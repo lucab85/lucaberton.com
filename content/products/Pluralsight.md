@@ -2,7 +2,7 @@
 title: "AI, Kubernetes & Ansible Hands-on - Pluralsight"
 subtitle: 'Deep Dive into Kubernetes, AI, and Ansible for Advanced Automation and Infrastructure Management'
 description: 'Enhance your IT skills with Luca Berton’s hands-on Pluralsight courses. Learn to automate and manage Kubernetes, AI, and Ansible for optimized infrastructure performance and security.'
-date: 2024-08-18T1:14:39+1:00
+date: 2024-09-28T1:14:02+1:00
 featured: true
 draft: false
 weight: 2
@@ -12,6 +12,55 @@ Dive deep into Kubernetes and Ansible with this hands-on course. Learn how to or
 <!--more-->
 
 [Pluralsight](https://www.pluralsight.com/), is an American  online education company that offers a variety of video training courses for software developers, IT administrators, and creative professionals through its website. It partner with Subject Matter Expert to deliver the best quality on the list of over offers more than 7,000 courses in its catalog.
+
+# Automating Azure DevTest Labs
+
+[![Automating Azure DevTest Labs](/pluralsight/Automating%20Azure%20DevTest%20Labs.jpg)](https://pluralsight.pxf.io/5g2o4o)
+
+In this concise 30-minute course, Luca Berton introduces learners to key automation concepts within Azure DevTest Labs, ensuring they can streamline tasks, save costs, and increase the consistency of their environments. As part of the *Azure DevTest Labs Quickstart* pathway, it sits at an intermediate level, appealing to cloud infrastructure engineers and DevOps professionals.
+
+The course is structured around three primary modules:
+
+1. **Automating Lab Management Tasks**  
+   *Duration: 7 minutes 57 seconds*  
+   In this module, Luca walks learners through automating resource management within Azure DevTest Labs. It includes demonstrations on automating virtual machine (VM) scheduling and lifecycle management, such as setting VM shutdown schedules and expiration dates to control costs. Additionally, it explores automating resource cleanup to optimize lab environments, preventing unnecessary expenditure.
+
+2. **Integrating Azure DevTest Labs with CI/CD Pipelines**  
+   *Duration: 9 minutes 36 seconds*  
+   This section covers how to integrate DevTest Labs with CI/CD pipelines using Azure DevOps. Learners are shown how to move from manual deployments to automated processes that trigger lab environment creation as part of the development lifecycle. Through this, teams can ensure consistent environments and accelerate development cycles.
+
+3. **Best Practices for Automation in DevTest Labs**  
+   *Duration: 9 minutes 4 seconds*  
+   In this final module, Luca shares insights into best practices when automating Azure DevTest Labs. He emphasizes the importance of idempotency in ARM templates and effective management of DevTest Labs artifacts. This ensures that deployments are consistent, repeatable, and efficient across various projects.
+
+
+To ensure hands-on experience, the course includes practical demonstrations on:
+- Setting up automated VM schedules.
+- Managing resource expiration and cleanup tasks.
+- Integrating lab environment provisioning into CI/CD pipelines using Azure DevOps.
+
+Additionally, Berton provides clear guidance on how to use ARM templates for automating these tasks. ARM templates are JSON files that describe the infrastructure and configurations for your projects, ensuring automation is both reliable and scalable.
+
+For those interested, the course is available now on Pluralsight: [Automating Azure DevTest Labs](https://pluralsight.pxf.io/XYQ1g5).
+
+
+# Federated Learning and Privacy-preserving RAGs
+
+[![Federated Learning and Privacy-preserving RAGs](/pluralsight/Federated%20Learning%20and%20Privacy-preserving%20RAGs.jpg)](https://pluralsight.pxf.io/5g2o4o)
+
+Unlock the potential of secure AI with Luca Berton’s course on **Federated Learning and Privacy-preserving Retrieval Augmented Generation (RAG)** systems. This course is concise yet loaded with practical insights. Here’s what you’ll learn:
+
+1. **Fundamentals of Federated Learning**: Understand how federated learning enables decentralized training without compromising data privacy.
+
+2. **Privacy-preserving Techniques**: Discover how to integrate advanced privacy-preserving methods like homomorphic encryption and differential privacy into RAG systems.
+
+3. **Implementing Secure RAG Models**: Step-by-step guidance on setting up and deploying RAG systems using TensorFlow Federated, PyTorch, and other frameworks.
+
+4. **Testing and Optimization**: Learn how to validate your RAG model’s performance and ensure compliance with data privacy regulations.
+
+5. **Real-World Application**: Explore a case study demonstrating the implementation of a privacy-preserving RAG in a customer support environment, and learn how to monitor and refine it over time.
+
+Enhance your skills and build AI solutions that are not only smart but also secure!
 
 # Evaluating RAG Solutions
 

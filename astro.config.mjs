@@ -7,9 +7,11 @@ import icon from "astro-icon";
 // https://astro.build/config
 export default defineConfig({
   site: "https://lucaberton.com",
+  base: "/",
   integrations: [mdx(), sitemap(), icon()],
   vite: {
     plugins: [tailwindcss()],
   },
-  output: 'static'
+  outDir: 'public',
+  publicDir: 'static',
 });

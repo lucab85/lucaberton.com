@@ -1,9 +1,12 @@
 
 export default new Map([
 ["src/content/blog/Ansible for Kubernetes by Example.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FAnsible+for+Kubernetes+by+Example.mdx&astroContentModuleFlag=true")],
+["src/content/blog/Hands-on Ansible Automation.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FHands-on+Ansible+Automation.mdx&astroContentModuleFlag=true")],
 ["src/content/blog/Ansible for VMware by Examples.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FAnsible+for+VMware+by+Examples.mdx&astroContentModuleFlag=true")],
 ["src/content/blog/Mastering the Red Hat Certified Engineer RHCE Exam.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FMastering+the+Red+Hat+Certified+Engineer+RHCE+Exam.mdx&astroContentModuleFlag=true")],
 ["src/content/blog/Red Hat Ansible Automation.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FRed+Hat+Ansible+Automation.mdx&astroContentModuleFlag=true")],
 ["src/content/blog/Red Hat Enterprise Linux 9 for SysAdmins.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FRed+Hat+Enterprise+Linux+9+for+SysAdmins.mdx&astroContentModuleFlag=true")],
-["src/content/blog/Hands-on Ansible Automation.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FHands-on+Ansible+Automation.mdx&astroContentModuleFlag=true")]]);
+["src/content/blog/Root Cause Analysis.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FRoot+Cause+Analysis.mdx&astroContentModuleFlag=true")],
+["src/content/blog/Technical Troubleshooting Diagnostics Networks Customers.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FTechnical+Troubleshooting+Diagnostics+Networks+Customers.mdx&astroContentModuleFlag=true")],
+["src/content/blog/Back-End Infrastructure Servers Secure APIs and Data.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FBack-End+Infrastructure+Servers+Secure+APIs+and+Data.mdx&astroContentModuleFlag=true")]]);
 		

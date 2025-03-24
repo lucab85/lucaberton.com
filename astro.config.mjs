@@ -3,6 +3,7 @@ import tailwindcss from "@tailwindcss/vite";
 import mdx from "@astrojs/mdx";
 import sitemap from "@astrojs/sitemap";
 import icon from "astro-icon";
+import react from '@astrojs/react';
 import partytown from "@astrojs/partytown"; // Corrected import
 
 // https://astro.build/config
@@ -11,6 +12,7 @@ export default defineConfig({
   base: "/",
   integrations: [
     mdx(),
+    react(),
     sitemap(),
     icon(),
     partytown({ config: { forward: ["dataLayer.push"] } }), // Using the correct import

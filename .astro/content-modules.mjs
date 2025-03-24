@@ -1,5 +1,8 @@
 
 export default new Map([
+["src/content/blog/Ansible for Kubernetes by Example.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FAnsible+for+Kubernetes+by+Example.mdx&astroContentModuleFlag=true")],
 ["src/content/blog/Ansible for VMware by Examples.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FAnsible+for+VMware+by+Examples.mdx&astroContentModuleFlag=true")],
-["src/content/blog/Ansible for Kubernetes by Example.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FAnsible+for+Kubernetes+by+Example.mdx&astroContentModuleFlag=true")]]);
+["src/content/blog/Red Hat Enterprise Linux 9 for SysAdmins.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FRed+Hat+Enterprise+Linux+9+for+SysAdmins.mdx&astroContentModuleFlag=true")],
+["src/content/blog/Hands-on Ansible Automation.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FHands-on+Ansible+Automation.mdx&astroContentModuleFlag=true")],
+["src/content/blog/Mastering the Red Hat Certified Engineer RHCE Exam.mdx", () => import("astro:content-layer-deferred-module?astro%3Acontent-layer-deferred-module=&fileName=src%2Fcontent%2Fblog%2FMastering+the+Red+Hat+Certified+Engineer+RHCE+Exam.mdx&astroContentModuleFlag=true")]]);
 		

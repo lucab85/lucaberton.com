@@ -36,7 +36,7 @@ export async function GET() {
       <video:description><![CDATA[${video.description || post.data.snippet}]]></video:description>
       <video:content_loc>https://www.youtube.com/watch?v=${video.id}</video:content_loc>
       <video:player_loc>https://www.youtube-nocookie.com/embed/${video.id}</video:player_loc>
-      <video:duration>${video.duration || 'PT15M'}</video:duration>
+      <video:duration>${video.duration || '900'}</video:duration>
       <video:publication_date>${isoDate}</video:publication_date>
       <video:uploader>Luca Berton</video:uploader>
       <video:live>no</video:live>
@@ -58,7 +58,7 @@ export async function GET() {
       <video:description><![CDATA[${post.data.snippet}]]></video:description>
       <video:content_loc>https://www.youtube.com/watch?v=${youtubeId}</video:content_loc>
       <video:player_loc>https://www.youtube-nocookie.com/embed/${youtubeId}</video:player_loc>
-      <video:duration>PT15M</video:duration>
+      <video:duration>900</video:duration>
       <video:publication_date>${isoDate}</video:publication_date>
       <video:uploader>Luca Berton</video:uploader>
       <video:live>no</video:live>

@@ -13,7 +13,17 @@ export default defineConfig({
   integrations: [
     mdx(),
     react(),
-    sitemap(),
+    sitemap({
+      // Ensure canonical URLs in sitemap
+      canonicalURL: "https://lucaberton.com",
+      // Filter out redirect pages and problematic URLs
+      filter: (page) => {
+        // Skip old URLs that should redirect
+        return !page.includes('www.') && 
+               !page.endsWith('/') ||
+               page === 'https://lucaberton.com/';
+      }
+    }),
     icon(),
     partytown({ config: { forward: ["dataLayer.push"] } }), // Using the correct import
     (await import("astro-compress")).default({

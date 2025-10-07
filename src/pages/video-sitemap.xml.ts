@@ -27,6 +27,7 @@ export async function GET() {
       
       // If we have video metadata, use it
       if (video?.id) {
+        const isoDate = new Date(post.data.publishDate).toISOString();
         return `<url>
     <loc>${postUrl}</loc>
     <video:video>
@@ -35,10 +36,9 @@ export async function GET() {
       <video:description><![CDATA[${video.description || post.data.snippet}]]></video:description>
       <video:content_loc>https://www.youtube.com/watch?v=${video.id}</video:content_loc>
       <video:player_loc>https://www.youtube-nocookie.com/embed/${video.id}</video:player_loc>
-      <video:duration>${video.duration || 'PT10M'}</video:duration>
-      <video:publication_date>${post.data.publishDate}</video:publication_date>
+      <video:duration>${video.duration || 'PT15M'}</video:duration>
+      <video:publication_date>${isoDate}</video:publication_date>
       <video:uploader>Luca Berton</video:uploader>
-      <video:uploader_info>https://lucaberton.com</video:uploader_info>
       <video:live>no</video:live>
       <video:family_friendly>yes</video:family_friendly>
     </video:video>
@@ -49,6 +49,7 @@ export async function GET() {
         const youtubeId = youtubeMatches ? youtubeMatches[1] : null;
         
         if (youtubeId) {
+          const isoDate = new Date(post.data.publishDate).toISOString();
           return `<url>
     <loc>${postUrl}</loc>
     <video:video>
@@ -57,10 +58,9 @@ export async function GET() {
       <video:description><![CDATA[${post.data.snippet}]]></video:description>
       <video:content_loc>https://www.youtube.com/watch?v=${youtubeId}</video:content_loc>
       <video:player_loc>https://www.youtube-nocookie.com/embed/${youtubeId}</video:player_loc>
-      <video:duration>PT10M</video:duration>
-      <video:publication_date>${post.data.publishDate}</video:publication_date>
+      <video:duration>PT15M</video:duration>
+      <video:publication_date>${isoDate}</video:publication_date>
       <video:uploader>Luca Berton</video:uploader>
-      <video:uploader_info>https://lucaberton.com</video:uploader_info>
       <video:live>no</video:live>
       <video:family_friendly>yes</video:family_friendly>
     </video:video>

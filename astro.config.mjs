@@ -18,10 +18,12 @@ export default defineConfig({
       canonicalURL: "https://lucaberton.com",
       // Filter out redirect pages and problematic URLs
       filter: (page) => {
-        // Skip old URLs that should redirect
-        return !page.includes('www.') && 
-               !page.endsWith('/') ||
-               page === 'https://lucaberton.com/';
+        // Skip team page (it's empty/placeholder)
+        if (page.includes('/team')) return false;
+        if (page.includes('partytown')) return false;
+        
+        // Include all other pages
+        return true;
       }
     }),
     icon(),

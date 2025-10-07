@@ -18,6 +18,11 @@ export const onRequest = defineMiddleware((context, next) => {
     return Response.redirect(`${url.origin}${url.pathname.slice(0, -1)}${url.search}`, 301);
   }
   
+  // Handle partytown URLs - redirect to home
+  if (url.pathname.includes('~partytown')) {
+    return Response.redirect(`${url.origin}/`, 301);
+  }
+  
   // Category and tag redirects
   if (url.pathname.startsWith('/categories/')) {
     const slug = url.pathname.replace('/categories/', '').replace('/', '');
@@ -27,6 +32,12 @@ export const onRequest = defineMiddleware((context, next) => {
   if (url.pathname.startsWith('/tags/')) {
     const slug = url.pathname.replace('/tags/', '').replace('/', '');
     return Response.redirect(`${url.origin}/blog/tags/${slug}`, 301);
+  }
+  
+  // Handle legacy /old/ URLs
+  if (url.pathname.startsWith('/old/')) {
+    const newPath = url.pathname.replace('/old/', '/');
+    return Response.redirect(`${url.origin}${newPath}`, 301);
   }
   
   return next();

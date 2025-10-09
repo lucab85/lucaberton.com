@@ -10,6 +10,7 @@ import partytown from "@astrojs/partytown"; // Corrected import
 export default defineConfig({
   site: "https://lucaberton.com",
   base: "/",
+  trailingSlash: "always",
   integrations: [
     mdx(),
     react(),

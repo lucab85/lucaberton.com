@@ -3,8 +3,13 @@ import { defineMiddleware } from "astro:middleware";
 export const onRequest = defineMiddleware((context, next) => {
   const url = context.url;
   
-  // Force HTTPS redirect
-  if (url.protocol === 'http:') {
+  // Skip middleware for Astro internal endpoints
+  if (url.pathname.startsWith('/_image') || url.pathname.startsWith('/_astro')) {
+    return next();
+  }
+  
+  // Force HTTPS redirect (but not for localhost)
+  if (url.protocol === 'http:' && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
     return Response.redirect(`https://${url.host}${url.pathname}${url.search}`, 301);
   }
   

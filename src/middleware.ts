@@ -18,11 +18,6 @@ export const onRequest = defineMiddleware((context, next) => {
     return Response.redirect(`https://lucaberton.com${url.pathname}${url.search}`, 301);
   }
   
-  // Handle trailing slash redirects (except for root)
-  if (url.pathname.endsWith('/') && url.pathname !== '/') {
-    return Response.redirect(`${url.origin}${url.pathname.slice(0, -1)}${url.search}`, 301);
-  }
-  
   // Handle partytown URLs - redirect to home
   if (url.pathname.includes('~partytown')) {
     return Response.redirect(`${url.origin}/`, 301);

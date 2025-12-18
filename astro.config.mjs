@@ -10,7 +10,7 @@ import partytown from "@astrojs/partytown"; // Corrected import
 export default defineConfig({
   site: "https://lucaberton.com",
   base: "/",
-  trailingSlash: "ignore",
+  trailingSlash: "always",
   integrations: [
     mdx(),
     react(),
@@ -26,7 +26,7 @@ export default defineConfig({
         // Include all other pages
         return true;
       },
-      // Custom serialization to ensure all URLs are canonical (https, no www, no trailing slash)
+      // Custom serialization to ensure all URLs are canonical (https, no www, with trailing slash)
       serialize: (item) => {
         // Normalize the URL to canonical form
         let url = item.url;
@@ -37,9 +37,9 @@ export default defineConfig({
         // Remove www prefix
         url = url.replace('://www.', '://');
         
-        // Remove trailing slash (except for root)
-        if (url.endsWith('/') && url !== 'https://lucaberton.com/') {
-          url = url.slice(0, -1);
+        // Ensure trailing slash for all URLs
+        if (!url.endsWith('/')) {
+          url = url + '/';
         }
         
         return {

@@ -15,16 +15,39 @@ export default defineConfig({
     mdx(),
     react(),
     sitemap({
-      // Ensure canonical URLs in sitemap
-      canonicalURL: "https://lucaberton.com",
       // Filter out redirect pages and problematic URLs
       filter: (page) => {
         // Skip team page (it's empty/placeholder)
         if (page.includes('/team')) return false;
         if (page.includes('partytown')) return false;
+        if (page.includes('?ref=')) return false;
+        if (page.includes('?utm_')) return false;
         
         // Include all other pages
         return true;
+      },
+      // Custom serialization to ensure all URLs are canonical (https, no www, no trailing slash)
+      serialize: (item) => {
+        // Normalize the URL to canonical form
+        let url = item.url;
+        
+        // Replace http with https
+        url = url.replace(/^http:\/\//, 'https://');
+        
+        // Remove www prefix
+        url = url.replace('://www.', '://');
+        
+        // Remove trailing slash (except for root)
+        if (url.endsWith('/') && url !== 'https://lucaberton.com/') {
+          url = url.slice(0, -1);
+        }
+        
+        return {
+          url: url,
+          lastmod: item.lastmod,
+          changefreq: item.changefreq,
+          priority: item.priority
+        };
       }
     }),
     icon(),

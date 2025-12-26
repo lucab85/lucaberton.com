@@ -1,0 +1,159 @@
+---
+draft: false
+title: "ProteinLens: Vibe Coding on Azure… and the Christmas Lunch That Triggered ‘Quota exceeded’"
+snippet: "A behind-the-scenes build log of an AI meal-photo MVP on Azure (Static Web Apps, Functions, PostgreSQL, AI Foundry) — plus the real lessons from quotas, pipelines, and why ‘AI writes your code’ still needs a human in the loop."
+publishDate: "2025-12-26"
+lastModified: "2025-12-26"
+category: "AI Engineering"
+author: "Luca Berton"
+tags:
+  - azure
+  - ai
+  - ai-foundry
+  - serverless
+  - azure-functions
+  - postgresql
+  - static-web-apps
+  - cicd
+  - vibecoding
+  - copilot
+image:
+  src: "/blog/proteinlens/proteinlens.jpg"
+  alt: "Microsoft Foundry deployment screen showing quota/region limitations while deploying AI models for ProteinLens"
+---
+
+# ProteinLens: Vibe Coding on Azure… and the Apulian Christmas lunch that triggered “Quota exceeded”
+
+On Dec 25th I messaged a few friends:
+“I’m working on this project… if you want to put the site under pressure with some tests. It’s all on Azure. Merry Christmas!”
+
+The project is **ProteinLens**: you take a photo of your meal and the app tries to figure out **what it is** and **how much protein** it contains. Simple idea, “weekend MVP” vibes — but with a real goal: build something production-shaped, with proper cloud infrastructure and automated deploys.
+
+Then reality showed up, fast:
+
+* “Failed to Load History”
+* “Unexpected end of JSON input”
+* “Something went wrong”
+* **“Quota exceeded”**
+* And the best one: *“I uploaded the Apulian lunch… told you it would blow up 😁”*
+
+That Christmas stress test turned into a mini post-mortem. And honestly, it was perfect.
+
+---
+
+## What ProteinLens does (and what’s under the hood)
+
+The MVP does one thing clearly: **snap a photo** → get a structured result (recognition + estimated proteins). The AI part runs via **AI Foundry**.
+
+![Azure infrastructure overview](/blog/proteinlens/Azure-infrastructure.jpg)
+
+Current stack:
+
+* **Frontend**: Azure **Static Web Apps**
+* **Backend**: Azure **Functions**
+* **Database**: Azure Database for **PostgreSQL**
+* **Deploy**: full CI/CD pipeline (infra, permissions, frontend + backend)
+* **Security hygiene**: secret scanning (e.g., *gitleaks*), proper secret handling
+
+In the chat I joked “it’s super scalable.” The services are, on paper.
+But “scalable services” don’t automatically make **a scalable system** — especially when an entire group starts hammering it with food photos at the same time.
+
+![GitHub Pipeline](/blog/proteinlens/GitHub-pipeline.jpg)
+---
+
+## The uncomfortable part: “AI writes your code” isn’t real yet (not end-to-end)
+
+I built a lot of this using **Spec Driven Vibe Coding** with tools like SpecKit/Copilot. They absolutely speed things up — but the “AI will build the whole app for you” story is still oversold.
+
+![GitHub Spec Driven Vibe Coding](/blog/proteinlens/VSCode-SpecDrivenVibeCoding.jpg)
+
+Here’s what happened when I iterated fast with LLM-generated infra + pipelines:
+
+* Each pipeline run started creating **duplicate resources** (Key Vaults, etc.)
+* Result: frontend and backend stopped talking because they had **different secrets**
+* Environment variables were **wrong or invented**
+* CI/CD builds ballooned and started hitting resource limits (compilation, upload, deploy)
+* **Zero retry logic**, so transient issues cascaded into total failure
+* The classic: “works on my machine,” then fails in cloud for reasons you can’t fully reproduce locally
+
+The most dangerous pattern:
+Many tools “help” by **adding** something on every interaction — another resource, another config file, another pipeline step. But real progress often comes from the opposite: **removing**, simplifying, testing, refining.
+
+---
+
+## “Quota exceeded” isn’t just a bug — it’s product and architecture feedback
+
+![GitHub Copilot Business](/blog/proteinlens/GitHub-CopilotBusiness.jpg)
+
+When multiple people hit an MVP simultaneously, the real bottlenecks show up immediately:
+
+* service quota / rate limits
+* large payloads (images)
+* endpoints with no caching or backoff
+* missing queues for burst handling
+* no resilience patterns (retries, circuit breakers)
+
+At that moment I realized it wasn’t just “I need more horsepower.”
+It was: I need **engineering discipline** — observability, retry/backoff, sane limits, guardrails.
+
+![Azure log troubleshooting](/blog/proteinlens/Azure-troubleshooting.jpg)
+
+---
+
+## Authentication: custom in Postgres or managed identity (Entra / SWA Auth)?
+
+After the first stress test, it became obvious I need auth to unlock:
+
+* user profiles
+* scan **history**
+* **preferences**
+* email confirmation / reset flows
+
+Because the frontend is on **Static Web Apps**, the platform already offers **built-in auth** options — which is appealing for moving fast without reinventing identity from scratch.
+The alternative is rolling your own user table in Postgres, but then you own passwords, email flows, security, compliance… and the debt grows quickly.
+
+For an MVP that wants to become a real product: managed identity tends to save months.
+
+---
+
+## Another reality check: model availability and quota are part of the design
+
+One more thing that surprised me: you can’t always “just use the best model” when you want.
+
+![OpenAI gpt-5.1-codex-max.jpg](/blog/proteinlens/OpenAI-gpt-5.1-codex-max.jpg)
+
+Concrete examples I ran into:
+
+* **gpt-5.1-codex-max**: deployable for me only via **swedencentral**, not **eastus**
+* **claude-opus-4.5**: showed **no quota available worldwide** at the time
+* Partner models can have **separate billing constraints** depending on your subscription setup
+
+![Antropic claude-opus-4.5](/blog/proteinlens/Antropic-claude-opus-4.5.jpg)
+
+This affects real decisions: fallback models, region strategy, budgeting, and even UX (clear messages when you’re rate-limited).
+
+---
+
+## What I learned (the honest version)
+
+1. **AI accelerates — it doesn’t replace**: if you don’t understand what it generated, you’ll ship a Frankenstein that “sort of works.”
+2. The difference between a demo and a product is made of **boring things**: retries, logging, caching, tests, limits.
+3. Good iteration includes **deleting**: fewer resources, fewer variables, less magic.
+4. Quotas aren’t an afterthought — they’re part of system design.
+5. Cloud ≠ local, and fighting that truth wastes time. Build with observability and resilience early.
+
+---
+
+## What’s next for ProteinLens
+
+Very practical next steps:
+
+* authentication + user profiles
+* history and preferences
+* retry/backoff + queues where needed
+* telemetry to see where it *actually* breaks
+* quota-aware UX + model fallback strategy
+
+If you want to try it (and yes, feel free to “stress test” it with a heavy meal photo 😄):
+**[https://www.proteinlens.com/](https://www.proteinlens.com/)**
+

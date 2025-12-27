@@ -1,0 +1,301 @@
+---
+draft: false
+title: "Copilot is great — until you do real-world programming"
+snippet: "While implementing 429 handling (rate-limit UX) for ProteinLens authentication, my AI coding assistant hit me with its own 429: token usage rate_limited. A small incident that exposed a bigger truth: copilots accelerate typing, not systems thinking. Here’s what happened, what I changed, and the checklist I now ship with."
+publishDate: "2025-12-27"
+lastModified: "2025-12-27"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - ai
+  - copilot
+  - programming
+  - rate-limiting
+  - reliability
+  - authentication
+  - typescript
+  - react
+  - devops
+  - platform-engineering
+image:
+  src: "/blog/proteinlens/rate-limited.jpg"
+  alt: "A VS Code workspace showing auth code changes while an AI coding assistant returns a rate_limited error during implementation"
+---
+
+I love AI coding assistants.
+
+They’re incredible at the 80%: scaffolding components, refactoring repetitive code, generating boilerplate, translating intent into TypeScript, and generally compressing time between “idea” and “PR”.
+
+But building a real product isn’t the same thing as writing code quickly.
+
+Real-world programming is the part nobody demos:
+
+- quotas and budgets
+- state drift
+- integration seams
+- failure paths
+- UX under stress
+- “it works locally” but not in production
+- “it says resolved” but it’s still using the old value
+
+And that’s exactly where copilots start to feel… insufficient.
+
+This post is a short incident report from ProteinLens:
+
+**I got rate-limited by my AI coding assistant while implementing rate limiting.**
+
+Yes, really.
+
+---
+
+## The setup: boring auth polish tasks
+
+I’m going through a set of “auth UX polish” tasks:
+
+- loading states (submit buttons, spinners, disabled forms)
+- validation feedback (clear errors per input)
+- rate limiting error handling (429) with friendly messaging
+
+Nothing flashy. Everything important.
+
+### T051: loading states
+
+I checked the main auth pages:
+
+- **SignIn** already had proper loading states ✅
+- **SignUp** looked empty at first, but it was just a redirect — the real UI is in `SignupPage.tsx`, which already had loading states ✅
+- **Forgot password** wasn’t a separate page — `ResetPassword.tsx` handles both “request reset” and “set new password” modes ✅
+
+So far so good. The “boring” work was mostly already done.
+
+### T052: validation feedback
+
+Also already implemented ✅  
+Nice.
+
+Then I hit the one task that always matters when your app is public:
+
+### T053: rate limiting error handling (429)
+
+---
+
+## The problem: the frontend didn’t understand rate limits
+
+I searched the frontend for anything resembling rate-limit handling:
+
+- `429`
+- `rate limit`
+- `too many requests`
+- `Retry-After`
+
+Nothing.
+
+The auth service had a generic `handleResponse()` that treated all non-200 responses as “some error”.
+
+That’s not enough.
+
+A 429 is not “something broke”.
+A 429 is “you’re fine, just not right now”.
+
+That difference matters because it changes UX:
+
+- don’t blame the user
+- don’t encourage repeated retries
+- ideally provide a cooldown message
+- if the API returns `Retry-After`, use it
+
+So I updated the auth service to throw a dedicated error type on 429 (e.g. `RateLimitError`), then started wiring it into the SignIn UI.
+
+Simple change. Small diff. Quick win.
+
+---
+
+## The incident: a 429 while implementing 429 handling
+
+I was mid-edit in `SignIn.tsx`, adding a specific branch:
+
+- if `RateLimitError`, show calm copy
+- otherwise handle known auth errors (unverified email, etc.)
+- fallback to generic errors
+
+And then my AI coding assistant returned:
+
+> **Server Error:** exceeded token usage  
+> **Error Code:** `rate_limited`
+
+I got rate-limited while implementing rate limiting.
+
+It was funny for about 3 seconds.
+
+Then it was annoying for 20 minutes.
+
+And then it became the point of this article.
+
+---
+
+## What this revealed: copilots accelerate typing, not systems thinking
+
+Copilot-style tools are great when:
+
+- the problem is local and self-contained
+- correctness is easy to verify
+- “the right answer” is mostly pattern matching
+- the task is more *typing* than *reasoning*
+
+They struggle when the work shifts from code to reality.
+
+### 1) Tooling has quotas, budgets, and failure modes
+
+Your coding assistant can throttle you.
+Your cloud can throttle you.
+Your identity provider can throttle you.
+Your email provider can throttle you.
+
+And none of those failures are “bugs” in your code.
+
+They’re constraints.
+
+**Real-world programming is building with constraints.**
+
+### 2) The hardest problems are state + integration problems
+
+The most time-consuming failures are rarely syntax or logic errors.
+They’re cross-layer, cross-system inconsistencies:
+
+- configuration says one thing, runtime uses another
+- secrets rotate but processes don’t reload
+- headers aren’t forwarded the way you think
+- cookies behave differently due to SameSite
+- rate limiting is enabled server-side, but UI doesn’t communicate it
+
+Copilots are good at writing code that *looks right*.
+They’re weaker at ensuring the *system is right*.
+
+### 3) “Generic error handling” is not a product
+
+AI assistants often default to generic patterns:
+
+- “show toast”
+- “log error”
+- “please try again”
+
+But auth flows need bespoke UX for a small set of predictable errors:
+
+- invalid credentials
+- email not verified
+- reset token expired
+- user already exists
+- **rate-limited / too many attempts**
+
+If you treat all errors the same, you ship confusion.
+
+And confusion is a conversion killer.
+
+### 4) The assistant can’t own the system
+
+A copilot can propose code.
+It can’t be accountable for:
+
+- end-to-end behavior
+- UX coherence
+- abuse resistance
+- telemetry and alerts
+- “what happens when this dependency fails”
+
+When the assistant disappears mid-flow, you still need a plan.
+
+That’s the difference between “coding” and “engineering”.
+
+---
+
+## The fix: ship 429 handling as a first-class UX path
+
+Here’s what “good” rate-limit handling looks like in an auth UI:
+
+- calm message (no blame language)
+- disable submit briefly so users don’t hammer the button
+- if available, show a cooldown based on `Retry-After`
+- keep the next action obvious (“Try again in a moment”)
+- don’t bury the error in a generic toast
+
+Example copy I like:
+
+> “You’re doing that a bit too fast. Please wait a moment and try again.”
+
+If you want to be extra clean:
+
+- add a countdown if you have an exact retry time
+- add a “Learn more” link (what happened, why it’s there, what to do)
+
+---
+
+## The workflow fix: treat the copilot like a dependency that can fail
+
+The surprising lesson wasn’t about rate limiting.
+
+It was about **developer flow**.
+
+When your assistant is part of your “shipping engine”, you need resilience in your process too.
+
+What I do now:
+
+- **keep diffs small and staged**  
+  Don’t hold the entire change in assistant context.
+
+- **write the next exact steps in plain text**  
+  If the tool cuts out, you can still execute.
+
+- **commit earlier**  
+  Treat it like pair-programming with someone who might leave the room.
+
+- **design the codebase so it doesn’t need the assistant**  
+  Typed error contracts, consistent response handling, integration tests.
+
+Ironically, the copilot 429 helped me adopt the same mindset I want in production:
+
+**assume dependencies fail**.
+
+---
+
+## Checklist: production-grade rate limiting in auth flows
+
+If you’re implementing login/signup/reset, this is my baseline:
+
+- [ ] Server returns `429 Too Many Requests` consistently for abuse paths
+- [ ] Client maps `429` to a **distinct error type** (not generic)
+- [ ] UI shows calm, blame-free copy
+- [ ] Submit button temporarily disabled (cooldown)
+- [ ] Use `Retry-After` header if present (optional but great)
+- [ ] Log rate-limit events at a low noise level (don’t flood monitoring)
+- [ ] Ensure the client does not auto-retry 429 in a tight loop
+- [ ] Provide a recovery path (“Forgot password”, “Contact support”)
+
+Bonus points:
+
+- [ ] Rate limit by IP + by account identifier (careful with enumeration)
+- [ ] Return structured error codes for localization / consistent UI
+- [ ] Add a smoke test that validates rate-limit UX (at least once)
+
+---
+
+## “Am I too much pro?”
+
+No.
+
+You’re not “too pro” for wanting this.
+
+If anything, this is what makes the difference between:
+
+- a demo that works
+- and a product that survives real users
+
+Rate limiting, failure UX, and dependency constraints are not advanced topics.
+They’re the ground floor of reliability.
+
+Copilots make you faster at writing code.
+
+They don’t remove the need for engineering judgment.
+
+And sometimes, they prove that point by rate-limiting you while you’re implementing rate limiting.
+
+Perfect.

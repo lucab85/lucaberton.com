@@ -1,0 +1,332 @@
+---
+draft: false
+title: "Authentication chaos: why “just add auth” turns into AAA, RBAC, and pain"
+snippet: "Auth isn’t one thing. It’s AAA (authentication, authorization, accounting), plus RBAC, scoping, and a clear token contract. Here’s how mixing Entra JWKS validation with self-managed JWTs breaks APIs in surprising ways—and the practical fixes to ship securely."
+publishDate: "2025-12-30"
+lastModified: "2025-12-30"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - authentication
+  - authorization
+  - security
+  - jwks
+  - jwt
+  - entra
+  - oauth
+  - rbac
+  - platformengineering
+  - saas
+image:
+  src: "/blog/proteinlens/Chrome-login-troubleshooting.jpg"
+  alt: "A jarring Microsoft-branded sign-in redirect while configuring Microsoft Entra External ID for a custom app authentication flow"
+---
+
+I used to think auth was a box you tick.
+
+You wire up a login page, slap a JWT on the response, add a middleware, ship. And then you “do permissions later”.
+
+And then reality hits: auth isn’t one thing. It’s three things (AAA), plus product decisions, plus infrastructure decisions, plus “how do I not accidentally let user A read user B’s data”.
+
+This is a post about **auth chaos**: why building an app with security, authentication, and permissions is harder than it looks—especially when you mix modern identity providers (Entra/Okta/Auth0/etc.), self-managed tokens, and a permission model that will evolve.
+
+---
+
+## The moment everything breaks: two token worlds collide
+
+Here’s the kind of bug that makes you stare at the wall.
+
+* The backend uses **JWKS verification**: it expects bearer tokens signed by **Microsoft Entra ID (Azure AD)**.
+* But your `/signin` endpoint generates its **own JWT** with a **local secret**.
+
+So you can sign in successfully… and then your own API rejects the token.
+
+Even worse: different parts of the backend might validate tokens differently:
+
+* `auth.ts` uses `verifyAccessToken()` (local secret) ✅
+* `authGuard.ts` uses `validateBearerToken()` (JWKS / Entra) ✅ (but incompatible with local tokens)
+
+Result: **random endpoints work**, others fail, and debugging feels like chasing ghosts.
+
+This is auth chaos in one screenshot: **your system doesn’t have a single “token contract.”** It has two.
+
+### Why this happens
+
+Because identity is a stack of choices, and it’s easy to accidentally make *two* incompatible sets of choices:
+
+* “We’ll use Entra eventually” → add JWKS validation middleware
+* “We need login today” → implement local email/password and mint JWTs
+* “We’ll reconcile later” → later becomes now, and now is on fire
+
+---
+
+## AAA: Authentication, Authorization, Accounting (and why most apps only do A)
+
+AAA is old terminology, but it’s still the best mental model for why “auth” expands.
+
+### 1) Authentication: **Who are you?**
+
+* Password login, magic link, social OAuth, SSO, device passkeys…
+* Token issuance (sessions vs JWT)
+* Token validation (local secret vs JWKS)
+* Refresh logic
+* Key rotation
+* Session revocation
+* MFA / step-up auth
+
+### 2) Authorization: **What are you allowed to do?**
+
+This is where “it worked in dev” goes to die.
+
+* RBAC (roles)
+* Permissions (fine-grained actions)
+* Resource scoping (tenant/org/project/document)
+* Admin vs owner vs member vs guest
+* Impersonation, support access, break-glass rules
+
+### 3) Accounting / Auditing: **What happened?**
+
+The part everyone ignores until:
+
+* you need SOC2,
+* you get a security incident,
+* or an enterprise customer asks “who accessed what?”
+
+This means:
+
+* audit logs,
+* admin actions history,
+* auth events (logins, MFA challenges, token refreshes),
+* permission changes,
+* data access trails (ideally per resource).
+
+If you’re building a real product, you will eventually need all three. The only question is **when**, and **how painful** you make the migration.
+
+---
+
+## RBAC: the comforting lie (and also the right starting point)
+
+RBAC sounds like the solution because it’s easy to explain:
+
+* User has Role
+* Role grants Permissions
+* Permission allows Action
+
+It’s a great MVP model… until you add *scope*.
+
+Because authorization is rarely just “can user delete”. It’s:
+
+> can user delete **this** document **in this** workspace **owned by this** org **while subscription is active**?
+
+RBAC alone doesn’t capture that. You need RBAC **plus scoping**.
+
+### The minimum viable RBAC that won’t ruin your future
+
+If you want RBAC that scales, start with three explicit concepts:
+
+* **Principal**: user (and later service accounts)
+* **Role**: owner/admin/member/viewer
+* **Resource scope**: org/workspace/project/document
+
+Then make authorization checks look like:
+
+* *principal* can do *action* on *resource* within *scope*
+
+Even if internally you still store roles as strings, force your code to think in these terms early.
+
+---
+
+## The hidden hard part: “permissions” is a product decision, not a code decision
+
+Most permission systems fail because they were built backward:
+
+* “Let’s add roles”
+* “Now users want teams”
+* “Now enterprises want groups mapped from Entra”
+* “Now we need per-project permissions”
+* “Now we need share-links”
+* “Now we need temporary access”
+* “Now we need audit logs”
+* “Now we need to revoke tokens when roles change”
+
+This is why permissioning feels like quicksand: it’s coupled to product reality.
+
+A good permission model reflects:
+
+* how you sell (B2C vs B2B),
+* how you onboard users,
+* your data model (multi-tenant? single tenant?),
+* your support workflows (impersonation?),
+* and compliance requirements.
+
+---
+
+## A practical lesson from the JWKS vs local JWT mess: define your “auth contract”
+
+Your backend needs one crisp answer to these questions:
+
+### Token contract checklist
+
+1. **Who issues tokens?**
+
+   * your backend (self-managed JWT / sessions)
+   * Entra (OIDC access tokens / ID tokens)
+   * both (but explicitly supported)
+
+2. **What token types are accepted at the API boundary?**
+
+   * access token only (recommended)
+   * never accept ID tokens as API auth
+   * define audiences/scopes clearly
+
+3. **How does verification work?**
+
+   * local secret / local keypair
+   * JWKS (issuer-based)
+   * both, but routed by issuer/audience
+
+4. **What happens on rotation and revocation?**
+
+   * JWKS rotates keys automatically (if you implement caching right)
+   * local tokens need key rotation strategy
+   * revocation requires sessions, short TTL, or token blacklist
+
+5. **How do permissions flow into the request context?**
+
+   * roles in token claims? (fast, but stale when roles change)
+   * roles loaded from DB? (slower, but always fresh)
+   * hybrid approach? (token has identity; DB holds authorization truth)
+
+---
+
+## The “two verifiers” fix (and why it’s a smell)
+
+Your suggested fix is pragmatic:
+
+> Update `authGuard.ts` to try self-managed JWT verification first, then fall back to Entra JWKS verification.
+
+That can work. But it’s also a warning sign: you now support **two issuers** and **two trust models**.
+
+If you do this, make it explicit and safe:
+
+* Route by `iss` (issuer) and `aud` (audience)
+* Reject unknown issuers
+* Never “try verify A, if fails, try B” without guardrails
+  (you don’t want weird edge cases where malformed tokens take the slow path or create confusing logs)
+
+A safer pattern is:
+
+```ts
+// Pseudocode: route by issuer, don't "guess"
+const { iss } = decodeWithoutVerifying(token);
+
+if (iss === "https://login.microsoftonline.com/<tenant>/v2.0") {
+  return verifyViaJwks(token);
+}
+
+if (iss === "your-app") {
+  return verifyViaLocalKey(token);
+}
+
+throw new Unauthorized("Unknown token issuer");
+```
+
+If you *must* support both during a migration, do it like a migration:
+
+* log which issuer is used,
+* measure usage,
+* set a deadline,
+* remove the old path.
+
+![VScode Auth](/blog/proteinlens/VScode-Auth.jpg)
+
+---
+
+## Where apps really get hurt: role drift, stale claims, and “who changed what?”
+
+Once you add RBAC, a bunch of non-obvious issues appear:
+
+### 1) Stale authorization
+
+If you embed roles in JWT claims, and a user gets demoted, their token might keep admin powers until it expires.
+
+Solutions:
+
+* short-lived tokens + refresh
+* sessions
+* “auth version” counters (invalidate old tokens when roles change)
+* load roles from DB on every request (often fine for MVP if cached well)
+
+### 2) Multi-tenant leakage
+
+The #1 authorization bug in SaaS is forgetting scope:
+
+* user is `admin`… of **which org**?
+
+Your DB queries must always include tenant scope. Every time. No exceptions.
+
+### 3) No audit trail
+
+When permissions change, you need to answer:
+
+* who changed it,
+* when,
+* from what → to what,
+* from which IP/device,
+* and what they did afterward.
+
+This becomes urgent the first time something “weird” happens.
+
+---
+
+## What I’d do for an MVP that still has a future
+
+If you’re building a product that might become B2B later, here’s the sane path:
+
+### Phase 1: Ship without future-faking
+
+* Pick **one** auth model at the API boundary:
+
+  * either self-managed (sessions/JWT)
+  * or IdP-issued tokens (Entra/Okta/etc.)
+* Keep **identity** in your DB (user record), even if IdP is used
+* Implement RBAC with scope (org/workspace)
+* Add basic audit logs for admin actions
+
+### Phase 2: Add enterprise as an add-on
+
+* Add OIDC/SAML SSO later **per org**
+* Map external groups → internal roles
+* Keep internal authorization rules the same
+  (SSO should change *authentication*, not your entire permission system)
+
+### Phase 3: Make it boring and correct
+
+* Threat model
+* token/session revocation story
+* proper audit trails
+* least privilege defaults
+* automated tests around authorization (table-driven tests save lives)
+
+---
+
+## The takeaway: “auth” isn’t plumbing, it’s your product’s trust boundary
+
+Authentication chaos happens when you treat identity like an implementation detail.
+
+But in a real app:
+
+* auth is UX,
+* auth is security,
+* auth is business logic,
+* auth is compliance,
+* auth is “can I trust this product?”
+
+So yes: building an app with security, authentication, and permissions **is difficult**—not because the libraries are hard, but because the **decisions are coupled** and the failure modes are subtle.
+
+If you want to avoid chaos, don’t aim for “auth done.” Aim for:
+
+* one token contract,
+* one authorization model,
+* scoped RBAC from day one,
+* and enough accounting to explain what happened when things go wrong.

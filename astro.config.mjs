@@ -23,6 +23,31 @@ export default defineConfig({
         if (page.includes('?ref=')) return false;
         if (page.includes('?utm_')) return false;
         
+        // Skip root-level categories and tags (they redirect to /blog/categories/ and /blog/tags/)
+        if (page.match(/\/categories\/[^/]+\/?$/) && !page.includes('/blog/categories/')) return false;
+        if (page.match(/\/tags\/[^/]+\/?$/) && !page.includes('/blog/tags/')) return false;
+        
+        // Skip legacy blog posts that redirect (as per _redirects file)
+        const redirectedBlogPosts = [
+          '/blog/complete-guide-fullstack-development',
+          '/blog/how-to-become-frontend-master',
+          '/blog/coursera_google-cloud-platform-fundamentals.it',
+          '/blog/kubernetes.it',
+          '/blog/responsivedesign',
+          '/blog/siteimprovement.it',
+          '/blog/redhat_do280',
+          '/blog/kcs_googletags',
+          '/blog/bitcoin',
+          '/blog/webfundamentals',
+          '/blog/coursera_google-it-support',
+          '/blog/languagecert_international_esol_selt_b1',
+          '/blog/services',
+        ];
+        if (redirectedBlogPosts.some(post => page.includes(post))) return false;
+        
+        // Skip blog-old (legacy content)
+        if (page.includes('/blog-old')) return false;
+        
         // Include all other pages
         return true;
       },

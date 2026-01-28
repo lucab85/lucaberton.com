@@ -1,0 +1,455 @@
+---
+draft: false
+title: "Ansible Automation for RHEL AI Deployments"
+snippet: "Automate your entire RHEL AI lifecycle with Ansible playbooks—from GPU provisioning to model deployment, monitoring setup, and CI/CD pipeline integration."
+publishDate: "2026-02-09"
+lastModified: "2026-02-09"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - rhel-ai
+  - ansible
+  - automation
+  - cicd
+  - devops
+  - infrastructure-as-code
+  - playbooks
+  - mlops
+image:
+  src: "/blog/books/practical-rhel-ai-cover.jpg"
+  alt: "Ansible Automation for RHEL AI"
+---
+
+> **📘 Book Reference:** This article is based on **Chapter 5: Custom Applications** of [Practical RHEL AI](/books/), covering Ansible playbooks and CI/CD automation for enterprise AI workflows.
+
+## Introduction
+
+Manual AI deployments don't scale. Whether you're managing 3 servers or 300, **Ansible** provides the automation backbone for consistent, repeatable RHEL AI deployments. *Practical RHEL AI* includes ready-to-use playbooks that I'll share in this article.
+
+## Why Ansible for AI Infrastructure?
+
+| Approach | Time to Deploy | Consistency | Rollback Capability |
+|----------|---------------|-------------|---------------------|
+| Manual | Hours | Variable | Manual |
+| Scripts | 30 minutes | Better | Complex |
+| **Ansible** | **5 minutes** | **100%** | **Built-in** |
+
+### Benefits for AI Teams
+
+- **Idempotent**: Run playbooks multiple times safely
+- **Agentless**: No software to install on target nodes
+- **Version Controlled**: Track infrastructure changes in Git
+- **Extensible**: Custom modules for AI-specific tasks
+
+## Project Structure
+
+```
+rhel-ai-automation/
+├── inventory/
+│   ├── production.yml
+│   └── staging.yml
+├── group_vars/
+│   ├── all.yml
+│   └── gpu_nodes.yml
+├── roles/
+│   ├── rhel_ai_base/
+│   ├── gpu_setup/
+│   ├── vllm_server/
+│   ├── instructlab/
+│   └── monitoring/
+├── playbooks/
+│   ├── site.yml
+│   ├── deploy_model.yml
+│   └── update_model.yml
+└── ansible.cfg
+```
+
+## Inventory Configuration
+
+```yaml
+# inventory/production.yml
+all:
+  children:
+    gpu_nodes:
+      hosts:
+        ai-node-01:
+          ansible_host: 192.168.1.101
+          gpu_type: nvidia_a100
+          gpu_count: 4
+        ai-node-02:
+          ansible_host: 192.168.1.102
+          gpu_type: nvidia_h100
+          gpu_count: 8
+    
+    training_nodes:
+      hosts:
+        train-01:
+          ansible_host: 192.168.1.110
+          deepspeed_config: multi_gpu
+    
+    inference_nodes:
+      hosts:
+        infer-01:
+          ansible_host: 192.168.1.120
+        infer-02:
+          ansible_host: 192.168.1.121
+```
+
+## Role: RHEL AI Base Setup
+
+```yaml
+# roles/rhel_ai_base/tasks/main.yml
+---
+- name: Enable RHEL AI repository
+  ansible.builtin.dnf:
+    name: "rhel-ai-release"
+    state: present
+  become: true
+
+- name: Install RHEL AI core packages
+  ansible.builtin.dnf:
+    name:
+      - rhel-ai
+      - python3.11
+      - podman
+      - nvidia-container-toolkit
+    state: present
+  become: true
+
+- name: Configure container runtime for GPU
+  ansible.builtin.template:
+    src: nvidia-container-runtime.toml.j2
+    dest: /etc/nvidia-container-runtime/config.toml
+    mode: '0644'
+  become: true
+  notify: Restart podman
+
+- name: Set SELinux context for model directory
+  community.general.sefcontext:
+    target: '/opt/models(/.*)?'
+    setype: container_file_t
+    state: present
+  become: true
+
+- name: Create model storage directory
+  ansible.builtin.file:
+    path: /opt/models
+    state: directory
+    mode: '0755'
+    owner: "{{ ai_user }}"
+    group: "{{ ai_group }}"
+  become: true
+```
+
+## Role: GPU Setup
+
+```yaml
+# roles/gpu_setup/tasks/nvidia.yml
+---
+- name: Install NVIDIA drivers
+  ansible.builtin.dnf:
+    name:
+      - nvidia-driver
+      - nvidia-driver-cuda
+      - cuda-toolkit-12-4
+    state: present
+  become: true
+  when: gpu_type is match("nvidia.*")
+
+- name: Verify GPU detection
+  ansible.builtin.command: nvidia-smi --query-gpu=name,memory.total --format=csv
+  register: gpu_info
+  changed_when: false
+
+- name: Display GPU information
+  ansible.builtin.debug:
+    msg: "Detected GPUs: {{ gpu_info.stdout_lines }}"
+
+- name: Configure GPU memory settings
+  ansible.builtin.template:
+    src: gpu-settings.conf.j2
+    dest: /etc/modprobe.d/nvidia.conf
+    mode: '0644'
+  become: true
+  notify: Reload nvidia modules
+```
+
+## Role: vLLM Server Deployment
+
+```yaml
+# roles/vllm_server/tasks/main.yml
+---
+- name: Pull vLLM container image
+  containers.podman.podman_image:
+    name: "{{ vllm_image }}"
+    tag: "{{ vllm_version }}"
+  become: true
+
+- name: Create vLLM configuration
+  ansible.builtin.template:
+    src: vllm-config.yaml.j2
+    dest: /opt/vllm/config.yaml
+    mode: '0644'
+  become: true
+  notify: Restart vllm service
+
+- name: Deploy vLLM systemd service
+  ansible.builtin.template:
+    src: vllm.service.j2
+    dest: /etc/systemd/system/vllm.service
+    mode: '0644'
+  become: true
+  notify:
+    - Reload systemd
+    - Restart vllm service
+
+- name: Ensure vLLM service is running
+  ansible.builtin.systemd:
+    name: vllm
+    state: started
+    enabled: true
+  become: true
+
+- name: Wait for vLLM health check
+  ansible.builtin.uri:
+    url: "http://localhost:{{ vllm_port }}/health"
+    method: GET
+    status_code: 200
+  register: health_check
+  until: health_check.status == 200
+  retries: 30
+  delay: 10
+```
+
+## Role: InstructLab Training
+
+```yaml
+# roles/instructlab/tasks/main.yml
+---
+- name: Install InstructLab CLI
+  ansible.builtin.pip:
+    name: instructlab
+    state: present
+    virtualenv: /opt/instructlab/venv
+  become: true
+
+- name: Clone taxonomy repository
+  ansible.builtin.git:
+    repo: "{{ taxonomy_repo }}"
+    dest: /opt/instructlab/taxonomy
+    version: "{{ taxonomy_version }}"
+  become: true
+  become_user: "{{ ai_user }}"
+
+- name: Configure InstructLab
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: /opt/instructlab/config.yaml
+    mode: '0644'
+  become: true
+
+- name: Generate synthetic training data
+  ansible.builtin.command:
+    cmd: >
+      /opt/instructlab/venv/bin/ilab data generate
+      --config /opt/instructlab/config.yaml
+      --num-instructions {{ synthetic_data_count }}
+  args:
+    chdir: /opt/instructlab
+  become: true
+  become_user: "{{ ai_user }}"
+  when: generate_synthetic_data | default(false)
+  async: 3600
+  poll: 60
+```
+
+## Playbook: Full Site Deployment
+
+```yaml
+# playbooks/site.yml
+---
+- name: Deploy RHEL AI Infrastructure
+  hosts: all
+  become: true
+  
+  pre_tasks:
+    - name: Verify RHEL version
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "RedHat"
+          - ansible_distribution_major_version | int >= 9
+        fail_msg: "RHEL 9+ required for RHEL AI"
+
+  roles:
+    - role: rhel_ai_base
+      tags: [base, always]
+
+- name: Configure GPU Nodes
+  hosts: gpu_nodes
+  become: true
+  
+  roles:
+    - role: gpu_setup
+      tags: [gpu]
+
+- name: Deploy Inference Servers
+  hosts: inference_nodes
+  become: true
+  
+  roles:
+    - role: vllm_server
+      tags: [inference, vllm]
+
+- name: Deploy Training Environment
+  hosts: training_nodes
+  become: true
+  
+  roles:
+    - role: instructlab
+      tags: [training, instructlab]
+
+- name: Setup Monitoring
+  hosts: all
+  become: true
+  
+  roles:
+    - role: monitoring
+      tags: [monitoring, prometheus]
+```
+
+## CI/CD Pipeline Integration
+
+### GitLab CI Example
+
+```yaml
+# .gitlab-ci.yml
+stages:
+  - validate
+  - deploy-staging
+  - test
+  - deploy-production
+
+variables:
+  ANSIBLE_CONFIG: ./ansible.cfg
+
+validate:
+  stage: validate
+  image: registry.redhat.io/ansible-automation-platform/ee-supported-rhel9:latest
+  script:
+    - ansible-lint playbooks/
+    - ansible-playbook playbooks/site.yml --syntax-check
+  rules:
+    - changes:
+        - "**/*.yml"
+        - "**/*.yaml"
+
+deploy-staging:
+  stage: deploy-staging
+  image: registry.redhat.io/ansible-automation-platform/ee-supported-rhel9:latest
+  script:
+    - ansible-playbook -i inventory/staging.yml playbooks/site.yml
+  environment:
+    name: staging
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+
+model-validation:
+  stage: test
+  script:
+    - python tests/validate_model.py --endpoint $STAGING_ENDPOINT
+    - python tests/benchmark_latency.py --target-p95 80
+  needs: [deploy-staging]
+
+deploy-production:
+  stage: deploy-production
+  image: registry.redhat.io/ansible-automation-platform/ee-supported-rhel9:latest
+  script:
+    - ansible-playbook -i inventory/production.yml playbooks/site.yml
+  environment:
+    name: production
+  when: manual
+  needs: [model-validation]
+```
+
+## Model Update Playbook
+
+```yaml
+# playbooks/update_model.yml
+---
+- name: Update AI Model with Zero Downtime
+  hosts: inference_nodes
+  serial: 1  # Rolling update
+  become: true
+  
+  vars:
+    new_model_version: "{{ model_version | default('latest') }}"
+  
+  tasks:
+    - name: Remove node from load balancer
+      ansible.builtin.uri:
+        url: "{{ lb_api }}/nodes/{{ inventory_hostname }}/disable"
+        method: POST
+      delegate_to: localhost
+    
+    - name: Wait for active requests to complete
+      ansible.builtin.wait_for:
+        timeout: 60
+    
+    - name: Pull new model version
+      containers.podman.podman_image:
+        name: "{{ model_registry }}/{{ model_name }}"
+        tag: "{{ new_model_version }}"
+    
+    - name: Update vLLM configuration
+      ansible.builtin.lineinfile:
+        path: /opt/vllm/config.yaml
+        regexp: '^model:'
+        line: "model: {{ model_registry }}/{{ model_name }}:{{ new_model_version }}"
+      notify: Restart vllm service
+    
+    - name: Flush handlers
+      ansible.builtin.meta: flush_handlers
+    
+    - name: Verify model health
+      ansible.builtin.uri:
+        url: "http://localhost:{{ vllm_port }}/health"
+        status_code: 200
+      register: health
+      until: health.status == 200
+      retries: 30
+      delay: 5
+    
+    - name: Re-enable node in load balancer
+      ansible.builtin.uri:
+        url: "{{ lb_api }}/nodes/{{ inventory_hostname }}/enable"
+        method: POST
+      delegate_to: localhost
+```
+
+## Related Book Content
+
+This article covers material from:
+- **Chapter 5: Custom Applications** - Ansible playbooks and automation
+- **Chapter 2: Setup** - Infrastructure provisioning
+- **Chapter 6: Monitoring** - Observability automation
+
+---
+
+## 📚 Get Production-Ready Playbooks
+
+**Want the complete Ansible collection for RHEL AI?**
+
+*Practical RHEL AI* includes a **downloadable playbook repository** with:
+
+- ✅ 20+ production-tested roles
+- ✅ Multi-cloud deployment templates (AWS, Azure, GCP)
+- ✅ Ansible Automation Platform integration guides
+- ✅ Policy-as-code gates for model validation
+- ✅ Disaster recovery and backup playbooks
+
+<div style="background: linear-gradient(135deg, #ee0000 0%, #cc0000 100%); padding: 2rem; border-radius: 12px; text-align: center; margin: 2rem 0;">
+  <h3 style="color: white; margin-bottom: 1rem;">🚀 Automate Your AI Infrastructure</h3>
+  <p style="color: white; margin-bottom: 1.5rem;"><strong>Practical RHEL AI</strong> gives you everything you need to deploy and manage enterprise AI at scale with Ansible.</p>
+  <a href="/books/" style="display: inline-block; background: white; color: #cc0000; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none; margin-right: 1rem;">Learn More →</a>
+  <a href="https://amzn.to/4qjORdC" style="display: inline-block; background: #ff9900; color: #111; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none;">Buy on Amazon →</a>
+</div>

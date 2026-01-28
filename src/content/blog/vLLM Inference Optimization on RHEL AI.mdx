@@ -1,0 +1,298 @@
+---
+draft: false
+title: "vLLM Inference Optimization on RHEL AI"
+snippet: "Deploy high-performance model serving with vLLM on Red Hat Enterprise Linux, featuring OpenAI-compatible APIs, tensor parallelism, and production-grade latency optimization."
+publishDate: "2026-02-02"
+lastModified: "2026-02-02"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - rhel-ai
+  - vllm
+  - inference
+  - openai-api
+  - tensor-parallelism
+  - latency-optimization
+  - model-serving
+  - production-deployment
+image:
+  src: "/blog/books/practical-rhel-ai-cover.jpg"
+  alt: "vLLM Inference Optimization"
+---
+
+> **📘 Book Reference:** This article is based on **Chapter 3: Core Components** of [Practical RHEL AI](/books/), covering vLLM deployment and optimization for enterprise inference workloads.
+
+## Introduction
+
+When it comes to serving large language models in production, **vLLM** stands out as the inference engine of choice for RHEL AI. Its innovative PagedAttention algorithm delivers exceptional throughput while maintaining low latency—critical for enterprise applications.
+
+*Practical RHEL AI* dedicates significant coverage to vLLM configuration, optimization, and production deployment patterns that I'll share in this article.
+
+## Why vLLM for Enterprise Inference?
+
+### Performance Comparison
+
+| Inference Engine | Throughput | Latency (P95) | Memory Efficiency |
+|-----------------|------------|---------------|-------------------|
+| **vLLM** | **24x baseline** | **~40ms** | **95%** |
+| Text Generation Inference | 12x baseline | ~60ms | 85% |
+| Native Transformers | 1x baseline | ~200ms | 60% |
+
+### Key Features
+
+- **PagedAttention**: Revolutionary memory management for KV cache
+- **Continuous Batching**: Dynamic request batching for maximum throughput
+- **Tensor Parallelism**: Scale across multiple GPUs seamlessly
+- **OpenAI-Compatible API**: Drop-in replacement for existing applications
+
+## Installing vLLM on RHEL AI
+
+```bash
+# vLLM is included in RHEL AI
+sudo dnf install -y rhel-ai-vllm
+
+# Verify installation
+vllm --version
+
+# Check GPU availability
+python -c "import torch; print(f'GPUs: {torch.cuda.device_count()}')"
+```
+
+## Basic Model Serving
+
+### Starting the vLLM Server
+
+```bash
+# Serve Granite model with OpenAI-compatible API
+python -m vllm.entrypoints.openai.api_server \
+  --model ibm-granite/granite-3b-code-instruct \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --tensor-parallel-size 1
+```
+
+### Client Integration
+
+```python
+from openai import OpenAI
+
+# Connect to vLLM server (OpenAI-compatible)
+client = OpenAI(
+    base_url="http://localhost:8000/v1",
+    api_key="not-needed"  # vLLM doesn't require API key by default
+)
+
+# Generate completion
+response = client.chat.completions.create(
+    model="ibm-granite/granite-3b-code-instruct",
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Explain RHEL AI in one paragraph."}
+    ],
+    temperature=0.7,
+    max_tokens=256
+)
+
+print(response.choices[0].message.content)
+```
+
+## Advanced Configuration
+
+### Multi-GPU Tensor Parallelism
+
+For larger models, distribute across multiple GPUs:
+
+```bash
+# Serve 7B model across 2 GPUs
+python -m vllm.entrypoints.openai.api_server \
+  --model ibm-granite/granite-7b-instruct \
+  --tensor-parallel-size 2 \
+  --gpu-memory-utilization 0.9 \
+  --max-model-len 4096
+```
+
+### Configuration File
+
+```yaml
+# vllm-config.yaml
+model: ibm-granite/granite-7b-instruct
+tensor_parallel_size: 2
+gpu_memory_utilization: 0.9
+max_model_len: 8192
+dtype: float16
+quantization: null
+enforce_eager: false
+max_num_seqs: 256
+max_num_batched_tokens: 32768
+```
+
+```bash
+# Start with config
+vllm serve --config vllm-config.yaml
+```
+
+## Achieving P95 ≤ 80ms Latency
+
+The book's target SLO of **P95 latency ≤ 80ms** requires careful optimization:
+
+### 1. Right-Size Your Model
+
+```python
+# Smaller models = lower latency
+model_latency_comparison = {
+    "granite-3b": "~25ms P95",
+    "granite-7b": "~45ms P95", 
+    "granite-13b": "~80ms P95",
+    "granite-34b": "~150ms P95 (needs optimization)"
+}
+```
+
+### 2. Enable Speculative Decoding
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+  --model ibm-granite/granite-7b-instruct \
+  --speculative-model ibm-granite/granite-3b-instruct \
+  --num-speculative-tokens 5 \
+  --use-v2-block-manager
+```
+
+### 3. Optimize Batch Settings
+
+```python
+# Production-optimized serving config
+serving_config = {
+    "max_num_seqs": 128,           # Limit concurrent sequences
+    "max_num_batched_tokens": 8192, # Control batch size
+    "enable_prefix_caching": True,  # Cache common prefixes
+    "disable_log_requests": True,   # Reduce I/O overhead
+}
+```
+
+## Containerized Deployment with Podman
+
+```bash
+# Pull vLLM container
+podman pull registry.redhat.io/rhel-ai/vllm-server:latest
+
+# Run with GPU support
+podman run -d \
+  --name vllm-server \
+  --device nvidia.com/gpu=all \
+  -p 8000:8000 \
+  -v /models:/models:ro \
+  registry.redhat.io/rhel-ai/vllm-server:latest \
+  --model /models/granite-7b-instruct \
+  --tensor-parallel-size 2
+```
+
+### Systemd Service
+
+```ini
+# /etc/systemd/system/vllm.service
+[Unit]
+Description=vLLM Inference Server
+After=network.target
+
+[Service]
+Type=simple
+User=vllm
+ExecStart=/usr/bin/podman run --rm \
+  --name vllm-server \
+  --device nvidia.com/gpu=all \
+  -p 8000:8000 \
+  registry.redhat.io/rhel-ai/vllm-server:latest \
+  --model ibm-granite/granite-7b-instruct
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Monitoring vLLM Performance
+
+### Prometheus Metrics
+
+vLLM exposes metrics at `/metrics`:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: 'vllm'
+    static_configs:
+      - targets: ['localhost:8000']
+    metrics_path: /metrics
+```
+
+### Key Metrics to Track
+
+| Metric | Description | Alert Threshold |
+|--------|-------------|-----------------|
+| `vllm:request_latency_seconds` | Request latency histogram | P95 > 80ms |
+| `vllm:num_requests_running` | Active requests | > max_num_seqs |
+| `vllm:gpu_cache_usage_perc` | KV cache utilization | > 95% |
+| `vllm:num_preemptions_total` | Request preemptions | > 0/min |
+
+### Grafana Dashboard Query
+
+```promql
+# P95 latency over time
+histogram_quantile(0.95, 
+  sum(rate(vllm:request_latency_seconds_bucket[5m])) by (le)
+)
+```
+
+## Load Balancing Multiple Instances
+
+For high availability and throughput:
+
+```nginx
+# nginx.conf
+upstream vllm_cluster {
+    least_conn;
+    server vllm-node-1:8000 weight=1;
+    server vllm-node-2:8000 weight=1;
+    server vllm-node-3:8000 weight=1;
+}
+
+server {
+    listen 80;
+    
+    location /v1 {
+        proxy_pass http://vllm_cluster;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_connect_timeout 60s;
+        proxy_read_timeout 300s;
+    }
+}
+```
+
+## Related Book Content
+
+This article covers material from:
+- **Chapter 3: Core Components** - vLLM architecture and deployment
+- **Chapter 6: Monitoring** - Performance metrics and SLOs
+- **Chapter 5: Custom Applications** - Production patterns
+
+---
+
+## 📚 Get the Complete Guide
+
+**Ready to master vLLM and enterprise AI deployment?**
+
+*Practical RHEL AI* provides comprehensive coverage of inference optimization, including:
+
+- ✅ Step-by-step vLLM configuration tutorials
+- ✅ Production deployment checklists
+- ✅ Performance tuning recipes for every GPU type
+- ✅ Real-world case studies with benchmarks
+- ✅ Troubleshooting guides for common issues
+
+<div style="background: linear-gradient(135deg, #ee0000 0%, #cc0000 100%); padding: 2rem; border-radius: 12px; text-align: center; margin: 2rem 0;">
+  <h3 style="color: white; margin-bottom: 1rem;">🚀 Pre-Order Now - Available March 2026</h3>
+  <p style="color: white; margin-bottom: 1.5rem;">Get <strong>Practical RHEL AI</strong> from Apress and start deploying production-ready AI on Red Hat Enterprise Linux today.</p>
+  <a href="/books/" style="display: inline-block; background: white; color: #cc0000; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none; margin-right: 1rem;">Learn More →</a>
+  <a href="https://amzn.to/4qjORdC" style="display: inline-block; background: #ff9900; color: #111; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none;">Buy on Amazon →</a>
+</div>

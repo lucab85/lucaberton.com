@@ -1,0 +1,547 @@
+---
+draft: false
+title: "AI Governance and Security on RHEL AI"
+snippet: "Implement enterprise-grade AI governance with SELinux, RBAC, SPDX lineage tracking, and policy-as-code gates, based on Practical RHEL AI Chapters 4 and 8."
+publishDate: "2025-12-10"
+lastModified: "2025-12-10"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - rhel-ai
+  - ai-governance
+  - security
+  - selinux
+  - rbac
+  - spdx-lineage
+  - policy-as-code
+  - explainable-ai
+image:
+  src: "/blog/books/practical-rhel-ai-cover.jpg"
+  alt: "AI Governance and Security"
+---
+
+## AI Governance and Security on RHEL AI
+
+Deploying AI in regulated industries requires more than technical excellence. You need governance frameworks that ensure models are fair, auditable, and compliant with regulations like GDPR, HIPAA, and SOX.
+
+This article covers implementing enterprise AI governance on RHEL AI, from SELinux hardening to model lineage tracking and automated compliance checks.
+
+### The AI Governance Challenge
+
+Enterprises deploying AI at scale face critical questions:
+
+- **Who approved this model for production?** Model governance audit trail
+- **Where did the training data come from?** Supply chain provenance
+- **Is this model biased against any demographic?** Fairness validation
+- **Can I explain why this prediction was made?** Explainability requirements
+- **What happens if a model fails?** Rollback and incident response procedures
+
+RHEL AI's foundation of Linux security principles makes implementing these controls straightforward.
+
+### 1. SELinux Hardening for AI Workloads
+
+RHEL AI runs with SELinux enabled by default. Define strict policies for model serving:
+
+```bash
+# Check current SELinux status
+getenforce
+
+# Create custom AI policy
+sudo semanage fcontext -a -t vllm_exec_t "/opt/rhel-ai/models(/.*)?"
+sudo semanage fcontext -a -t rhel_ai_rw_t "/var/lib/rhel-ai(/.*)?"
+
+# Restore context
+sudo restorecon -Rv /opt/rhel-ai
+sudo restorecon -Rv /var/lib/rhel-ai
+
+# Create custom policy for model serving
+cat > rhel_ai_custom.te << 'EOF'
+policy_module(rhel_ai_custom, 1.0.0)
+
+type vllm_t;
+type vllm_exec_t;
+type rhel_ai_model_t;
+
+# Allow vLLM to access models
+allow vllm_t rhel_ai_model_t:file { read open getattr };
+
+# Allow vLLM to listen on port 8000
+allow vllm_t self:tcp_socket { bind listen accept };
+
+# Allow logging
+allow vllm_t self:unix_stream_socket { write read };
+EOF
+
+# Compile and install
+checkmodule -M -m -o rhel_ai_custom.mod rhel_ai_custom.te
+semodule_package -o rhel_ai_custom.pp -m rhel_ai_custom.mod
+sudo semodule -i rhel_ai_custom.pp
+```
+
+Verify the policy:
+
+```bash
+# Check vLLM process context
+ps -eZ | grep vllm
+
+# Audit denials
+sudo tail -f /var/log/audit/audit.log | grep denied
+```
+
+### 2. RBAC for Model Access Control
+
+Define role-based access to models and resources:
+
+```bash
+# Create AI team users and groups
+sudo groupadd -r ai-engineers
+sudo groupadd -r ai-auditors
+sudo groupadd -r ai-operators
+
+# Create model repository with restricted access
+sudo mkdir -p /opt/rhel-ai/models/{production,staging,development}
+sudo chgrp -R ai-engineers /opt/rhel-ai/models
+
+# Set permissions (principle of least privilege)
+sudo chmod 750 /opt/rhel-ai/models/{production,staging,development}
+sudo chmod 640 /opt/rhel-ai/models/production/*
+sudo chmod 750 /opt/rhel-ai/models/staging/*
+sudo chmod 750 /opt/rhel-ai/models/development/*
+
+# Audit model access
+sudo auditctl -w /opt/rhel-ai/models/production/ -p wa -k ai_model_change
+sudo auditctl -w /opt/rhel-ai/models/ -p r -k ai_model_read
+```
+
+Check audit logs:
+
+```bash
+# See who accessed production models
+sudo ausearch -k ai_model_read -ts recent | grep -i "production"
+
+# Generate audit report
+sudo aureport -f | grep -i "ai_model"
+```
+
+### 3. Model Lineage and Provenance Tracking
+
+Implement SPDX (Software Package Data Exchange) for model tracking:
+
+```yaml
+# /opt/rhel-ai/models/granite-8b-medical/SBOM.spdx
+SPDXVersion: SPDX-2.3
+DataLicense: CC0-1.0
+SPDXID: SPDXRef-DOCUMENT
+DocumentName: Granite-8B-Medical Model Lineage
+DocumentNamespace: https://rhel-ai.example.com/sbom/granite-medical-001
+Creator: Tool: rhel-ai-sbom-generator-1.0
+Created: 2025-12-10T10:00:00Z
+
+PackageName: granite-8b-medical
+SPDXID: SPDXRef-Package
+PackageVersion: 1.2.0
+PackageDownloadLocation: https://huggingface.co/ibm-granite/granite-8b-instruct
+FilesAnalyzed: true
+PackageVerificationCode: d6a770ba38583ed4bb4525bd96e50461655d2758 (excludes: ./exclude.asm)
+
+# Training data provenance
+PackageName: medical-training-dataset
+SPDXID: SPDXRef-TrainingData
+PackageVersion: 2025-12-01
+PackageDownloadLocation: https://data-registry.example.com/medical-v2
+ExternalRef: DocumentRef-clinicaltrials: https://clinicaltrials.gov/
+ExternalRefComment: Training data sourced from 50K+ de-identified clinical notes
+
+# Base model reference
+RelationshipType: DEPENDS_ON
+RelationshipComment: Fine-tuned from Granite 8B base model
+Relationship: SPDXRef-Package DEPENDS_ON DocumentRef-granite:SPDXRef-BaseModel
+
+# Approval and deployment
+Relationship: SPDXRef-Package REVIEWED_BY DocumentRef-approval:SPDXRef-Review
+ReviewerComment: "Passed fairness testing. Recommended for medical assistance (non-diagnostic)."
+ReviewDate: 2025-12-08T14:00:00Z
+
+# Regulatory compliance markers
+Relationship: SPDXRef-Package COMPLIANT_WITH HIPAA-compliance-2024
+Relationship: SPDXRef-Package COMPLIANT_WITH GDPR-compliance-2024
+```
+
+Generate and validate:
+
+```bash
+# Create SBOM automatically
+rhel-ai model sbom create \
+  --model granite-8b-medical \
+  --training-data /var/lib/rhel-ai/datasets/medical \
+  --output /opt/rhel-ai/models/granite-8b-medical/SBOM.spdx
+
+# Validate SBOM
+rhel-ai sbom validate /opt/rhel-ai/models/granite-8b-medical/SBOM.spdx
+
+# Track to compliance database
+curl -X POST https://compliance-db.example.com/models \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d @model-metadata.json
+```
+
+### 4. Fairness and Explainability Validation
+
+Implement automated fairness testing before model deployment:
+
+```python
+# /opt/rhel-ai/fairness_validator.py
+from fairness_indicators import fairness_indicators
+import pandas as pd
+import json
+
+def validate_model_fairness(model, test_data, sensitive_attrs=['age_group', 'gender', 'race']):
+    """
+    Validate model fairness across demographic groups.
+    Implements: Equalized Odds, Demographic Parity, Calibration
+    """
+    results = {
+        'timestamp': pd.Timestamp.now().isoformat(),
+        'model': model.name,
+        'metrics': {}
+    }
+    
+    for attr in sensitive_attrs:
+        group_metrics = {}
+        
+        for group in test_data[attr].unique():
+            group_data = test_data[test_data[attr] == group]
+            
+            # Get predictions
+            predictions = model.predict(group_data)
+            
+            # Calculate fairness metrics
+            tpr = (predictions[group_data['label'] == 1] == 1).sum() / (group_data['label'] == 1).sum()
+            fpr = (predictions[group_data['label'] == 0] == 1).sum() / (group_data['label'] == 0).sum()
+            
+            group_metrics[str(group)] = {
+                'true_positive_rate': float(tpr),
+                'false_positive_rate': float(fpr),
+                'sample_size': len(group_data)
+            }
+        
+        # Check for equalized odds (TPR and FPR should be equal across groups)
+        tprs = [m['true_positive_rate'] for m in group_metrics.values()]
+        max_tpr_diff = max(tprs) - min(tprs)
+        
+        results['metrics'][attr] = {
+            'group_metrics': group_metrics,
+            'max_tpr_difference': float(max_tpr_diff),
+            'passes_equalized_odds': max_tpr_diff < 0.1,  # Threshold
+            'recommendation': 'APPROVED' if max_tpr_diff < 0.1 else 'REQUIRES_REVIEW'
+        }
+    
+    return results
+
+def explain_prediction(model, sample, method='shap'):
+    """
+    Explain individual predictions using SHAP (SHapley Additive exPlanations)
+    """
+    import shap
+    
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(sample)
+    
+    explanation = {
+        'sample_id': sample.get('id'),
+        'prediction': model.predict(sample),
+        'confidence': float(model.predict_proba(sample).max()),
+        'feature_importance': {
+            feature: float(shap_value) 
+            for feature, shap_value in zip(sample.columns, shap_values)
+        },
+        'top_contributing_features': sorted(
+            [(f, s) for f, s in zip(sample.columns, shap_values)],
+            key=lambda x: abs(x[1]),
+            reverse=True
+        )[:5]
+    }
+    
+    return explanation
+
+if __name__ == '__main__':
+    import sys
+    from prometheus_client import start_http_server, Gauge
+    
+    # Metrics for monitoring
+    fairness_metric = Gauge('model_fairness_score', 'Fairness violation ratio')
+    explainability_metric = Gauge('model_explainability_score', 'Avg feature importance concentration')
+    
+    start_http_server(8002)
+    
+    # Load production model and test data
+    model = load_model('/opt/rhel-ai/models/granite-8b-medical')
+    test_data = pd.read_csv('/var/lib/rhel-ai/validation/fairness_test_set.csv')
+    
+    # Validate fairness
+    fairness_results = validate_model_fairness(model, test_data)
+    
+    with open('/var/lib/rhel-ai/metrics/fairness_report.json', 'w') as f:
+        json.dump(fairness_results, f, indent=2)
+    
+    # Export metrics
+    violations = sum(1 for attr, metrics in fairness_results['metrics'].items()
+                    if not metrics['passes_equalized_odds'])
+    fairness_metric.set(violations / len(fairness_results['metrics']))
+    
+    print(json.dumps(fairness_results, indent=2))
+```
+
+Deploy the fairness validator:
+
+```bash
+# Run before model deployment
+python3 /opt/rhel-ai/fairness_validator.py
+
+# Automated check in CI/CD
+cat > /opt/rhel-ai/model-approval.sh << 'EOF'
+#!/bin/bash
+set -e
+
+MODEL=$1
+FAIRNESS_THRESHOLD=0.1
+
+python3 /opt/rhel-ai/fairness_validator.py --model $MODEL --output fairness_report.json
+
+# Check results
+VIOLATIONS=$(jq '[.metrics[] | select(.passes_equalized_odds == false)] | length' fairness_report.json)
+
+if [ $VIOLATIONS -gt 0 ]; then
+  echo "❌ Model failed fairness validation ($VIOLATIONS violations)"
+  exit 1
+fi
+
+echo "✅ Model passed fairness validation"
+exit 0
+EOF
+
+chmod +x /opt/rhel-ai/model-approval.sh
+```
+
+### 5. Compliance Automation
+
+Implement policy-as-code for compliance:
+
+```hcl
+# /opt/rhel-ai/compliance/model-deployment.rego (Rego policy language)
+package rhel_ai
+
+# Require all production models to have fairness validation
+deny[msg] {
+    input.model.environment == "production"
+    not input.fairness_report
+    msg := "Missing fairness validation report"
+}
+
+# Require SBOM for all models
+deny[msg] {
+    input.model.environment == "production"
+    not input.sbom
+    msg := "Missing SBOM (Software Bill of Materials)"
+}
+
+# Require explicit model deprecation path
+deny[msg] {
+    input.model.environment == "production"
+    not input.deprecation_date
+    msg := "Missing deprecation date for model lifecycle"
+}
+
+# Enforce model accuracy SLO
+deny[msg] {
+    input.model.environment == "production"
+    input.model.accuracy < 0.92
+    msg := sprintf("Model accuracy %.2f%% below 92%% SLO", [input.model.accuracy])
+}
+
+# Check for personally identifiable information (PII) in model
+deny[msg] {
+    input.model.environment == "production"
+    input.training_data.contains_pii == true
+    not input.pii_removal_method
+    msg := "Training data contains PII without documented removal method"
+}
+
+# Audit logging required
+deny[msg] {
+    input.model.environment == "production"
+    not input.audit_logging_enabled
+    msg := "Audit logging not enabled for production model"
+}
+
+allow["model_approved"] {
+    not deny
+}
+```
+
+Enforce policies:
+
+```bash
+# Install OPA (Open Policy Agent)
+sudo dnf install -y opa
+
+# Validate model deployment against policy
+opa eval -d /opt/rhel-ai/compliance/model-deployment.rego \
+  -i model-deployment.json \
+  "data.rhel_ai.allow"
+
+# Result: {"result": ["model_approved"]} or denials with reasons
+```
+
+### 6. Audit Logging and Compliance Reporting
+
+Centralize all AI activity in audit logs:
+
+```bash
+# Configure auditd for AI workflows
+sudo cat >> /etc/audit/rules.d/rhel-ai.rules << 'EOF'
+# Model deployments
+-a always,exit -F path=/opt/rhel-ai/models/production -F perm=x -F auid>=1000 -k ai_deploy
+
+# Training runs
+-a always,exit -F path=/var/lib/rhel-ai/training -F perm=w -F auid>=1000 -k ai_training
+
+# Inference API calls (log sensitive ones)
+-a always,exit -F path=/var/log/rhel-ai/inference -F perm=w -F auid>=1000 -k ai_inference
+
+# Configuration changes
+-a always,exit -F path=/etc/rhel-ai -F perm=w -F auid>=1000 -k ai_config_change
+EOF
+
+# Reload audit rules
+sudo systemctl restart auditd
+
+# Generate compliance report
+sudo aureport -i -ts recent -k ai_deploy | \
+  awk '{print $1, $2, $3, $4, $5, $6}' | \
+  column -t > compliance_report.txt
+
+# Export to SIEM
+sudo ausearch -k ai_deploy -ts recent --format json > ai_audit_events.json
+```
+
+### 7. Data Governance
+
+Implement data classification and retention policies:
+
+```bash
+# Classify training data
+rhel-ai data classify \
+  --input /var/lib/rhel-ai/datasets/medical \
+  --sensitivity-level HIGH \
+  --pii-scan enabled \
+  --data-retention 2y
+
+# Anonymize sensitive data before fine-tuning
+rhel-ai data anonymize \
+  --input raw_patient_data.csv \
+  --methods PII-removal,k-anonymity \
+  --k-value 5 \
+  --output anonymized_training_data.csv
+
+# Generate data inventory
+rhel-ai data inventory create \
+  --path /var/lib/rhel-ai/datasets \
+  --output data_catalog.json
+```
+
+### Compliance Checklist
+
+Use this checklist before deploying to production:
+
+```markdown
+# AI Model Compliance Checklist
+
+## Model Governance
+- [ ] Model has unique identifier and version
+- [ ] Approval chain documented (Data Science → Engineering → Compliance)
+- [ ] Clear deprecation date set
+- [ ] Owner and backup owner assigned
+
+## Fairness & Bias
+- [ ] Fairness validation passed (Equalized Odds < 10%)
+- [ ] No protected attributes used as features
+- [ ] Demographic parity tested
+- [ ] Bias mitigation strategy documented
+
+## Explainability
+- [ ] Model predictions are explainable (SHAP/LIME analysis)
+- [ ] Feature importance ranked
+- [ ] Confidence scores provided
+- [ ] Adversarial examples tested
+
+## Data Governance
+- [ ] Training data source documented
+- [ ] PII removed from training data
+- [ ] Data retention policy set
+- [ ] Consent obtained for personal data
+
+## Security
+- [ ] Model encrypted at rest
+- [ ] API endpoints secured (HTTPS, auth)
+- [ ] Access logs enabled
+- [ ] SELinux policy enforced
+
+## Compliance
+- [ ] SPDX SBOM generated
+- [ ] Regulatory mappings documented (GDPR, HIPAA, etc.)
+- [ ] Audit logging enabled
+- [ ] Incident response plan documented
+
+## Monitoring
+- [ ] Performance metrics defined
+- [ ] Drift detection configured
+- [ ] Accuracy SLO set
+- [ ] Alert thresholds configured
+```
+
+### Next Steps
+
+Implement governance incrementally:
+
+1. **Start with audit logging** on all model access
+2. **Add fairness testing** to your CI/CD pipeline
+3. **Implement SPDX SBOMs** for all models
+4. **Enforce policy-as-code** with OPA
+5. **Regular compliance audits** (quarterly)
+
+### Resources
+
+- [NIST AI Risk Management Framework](https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf)
+- [Fairness Indicators (Google)](https://github.com/tensorflow/fairness-indicators)
+- [Open Policy Agent (OPA)](https://www.openpolicyagent.org/)
+- [SPDX Specification](https://spdx.github.io/)
+- [SHAP Explainability](https://github.com/slundberg/shap)
+
+---
+
+**Enterprise AI requires enterprise governance. With RHEL AI's security foundation and the tools in this article, you can deploy AI responsibly at scale.**
+
+The final article will explore advanced use cases and production patterns that tie everything together.
+
+---
+
+## 📚 Implement Enterprise AI Governance
+
+**Need a complete governance framework for AI?**
+
+*Practical RHEL AI* covers security and compliance comprehensively:
+
+- ✅ SPDX lineage tracking implementation guides
+- ✅ SELinux and RBAC configuration recipes
+- ✅ Policy-as-code gate examples
+- ✅ EU AI Act compliance checklists
+- ✅ Audit logging and model provenance patterns
+
+<div style="background: linear-gradient(135deg, #ee0000 0%, #cc0000 100%); padding: 2rem; border-radius: 12px; text-align: center; margin: 2rem 0;">
+  <h3 style="color: white; margin-bottom: 1rem;">🔐 Secure Your AI Infrastructure</h3>
+  <p style="color: white; margin-bottom: 1.5rem;"><strong>Practical RHEL AI</strong> provides the governance frameworks you need for compliant, auditable AI systems.</p>
+  <a href="/books/" style="display: inline-block; background: white; color: #cc0000; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none; margin-right: 1rem;">Learn More →</a>
+  <a href="https://amzn.to/4qjORdC" style="display: inline-block; background: #ff9900; color: #111; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none;">Buy on Amazon →</a>
+</div>

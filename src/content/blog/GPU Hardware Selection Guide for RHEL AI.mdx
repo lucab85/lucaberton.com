@@ -1,0 +1,319 @@
+---
+draft: false
+title: "GPU Hardware Selection Guide for RHEL AI"
+snippet: "Compare NVIDIA A100, H100, and AMD MI300X GPUs for RHEL AI workloads—including performance benchmarks, cost analysis, and deployment recommendations for training and inference."
+publishDate: "2026-02-16"
+lastModified: "2026-02-16"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - rhel-ai
+  - gpu
+  - nvidia-a100
+  - nvidia-h100
+  - amd-mi300x
+  - hardware-selection
+  - benchmarks
+  - infrastructure
+image:
+  src: "/blog/books/practical-rhel-ai-cover.jpg"
+  alt: "GPU Hardware Selection Guide"
+---
+
+> **📘 Book Reference:** This article is based on **Chapter 2: Setup** and **Chapter 4: Advanced Features** of [Practical RHEL AI](/books/), covering GPU hardware requirements and optimization strategies.
+
+## Introduction
+
+Choosing the right GPU for your RHEL AI deployment is one of the most consequential infrastructure decisions you'll make. The wrong choice can mean wasted budget, performance bottlenecks, or inability to run your target models.
+
+*Practical RHEL AI* provides detailed hardware guidance that I'll summarize here, helping you match GPU capabilities to your specific workload requirements.
+
+## Supported GPU Hardware
+
+RHEL AI officially supports:
+
+| GPU | Memory | Interconnect | Best For |
+|-----|--------|--------------|----------|
+| **NVIDIA A100** | 40GB / 80GB | NVLink 3.0 | Training & Inference |
+| **NVIDIA H100** | 80GB | NVLink 4.0 | Large Model Training |
+| **AMD MI300X** | 192GB | Infinity Fabric | Memory-Bound Workloads |
+
+## NVIDIA A100: The Proven Workhorse
+
+### Specifications
+
+```
+Architecture: Ampere
+CUDA Cores: 6,912
+Tensor Cores: 432 (3rd Gen)
+Memory: 40GB or 80GB HBM2e
+Memory Bandwidth: 2 TB/s
+TDP: 400W
+```
+
+### When to Choose A100
+
+✅ **Ideal for:**
+- Mixed training and inference workloads
+- Models up to 13B parameters (single GPU)
+- Budget-conscious deployments
+- Established software ecosystem
+
+❌ **Limitations:**
+- Older FP8 support (limited)
+- Lower memory bandwidth than H100
+- Cannot run 70B+ models efficiently
+
+### RHEL AI Configuration
+
+```bash
+# Verify A100 detection
+nvidia-smi --query-gpu=name,memory.total,compute_cap --format=csv
+
+# Expected output:
+# NVIDIA A100-SXM4-80GB, 81920 MiB, 8.0
+
+# Optimal vLLM settings for A100
+python -m vllm.entrypoints.openai.api_server \
+  --model granite-7b-instruct \
+  --dtype float16 \
+  --gpu-memory-utilization 0.92 \
+  --max-model-len 8192
+```
+
+## NVIDIA H100: Maximum Performance
+
+### Specifications
+
+```
+Architecture: Hopper
+CUDA Cores: 16,896
+Tensor Cores: 528 (4th Gen)
+Memory: 80GB HBM3
+Memory Bandwidth: 3.35 TB/s
+TDP: 700W
+FP8 Tensor Core Performance: 3,958 TFLOPS
+```
+
+### When to Choose H100
+
+✅ **Ideal for:**
+- Large model training (34B+ parameters)
+- Latency-critical inference
+- FP8 inference optimization
+- Multi-node distributed training
+
+❌ **Limitations:**
+- Higher cost (~2.5x A100 pricing)
+- Higher power requirements
+- May be overkill for smaller models
+
+### Performance Comparison
+
+| Workload | A100 80GB | H100 80GB | H100 Advantage |
+|----------|-----------|-----------|----------------|
+| GPT-3 175B Training | 1.0x | 3.0x | **3x faster** |
+| Llama 70B Inference | 1.0x | 2.4x | **2.4x faster** |
+| Granite 7B Inference | 1.0x | 1.6x | 1.6x faster |
+| Fine-tuning 13B | 1.0x | 2.2x | **2.2x faster** |
+
+### H100 with FP8 Inference
+
+```python
+from vllm import LLM, SamplingParams
+
+# H100 with FP8 quantization
+llm = LLM(
+    model="granite-34b-instruct",
+    dtype="float8_e4m3fn",
+    quantization="fp8",
+    tensor_parallel_size=2,
+    enforce_eager=False  # Use CUDA graphs
+)
+
+# 50% memory reduction, minimal accuracy loss
+```
+
+## AMD MI300X: Memory Champion
+
+### Specifications
+
+```
+Architecture: CDNA 3
+Compute Units: 304
+Memory: 192GB HBM3
+Memory Bandwidth: 5.3 TB/s
+TDP: 750W
+```
+
+### When to Choose MI300X
+
+✅ **Ideal for:**
+- Memory-bound workloads
+- Running 70B+ models on single GPU
+- Avoiding tensor parallelism complexity
+- ROCm-compatible workflows
+
+❌ **Limitations:**
+- Smaller software ecosystem than NVIDIA
+- Some CUDA libraries need porting
+- Fewer cloud availability options
+
+### RHEL AI with ROCm
+
+```bash
+# Install AMD GPU support
+sudo dnf install -y rocm-hip-runtime rocm-hip-sdk
+
+# Verify MI300X detection
+rocm-smi --showproductname
+
+# vLLM with ROCm backend
+python -m vllm.entrypoints.openai.api_server \
+  --model granite-70b-instruct \
+  --dtype float16 \
+  --device rocm
+```
+
+## Memory Requirements by Model Size
+
+| Model Size | Minimum GPU Memory | Recommended Configuration |
+|------------|-------------------|---------------------------|
+| 3B params | 8GB | A100 40GB (comfortable) |
+| 7B params | 16GB | A100 40GB or H100 |
+| 13B params | 32GB | A100 80GB |
+| 34B params | 80GB | H100 or 2x A100 |
+| 70B params | 150GB+ | MI300X or 2x H100 |
+
+### Memory Calculation Formula
+
+```python
+def estimate_gpu_memory(params_billions, dtype_bytes=2, overhead=1.2):
+    """
+    Estimate GPU memory required for inference.
+    
+    Args:
+        params_billions: Model parameters in billions
+        dtype_bytes: 2 for FP16, 1 for INT8, 0.5 for INT4
+        overhead: KV cache and activation memory (1.2 = 20% overhead)
+    
+    Returns:
+        Required GPU memory in GB
+    """
+    base_memory = params_billions * dtype_bytes
+    return base_memory * overhead
+
+# Examples:
+# 7B FP16:  7 * 2 * 1.2 = 16.8 GB
+# 70B FP16: 70 * 2 * 1.2 = 168 GB
+# 70B INT8: 70 * 1 * 1.2 = 84 GB
+```
+
+## Multi-GPU Configurations
+
+### Training Configurations
+
+| Configuration | Total Memory | Use Case |
+|--------------|--------------|----------|
+| 4x A100 80GB | 320GB | Fine-tune up to 34B models |
+| 8x A100 80GB | 640GB | Train 70B models |
+| 8x H100 80GB | 640GB | Train 70B+ models faster |
+| 4x MI300X | 768GB | Memory-intensive training |
+
+### NVLink vs PCIe
+
+```
+NVLink 4.0 (H100): 900 GB/s bidirectional
+NVLink 3.0 (A100): 600 GB/s bidirectional
+PCIe 5.0: 128 GB/s bidirectional
+PCIe 4.0: 64 GB/s bidirectional
+
+Recommendation: Always use NVLink for multi-GPU training
+```
+
+## Cost Analysis
+
+### On-Premises (3-Year TCO)
+
+| GPU | Hardware Cost | Power (3yr) | Total TCO |
+|-----|--------------|-------------|-----------|
+| A100 80GB | $15,000 | $4,200 | $19,200 |
+| H100 80GB | $35,000 | $7,350 | $42,350 |
+| MI300X | $20,000 | $7,875 | $27,875 |
+
+### Cloud Hourly Rates (Approximate)
+
+| GPU | AWS | Azure | GCP |
+|-----|-----|-------|-----|
+| A100 40GB | $3.06/hr | $3.40/hr | $2.95/hr |
+| A100 80GB | $4.10/hr | $4.50/hr | $4.00/hr |
+| H100 80GB | $8.00/hr | $8.50/hr | $8.25/hr |
+
+## Decision Framework
+
+```
+START
+  │
+  ├─ Budget constrained?
+  │   YES → A100 80GB
+  │   NO ↓
+  │
+  ├─ Model size > 34B parameters?
+  │   YES → H100 or MI300X
+  │   NO ↓
+  │
+  ├─ Training large models?
+  │   YES → H100 (speed matters)
+  │   NO ↓
+  │
+  ├─ Inference-only workload?
+  │   YES → A100 (cost-effective)
+  │   NO ↓
+  │
+  └─ Mixed workload → H100 (future-proof)
+```
+
+## RHEL AI Hardware Validation
+
+```bash
+# Run RHEL AI hardware validation
+rhel-ai-validate --check hardware
+
+# Expected output:
+# ✓ GPU detected: NVIDIA H100 80GB
+# ✓ Driver version: 535.129.03
+# ✓ CUDA version: 12.4
+# ✓ Memory: 80GB HBM3
+# ✓ NVLink: Connected (4 links)
+# ✓ PCIe: Gen5 x16
+# 
+# Hardware validation: PASSED
+```
+
+## Related Book Content
+
+This article covers material from:
+- **Chapter 2: Setup** - Hardware requirements and validation
+- **Chapter 4: Advanced Features** - GPU optimization techniques
+- **Chapter 7: Use Cases** - Workload-specific recommendations
+
+---
+
+## 📚 Complete Hardware Planning Guide
+
+**Need help sizing your RHEL AI infrastructure?**
+
+*Practical RHEL AI* includes comprehensive hardware planning resources:
+
+- ✅ Detailed benchmark data for all supported GPUs
+- ✅ Workload sizing calculators
+- ✅ Cloud vs on-premises cost models
+- ✅ Power and cooling requirements
+- ✅ Procurement checklists and vendor guidance
+
+<div style="background: linear-gradient(135deg, #ee0000 0%, #cc0000 100%); padding: 2rem; border-radius: 12px; text-align: center; margin: 2rem 0;">
+  <h3 style="color: white; margin-bottom: 1rem;">💰 Make the Right Investment</h3>
+  <p style="color: white; margin-bottom: 1.5rem;">Don't overspend—or underspend—on GPU hardware. <strong>Practical RHEL AI</strong> helps you choose the perfect configuration for your workloads and budget.</p>
+  <a href="/books/" style="display: inline-block; background: white; color: #cc0000; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none; margin-right: 1rem;">Learn More →</a>
+  <a href="https://amzn.to/4qjORdC" style="display: inline-block; background: #ff9900; color: #111; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none;">Buy on Amazon →</a>
+</div>

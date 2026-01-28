@@ -1,0 +1,400 @@
+---
+draft: false
+title: "Containerized AI Workloads with Podman on RHEL"
+snippet: "Deploy and manage AI models using Podman containers on Red Hat Enterprise Linux—including GPU passthrough, rootless containers, and production orchestration patterns."
+publishDate: "2026-02-23"
+lastModified: "2026-02-23"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - rhel-ai
+  - podman
+  - containers
+  - gpu-passthrough
+  - rootless
+  - orchestration
+  - deployment
+  - security
+image:
+  src: "/blog/books/practical-rhel-ai-cover.jpg"
+  alt: "Containerized AI with Podman"
+---
+
+> **📘 Book Reference:** This article is based on **Chapter 2: Setup** and **Chapter 5: Custom Applications** of [Practical RHEL AI](/books/), covering container-based AI deployments using Podman.
+
+## Introduction
+
+**Podman** is the container runtime of choice for RHEL AI deployments. Unlike Docker, Podman runs daemonless and supports rootless containers out of the box—critical features for security-conscious enterprise AI deployments.
+
+*Practical RHEL AI* recommends Podman for all containerized AI workloads, and this article shows you how.
+
+## Why Podman for AI Workloads?
+
+| Feature | Podman | Docker |
+|---------|--------|--------|
+| Daemonless | ✅ Yes | ❌ No |
+| Rootless Containers | ✅ Native | ⚠️ Limited |
+| SELinux Integration | ✅ Full | ⚠️ Partial |
+| Systemd Integration | ✅ Native | ⚠️ Workarounds |
+| OCI Compliant | ✅ Yes | ✅ Yes |
+| GPU Support | ✅ CDI | ✅ nvidia-docker |
+
+## Installing Podman with GPU Support
+
+```bash
+# Install Podman and GPU tools
+sudo dnf install -y podman podman-plugins nvidia-container-toolkit
+
+# Configure NVIDIA Container Toolkit for Podman
+sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+
+# Verify CDI configuration
+nvidia-ctk cdi list
+
+# Test GPU access in container
+podman run --rm --device nvidia.com/gpu=all \
+  nvidia/cuda:12.4-base nvidia-smi
+```
+
+## Running AI Models in Containers
+
+### Basic vLLM Container
+
+```bash
+# Pull the RHEL AI vLLM image
+podman pull registry.redhat.io/rhel-ai/vllm-server:latest
+
+# Run with GPU access
+podman run -d \
+  --name vllm-inference \
+  --device nvidia.com/gpu=all \
+  -p 8000:8000 \
+  -v /opt/models:/models:ro,Z \
+  registry.redhat.io/rhel-ai/vllm-server:latest \
+  --model /models/granite-7b-instruct \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+### Rootless Container (Enhanced Security)
+
+```bash
+# Run as non-root user (no sudo!)
+podman run -d \
+  --name vllm-rootless \
+  --device nvidia.com/gpu=all \
+  -p 8000:8000 \
+  -v ~/models:/models:ro \
+  registry.redhat.io/rhel-ai/vllm-server:latest \
+  --model /models/granite-7b-instruct
+
+# Verify running as non-root
+podman top vllm-rootless user
+```
+
+## Building Custom AI Containers
+
+### Containerfile for Fine-Tuned Model
+
+```dockerfile
+# Containerfile.inference
+FROM registry.redhat.io/rhel-ai/vllm-server:latest
+
+LABEL maintainer="ai-team@example.com"
+LABEL version="1.0"
+LABEL description="Custom fine-tuned Granite model"
+
+# Copy fine-tuned model weights
+COPY --chown=1001:1001 ./model-weights /opt/model
+
+# Copy custom configuration
+COPY vllm-config.yaml /opt/vllm/config.yaml
+
+# Set environment variables
+ENV MODEL_PATH=/opt/model
+ENV VLLM_CONFIG=/opt/vllm/config.yaml
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
+
+# Run vLLM server
+CMD ["python", "-m", "vllm.entrypoints.openai.api_server", \
+     "--config", "/opt/vllm/config.yaml"]
+```
+
+### Build and Push
+
+```bash
+# Build the container
+podman build -t my-registry.com/ai-models/granite-custom:v1.0 \
+  -f Containerfile.inference .
+
+# Test locally
+podman run --rm -d \
+  --name test-inference \
+  --device nvidia.com/gpu=all \
+  -p 8000:8000 \
+  my-registry.com/ai-models/granite-custom:v1.0
+
+# Push to registry
+podman push my-registry.com/ai-models/granite-custom:v1.0
+```
+
+## Multi-Container AI Stack
+
+### Podman Pod for Complete Stack
+
+```bash
+# Create pod with shared network
+podman pod create \
+  --name ai-stack \
+  -p 8000:8000 \
+  -p 9090:9090 \
+  -p 3000:3000
+
+# Add vLLM inference server
+podman run -d \
+  --pod ai-stack \
+  --name vllm \
+  --device nvidia.com/gpu=all \
+  -v /opt/models:/models:ro,Z \
+  registry.redhat.io/rhel-ai/vllm-server:latest \
+  --model /models/granite-7b-instruct
+
+# Add Prometheus for monitoring
+podman run -d \
+  --pod ai-stack \
+  --name prometheus \
+  -v ./prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z \
+  prom/prometheus:latest
+
+# Add Grafana for visualization
+podman run -d \
+  --pod ai-stack \
+  --name grafana \
+  -v grafana-data:/var/lib/grafana:Z \
+  grafana/grafana:latest
+
+# Check pod status
+podman pod ps
+podman ps --pod
+```
+
+### Pod Definition File
+
+```yaml
+# ai-stack-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ai-stack
+  labels:
+    app: rhel-ai
+spec:
+  containers:
+    - name: vllm
+      image: registry.redhat.io/rhel-ai/vllm-server:latest
+      args:
+        - "--model"
+        - "/models/granite-7b-instruct"
+      ports:
+        - containerPort: 8000
+      volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: true
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+    
+    - name: prometheus
+      image: prom/prometheus:latest
+      ports:
+        - containerPort: 9090
+      volumeMounts:
+        - name: prometheus-config
+          mountPath: /etc/prometheus
+    
+    - name: grafana
+      image: grafana/grafana:latest
+      ports:
+        - containerPort: 3000
+  
+  volumes:
+    - name: models
+      hostPath:
+        path: /opt/models
+    - name: prometheus-config
+      hostPath:
+        path: /opt/prometheus
+```
+
+```bash
+# Deploy from YAML
+podman play kube ai-stack-pod.yaml
+```
+
+## Systemd Integration
+
+### Generate Systemd Service
+
+```bash
+# Generate service file from running container
+podman generate systemd --new --name vllm-inference \
+  > ~/.config/systemd/user/vllm-inference.service
+
+# Or for system-wide (requires root)
+sudo podman generate systemd --new --name vllm-inference \
+  > /etc/systemd/system/vllm-inference.service
+```
+
+### Custom Systemd Service
+
+```ini
+# /etc/systemd/system/rhel-ai-vllm.service
+[Unit]
+Description=RHEL AI vLLM Inference Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+TimeoutStartSec=300
+
+ExecStartPre=-/usr/bin/podman stop vllm-inference
+ExecStartPre=-/usr/bin/podman rm vllm-inference
+ExecStartPre=/usr/bin/podman pull registry.redhat.io/rhel-ai/vllm-server:latest
+
+ExecStart=/usr/bin/podman run \
+  --name vllm-inference \
+  --device nvidia.com/gpu=all \
+  --publish 8000:8000 \
+  --volume /opt/models:/models:ro,Z \
+  registry.redhat.io/rhel-ai/vllm-server:latest \
+  --model /models/granite-7b-instruct
+
+ExecStop=/usr/bin/podman stop vllm-inference
+ExecStopPost=/usr/bin/podman rm -f vllm-inference
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable --now rhel-ai-vllm.service
+sudo systemctl status rhel-ai-vllm.service
+```
+
+## Security Best Practices
+
+### SELinux Context
+
+```bash
+# Ensure proper SELinux labels on model directory
+sudo semanage fcontext -a -t container_file_t '/opt/models(/.*)?'
+sudo restorecon -Rv /opt/models
+
+# Verify SELinux context
+ls -laZ /opt/models
+```
+
+### Resource Limits
+
+```bash
+# Run with memory and CPU limits
+podman run -d \
+  --name vllm-limited \
+  --device nvidia.com/gpu=all \
+  --memory 64g \
+  --cpus 16 \
+  --pids-limit 1000 \
+  -p 8000:8000 \
+  registry.redhat.io/rhel-ai/vllm-server:latest \
+  --model /models/granite-7b-instruct
+```
+
+### Read-Only Root Filesystem
+
+```bash
+# Enhanced security with read-only root
+podman run -d \
+  --name vllm-secure \
+  --device nvidia.com/gpu=all \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid \
+  -v /opt/models:/models:ro,Z \
+  -p 8000:8000 \
+  registry.redhat.io/rhel-ai/vllm-server:latest
+```
+
+## Container Networking
+
+### Custom Network for AI Stack
+
+```bash
+# Create dedicated network
+podman network create ai-network
+
+# Run containers on custom network
+podman run -d \
+  --name vllm \
+  --network ai-network \
+  --device nvidia.com/gpu=all \
+  registry.redhat.io/rhel-ai/vllm-server:latest
+
+podman run -d \
+  --name api-gateway \
+  --network ai-network \
+  -p 80:80 \
+  nginx:latest
+
+# Containers can communicate by name
+# api-gateway can reach vllm at http://vllm:8000
+```
+
+## Monitoring Container Resources
+
+```bash
+# Real-time stats
+podman stats vllm-inference
+
+# Output:
+# ID            NAME             CPU %   MEM USAGE / LIMIT   NET I/O         BLOCK I/O
+# abc123def456  vllm-inference   45.2%   48.5GiB / 64GiB     1.2GB / 500MB   50MB / 0B
+
+# GPU monitoring inside container
+podman exec vllm-inference nvidia-smi dmon -s mu
+```
+
+## Related Book Content
+
+This article covers material from:
+- **Chapter 2: Setup** - Podman installation and GPU configuration
+- **Chapter 5: Custom Applications** - Container deployment patterns
+- **Chapter 4: Advanced Features** - Security and SELinux
+
+---
+
+## 📚 Master Container-Based AI Deployment
+
+**Ready to containerize your AI infrastructure?**
+
+*Practical RHEL AI* provides complete container deployment guidance:
+
+- ✅ Production-ready Containerfiles for all RHEL AI components
+- ✅ Podman Quadlet recipes for systemd integration
+- ✅ OpenShift deployment manifests
+- ✅ Security hardening checklists
+- ✅ Multi-node orchestration patterns
+
+<div style="background: linear-gradient(135deg, #ee0000 0%, #cc0000 100%); padding: 2rem; border-radius: 12px; text-align: center; margin: 2rem 0;">
+  <h3 style="color: white; margin-bottom: 1rem;">🐳 Container-First AI Deployment</h3>
+  <p style="color: white; margin-bottom: 1.5rem;"><strong>Practical RHEL AI</strong> shows you how to build secure, scalable, containerized AI infrastructure with Podman.</p>
+  <a href="/books/" style="display: inline-block; background: white; color: #cc0000; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none; margin-right: 1rem;">Learn More →</a>
+  <a href="https://amzn.to/4qjORdC" style="display: inline-block; background: #ff9900; color: #111; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none;">Buy on Amazon →</a>
+</div>

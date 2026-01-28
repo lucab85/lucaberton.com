@@ -1,0 +1,597 @@
+---
+draft: false
+title: "Securing AI Workloads with SELinux on RHEL"
+snippet: "Implement enterprise-grade security for AI workloads using SELinux policies, container isolation, and secure model serving on RHEL AI."
+publishDate: "2025-12-28"
+lastModified: "2025-12-28"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - rhel-ai
+  - selinux
+  - security
+  - container-security
+  - podman
+  - compliance
+  - hardening
+image:
+  src: "/blog/books/practical-rhel-ai-cover.jpg"
+  alt: "Securing AI Workloads with SELinux on RHEL"
+---
+
+Security isn't optional in enterprise AI deployments. RHEL AI provides **defense-in-depth** through SELinux mandatory access controls, container isolation, and secure model serving patterns. This guide covers the security hardening techniques that make your AI workloads production-ready without compromising functionality.
+
+## SELinux Fundamentals for AI
+
+SELinux (Security-Enhanced Linux) enforces mandatory access control policies that protect your AI infrastructure from unauthorized access.
+
+### SELinux Modes
+
+```bash
+# Check current SELinux status
+getenforce
+# Output: Enforcing | Permissive | Disabled
+
+# Check detailed status
+sestatus
+# SELinux status:                 enabled
+# SELinuxfs mount:                /sys/fs/selinux
+# SELinux root directory:         /etc/selinux
+# Loaded policy name:             targeted
+# Current mode:                   enforcing
+# Mode from config file:          enforcing
+# Policy MLS status:              enabled
+# Policy deny_unknown status:     allowed
+```
+
+### Why SELinux Matters for AI
+
+| Threat | Without SELinux | With SELinux |
+|--------|-----------------|--------------|
+| **Model theft** | Process can read any file | Confined to labeled resources |
+| **Data exfiltration** | Unrestricted network access | Policy-controlled egress |
+| **Container escape** | Root access to host | Isolated by type enforcement |
+| **Privilege escalation** | User can become root | Transitions require policy |
+
+## Configuring SELinux for AI Containers
+
+Run AI workloads in containers with proper SELinux contexts.
+
+### Container SELinux Types
+
+```bash
+# Check available container types
+seinfo -t | grep container
+
+# Common types for AI workloads:
+# container_t        - Standard container
+# container_file_t   - Container files
+# container_runtime_t - Podman/Docker runtime
+# nvidia_device_t    - GPU devices
+```
+
+### Running GPU Containers with SELinux
+
+```bash
+# Run vLLM with proper SELinux labels
+podman run -d \
+  --name vllm-server \
+  --security-opt label=type:container_t \
+  --device nvidia.com/gpu=all \
+  -v /models:/models:Z \
+  -p 8000:8000 \
+  vllm/vllm-openai:latest \
+  --model /models/granite-7b-instruct
+
+# The :Z suffix applies correct SELinux labels
+# This is equivalent to:
+# chcon -Rt container_file_t /models
+```
+
+### Custom SELinux Policy for AI Workloads
+
+```bash
+# Create custom policy module for AI inference
+cat > ai_inference.te << 'EOF'
+policy_module(ai_inference, 1.0)
+
+require {
+    type container_t;
+    type nvidia_device_t;
+    type container_file_t;
+    type unreserved_port_t;
+}
+
+# Allow containers to use NVIDIA GPUs
+allow container_t nvidia_device_t:chr_file { open read write ioctl };
+
+# Allow binding to inference ports (8000-8999)
+allow container_t unreserved_port_t:tcp_socket { name_bind };
+
+# Allow reading model files
+allow container_t container_file_t:file { read open getattr };
+EOF
+
+# Compile and install the policy
+checkmodule -M -m -o ai_inference.mod ai_inference.te
+semodule_package -o ai_inference.pp -m ai_inference.mod
+semodule -i ai_inference.pp
+
+# Verify policy is loaded
+semodule -l | grep ai_inference
+```
+
+## Model File Security
+
+Protect your trained models from unauthorized access.
+
+### Model Directory Setup
+
+```bash
+# Create secure model directory structure
+mkdir -p /var/lib/rhel-ai/models/{base,fine-tuned,staging}
+
+# Set ownership
+chown -R root:rhel-ai /var/lib/rhel-ai/models
+
+# Set permissions (group read, no world access)
+chmod 750 /var/lib/rhel-ai/models
+chmod 640 /var/lib/rhel-ai/models/*/*.safetensors
+
+# Apply SELinux labels
+semanage fcontext -a -t container_file_t "/var/lib/rhel-ai/models(/.*)?"
+restorecon -Rv /var/lib/rhel-ai/models
+```
+
+### Model Access Audit
+
+```bash
+# Enable SELinux auditing for model access
+cat > /etc/audit/rules.d/ai-models.rules << 'EOF'
+# Audit all access to model files
+-w /var/lib/rhel-ai/models -p rwxa -k ai_model_access
+
+# Audit model loading operations
+-a always,exit -F arch=b64 -S open -S openat -F dir=/var/lib/rhel-ai/models -k model_load
+EOF
+
+# Reload audit rules
+auditctl -R /etc/audit/rules.d/ai-models.rules
+
+# Search for model access events
+ausearch -k ai_model_access -ts today
+```
+
+## Network Security for AI Services
+
+Control network access for AI inference endpoints.
+
+### Firewall Configuration
+
+```bash
+# Allow inference API port
+firewall-cmd --permanent --add-port=8000/tcp
+
+# Restrict to specific networks
+firewall-cmd --permanent --add-rich-rule='
+  rule family="ipv4"
+  source address="10.0.0.0/8"
+  port protocol="tcp" port="8000"
+  accept'
+
+# Block external access to metrics
+firewall-cmd --permanent --add-rich-rule='
+  rule family="ipv4"
+  source not address="127.0.0.1"
+  port protocol="tcp" port="9090"
+  reject'
+
+firewall-cmd --reload
+```
+
+### mTLS for Model Serving
+
+```python
+#!/usr/bin/env python3
+"""secure_inference.py - mTLS-enabled inference server"""
+
+import ssl
+from fastapi import FastAPI, HTTPException
+from fastapi.security import HTTPBearer
+import uvicorn
+
+app = FastAPI()
+security = HTTPBearer()
+
+# SSL context with client certificate verification
+ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ssl_context.load_cert_chain(
+    certfile="/etc/pki/tls/certs/inference.crt",
+    keyfile="/etc/pki/tls/private/inference.key"
+)
+ssl_context.load_verify_locations("/etc/pki/tls/certs/ca-bundle.crt")
+ssl_context.verify_mode = ssl.CERT_REQUIRED
+
+@app.post("/v1/completions")
+async def generate(request: dict):
+    # Inference logic here
+    pass
+
+if __name__ == "__main__":
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        ssl_context=ssl_context
+    )
+```
+
+### Certificate Generation
+
+```bash
+# Generate CA certificate
+openssl genrsa -out ca.key 4096
+openssl req -new -x509 -days 365 -key ca.key -out ca.crt \
+  -subj "/CN=RHEL-AI-CA/O=Enterprise"
+
+# Generate server certificate
+openssl genrsa -out inference.key 2048
+openssl req -new -key inference.key -out inference.csr \
+  -subj "/CN=inference.internal/O=Enterprise"
+openssl x509 -req -days 365 -in inference.csr \
+  -CA ca.crt -CAkey ca.key -CAcreateserial -out inference.crt
+
+# Generate client certificate
+openssl genrsa -out client.key 2048
+openssl req -new -key client.key -out client.csr \
+  -subj "/CN=api-client/O=Enterprise"
+openssl x509 -req -days 365 -in client.csr \
+  -CA ca.crt -CAkey ca.key -CAcreateserial -out client.crt
+
+# Install certificates
+cp ca.crt /etc/pki/tls/certs/
+cp inference.crt /etc/pki/tls/certs/
+cp inference.key /etc/pki/tls/private/
+chmod 600 /etc/pki/tls/private/inference.key
+```
+
+## Container Isolation Patterns
+
+Implement defense-in-depth with multiple isolation layers.
+
+### Rootless Podman for AI
+
+```bash
+# Run as non-root user
+sudo useradd -r -s /sbin/nologin ai-inference
+
+# Enable rootless podman
+sudo usermod --add-subuids 100000-165535 ai-inference
+sudo usermod --add-subgids 100000-165535 ai-inference
+
+# Run container as non-root
+sudo -u ai-inference podman run -d \
+  --name secure-vllm \
+  --userns=keep-id \
+  --security-opt no-new-privileges:true \
+  --cap-drop=ALL \
+  --read-only \
+  --tmpfs /tmp:rw,size=1g \
+  -v /models:/models:ro \
+  -p 8000:8000 \
+  vllm/vllm-openai:latest
+```
+
+### Seccomp Profiles for AI
+
+```json
+{
+  "defaultAction": "SCMP_ACT_ERRNO",
+  "archMap": [
+    {
+      "architecture": "SCMP_ARCH_X86_64",
+      "subArchitectures": ["SCMP_ARCH_X86"]
+    }
+  ],
+  "syscalls": [
+    {
+      "names": [
+        "read", "write", "open", "close", "stat", "fstat",
+        "mmap", "mprotect", "munmap", "brk", "rt_sigaction",
+        "rt_sigprocmask", "ioctl", "access", "pipe", "select",
+        "sched_yield", "mremap", "msync", "clone", "fork",
+        "execve", "exit", "wait4", "kill", "uname", "fcntl",
+        "flock", "fsync", "fdatasync", "truncate", "ftruncate",
+        "getdents", "getcwd", "chdir", "rename", "mkdir",
+        "rmdir", "link", "unlink", "symlink", "readlink",
+        "chmod", "chown", "umask", "gettimeofday", "getrlimit",
+        "getrusage", "sysinfo", "times", "ptrace", "getuid",
+        "syslog", "getgid", "setuid", "setgid", "geteuid",
+        "getegid", "setpgid", "getppid", "getpgrp", "setsid",
+        "setreuid", "setregid", "getgroups", "setgroups",
+        "setresuid", "getresuid", "setresgid", "getresgid",
+        "getpgid", "setfsuid", "setfsgid", "getsid", "capget",
+        "capset", "rt_sigpending", "rt_sigtimedwait",
+        "rt_sigqueueinfo", "rt_sigsuspend", "sigaltstack",
+        "personality", "statfs", "fstatfs", "getpriority",
+        "setpriority", "sched_setparam", "sched_getparam",
+        "sched_setscheduler", "sched_getscheduler",
+        "sched_get_priority_max", "sched_get_priority_min",
+        "sched_rr_get_interval", "mlock", "munlock", "mlockall",
+        "munlockall", "prctl", "arch_prctl", "futex",
+        "epoll_create", "epoll_ctl", "epoll_wait", "socket",
+        "connect", "accept", "sendto", "recvfrom", "sendmsg",
+        "recvmsg", "shutdown", "bind", "listen", "getsockname",
+        "getpeername", "socketpair", "setsockopt", "getsockopt",
+        "set_tid_address", "set_robust_list", "get_robust_list",
+        "nanosleep", "clock_gettime", "clock_getres",
+        "exit_group", "tgkill", "openat", "mkdirat", "newfstatat",
+        "unlinkat", "readlinkat", "faccessat", "pselect6",
+        "ppoll", "epoll_pwait", "epoll_create1", "pipe2",
+        "eventfd2", "accept4", "getrandom", "memfd_create"
+      ],
+      "action": "SCMP_ACT_ALLOW"
+    }
+  ]
+}
+```
+
+```bash
+# Apply seccomp profile
+podman run -d \
+  --security-opt seccomp=/etc/containers/seccomp/ai-inference.json \
+  vllm/vllm-openai:latest
+```
+
+## Secret Management
+
+Securely handle API keys, model credentials, and certificates.
+
+### Using Podman Secrets
+
+```bash
+# Create secrets
+echo "your-api-key" | podman secret create openai_key -
+echo "your-hf-token" | podman secret create hf_token -
+
+# Use secrets in container
+podman run -d \
+  --name vllm-server \
+  --secret openai_key,target=/run/secrets/openai_key \
+  --secret hf_token,target=/run/secrets/hf_token \
+  -e OPENAI_API_KEY_FILE=/run/secrets/openai_key \
+  -e HF_TOKEN_FILE=/run/secrets/hf_token \
+  vllm/vllm-openai:latest
+```
+
+### HashiCorp Vault Integration
+
+```python
+#!/usr/bin/env python3
+"""vault_secrets.py - Retrieve secrets from Vault"""
+
+import hvac
+import os
+
+class VaultSecretManager:
+    def __init__(self, vault_addr: str = None, role: str = "ai-inference"):
+        self.client = hvac.Client(
+            url=vault_addr or os.environ.get("VAULT_ADDR"),
+        )
+        
+        # Kubernetes auth (for containerized workloads)
+        if os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token"):
+            with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as f:
+                jwt = f.read()
+            self.client.auth.kubernetes.login(role=role, jwt=jwt)
+    
+    def get_model_credentials(self, model_name: str) -> dict:
+        """Retrieve model download credentials."""
+        secret = self.client.secrets.kv.v2.read_secret_version(
+            path=f"ai/models/{model_name}"
+        )
+        return secret["data"]["data"]
+    
+    def get_api_key(self, service: str) -> str:
+        """Retrieve API key for service."""
+        secret = self.client.secrets.kv.v2.read_secret_version(
+            path=f"ai/api-keys/{service}"
+        )
+        return secret["data"]["data"]["key"]
+
+# Usage
+vault = VaultSecretManager()
+hf_creds = vault.get_model_credentials("granite-7b")
+api_key = vault.get_api_key("inference-service")
+```
+
+## Compliance and Auditing
+
+Meet regulatory requirements with comprehensive audit trails.
+
+### Audit Configuration
+
+```bash
+# Enable comprehensive auditing
+cat > /etc/audit/rules.d/rhel-ai-compliance.rules << 'EOF'
+# AI Model Operations
+-w /var/lib/rhel-ai/models -p wa -k model_changes
+-w /etc/rhel-ai -p wa -k ai_config_changes
+
+# Container Operations
+-w /etc/containers -p wa -k container_config
+-a always,exit -F arch=b64 -S execve -F path=/usr/bin/podman -k container_exec
+
+# Authentication Events
+-w /var/log/secure -p wa -k auth_logs
+-w /etc/passwd -p wa -k identity
+-w /etc/group -p wa -k identity
+
+# Network Changes
+-a always,exit -F arch=b64 -S socket -S connect -S accept -k network_activity
+
+# Privilege Escalation
+-a always,exit -F arch=b64 -S setuid -S setgid -k privilege_change
+EOF
+
+auditctl -R /etc/audit/rules.d/rhel-ai-compliance.rules
+```
+
+### Compliance Report Generation
+
+```python
+#!/usr/bin/env python3
+"""compliance_report.py - Generate AI security compliance report"""
+
+import subprocess
+import json
+from datetime import datetime, timedelta
+
+class ComplianceReporter:
+    def __init__(self):
+        self.report = {
+            "generated_at": datetime.now().isoformat(),
+            "period": "last_24_hours",
+            "checks": []
+        }
+    
+    def check_selinux_status(self):
+        """Verify SELinux is enforcing."""
+        result = subprocess.run(
+            ["getenforce"],
+            capture_output=True,
+            text=True
+        )
+        status = result.stdout.strip()
+        
+        self.report["checks"].append({
+            "name": "SELinux Enforcing",
+            "status": "PASS" if status == "Enforcing" else "FAIL",
+            "value": status,
+            "required": "Enforcing"
+        })
+    
+    def check_model_permissions(self):
+        """Verify model file permissions."""
+        result = subprocess.run(
+            ["stat", "-c", "%a", "/var/lib/rhel-ai/models"],
+            capture_output=True,
+            text=True
+        )
+        perms = result.stdout.strip()
+        
+        self.report["checks"].append({
+            "name": "Model Directory Permissions",
+            "status": "PASS" if perms == "750" else "FAIL",
+            "value": perms,
+            "required": "750"
+        })
+    
+    def check_audit_events(self):
+        """Check for security events in audit log."""
+        result = subprocess.run(
+            ["ausearch", "-k", "model_changes", "-ts", "yesterday"],
+            capture_output=True,
+            text=True
+        )
+        
+        events = len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0
+        
+        self.report["checks"].append({
+            "name": "Model Change Events",
+            "status": "INFO",
+            "value": events,
+            "description": "Number of model changes in last 24h"
+        })
+    
+    def generate_report(self) -> dict:
+        """Generate full compliance report."""
+        self.check_selinux_status()
+        self.check_model_permissions()
+        self.check_audit_events()
+        
+        # Calculate overall status
+        failures = sum(
+            1 for c in self.report["checks"]
+            if c["status"] == "FAIL"
+        )
+        
+        self.report["overall_status"] = "COMPLIANT" if failures == 0 else "NON-COMPLIANT"
+        self.report["failures"] = failures
+        
+        return self.report
+
+# Generate and print report
+reporter = ComplianceReporter()
+report = reporter.generate_report()
+print(json.dumps(report, indent=2))
+```
+
+## Security Hardening Checklist
+
+```markdown
+## RHEL AI Security Hardening Checklist
+
+### System Level
+- [ ] SELinux in Enforcing mode
+- [ ] Audit daemon enabled and configured
+- [ ] Firewall enabled with minimal ports
+- [ ] Automatic security updates enabled
+- [ ] Secure boot enabled (if applicable)
+
+### Container Security
+- [ ] Running rootless Podman where possible
+- [ ] no-new-privileges enabled
+- [ ] Capabilities dropped (CAP_DROP=ALL)
+- [ ] Read-only root filesystem
+- [ ] Seccomp profile applied
+- [ ] SELinux labels configured
+
+### Model Security
+- [ ] Model files owned by dedicated user/group
+- [ ] Restrictive permissions (640 or 750)
+- [ ] SELinux file context applied
+- [ ] Audit rules for model access
+- [ ] Integrity verification (checksums)
+
+### Network Security
+- [ ] mTLS for inter-service communication
+- [ ] API authentication required
+- [ ] Rate limiting configured
+- [ ] Network policies/firewall rules
+- [ ] Monitoring for anomalous traffic
+
+### Secret Management
+- [ ] No secrets in environment variables
+- [ ] Using Podman secrets or Vault
+- [ ] Secrets rotated regularly
+- [ ] Access to secrets audited
+```
+
+## Related Book Content
+
+This article covers material from:
+- **Chapter 4: Advanced Features** - Security and compliance features
+- **Chapter 2: Installation** - Secure installation practices
+- **Chapter 6: Monitoring** - Audit logging and compliance
+
+---
+
+## 📚 Secure Your AI Infrastructure
+
+**Need enterprise-grade AI security?**
+
+*Practical RHEL AI* provides comprehensive security guidance:
+
+- ✅ SELinux policy development tutorials
+- ✅ Container security hardening recipes
+- ✅ Compliance framework implementation
+- ✅ Secret management patterns
+- ✅ Audit and monitoring strategies
+
+<div style="background: linear-gradient(135deg, #ee0000 0%, #cc0000 100%); padding: 2rem; border-radius: 12px; text-align: center; margin: 2rem 0;">
+  <h3 style="color: white; margin-bottom: 1rem;">🔐 Lock Down Your AI</h3>
+  <p style="color: white; margin-bottom: 1.5rem;"><strong>Practical RHEL AI</strong> shows you how to implement defense-in-depth security for enterprise AI workloads.</p>
+  <a href="/books/" style="display: inline-block; background: white; color: #cc0000; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none; margin-right: 1rem;">Learn More →</a>
+  <a href="https://amzn.to/4qjORdC" style="display: inline-block; background: #ff9900; color: #111; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none;">Buy on Amazon →</a>
+</div>

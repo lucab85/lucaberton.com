@@ -1,0 +1,366 @@
+---
+draft: false
+title: "Fine-Tuning Models with InstructLab on RHEL AI"
+snippet: "Master the four-step InstructLab workflow to fine-tune Granite and Mixtral models on Red Hat Enterprise Linux, based on Practical RHEL AI book Chapters 3 and 5."
+publishDate: "2025-11-22"
+lastModified: "2025-11-22"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - rhel-ai
+  - instructlab
+  - model-fine-tuning
+  - granite
+  - mixtral
+  - synthetic-data
+  - taxonomy-trees
+  - ansible-automation
+image:
+  src: "/blog/books/practical-rhel-ai-cover.jpg"
+  alt: "InstructLab Model Fine-Tuning"
+---
+
+## Fine-Tuning Models with InstructLab on RHEL AI
+
+InstructLab is a revolutionary approach to model improvement that democratizes fine-tuning. Instead of requiring massive labeled datasets and GPU farms, you can teach models new skills through a simple YAML-based workflow. In this article, we'll explore the four-step InstructLab process and build a custom domain expert.
+
+### What is InstructLab?
+
+InstructLab (Instructlab Lab) is an open-source project that enables you to:
+
+- **Define custom skills** using simple YAML files
+- **Generate synthetic training data** automatically
+- **Fine-tune base models** (Granite, Mixtral) efficiently
+- **Serve improved models** through OpenAI-compatible APIs
+
+The magic lies in its **generative approach**: instead of manually labeling thousands of examples, InstructLab uses the base model itself to generate diverse, synthetic training data.
+
+### The Four-Step InstructLab Workflow (Chapter 3)
+
+As detailed in *Practical RHEL AI*, the InstructLab workflow consists of:
+1. **Craft YAML skills** → Define capability statements
+2. **Generate synthetic data** → Automated training data creation
+3. **Fine-tune** → Train Granite or Mixtral models
+4. **Serve models** → OpenAI-compatible API deployment
+
+#### Step 1: Craft YAML Skill Definitions
+
+Write capability statements and translate them to taxonomy seeds (Chapter 5):
+
+```bash
+mkdir -p ~/instructlab-project/taxonomy
+cd ~/instructlab-project
+```
+
+Define a skill by creating a YAML file:
+
+```yaml
+# taxonomy/domain/healthcare/medical-coding.yaml
+version: 2
+metadata:
+  name: "Medical Diagnosis Assistant"
+  description: "Assists with ICD-10 medical coding and diagnosis mapping"
+  author: "enterprise-ai-team"
+  created: "2025-11-22"
+  
+task_description: >
+  The task is to map clinical descriptions to ICD-10 diagnostic codes.
+  
+seed_examples:
+  - question: "A 65-year-old patient presents with persistent headache, nausea, and visual disturbances for 3 days"
+    answer: "Possible diagnoses include migraine (G43), tension headache (G44), or intracranial hypertension (G93.2). Recommend neurological consultation."
+  
+  - question: "Patient reports acute chest pain radiating to left arm with shortness of breath"
+    answer: "Urgent evaluation for acute coronary syndrome (I24) required. Perform ECG and troponin levels immediately."
+  
+  - question: "Chronic low back pain with radiation to left leg following a fall"
+    answer: "Suggest lumbar strain (M54.5) with possible nerve compression (M51). Consider MRI imaging."
+```
+
+#### Step 2: Generate Synthetic Training Data
+
+InstructLab generates diverse examples from your seed examples:
+
+```bash
+# Initialize InstructLab
+ilab init
+
+# Generate synthetic data
+ilab data generate \
+  --taxonomy-path taxonomy \
+  --num-generate-threads 4 \
+  --output-dir generated_data
+```
+
+This creates thousands of synthetic examples by:
+- Paraphrasing questions
+- Generating alternative answers
+- Adding contextual variations
+- Balancing example distribution
+
+Inspect generated data:
+
+```bash
+head -20 generated_data/medical-coding_gen.jsonl
+```
+
+#### Step 3: Fine-Tune the Base Model
+
+Train a Granite or Mixtral model with your synthetic data:
+
+```bash
+# Download base model (if not already present)
+ilab model download --model granite-7b
+
+# Fine-tune model
+ilab model train \
+  --model granite-7b \
+  --training-data generated_data/medical-coding_gen.jsonl \
+  --output-dir fine-tuned-models \
+  --num-epochs 2 \
+  --batch-size 8 \
+  --learning-rate 1e-4
+```
+
+Monitor training progress:
+
+```bash
+# Watch training logs in real-time
+tail -f fine-tuned-models/training.log
+```
+
+**Training Configuration Options:**
+
+| Parameter | Default | Recommendation |
+|-----------|---------|-----------------|
+| num_epochs | 1 | 1-3 for good results |
+| batch_size | 8 | 4-16 depending on GPU memory |
+| learning_rate | 1e-4 | 5e-5 to 5e-4 range |
+| warmup_steps | 100 | 5-10% of total steps |
+
+#### Step 4: Serve Your Fine-Tuned Model
+
+Deploy the improved model as an OpenAI-compatible API:
+
+```bash
+# Start the inference server
+ilab model serve \
+  --model-dir fine-tuned-models/best_model \
+  --port 8000 \
+  --gpu-layers all
+```
+
+Test your model:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "granite-medical",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Patient with severe abdominal pain in upper left quadrant"
+      }
+    ],
+    "temperature": 0.7,
+    "max_tokens": 500
+  }'
+```
+
+### Advanced Techniques
+
+#### Multi-Skill Training
+
+Combine multiple domains in a single fine-tuning run:
+
+```bash
+# Directory structure
+taxonomy/
+├── healthcare/
+│   ├── medical-coding.yaml
+│   └── drug-interactions.yaml
+├── finance/
+│   ├── portfolio-analysis.yaml
+│   └── risk-assessment.yaml
+└── legal/
+    └── contract-review.yaml
+
+# Generate data for all skills
+ilab data generate --taxonomy-path taxonomy --num-generate-threads 8
+```
+
+#### Quality Assurance
+
+Validate your taxonomy before training:
+
+```bash
+ilab taxonomy validate --taxonomy-path taxonomy
+```
+
+Expected output:
+```
+✓ healthcare/medical-coding.yaml: 5 examples, valid structure
+✓ finance/portfolio-analysis.yaml: 8 examples, valid structure
+✓ legal/contract-review.yaml: 4 examples, valid structure
+
+Total: 17 skills, 87 seed examples
+```
+
+#### Continuous Improvement
+
+Iteratively improve your model:
+
+```bash
+# Evaluate model performance
+ilab model evaluate \
+  --model fine-tuned-models/best_model \
+  --test-data test_examples.jsonl \
+  --metrics accuracy,bleu,rouge
+
+# Based on results, refine taxonomy and retrain
+vim taxonomy/healthcare/medical-coding.yaml
+ilab data generate --taxonomy-path taxonomy
+ilab model train # Retrain with improved data
+```
+
+### Practical Use Case: Financial Analysis Expert
+
+Here's a complete example for a finance domain:
+
+```yaml
+# taxonomy/finance/portfolio-rebalancing.yaml
+version: 2
+metadata:
+  name: "Portfolio Rebalancing Advisor"
+  description: "Provides investment rebalancing recommendations"
+  author: "finance-team"
+
+task_description: >
+  Help investors determine when and how to rebalance their portfolios
+  based on market conditions and investment goals.
+
+seed_examples:
+  - question: |
+      Current portfolio: 60% stocks, 30% bonds, 10% cash
+      Target allocation: 70% stocks, 25% bonds, 5% cash
+      Market context: Stocks up 15% YTD, bonds stable
+      Should I rebalance?
+    answer: |
+      Yes, rebalance to target allocation. Your stock position has drifted
+      significantly above target (+10%). Execute:
+      1. Sell 10% of stocks
+      2. Allocate 5% to bonds
+      3. Move 5% excess cash to bonds
+      This captures gains and maintains risk profile.
+
+  - question: |
+      30/70 portfolio (30% stocks, 70% bonds)
+      Economic outlook: Anticipated rate cuts in Q1
+      Performance: Stocks +8%, Bonds -2%
+      Action plan?
+    answer: |
+      With rate cuts expected, consider tactical rebalancing:
+      1. Increase stock allocation to 35-40% (anticipated bond weakness)
+      2. Maintain high-quality bond allocation
+      3. Keep 5-10% cash for opportunities
+      Monitor rate cut announcements for execution timing.
+```
+
+### Performance Optimization Tips
+
+1. **Use DeepSpeed for faster training:**
+```bash
+ilab model train \
+  --model granite-7b \
+  --training-data generated_data/training.jsonl \
+  --use-deepspeed \
+  --deepspeed-stage 2
+```
+
+2. **Enable vLLM for inference:**
+```bash
+ilab model serve \
+  --model-dir fine-tuned-models/best_model \
+  --inference-backend vllm
+```
+
+3. **Monitor GPU utilization:**
+```bash
+watch -n 1 nvidia-smi
+```
+
+### Troubleshooting
+
+**Issue: Out of memory during training**
+
+```bash
+# Reduce batch size
+ilab model train \
+  --batch-size 4 \
+  --gradient-accumulation-steps 2
+```
+
+**Issue: Model quality not improving**
+
+```bash
+# Check data quality
+ilab data validate --data-file generated_data/training.jsonl
+
+# Increase seed examples
+# Edit YAML files to add more diverse examples
+ilab data generate --taxonomy-path taxonomy --num-generate-threads 8
+```
+
+**Issue: Inference latency too high**
+
+```bash
+# Use quantization
+ilab model serve \
+  --model-dir fine-tuned-models/best_model \
+  --quantization int8
+```
+
+### Next Steps
+
+Now that you understand InstructLab:
+
+1. **Create your first skill** in your domain
+2. **Generate synthetic data** and validate quality
+3. **Fine-tune a model** on your data
+4. **Deploy and monitor** in production
+5. **Iterate** based on user feedback
+
+InstructLab transforms AI from "magic black box" into a practical tool you can teach, tune, and continuously improve.
+
+### Resources
+
+- [InstructLab GitHub](https://github.com/instructlab)
+- [Granite Model Hub](https://huggingface.co/ibm-granite)
+- [vLLM Documentation](https://docs.vllm.ai/)
+- [DeepSpeed Training Guide](https://www.deepspeed.ai/tutorials/)
+
+---
+
+**Ready to fine-tune?** Start with a simple skill, validate your approach, and scale to enterprise domains. The next article will cover deploying models to production with monitoring and governance.
+
+---
+
+## 📚 Master the Complete InstructLab Workflow
+
+**Ready to build custom AI skills for your organization?**
+
+*Practical RHEL AI* provides comprehensive InstructLab coverage:
+
+- ✅ 50+ taxonomy examples across industries
+- ✅ Advanced synthetic data generation techniques
+- ✅ Multi-GPU training configurations with DeepSpeed
+- ✅ Model validation and MMLU benchmarking
+- ✅ Production deployment patterns with vLLM
+
+<div style="background: linear-gradient(135deg, #ee0000 0%, #cc0000 100%); padding: 2rem; border-radius: 12px; text-align: center; margin: 2rem 0;">
+  <h3 style="color: white; margin-bottom: 1rem;">🧠 Teach AI Your Domain Expertise</h3>
+  <p style="color: white; margin-bottom: 1.5rem;"><strong>Practical RHEL AI</strong> shows you how to fine-tune models that understand your business—without massive training datasets.</p>
+  <a href="/books/" style="display: inline-block; background: white; color: #cc0000; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none; margin-right: 1rem;">Learn More →</a>
+  <a href="https://amzn.to/4qjORdC" style="display: inline-block; background: #ff9900; color: #111; padding: 0.75rem 2rem; border-radius: 8px; font-weight: bold; text-decoration: none;">Buy on Amazon →</a>
+</div>

@@ -1,0 +1,352 @@
+---
+draft: false
+title: "Scaling AI Inference with vLLM on RHEL AI: Multi-Node Deployments"
+snippet: "Master enterprise-scale AI inference by deploying vLLM across multiple nodes on RHEL AI, with practical guidance on tensor parallelism, load balancing, and performance optimization."
+publishDate: "2026-01-28"
+lastModified: "2026-01-28"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - rhel-ai
+  - vllm
+  - inference
+  - scaling
+  - multi-node
+  - tensor-parallelism
+  - load-balancing
+  - kubernetes
+  - high-availability
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Scaling AI Inference with vLLM on RHEL AI"
+---
+
+## Scaling AI Inference with vLLM on RHEL AI: Multi-Node Deployments
+
+As AI adoption accelerates across the enterprise, the demand for low-latency, high-throughput inference services grows exponentially. A single GPU server might handle development and testing, but production workloads—serving thousands of concurrent users—require a distributed inference architecture. This guide, based on *Practical RHEL AI*, walks through scaling vLLM inference across multiple nodes.
+
+### Understanding vLLM Architecture
+
+vLLM (Very Large Language Model) is an inference engine optimized for serving LLMs at scale. Key features that make it ideal for enterprise deployments include:
+
+- **PagedAttention**: Efficient memory management reducing GPU memory waste by up to 24x
+- **Continuous Batching**: Dynamic request batching for optimal throughput
+- **Tensor Parallelism**: Split large models across multiple GPUs
+- **Pipeline Parallelism**: Distribute model layers across nodes
+- **OpenAI-Compatible API**: Drop-in replacement for existing integrations
+
+### Deployment Topology Options
+
+Before scaling, understand your deployment options:
+
+| Topology | Use Case | Complexity |
+|----------|----------|------------|
+| Single GPU | Development, small models | Low |
+| Multi-GPU (Single Node) | Medium models, moderate traffic | Medium |
+| Multi-Node Tensor Parallel | Large models (70B+) | High |
+| Load-Balanced Replicas | High availability, horizontal scaling | Medium |
+
+### Prerequisites
+
+For this multi-node deployment, you'll need:
+
+- 2+ RHEL AI nodes with GPU support
+- High-speed interconnect (InfiniBand or 100GbE recommended)
+- Shared storage (NFS or parallel filesystem)
+- Container orchestration (Kubernetes/OpenShift or Podman)
+
+### Method 1: Multi-GPU Tensor Parallelism (Single Node)
+
+For models that exceed single GPU memory, use tensor parallelism within a node:
+
+```bash
+# Serve a 70B model across 4 GPUs
+ilab model serve \
+    --model-path /models/granite-70b \
+    --tensor-parallel-size 4 \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --max-model-len 4096
+```
+
+Verify GPU utilization:
+
+```bash
+nvidia-smi dmon -s u -d 1
+```
+
+### Method 2: Multi-Node Deployment with Ray
+
+For truly large models or higher throughput, deploy across multiple nodes using Ray:
+
+**Step 1: Configure the Head Node**
+
+```bash
+# On the head node (node1)
+ray start --head --port=6379 --dashboard-host=0.0.0.0
+
+# Note the Ray address displayed
+# Example: ray://192.168.1.100:6379
+```
+
+**Step 2: Join Worker Nodes**
+
+```bash
+# On each worker node (node2, node3, etc.)
+ray start --address='192.168.1.100:6379'
+```
+
+**Step 3: Deploy vLLM with Ray Backend**
+
+```python
+#!/usr/bin/env python3
+"""Multi-node vLLM deployment with Ray"""
+
+from vllm import LLM, SamplingParams
+import ray
+
+# Initialize Ray cluster
+ray.init(address="auto")
+
+# Configure the model with tensor parallelism across nodes
+llm = LLM(
+    model="/shared-storage/models/granite-70b",
+    tensor_parallel_size=8,  # 4 GPUs per node × 2 nodes
+    pipeline_parallel_size=2,
+    trust_remote_code=True,
+    max_model_len=4096,
+)
+
+# Test inference
+prompts = ["Explain RHEL AI in one paragraph:"]
+sampling_params = SamplingParams(temperature=0.7, max_tokens=256)
+
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    print(output.outputs[0].text)
+```
+
+### Method 3: Kubernetes/OpenShift Deployment
+
+For production environments, deploy vLLM on OpenShift:
+
+**Step 1: Create the vLLM Deployment**
+
+```yaml
+# vllm-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-inference
+  namespace: rhel-ai
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vllm-inference
+  template:
+    metadata:
+      labels:
+        app: vllm-inference
+    spec:
+      containers:
+      - name: vllm
+        image: registry.redhat.io/rhel-ai/vllm-runtime:latest
+        args:
+          - "--model=/models/granite-7b"
+          - "--host=0.0.0.0"
+          - "--port=8000"
+          - "--tensor-parallel-size=1"
+        ports:
+        - containerPort: 8000
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            memory: "48Gi"
+          requests:
+            nvidia.com/gpu: 1
+            memory: "32Gi"
+        volumeMounts:
+        - name: model-storage
+          mountPath: /models
+      volumes:
+      - name: model-storage
+        persistentVolumeClaim:
+          claimName: model-pvc
+```
+
+**Step 2: Create the Service and Route**
+
+```yaml
+# vllm-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-service
+  namespace: rhel-ai
+spec:
+  selector:
+    app: vllm-inference
+  ports:
+  - port: 8000
+    targetPort: 8000
+  type: ClusterIP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: vllm-route
+  namespace: rhel-ai
+spec:
+  to:
+    kind: Service
+    name: vllm-service
+  port:
+    targetPort: 8000
+  tls:
+    termination: edge
+```
+
+**Step 3: Configure Horizontal Pod Autoscaler**
+
+```yaml
+# vllm-hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vllm-hpa
+  namespace: rhel-ai
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vllm-inference
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Pods
+    pods:
+      metric:
+        name: vllm_requests_running
+      target:
+        type: AverageValue
+        averageValue: "50"
+```
+
+### Performance Optimization
+
+#### 1. Continuous Batching Configuration
+
+Optimize throughput with batching parameters:
+
+```bash
+ilab model serve \
+    --model-path /models/granite-7b \
+    --max-num-batched-tokens 8192 \
+    --max-num-seqs 256 \
+    --scheduler-delay-factor 0.1
+```
+
+#### 2. KV Cache Optimization
+
+Configure KV cache for your memory constraints:
+
+```bash
+# Allow 90% GPU memory for KV cache
+ilab model serve \
+    --model-path /models/granite-7b \
+    --gpu-memory-utilization 0.90 \
+    --block-size 16
+```
+
+#### 3. Quantization for Memory Efficiency
+
+Use AWQ or GPTQ quantization for larger models:
+
+```bash
+# Serve a quantized model
+ilab model serve \
+    --model-path /models/granite-70b-awq \
+    --quantization awq \
+    --tensor-parallel-size 2
+```
+
+### Load Balancing Strategies
+
+**HAProxy Configuration for vLLM:**
+
+```haproxy
+# /etc/haproxy/haproxy.cfg
+frontend vllm_frontend
+    bind *:8080
+    default_backend vllm_servers
+
+backend vllm_servers
+    balance leastconn
+    option httpchk GET /health
+    http-check expect status 200
+    
+    server vllm1 192.168.1.101:8000 check inter 5s fall 3 rise 2
+    server vllm2 192.168.1.102:8000 check inter 5s fall 3 rise 2
+    server vllm3 192.168.1.103:8000 check inter 5s fall 3 rise 2
+```
+
+### Monitoring and Observability
+
+vLLM exposes Prometheus metrics. Configure scraping:
+
+```yaml
+# prometheus-scrape-config.yaml
+scrape_configs:
+  - job_name: 'vllm'
+    static_configs:
+      - targets: ['vllm1:8000', 'vllm2:8000', 'vllm3:8000']
+    metrics_path: /metrics
+```
+
+Key metrics to monitor:
+
+| Metric | Description | Alert Threshold |
+|--------|-------------|-----------------|
+| `vllm:num_requests_running` | Active requests | > 100 |
+| `vllm:num_requests_waiting` | Queued requests | > 50 |
+| `vllm:gpu_cache_usage_perc` | KV cache utilization | > 95% |
+| `vllm:avg_generation_throughput` | Tokens/second | < baseline |
+
+### Benchmarking Your Deployment
+
+Validate performance with the vLLM benchmark tool:
+
+```bash
+# Run throughput benchmark
+python -m vllm.entrypoints.openai.api_server_benchmark \
+    --model /models/granite-7b \
+    --num-prompts 1000 \
+    --input-len 128 \
+    --output-len 128 \
+    --request-rate 10
+```
+
+Expected results for a 4×A100 deployment serving Granite-7B:
+
+- **Throughput**: 2,000+ tokens/second
+- **Latency (P50)**: < 50ms time-to-first-token
+- **Latency (P99)**: < 200ms time-to-first-token
+
+### Conclusion
+
+Scaling AI inference with vLLM on RHEL AI transforms a single-server prototype into a production-grade service capable of handling enterprise workloads. Whether you choose tensor parallelism for large models or horizontal scaling for high availability, RHEL AI's integrated toolchain simplifies deployment and operations.
+
+For advanced topics including A/B model deployments, canary releases, and inference cost optimization, refer to Chapters 10-12 of *Practical RHEL AI*.
+
+import Link from "../../components/ui/link.astro";
+
+<Link size="lg" href="https://amzn.to/4qjORdC" class="flex gap-2 items-center justify-center bg-blue-600 text-white px-5 py-3 rounded-lg shadow-md hover:bg-blue-700">
+  Get Practical RHEL AI on Amazon
+</Link>

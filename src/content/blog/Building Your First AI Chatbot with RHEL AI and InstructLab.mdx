@@ -1,0 +1,269 @@
+---
+draft: false
+title: "Building Your First AI Chatbot with RHEL AI and InstructLab"
+snippet: "Learn how to create a production-ready enterprise chatbot using RHEL AI's InstructLab framework, from model selection to deployment with OpenAI-compatible APIs."
+publishDate: "2026-01-29"
+lastModified: "2026-01-29"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - rhel-ai
+  - instructlab
+  - chatbot
+  - llm
+  - enterprise-ai
+  - granite-models
+  - vllm
+  - openai-api
+  - conversational-ai
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Building AI Chatbot with RHEL AI"
+---
+
+## Building Your First AI Chatbot with RHEL AI and InstructLab
+
+One of the most compelling use cases for enterprise AI is building intelligent chatbots that can assist employees, answer customer queries, or automate internal processes. In this hands-on guide based on *Practical RHEL AI*, we'll walk through creating a production-ready chatbot using RHEL AI's integrated toolchain.
+
+### Why RHEL AI for Chatbots?
+
+Traditional chatbot frameworks often require cobbling together disparate tools, managing complex dependencies, and hoping everything plays nicely together. RHEL AI changes this paradigm by providing:
+
+- **Pre-integrated LLM stack**: InstructLab, vLLM, and DeepSpeed work seamlessly together
+- **Enterprise-grade security**: SELinux policies and container isolation out of the box
+- **OpenAI-compatible APIs**: Easy integration with existing applications
+- **GPU optimization**: Automatic memory management and inference acceleration
+
+### Prerequisites
+
+Before starting, ensure you have:
+
+- RHEL AI installed with GPU support (see the installation guide)
+- At least 24GB GPU memory (NVIDIA A100 or equivalent)
+- 50GB free disk space for models
+- Python 3.11+ environment
+
+### Step 1: Initialize InstructLab
+
+First, set up your InstructLab environment:
+
+```bash
+# Create a dedicated workspace
+mkdir -p ~/chatbot-project && cd ~/chatbot-project
+
+# Initialize InstructLab
+ilab config init
+
+# Download the base Granite model
+ilab model download --model-name granite-7b-lab
+```
+
+InstructLab will configure the necessary directories and download the Granite foundation model, which serves as an excellent starting point for enterprise chatbots.
+
+### Step 2: Prepare Your Knowledge Base
+
+For an enterprise chatbot, you'll want to inject domain-specific knowledge. Create a taxonomy structure:
+
+```bash
+# Create taxonomy directories
+mkdir -p taxonomy/knowledge/company/policies
+mkdir -p taxonomy/knowledge/company/products
+```
+
+Add your knowledge files in YAML format:
+
+```yaml
+# taxonomy/knowledge/company/policies/qna.yaml
+created_by: your-username
+version: 3
+domain: company_policies
+seed_examples:
+  - context: |
+      Our company offers 25 days of annual leave for all full-time employees.
+      Leave requests must be submitted at least 2 weeks in advance through
+      the HR portal. Manager approval is required for requests longer than
+      5 consecutive days.
+    questions_and_answers:
+      - question: How many days of annual leave do I get?
+        answer: Full-time employees receive 25 days of annual leave per year.
+      - question: How do I request time off?
+        answer: Submit your leave request through the HR portal at least 2 weeks in advance.
+      - question: Do I need approval for vacation?
+        answer: Manager approval is required for leave requests longer than 5 consecutive days.
+```
+
+### Step 3: Generate Synthetic Training Data
+
+InstructLab's Synthetic Data Generation (SDG) pipeline creates high-quality training examples from your knowledge base:
+
+```bash
+# Generate synthetic data from your taxonomy
+ilab data generate --model granite-7b-lab \
+    --num-instructions 100 \
+    --output-dir ./generated-data
+
+# Review the generated data
+ls -la ./generated-data/
+```
+
+The SDG pipeline uses the teacher model to create diverse question-answer pairs, ensuring comprehensive coverage of your knowledge domain.
+
+### Step 4: Fine-Tune the Model
+
+With synthetic data ready, fine-tune your chatbot model:
+
+```bash
+# Start the fine-tuning process
+ilab model train \
+    --model-name granite-7b-lab \
+    --data-dir ./generated-data \
+    --output-dir ./fine-tuned-model \
+    --num-epochs 3 \
+    --effective-batch-size 16
+```
+
+For multi-GPU setups, InstructLab automatically leverages DeepSpeed for distributed training:
+
+```bash
+# Multi-GPU training with DeepSpeed ZeRO-3
+ilab model train \
+    --model-name granite-7b-lab \
+    --data-dir ./generated-data \
+    --output-dir ./fine-tuned-model \
+    --distributed \
+    --deepspeed-config zero3
+```
+
+### Step 5: Deploy with vLLM
+
+Once training completes, deploy your chatbot using vLLM for optimized inference:
+
+```bash
+# Start the vLLM server with your fine-tuned model
+ilab model serve \
+    --model-path ./fine-tuned-model \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --tensor-parallel-size 1
+```
+
+Your chatbot is now accessible via an OpenAI-compatible API at `http://localhost:8000`.
+
+### Step 6: Build the Chat Interface
+
+Create a simple Python client to interact with your chatbot:
+
+```python
+#!/usr/bin/env python3
+"""Simple chatbot client for RHEL AI"""
+
+import requests
+import json
+
+API_URL = "http://localhost:8000/v1/chat/completions"
+
+def chat(message: str, history: list = None) -> str:
+    """Send a message to the chatbot and get a response."""
+    if history is None:
+        history = []
+    
+    messages = history + [{"role": "user", "content": message}]
+    
+    response = requests.post(
+        API_URL,
+        json={
+            "model": "fine-tuned-model",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 512
+        },
+        headers={"Content-Type": "application/json"}
+    )
+    
+    result = response.json()
+    return result["choices"][0]["message"]["content"]
+
+def main():
+    """Interactive chat loop."""
+    print("Enterprise Chatbot (powered by RHEL AI)")
+    print("Type 'quit' to exit\n")
+    
+    history = []
+    system_prompt = {
+        "role": "system",
+        "content": "You are a helpful enterprise assistant. Answer questions accurately and professionally."
+    }
+    history.append(system_prompt)
+    
+    while True:
+        user_input = input("You: ").strip()
+        if user_input.lower() in ['quit', 'exit', 'q']:
+            break
+        
+        response = chat(user_input, history)
+        print(f"Bot: {response}\n")
+        
+        history.append({"role": "user", "content": user_input})
+        history.append({"role": "assistant", "content": response})
+
+if __name__ == "__main__":
+    main()
+```
+
+### Step 7: Containerize for Production
+
+For production deployment, containerize your chatbot:
+
+```dockerfile
+# Containerfile for RHEL AI Chatbot
+FROM registry.redhat.io/rhel-ai/rhel-ai-nvidia-runtime:latest
+
+WORKDIR /app
+
+# Copy fine-tuned model
+COPY ./fine-tuned-model /app/model
+
+# Copy application code
+COPY ./chatbot_client.py /app/
+
+# Expose the API port
+EXPOSE 8000
+
+# Start vLLM server
+CMD ["ilab", "model", "serve", "--model-path", "/app/model", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+Build and run with Podman:
+
+```bash
+# Build the container
+podman build -t enterprise-chatbot:v1 .
+
+# Run with GPU support
+podman run --device nvidia.com/gpu=all \
+    -p 8000:8000 \
+    enterprise-chatbot:v1
+```
+
+### Production Considerations
+
+When deploying to production, consider these best practices from *Practical RHEL AI*:
+
+1. **Load Balancing**: Deploy multiple inference pods behind a load balancer for high availability
+2. **Monitoring**: Integrate with Prometheus and Grafana for metrics collection
+3. **Rate Limiting**: Implement API rate limiting to prevent abuse
+4. **Authentication**: Add OAuth2 or API key authentication
+5. **Logging**: Enable structured logging for audit trails
+6. **Model Versioning**: Use SPDX for tracking model lineage
+
+### Conclusion
+
+Building an enterprise chatbot with RHEL AI combines the power of modern LLMs with the stability and security of Red Hat Enterprise Linux. The integrated toolchain—InstructLab for fine-tuning, vLLM for inference, and Podman for containerization—streamlines the path from prototype to production.
+
+For deeper coverage of chatbot architectures, multi-turn conversation handling, and RAG integration, refer to Chapters 7-9 of *Practical RHEL AI*.
+
+import Link from "../../components/ui/link.astro";
+
+<Link size="lg" href="https://amzn.to/4qjORdC" class="flex gap-2 items-center justify-center bg-blue-600 text-white px-5 py-3 rounded-lg shadow-md hover:bg-blue-700">
+  Get Practical RHEL AI on Amazon
+</Link>

@@ -1,0 +1,267 @@
+---
+import { getCollection } from "astro:content";
+import Layout from "@layouts/Layout.astro";
+import Container from "@components/container.astro";
+
+// Fetch all published posts at build time
+const allPosts = await getCollection("blog", ({ data }) => {
+  return !data.draft && data.publishDate < new Date();
+});
+
+// Sort by date
+const sortedPosts = allPosts.sort(
+  (a, b) => b.data.publishDate.valueOf() - a.data.publishDate.valueOf()
+);
+
+// Prepare posts data for client-side search
+const postsData = sortedPosts.map(post => ({
+  slug: post.slug,
+  title: post.data.title,
+  snippet: post.data.snippet,
+  category: post.data.category,
+  author: post.data.author,
+  tags: post.data.tags || [],
+  image: post.data.image,
+  publishDate: post.data.publishDate.toISOString(),
+  publishDateStr: post.data.publishDate.toDateString(),
+}));
+---
+
+<Layout title="Search Blog">
+  <Container>
+    <div class="mt-16 text-center">
+      <h1 class="text-4xl lg:text-5xl font-bold lg:tracking-tight">Search Blog</h1>
+      <p class="text-lg mt-4 text-slate-500 mx-auto max-w-xl">
+        Find articles by keyword, topic, or author
+      </p>
+    </div>
+
+    <div class="mt-10">
+      <div class="blog-search w-full max-w-md mx-auto mb-8">
+        <div class="relative">
+          <input
+            type="text"
+            id="search-input"
+            placeholder="Search articles..."
+            class="w-full px-4 py-3 pl-12 rounded-lg border border-gray-300 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition"
+          />
+          <svg
+            class="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400"
+            fill="none"
+            stroke="currentColor"
+            viewBox="0 0 24 24"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="2"
+              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+            />
+          </svg>
+          <button
+            type="button"
+            id="clear-btn"
+            class="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 text-gray-400 hover:text-gray-600 transition text-sm hidden"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <main class="mt-8">
+      <div id="results-info" class="mb-8 text-center hidden">
+        <p class="text-gray-600" id="results-text"></p>
+      </div>
+
+      <div id="no-query" class="text-center py-16">
+        <svg class="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg>
+        <p class="text-gray-500">Enter a search term to find articles.</p>
+      </div>
+
+      <div id="no-results" class="text-center py-16 hidden">
+        <svg class="w-16 h-16 mx-auto text-gray-300 mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <p class="text-gray-500 mb-4">No articles found matching your search.</p>
+        <p class="text-gray-400 text-sm">Try different keywords or browse all articles.</p>
+        <a href="/blog" class="inline-block mt-6 px-6 py-2 bg-blue-500 text-white rounded-md hover:bg-blue-600 transition">
+          Browse All Articles
+        </a>
+      </div>
+
+      <ul id="results-list" class="grid sm:grid-cols-2 md:grid-cols-3 gap-10 lg:gap-16 hidden">
+      </ul>
+    </main>
+  </Container>
+</Layout>
+
+<script define:vars={{ postsData }}>
+  // Get DOM elements
+  const searchInput = document.getElementById('search-input');
+  const clearBtn = document.getElementById('clear-btn');
+  const resultsInfo = document.getElementById('results-info');
+  const resultsText = document.getElementById('results-text');
+  const noQuery = document.getElementById('no-query');
+  const noResults = document.getElementById('no-results');
+  const resultsList = document.getElementById('results-list');
+
+  // Search function
+  function searchPosts(query) {
+    if (!query || query.length < 2) return [];
+    
+    const keywords = query.toLowerCase().split(/\s+/).filter(k => k.length > 1);
+    if (keywords.length === 0) return [];
+    
+    return postsData
+      .filter(post => {
+        const searchableText = [
+          post.title,
+          post.snippet,
+          post.category,
+          post.author,
+          ...post.tags,
+        ].join(' ').toLowerCase();
+        
+        return keywords.every(keyword => searchableText.includes(keyword));
+      })
+      .sort((a, b) => {
+        const aTitle = a.title.toLowerCase();
+        const bTitle = b.title.toLowerCase();
+        const aHasTitleMatch = keywords.some(k => aTitle.includes(k));
+        const bHasTitleMatch = keywords.some(k => bTitle.includes(k));
+        
+        if (aHasTitleMatch && !bHasTitleMatch) return -1;
+        if (!aHasTitleMatch && bHasTitleMatch) return 1;
+        
+        return new Date(b.publishDate) - new Date(a.publishDate);
+      });
+  }
+
+  // Render results
+  function renderResults(results, query) {
+    // Update URL without reloading
+    const url = new URL(window.location);
+    if (query) {
+      url.searchParams.set('q', query);
+    } else {
+      url.searchParams.delete('q');
+    }
+    window.history.replaceState({}, '', url);
+
+    // Show/hide clear button
+    clearBtn.classList.toggle('hidden', !query);
+
+    if (!query || query.length < 2) {
+      noQuery.classList.remove('hidden');
+      noResults.classList.add('hidden');
+      resultsList.classList.add('hidden');
+      resultsInfo.classList.add('hidden');
+      return;
+    }
+
+    noQuery.classList.add('hidden');
+    resultsInfo.classList.remove('hidden');
+
+    if (results.length === 0) {
+      noResults.classList.remove('hidden');
+      resultsList.classList.add('hidden');
+      resultsText.innerHTML = `No results found for "<strong>${escapeHtml(query)}</strong>"`;
+      return;
+    }
+
+    noResults.classList.add('hidden');
+    resultsList.classList.remove('hidden');
+    resultsText.innerHTML = `Found <strong>${results.length}</strong> result${results.length !== 1 ? 's' : ''} for "<strong>${escapeHtml(query)}</strong>"`;
+
+    resultsList.innerHTML = results.map((post, index) => `
+      <li>
+        <a href="/blog/${post.slug}">
+          <div>
+            <img
+              src="${post.image.src}"
+              alt="${escapeHtml(post.image.alt)}"
+              class="w-full rounded-md object-cover aspect-video"
+              loading="${index <= 2 ? 'eager' : 'lazy'}"
+              decoding="${index <= 2 ? 'sync' : 'async'}"
+            />
+            <div class="mt-4">
+              <span class="text-blue-400 uppercase tracking-wider text-xs font-medium">
+                ${escapeHtml(post.category)}
+              </span>
+              <h2 class="text-xl font-semibold leading-snug tracking-tight mt-1">
+                ${escapeHtml(post.title)}
+              </h2>
+              <p class="text-gray-500 text-sm mt-2 line-clamp-2">
+                ${escapeHtml(post.snippet)}
+              </p>
+              <div class="flex gap-2 mt-3 text-sm">
+                <span class="text-gray-400">${escapeHtml(post.author)}</span>
+                <span class="text-gray-400">•</span>
+                <time class="text-gray-400" datetime="${post.publishDate}">
+                  ${post.publishDateStr}
+                </time>
+              </div>
+            </div>
+          </div>
+        </a>
+      </li>
+    `).join('');
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
+  // Debounce function
+  function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+      const later = () => {
+        clearTimeout(timeout);
+        func(...args);
+      };
+      clearTimeout(timeout);
+      timeout = setTimeout(later, wait);
+    };
+  }
+
+  // Handle search input
+  const handleSearch = debounce((query) => {
+    const results = searchPosts(query);
+    renderResults(results, query);
+  }, 200);
+
+  searchInput.addEventListener('input', (e) => {
+    handleSearch(e.target.value.trim());
+  });
+
+  // Handle clear button
+  clearBtn.addEventListener('click', () => {
+    searchInput.value = '';
+    renderResults([], '');
+    searchInput.focus();
+  });
+
+  // Handle initial query from URL
+  const urlParams = new URLSearchParams(window.location.search);
+  const initialQuery = urlParams.get('q');
+  if (initialQuery) {
+    searchInput.value = initialQuery;
+    const results = searchPosts(initialQuery);
+    renderResults(results, initialQuery);
+  }
+</script>
+
+<style>
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+</style>

@@ -15,7 +15,7 @@ tags:
   - model-parallelism
   - nccl
 image:
-  src: "/blog/books/practical-rhel-ai-cover.jpg"
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
   alt: "Multi-GPU Training Strategies for RHEL AI"
 ---
 
@@ -27,22 +27,30 @@ Different parallelism approaches solve different scaling challenges. Choose the 
 
 ### Parallelism Overview
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Parallelism Strategies                        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Data Parallelism         Model Parallelism    Pipeline Parallel│
-│  ┌───┐ ┌───┐ ┌───┐       ┌─────────────────┐  ┌───┬───┬───┐    │
-│  │GPU│ │GPU│ │GPU│       │   GPU0  │  GPU1 │  │ L │ L │ L │    │
-│  │ 0 │ │ 1 │ │ 2 │       │ Layer   │ Layer │  │ 1 │ 2 │ 3 │    │
-│  ├───┤ ├───┤ ├───┤       │  1-12   │ 13-24 │  │GPU│GPU│GPU│    │
-│  │Full│Full│Full│        └─────────────────┘  │ 0 │ 1 │ 2 │    │
-│  │Model│Model│Model│                           └───┴───┴───┘    │
-│  └───┘ └───┘ └───┘                                              │
-│  Different batches        Model split across   Layers in stages │
-│                           GPUs (tensor)                          │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    subgraph DP["Data Parallelism"]
+        direction TB
+        GPU0a["GPU 0<br/>Full Model"]
+        GPU1a["GPU 1<br/>Full Model"]
+        GPU2a["GPU 2<br/>Full Model"]
+        Note1["Different batches"]
+    end
+    
+    subgraph MP["Model Parallelism"]
+        direction TB
+        GPU0b["GPU 0<br/>Layer 1-12"]
+        GPU1b["GPU 1<br/>Layer 13-24"]
+        Note2["Model split across<br/>GPUs (tensor)"]
+    end
+    
+    subgraph PP["Pipeline Parallel"]
+        direction TB
+        L1["L1<br/>GPU 0"]
+        L2["L2<br/>GPU 1"]
+        L3["L3<br/>GPU 2"]
+        Note3["Layers in stages"]
+    end
 ```
 
 ### When to Use Each Strategy
@@ -164,26 +172,31 @@ DeepSpeed's ZeRO (Zero Redundancy Optimizer) partitions model states across GPUs
 
 ### ZeRO Stages Explained
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                      ZeRO Optimization Stages                    │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Stage 1: Optimizer State Partitioning                          │
-│  ┌────────────────────────────────────────┐                     │
-│  │ GPU0: Opt1/4 │ GPU1: Opt2/4 │ ...      │  Memory: ~4x less   │
-│  └────────────────────────────────────────┘                     │
-│                                                                  │
-│  Stage 2: + Gradient Partitioning                               │
-│  ┌────────────────────────────────────────┐                     │
-│  │ + Grad1/4    │ + Grad2/4    │ ...      │  Memory: ~8x less   │
-│  └────────────────────────────────────────┘                     │
-│                                                                  │
-│  Stage 3: + Parameter Partitioning                              │
-│  ┌────────────────────────────────────────┐                     │
-│  │ + Param1/4   │ + Param2/4   │ ...      │  Memory: ~Nx less   │
-│  └────────────────────────────────────────┘                     │
-└─────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph S1["Stage 1: Optimizer State Partitioning"]
+        O1["GPU0: Opt1/4"]
+        O2["GPU1: Opt2/4"]
+        O3["..."]
+        M1["Memory: ~4x less"]
+    end
+    
+    subgraph S2["Stage 2: + Gradient Partitioning"]
+        G1["+ Grad1/4"]
+        G2["+ Grad2/4"]
+        G3["..."]
+        M2["Memory: ~8x less"]
+    end
+    
+    subgraph S3["Stage 3: + Parameter Partitioning"]
+        P1["+ Param1/4"]
+        P2["+ Param2/4"]
+        P3["..."]
+        M3["Memory: ~Nx less"]
+    end
+    
+    S1 --> S2
+    S2 --> S3
 ```
 
 ### DeepSpeed Configuration

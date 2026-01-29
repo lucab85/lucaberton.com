@@ -1,0 +1,572 @@
+---
+draft: false
+title: "Implementing RAG (Retrieval-Augmented Generation) on RHEL AI"
+snippet: "Build enterprise knowledge systems using RAG architecture on RHEL AI, combining vector databases, document ingestion pipelines, and LLM inference for accurate, grounded AI responses."
+publishDate: "2026-01-26"
+lastModified: "2026-01-26"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - rhel-ai
+  - rag
+  - retrieval-augmented-generation
+  - vector-database
+  - embeddings
+  - langchain
+  - enterprise-search
+  - knowledge-management
+  - llm
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Implementing RAG on RHEL AI"
+---
+
+## Implementing RAG (Retrieval-Augmented Generation) on RHEL AI
+
+Large Language Models are powerful, but they have limitations: knowledge cutoffs, hallucinations, and inability to access private enterprise data. Retrieval-Augmented Generation (RAG) solves these challenges by combining LLMs with external knowledge retrieval, enabling AI systems to provide accurate, up-to-date, and verifiable responses. This guide, based on *Practical RHEL AI*, walks through building a production RAG system on RHEL AI.
+
+### What is RAG?
+
+RAG enhances LLM responses by:
+
+1. **Retrieving** relevant documents from a knowledge base
+2. **Augmenting** the prompt with retrieved context
+3. **Generating** a response grounded in actual data
+
+```mermaid
+flowchart LR
+    Query["Query"] --> VectorSearch["Vector Search<br/>(Embedding)"]
+    VectorSearch --> Context["Retrieved<br/>Context"]
+    Context --> AugPrompt["Augmented<br/>Prompt"]
+    AugPrompt --> LLM["LLM<br/>Generation"]
+    LLM --> Response["Response"]
+```
+
+### Architecture Components
+
+A complete RAG system on RHEL AI includes:
+
+| Component | Purpose | RHEL AI Integration |
+|-----------|---------|---------------------|
+| Document Loader | Ingest enterprise documents | Python libraries |
+| Text Splitter | Chunk documents for embedding | LangChain |
+| Embedding Model | Convert text to vectors | InstructLab/HuggingFace |
+| Vector Database | Store and search embeddings | Milvus/PostgreSQL+pgvector |
+| LLM | Generate responses | vLLM with Granite |
+| Orchestration | Coordinate the pipeline | LangChain/LlamaIndex |
+
+### Prerequisites
+
+Ensure you have:
+
+- RHEL AI installed with GPU support
+- At least 32GB GPU memory for embedding + generation
+- PostgreSQL 15+ with pgvector extension (or Milvus)
+- Python 3.11+ environment
+
+### Step 1: Set Up the Vector Database
+
+**Option A: PostgreSQL with pgvector**
+
+```bash
+# Install PostgreSQL and pgvector
+sudo dnf install -y postgresql15-server postgresql15-contrib
+sudo dnf install -y pgvector_15
+
+# Initialize and start PostgreSQL
+sudo postgresql-setup --initdb
+sudo systemctl enable --now postgresql
+
+# Create database and enable extension
+sudo -u postgres psql << 'EOF'
+CREATE DATABASE rag_knowledge;
+\c rag_knowledge
+CREATE EXTENSION vector;
+CREATE TABLE documents (
+    id SERIAL PRIMARY KEY,
+    content TEXT,
+    metadata JSONB,
+    embedding vector(768)
+);
+CREATE INDEX ON documents USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+EOF
+```
+
+**Option B: Milvus (Containerized)**
+
+```bash
+# Deploy Milvus with Podman
+podman run -d --name milvus-standalone \
+    -p 19530:19530 \
+    -p 9091:9091 \
+    -v /var/lib/milvus:/var/lib/milvus:Z \
+    milvusdb/milvus:latest \
+    milvus run standalone
+```
+
+### Step 2: Document Ingestion Pipeline
+
+Create a document processor that handles various enterprise formats:
+
+```python
+#!/usr/bin/env python3
+"""Document ingestion pipeline for RAG on RHEL AI"""
+
+import os
+from pathlib import Path
+from typing import List, Dict, Any
+
+from langchain.document_loaders import (
+    PyPDFLoader,
+    Docx2txtLoader,
+    TextLoader,
+    UnstructuredMarkdownLoader
+)
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.schema import Document
+
+class DocumentIngester:
+    """Ingest and chunk documents for RAG."""
+    
+    LOADERS = {
+        '.pdf': PyPDFLoader,
+        '.docx': Docx2txtLoader,
+        '.txt': TextLoader,
+        '.md': UnstructuredMarkdownLoader,
+    }
+    
+    def __init__(self, chunk_size: int = 1000, chunk_overlap: int = 200):
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            length_function=len,
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
+    
+    def load_document(self, file_path: str) -> List[Document]:
+        """Load a document based on its file extension."""
+        ext = Path(file_path).suffix.lower()
+        if ext not in self.LOADERS:
+            raise ValueError(f"Unsupported file type: {ext}")
+        
+        loader = self.LOADERS[ext](file_path)
+        return loader.load()
+    
+    def process_directory(self, directory: str) -> List[Document]:
+        """Process all supported documents in a directory."""
+        all_docs = []
+        
+        for root, _, files in os.walk(directory):
+            for file in files:
+                file_path = os.path.join(root, file)
+                ext = Path(file).suffix.lower()
+                
+                if ext in self.LOADERS:
+                    try:
+                        docs = self.load_document(file_path)
+                        # Add source metadata
+                        for doc in docs:
+                            doc.metadata['source'] = file_path
+                        all_docs.extend(docs)
+                        print(f"✓ Processed: {file_path}")
+                    except Exception as e:
+                        print(f"✗ Failed to process {file_path}: {e}")
+        
+        return all_docs
+    
+    def chunk_documents(self, documents: List[Document]) -> List[Document]:
+        """Split documents into chunks."""
+        return self.text_splitter.split_documents(documents)
+
+
+# Usage example
+if __name__ == "__main__":
+    ingester = DocumentIngester(chunk_size=1000, chunk_overlap=200)
+    
+    # Process enterprise documents
+    docs = ingester.process_directory("/var/lib/rhel-ai/knowledge-base")
+    chunks = ingester.chunk_documents(docs)
+    
+    print(f"Total documents: {len(docs)}")
+    print(f"Total chunks: {len(chunks)}")
+```
+
+### Step 3: Embedding Generation
+
+Use a local embedding model for enterprise data privacy:
+
+```python
+#!/usr/bin/env python3
+"""Embedding generation for RAG on RHEL AI"""
+
+import torch
+from sentence_transformers import SentenceTransformer
+from typing import List
+import numpy as np
+
+class EmbeddingGenerator:
+    """Generate embeddings using local models."""
+    
+    def __init__(self, model_name: str = "sentence-transformers/all-mpnet-base-v2"):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = SentenceTransformer(model_name, device=self.device)
+        self.embedding_dim = self.model.get_sentence_embedding_dimension()
+        print(f"Loaded embedding model on {self.device}")
+        print(f"Embedding dimension: {self.embedding_dim}")
+    
+    def embed_texts(self, texts: List[str], batch_size: int = 32) -> np.ndarray:
+        """Generate embeddings for a list of texts."""
+        embeddings = self.model.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress_bar=True,
+            convert_to_numpy=True,
+            normalize_embeddings=True  # For cosine similarity
+        )
+        return embeddings
+    
+    def embed_query(self, query: str) -> np.ndarray:
+        """Generate embedding for a single query."""
+        return self.model.encode(
+            query,
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        )
+
+
+# For InstructLab-based embeddings (alternative)
+class InstructLabEmbeddings:
+    """Use InstructLab's embedding capability."""
+    
+    def __init__(self, model_path: str):
+        from transformers import AutoTokenizer, AutoModel
+        
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        self.model = AutoModel.from_pretrained(model_path)
+        self.model.eval()
+        
+        if torch.cuda.is_available():
+            self.model = self.model.cuda()
+    
+    def embed_texts(self, texts: List[str]) -> np.ndarray:
+        """Generate embeddings using mean pooling."""
+        embeddings = []
+        
+        for text in texts:
+            inputs = self.tokenizer(
+                text, 
+                return_tensors="pt", 
+                padding=True, 
+                truncation=True,
+                max_length=512
+            )
+            
+            if torch.cuda.is_available():
+                inputs = {k: v.cuda() for k, v in inputs.items()}
+            
+            with torch.no_grad():
+                outputs = self.model(**inputs)
+                # Mean pooling
+                attention_mask = inputs['attention_mask']
+                token_embeddings = outputs.last_hidden_state
+                input_mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+                embedding = torch.sum(token_embeddings * input_mask_expanded, 1) / torch.clamp(input_mask_expanded.sum(1), min=1e-9)
+                embeddings.append(embedding.cpu().numpy())
+        
+        return np.vstack(embeddings)
+```
+
+### Step 4: Vector Store Integration
+
+Store and retrieve embeddings from PostgreSQL with pgvector:
+
+```python
+#!/usr/bin/env python3
+"""Vector store operations for RAG on RHEL AI"""
+
+import psycopg2
+from psycopg2.extras import execute_values
+import numpy as np
+from typing import List, Tuple, Dict, Any
+import json
+
+class PgVectorStore:
+    """PostgreSQL vector store with pgvector."""
+    
+    def __init__(self, connection_string: str):
+        self.conn = psycopg2.connect(connection_string)
+        self.conn.autocommit = True
+    
+    def store_documents(
+        self, 
+        contents: List[str], 
+        embeddings: np.ndarray, 
+        metadata: List[Dict[str, Any]]
+    ):
+        """Store documents with their embeddings."""
+        cursor = self.conn.cursor()
+        
+        data = [
+            (content, json.dumps(meta), embedding.tolist())
+            for content, meta, embedding in zip(contents, metadata, embeddings)
+        ]
+        
+        execute_values(
+            cursor,
+            """
+            INSERT INTO documents (content, metadata, embedding)
+            VALUES %s
+            """,
+            data,
+            template="(%s, %s, %s::vector)"
+        )
+        
+        print(f"Stored {len(contents)} documents")
+    
+    def similarity_search(
+        self, 
+        query_embedding: np.ndarray, 
+        top_k: int = 5,
+        score_threshold: float = 0.7
+    ) -> List[Tuple[str, Dict, float]]:
+        """Find similar documents using cosine similarity."""
+        cursor = self.conn.cursor()
+        
+        cursor.execute(
+            """
+            SELECT content, metadata, 1 - (embedding <=> %s::vector) as similarity
+            FROM documents
+            WHERE 1 - (embedding <=> %s::vector) > %s
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+            """,
+            (query_embedding.tolist(), query_embedding.tolist(), 
+             score_threshold, query_embedding.tolist(), top_k)
+        )
+        
+        results = []
+        for row in cursor.fetchall():
+            results.append((row[0], json.loads(row[1]), row[2]))
+        
+        return results
+    
+    def close(self):
+        """Close database connection."""
+        self.conn.close()
+```
+
+### Step 5: RAG Pipeline Implementation
+
+Combine all components into a complete RAG pipeline:
+
+```python
+#!/usr/bin/env python3
+"""Complete RAG pipeline for RHEL AI"""
+
+import requests
+from typing import List, Optional
+
+class RAGPipeline:
+    """End-to-end RAG pipeline for enterprise AI."""
+    
+    def __init__(
+        self,
+        vector_store,
+        embedding_generator,
+        llm_endpoint: str = "http://localhost:8000/v1/chat/completions",
+        model_name: str = "granite-7b"
+    ):
+        self.vector_store = vector_store
+        self.embedder = embedding_generator
+        self.llm_endpoint = llm_endpoint
+        self.model_name = model_name
+    
+    def retrieve(self, query: str, top_k: int = 5) -> List[str]:
+        """Retrieve relevant documents for a query."""
+        query_embedding = self.embedder.embed_query(query)
+        results = self.vector_store.similarity_search(
+            query_embedding, 
+            top_k=top_k,
+            score_threshold=0.5
+        )
+        
+        contexts = [content for content, _, _ in results]
+        return contexts
+    
+    def format_prompt(self, query: str, contexts: List[str]) -> str:
+        """Format the augmented prompt."""
+        context_text = "\n\n---\n\n".join(contexts)
+        
+        prompt = f"""You are an enterprise AI assistant. Answer the question based ONLY on the provided context. If the context doesn't contain relevant information, say "I don't have enough information to answer that question."
+
+CONTEXT:
+{context_text}
+
+QUESTION: {query}
+
+ANSWER:"""
+        
+        return prompt
+    
+    def generate(self, prompt: str, max_tokens: int = 512) -> str:
+        """Generate response using vLLM."""
+        response = requests.post(
+            self.llm_endpoint,
+            json={
+                "model": self.model_name,
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant that answers questions based on provided context."},
+                    {"role": "user", "content": prompt}
+                ],
+                "temperature": 0.3,
+                "max_tokens": max_tokens
+            },
+            headers={"Content-Type": "application/json"}
+        )
+        
+        result = response.json()
+        return result["choices"][0]["message"]["content"]
+    
+    def query(self, question: str, top_k: int = 5) -> dict:
+        """Execute the full RAG pipeline."""
+        # Retrieve relevant contexts
+        contexts = self.retrieve(question, top_k=top_k)
+        
+        # Format augmented prompt
+        prompt = self.format_prompt(question, contexts)
+        
+        # Generate response
+        answer = self.generate(prompt)
+        
+        return {
+            "question": question,
+            "answer": answer,
+            "sources": contexts,
+            "num_sources": len(contexts)
+        }
+
+
+# Usage example
+if __name__ == "__main__":
+    from embedding_generator import EmbeddingGenerator
+    from vector_store import PgVectorStore
+    
+    # Initialize components
+    embedder = EmbeddingGenerator()
+    vector_store = PgVectorStore("postgresql://localhost/rag_knowledge")
+    
+    # Create RAG pipeline
+    rag = RAGPipeline(vector_store, embedder)
+    
+    # Query the system
+    result = rag.query("What is our company's policy on remote work?")
+    
+    print(f"Question: {result['question']}")
+    print(f"\nAnswer: {result['answer']}")
+    print(f"\nBased on {result['num_sources']} sources")
+```
+
+### Step 6: Advanced RAG Techniques
+
+**Hybrid Search (Dense + Sparse)**
+
+```python
+def hybrid_search(self, query: str, top_k: int = 5, alpha: float = 0.7):
+    """Combine dense vector search with BM25 keyword search."""
+    
+    # Dense search
+    query_embedding = self.embedder.embed_query(query)
+    dense_results = self.vector_store.similarity_search(query_embedding, top_k=top_k*2)
+    
+    # Sparse search (BM25)
+    cursor = self.conn.cursor()
+    cursor.execute(
+        """
+        SELECT content, metadata, ts_rank(to_tsvector('english', content), query) as rank
+        FROM documents, plainto_tsquery('english', %s) query
+        WHERE to_tsvector('english', content) @@ query
+        ORDER BY rank DESC
+        LIMIT %s
+        """,
+        (query, top_k*2)
+    )
+    sparse_results = cursor.fetchall()
+    
+    # Combine with Reciprocal Rank Fusion
+    combined = self._reciprocal_rank_fusion(dense_results, sparse_results, alpha)
+    return combined[:top_k]
+```
+
+**Query Rewriting**
+
+```python
+def rewrite_query(self, original_query: str) -> str:
+    """Use LLM to expand and clarify the query."""
+    
+    prompt = f"""Rewrite the following query to be more specific and include relevant synonyms for better search results. Return only the rewritten query.
+
+Original query: {original_query}
+
+Rewritten query:"""
+    
+    response = self.generate(prompt, max_tokens=100)
+    return response.strip()
+```
+
+### Production Deployment
+
+**Docker Compose for Complete Stack:**
+
+```yaml
+# docker-compose.yml
+version: '3.8'
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_DB: rag_knowledge
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+  
+  vllm:
+    image: registry.redhat.io/rhel-ai/vllm-runtime:latest
+    command: ["--model", "/models/granite-7b", "--host", "0.0.0.0"]
+    volumes:
+      - ./models:/models:ro
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+  
+  rag-api:
+    build: ./rag-service
+    environment:
+      DATABASE_URL: postgresql://postgres:${DB_PASSWORD}@postgres/rag_knowledge
+      LLM_ENDPOINT: http://vllm:8000/v1/chat/completions
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+      - vllm
+
+volumes:
+  pgdata:
+```
+
+### Conclusion
+
+RAG transforms LLMs from general-purpose language models into enterprise knowledge systems that provide accurate, verifiable answers grounded in your organization's data. RHEL AI's integrated stack—combining vLLM for inference, containerized databases, and enterprise security—makes building production RAG systems straightforward.
+
+For advanced RAG patterns including multi-hop reasoning, agentic RAG, and evaluation frameworks, refer to Chapters 8-10 of *Practical RHEL AI*.
+
+import Link from "../../components/ui/link.astro";
+
+<Link size="lg" href="https://amzn.to/4qjORdC" class="flex gap-2 items-center justify-center bg-blue-600 text-white px-5 py-3 rounded-lg shadow-md hover:bg-blue-700">
+  Get Practical RHEL AI on Amazon
+</Link>

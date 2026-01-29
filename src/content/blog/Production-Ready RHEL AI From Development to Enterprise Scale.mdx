@@ -16,7 +16,7 @@ tags:
   - vector-stores
   - rag
 image:
-  src: "/blog/books/practical-rhel-ai-cover.jpg"
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
   alt: "RHEL AI Production Deployment"
 ---
 
@@ -30,93 +30,50 @@ This final article covers battle-tested patterns for deploying RHEL AI at enterp
 
 Here's a production-ready RHEL AI architecture:
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                   Clients / APIs                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │ Web App      │  │ Mobile       │  │ 3rd-party    │  │
-│  │              │  │ Application  │  │ Integration  │  │
-│  └──────────────┘  └──────────────┘  └──────────────┘  │
-└─────────────┬───────────────────────────────────────────┘
-              │
-    ┌─────────┴──────────┐
-    │                    │
-┌───▼────────────────────▼────────────────────────────────┐
-│         Load Balancer (NGINX / HAProxy)                 │
-│         - Sticky sessions for inference continuity      │
-│         - Rate limiting (500 req/s per client)          │
-│         - Circuit breaker pattern                       │
-└───┬────────────────────────────────────────────────────┘
-    │
-┌───▼────────────────────────────────────────────────────┐
-│   Kubernetes Cluster (Multi-region / Multi-cloud)      │
-│                                                        │
-│  ┌──────────────────────────────────────────────────┐ │
-│  │ Inference Namespace                              │ │
-│  │                                                  │ │
-│  │  ┌────────────────────────────────────────────┐ │ │
-│  │  │ vLLM Deployment (3 replicas, GPU-enabled) │ │ │
-│  │  │ - A100 40GB GPUs (2 GPUs per pod)         │ │ │
-│  │  │ - Horizontal Pod Autoscaling (1-10)       │ │ │
-│  │  │ - Resource requests/limits enforced       │ │ │
-│  │  └────────────────────────────────────────────┘ │ │
-│  │                                                  │ │
-│  │  ┌────────────────────────────────────────────┐ │ │
-│  │  │ Model Serving Cache (Redis)                │ │ │
-│  │  │ - Prompt embeddings cache                  │ │ │
-│  │  │ - Token-level caching for efficiency       │ │ │
-│  │  └────────────────────────────────────────────┘ │ │
-│  │                                                  │ │
-│  │  ┌────────────────────────────────────────────┐ │ │
-│  │  │ Inference Gateway (FastAPI)                │ │ │
-│  │  │ - OpenAI API compatibility                 │ │ │
-│  │  │ - Request validation & sanitization        │ │ │
-│  │  │ - Model selection (A/B testing, canary)    │ │ │
-│  │  └────────────────────────────────────────────┘ │ │
-│  └──────────────────────────────────────────────────┘ │
-│                                                        │
-│  ┌──────────────────────────────────────────────────┐ │
-│  │ Training Namespace                               │ │
-│  │                                                  │ │
-│  │  ┌────────────────────────────────────────────┐ │ │
-│  │  │ InstructLab Fine-tuning Jobs (GPU-enabled) │ │ │
-│  │  │ - H100 80GB GPUs (4 GPUs per job)          │ │ │
-│  │  │ - DeepSpeed distributed training           │ │ │
-│  │  │ - Nightly scheduled runs                   │ │ │
-│  │  └────────────────────────────────────────────┘ │ │
-│  │                                                  │ │
-│  │  ┌────────────────────────────────────────────┐ │ │
-│  │  │ Data Processing Pipeline                   │ │ │
-│  │  │ - Fairness validation                      │ │ │
-│  │  │ - SBOM generation                          │ │ │
-│  │  │ - Compliance checks                        │ │ │
-│  │  └────────────────────────────────────────────┘ │ │
-│  └──────────────────────────────────────────────────┘ │
-│                                                        │
-│  ┌──────────────────────────────────────────────────┐ │
-│  │ Monitoring Namespace                             │ │
-│  │ - Prometheus (metrics collection)                │ │
-│  │ - Grafana (visualization)                        │ │
-│  │ - AlertManager (alerting)                        │ │
-│  │ - Loki (log aggregation)                         │ │
-│  └──────────────────────────────────────────────────┘ │
-└───┬────────────────────────────────────────────────────┘
-    │
-┌───▼────────────────────────────────────────────────────┐
-│         Persistent Storage Layer                       │
-│  ┌──────────────────────────────────────────────────┐ │
-│  │ Model Registry (NFS/S3)                          │ │
-│  │ - Versioned model checkpoints                    │ │
-│  │ - SBOM and metadata                              │ │
-│  │ - 1-click rollback capability                    │ │
-│  └──────────────────────────────────────────────────┘ │
-│  ┌──────────────────────────────────────────────────┐ │
-│  │ Data Lake (S3 / Azure Blob)                      │ │
-│  │ - Training datasets (cold storage)               │ │
-│  │ - Validation sets (hot storage)                  │ │
-│  │ - Inference logs (for drift detection)           │ │
-│  └──────────────────────────────────────────────────┘ │
-└────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Clients["Clients / APIs"]
+        WebApp["Web App"]
+        Mobile["Mobile Application"]
+        ThirdParty["3rd-party Integration"]
+    end
+
+    LB["Load Balancer<br/>NGINX / HAProxy<br/>• Sticky sessions<br/>• Rate limiting 500 req/s<br/>• Circuit breaker"]
+
+    subgraph K8s["Kubernetes Cluster (Multi-region)"]
+        subgraph InferenceNS["Inference Namespace"]
+            vLLM["vLLM Deployment<br/>3 replicas, A100 GPUs<br/>HPA 1-10 pods"]
+            Redis["Model Serving Cache<br/>Redis"]
+            Gateway["Inference Gateway<br/>FastAPI<br/>OpenAI API compatible"]
+        end
+
+        subgraph TrainingNS["Training Namespace"]
+            InstructLab["InstructLab Fine-tuning<br/>H100 80GB GPUs<br/>DeepSpeed distributed"]
+            DataPipeline["Data Processing<br/>• Fairness validation<br/>• SBOM generation<br/>• Compliance checks"]
+        end
+
+        subgraph MonitoringNS["Monitoring Namespace"]
+            Prometheus["Prometheus"]
+            Grafana["Grafana"]
+            AlertManager["AlertManager"]
+            Loki["Loki"]
+        end
+    end
+
+    subgraph Storage["Persistent Storage Layer"]
+        ModelRegistry["Model Registry<br/>NFS/S3<br/>Versioned checkpoints"]
+        DataLake["Data Lake<br/>S3 / Azure Blob<br/>Training datasets"]
+    end
+
+    Clients --> LB
+    LB --> Gateway
+    Gateway --> vLLM
+    vLLM --> Redis
+    InstructLab --> ModelRegistry
+    DataPipeline --> DataLake
+    vLLM --> ModelRegistry
+    MonitoringNS -.-> InferenceNS
+    MonitoringNS -.-> TrainingNS
 ```
 
 ### 1. Kubernetes Deployment with GPU Support

@@ -23,7 +23,7 @@ export async function GET() {
   function generateVideoSitemap(posts: any[]) {
     const urlTags = posts.map(post => {
       const video = (post.data as any).video;
-      const postUrl = `${siteUrl}/blog/${post.slug}`;
+      const postUrl = `${siteUrl}/blog/${post.slug}/`;
       
       // If we have video metadata, use it
       if (video?.id) {

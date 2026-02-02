@@ -6,25 +6,23 @@ INDEXNOW_KEY="ac6bded46004d1b1c6db06774d21d7bd"
 SITE_URL="https://lucaberton.com"
 KEY_LOCATION="${SITE_URL}/${INDEXNOW_KEY}.txt"
 
-# Extract URLs from sitemap
+# Extract URLs from sitemap (macOS compatible)
 echo "📡 Extracting URLs from sitemap..."
-URLS=$(grep -oP '(?<=<loc>)[^<]+' public/sitemap-0.xml | head -100)
+URLS=$(grep -o '<loc>[^<]*</loc>' public/sitemap-0.xml | sed 's/<loc>//g;s/<\/loc>//g' | head -100)
 
 # Count URLs
 URL_COUNT=$(echo "$URLS" | wc -l | tr -d ' ')
 echo "📊 Found ${URL_COUNT} URLs to submit"
 
-# Build JSON payload
-URL_LIST=$(echo "$URLS" | sed 's/^/    "/;s/$/"/' | paste -sd ',' - | sed 's/,/,\n/g')
+# Build JSON array of URLs
+URL_JSON=$(echo "$URLS" | while read url; do echo "\"$url\""; done | paste -sd ',' -)
 
 JSON_PAYLOAD=$(cat <<EOF
 {
   "host": "lucaberton.com",
   "key": "${INDEXNOW_KEY}",
   "keyLocation": "${KEY_LOCATION}",
-  "urlList": [
-${URL_LIST}
-  ]
+  "urlList": [${URL_JSON}]
 }
 EOF
 )

@@ -6,9 +6,9 @@ INDEXNOW_KEY="ac6bded46004d1b1c6db06774d21d7bd"
 SITE_URL="https://lucaberton.com"
 KEY_LOCATION="${SITE_URL}/${INDEXNOW_KEY}.txt"
 
-# Extract URLs from sitemap (macOS compatible)
-echo "📡 Extracting URLs from sitemap..."
-URLS=$(grep -o '<loc>[^<]*</loc>' public/sitemap-0.xml | sed 's/<loc>//g;s/<\/loc>//g' | head -100)
+# Extract URLs from both sitemaps (macOS compatible)
+echo "📡 Extracting URLs from sitemaps..."
+URLS=$(grep -o '<loc>[^<]*</loc>' public/sitemap-0.xml public/video-sitemap.xml | sed 's/.*<loc>//g;s/<\/loc>//g' | sort -u | head -200)
 
 # Count URLs
 URL_COUNT=$(echo "$URLS" | wc -l | tr -d ' ')

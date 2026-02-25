@@ -1,0 +1,229 @@
+---
+draft: false
+title: "OpenClaw Config Migration: channels.discord and Schema Changes"
+snippet: "How OpenClaw handles config schema migrations, the move from discord to channels.discord, validation errors on old paths, and best practices for managing OpenClaw configuration changes across versions."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - configuration
+  - migration
+  - docker
+  - azure
+  - cli
+  - schema
+image:
+  src: "/blog/openclaw/config-migration.jpg"
+  alt: "OpenClaw config migration from discord to channels.discord"
+---
+
+## 🦞 Config Evolution in OpenClaw
+
+OpenClaw moves fast. As the project matures, configuration schemas evolve — keys get renamed, nested deeper, or restructured entirely. Version 2026.2.25 introduced a significant change: the Discord configuration moved from a top-level `discord` key to `channels.discord`.
+
+This guide covers what changed, why you'll hit validation errors, and how to manage config migrations cleanly.
+
+---
+
+## 🔄 What Changed
+
+### Before (Pre-2026.2.25)
+
+```json
+{
+  "discord": {
+    "enabled": true,
+    "token": "your-bot-token"
+  }
+}
+```
+
+### After (2026.2.25+)
+
+```json
+{
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "token": "your-bot-token",
+      "groupPolicy": "open",
+      "streaming": "off"
+    }
+  }
+}
+```
+
+The restructuring makes room for additional channel types under a unified `channels` namespace — potentially Slack, Telegram, or custom integrations in the future.
+
+---
+
+## ❌ The Validation Error
+
+If you try to use the old config path with the CLI:
+
+```bash
+docker compose run --rm openclaw-cli config set discord.enabled false
+```
+
+You'll get a clear error:
+
+```
+🦞 OpenClaw 2026.2.25 (unknown)
+   I'll butter your workflow like a lobster roll: messy, delicious, effective.
+
+Error: Config validation failed: discord: discord config moved
+  to channels.discord (auto-migrated on load).
+```
+
+OpenClaw **auto-migrates** the config on load (when reading from `openclaw.json`), but the CLI's `config set` command validates against the **new** schema and rejects the old path.
+
+---
+
+## ✅ The Correct Commands
+
+### Setting Discord Config
+
+```bash
+# Enable Discord
+docker compose run --rm openclaw-cli config set channels.discord.enabled true
+
+# Disable Discord
+docker compose run --rm openclaw-cli config set channels.discord.enabled false
+```
+
+### Reading Discord Config
+
+```bash
+# Get a single value
+docker compose run --rm openclaw-cli config get channels.discord.enabled
+# Output: false
+
+# Get the entire channels.discord object
+docker compose run --rm openclaw-cli config get channels
+# Output:
+# {
+#   "discord": {
+#     "enabled": false,
+#     "token": "__OPENCLAW_REDACTED__",
+#     "groupPolicy": "open",
+#     "streaming": "off"
+#   }
+# }
+```
+
+Note that `config get` automatically redacts sensitive values like tokens with `__OPENCLAW_REDACTED__`.
+
+---
+
+## 🔒 Config File Mechanics
+
+Every `config set` operation follows a careful update process:
+
+1. **Read** the current `openclaw.json`
+2. **Compute** the SHA-256 hash of the original
+3. **Apply** the change
+4. **Compute** the new hash
+5. **Write** the updated file
+6. **Create** a `.bak` backup of the original
+
+You can see this in the CLI output:
+
+```
+Config overwrite: /home/node/.openclaw/openclaw.json
+  (sha256 689e4b12...cc272908 -> 68ed1fd4...facefda7,
+   backup=/home/node/.openclaw/openclaw.json.bak)
+Updated channels.discord.enabled. Restart the gateway to apply.
+```
+
+### Important: Always Restart
+
+Config changes are **not** hot-reloaded. You must restart the gateway:
+
+```bash
+docker compose down
+docker compose up -d
+```
+
+---
+
+## 📁 Config File Location
+
+The config file lives inside the bind-mounted volume:
+
+| Location | Path |
+|----------|------|
+| Host (Azure VM) | `/home/azureuser/.openclaw/openclaw.json` |
+| Container | `/home/node/.openclaw/openclaw.json` |
+| Backup | `/home/node/.openclaw/openclaw.json.bak` |
+
+The volume mount in `docker-compose.yml` maps between the two:
+
+```yaml
+volumes:
+  - /home/azureuser/.openclaw:/home/node/.openclaw
+```
+
+---
+
+## 🗂️ Full Channel Config Schema
+
+As of OpenClaw 2026.2.25, the `channels` object supports:
+
+```json
+{
+  "channels": {
+    "discord": {
+      "enabled": true,
+      "token": "your-discord-bot-token",
+      "groupPolicy": "open",
+      "streaming": "off"
+    }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `enabled` | boolean | Whether the Discord channel is active |
+| `token` | string | Discord bot token |
+| `groupPolicy` | string | `"open"` allows any server member to interact |
+| `streaming` | string | `"off"` disables streaming responses |
+
+---
+
+## 🛠️ Troubleshooting Config Issues
+
+### "Config validation failed"
+
+You're using an old config path. Check the error message for the new path.
+
+### Changes Not Taking Effect
+
+You forgot to restart. Always `docker compose down && docker compose up -d` after config changes.
+
+### Viewing Raw Config
+
+If the CLI isn't available, check the file directly on the host:
+
+```bash
+cat /home/azureuser/.openclaw/openclaw.json | python3 -m json.tool
+```
+
+### Restoring a Backup
+
+If a config change broke things:
+
+```bash
+cp /home/azureuser/.openclaw/openclaw.json.bak \
+   /home/azureuser/.openclaw/openclaw.json
+docker compose down && docker compose up -d
+```
+
+---
+
+## 🔗 Series Navigation
+
+- Previous: [OpenClaw Discord Error 4014: Privileged Gateway Intents Deep Dive](/blog/openclaw-discord-error-4014-privileged-gateway-intents)
+- Next: [Diagnosing OpenClaw Gateway Crash-Restart Loops](/blog/diagnosing-openclaw-gateway-crash-restart-loops)

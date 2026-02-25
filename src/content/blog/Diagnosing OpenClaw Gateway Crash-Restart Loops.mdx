@@ -1,0 +1,253 @@
+---
+draft: false
+title: "Diagnosing OpenClaw Gateway Crash-Restart Loops on Docker"
+snippet: "Step-by-step guide to diagnosing OpenClaw gateway crash-restart loops in Docker. Covers empty logs, connection resets, docker inspect techniques, OOM detection, and breaking the loop."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - docker
+  - troubleshooting
+  - crash-loop
+  - restart
+  - azure
+  - debugging
+image:
+  src: "/blog/openclaw/crash-restart-loop.jpg"
+  alt: "Diagnosing OpenClaw gateway crash-restart loops in Docker"
+---
+
+## 🦞 When Your Gateway Won't Stay Up
+
+You've deployed OpenClaw, the container shows "Up" in `docker compose ps`, but you can't reach it. Curl returns "Connection reset by peer" and the logs are... empty. What's going on?
+
+You're likely caught in a **crash-restart loop** — the gateway starts, hits a fatal error, crashes, Docker restarts it, and the cycle repeats before you can even check what happened.
+
+---
+
+## 🔍 Symptoms of a Crash-Restart Loop
+
+### 1. Connection Resets
+
+```bash
+$ curl -I http://127.0.0.1:18789
+curl: (56) Recv failure: Connection reset by peer
+```
+
+The port is bound (Docker proxy is listening), but the application inside the container isn't ready — it's either starting up or has just crashed.
+
+### 2. Empty Logs
+
+```bash
+$ docker compose logs --tail=200 openclaw-gateway
+# (nothing)
+```
+
+If you check logs immediately after a crash, the new container instance hasn't produced any output yet. The old container's logs are gone because Docker Compose recreates the container.
+
+### 3. Container Shows "Up" but Fresh
+
+```bash
+$ docker compose ps
+NAME                          STATUS
+openclaw-openclaw-gateway-1   Up 2 seconds
+```
+
+Notice the "Up 2 seconds" — this means the container **just** restarted. A few seconds later you might see "Up 6 seconds" as it keeps running briefly before crashing again.
+
+### 4. Oscillating Uptime
+
+Running `docker compose ps` repeatedly reveals the pattern:
+
+```
+Up 45 seconds   # Still running...
+Up 46 seconds   # Still running...
+Up 47 seconds   # Still running...
+Up 4 seconds    # Just restarted!
+Up 5 seconds    # New instance
+```
+
+The uptime counter resets when the crash-restart happens. The interval depends on how long the gateway takes to hit the fatal error.
+
+---
+
+## 🛠️ Diagnostic Techniques
+
+### Step 1: Check Container State
+
+```bash
+docker inspect -f '{{.State.Status}} {{.State.Restarting}} \
+  {{.State.ExitCode}} {{.State.Error}}' openclaw-openclaw-gateway-1
+```
+
+Expected output in a crash loop:
+```
+running false 0
+```
+
+The exit code 0 is misleading — Docker's init process (`/sbin/docker-init`) may mask the real exit code. The key indicator is the oscillating uptime, not the exit code.
+
+### Step 2: Check for OOM Kills
+
+```bash
+docker inspect -f '{{.State.OOMKilled}} {{.State.ExitCode}}' \
+  openclaw-openclaw-gateway-1
+```
+
+```
+false 0
+```
+
+If `OOMKilled` is `true`, the container ran out of memory. OpenClaw's gateway process can consume significant memory (466MB RSS observed in production) — ensure your VM has enough RAM.
+
+### Step 3: Check System Logs (if you have access)
+
+```bash
+sudo dmesg | tail -n 50 | grep -i -E 'killed process|oom'
+```
+
+Note: On Azure VMs, `azureuser` may not have dmesg access without `sudo`, and even then it might be restricted:
+```
+dmesg: read kernel buffer failed: Operation not permitted
+```
+
+### Step 4: Use docker logs Directly
+
+Skip `docker compose logs` and use `docker logs` directly for more reliable output:
+
+```bash
+docker logs --tail=200 openclaw-openclaw-gateway-1
+```
+
+This is more reliable during restart loops because it accesses the container's log buffer directly, even between restarts.
+
+### Step 5: Run in Foreground
+
+Stop the detached deployment and run in foreground to see real-time output:
+
+```bash
+docker compose down
+docker compose up openclaw-gateway  # No -d flag
+```
+
+This attaches your terminal to the container's stdout/stderr, letting you watch the crash happen in real time:
+
+```
+openclaw-gateway-1  | [gateway] listening on ws://0.0.0.0:18789 (PID 7)
+openclaw-gateway-1  | [discord] [default] starting provider (@openclaw)
+openclaw-gateway-1  | [openclaw] Uncaught exception: Error: Fatal Gateway error: 4014
+```
+
+### Step 6: Exec Into the Container
+
+If the container stays up long enough (even a few seconds), you can shell in:
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 /bin/sh
+```
+
+Inside the container, check processes:
+
+```
+$ ps aux
+USER  PID %CPU %MEM    VSZ   RSS   COMMAND
+node    1  0.0  0.0   1056   736   /sbin/docker-init -- docker
+node    7 74.4  5.7 12034772 466440 openclaw-gateway
+```
+
+The high CPU percentage during startup is normal — OpenClaw loads hooks, initializes providers, and connects to external services.
+
+---
+
+## 🔧 Common Crash-Loop Causes
+
+### 1. Discord Error 4014 (Most Common)
+
+The gateway crashes when Discord rejects the connection due to missing Privileged Gateway Intents.
+
+**Fix:** Enable Message Content Intent in Discord Dev Portal, or disable Discord:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  channels.discord.enabled false
+docker compose down && docker compose up -d
+```
+
+### 2. Invalid Configuration
+
+A malformed `openclaw.json` can prevent startup.
+
+**Fix:** Check the config or restore from backup:
+
+```bash
+cat /home/azureuser/.openclaw/openclaw.json | python3 -m json.tool
+# If invalid, restore backup:
+cp /home/azureuser/.openclaw/openclaw.json.bak \
+   /home/azureuser/.openclaw/openclaw.json
+```
+
+### 3. Port Conflicts
+
+Another process is already bound to port 18789 or 18790.
+
+**Fix:** Check with `ss`:
+
+```bash
+sudo ss -ltnp | grep -E ':18789|:18790'
+```
+
+### 4. Insufficient Memory
+
+The gateway process needs ~500MB RSS. On small VMs, it can get OOM-killed.
+
+**Fix:** Use a VM with at least 2GB RAM.
+
+---
+
+## 🛑 Breaking the Loop
+
+The simplest way to break a crash-restart loop:
+
+```bash
+# Stop everything
+docker compose down
+
+# Fix the underlying issue (e.g., disable Discord)
+docker compose run --rm openclaw-cli config set \
+  channels.discord.enabled false
+
+# Start fresh
+docker compose up -d
+
+# Verify stability
+docker compose ps
+# Wait 30+ seconds and check again
+docker compose ps
+```
+
+If the uptime keeps increasing without resetting, you've broken the loop.
+
+---
+
+## 📊 Restart Policy Reference
+
+OpenClaw's `docker-compose.yml` uses `restart: unless-stopped`, which means:
+
+| Scenario | Behavior |
+|----------|----------|
+| Container exits normally | Restart |
+| Container crashes | Restart |
+| `docker compose stop` | Don't restart |
+| Docker daemon restarts | Restart |
+| `docker compose down` | Remove (no restart) |
+
+This policy is why crash loops are persistent — Docker will keep restarting a crashing container indefinitely until you intervene.
+
+---
+
+## 🔗 Series Navigation
+
+- Previous: [OpenClaw Config Migration: channels.discord and Schema Changes](/blog/openclaw-config-migration-channels-discord-schema)
+- Next: [Understanding OpenClaw dangerouslyAllowHostHeaderOriginFallback](/blog/understanding-openclaw-dangerously-allow-host-header-origin-fallback)

@@ -1,0 +1,231 @@
+---
+draft: false
+title: "Understanding OpenClaw dangerouslyAllowHostHeaderOriginFallback"
+snippet: "Deep dive into OpenClaw's dangerouslyAllowHostHeaderOriginFallback config setting. Learn when you need it, what security risks it carries, and how to configure it properly for remote Control UI access on Azure VMs."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - security
+  - control-ui
+  - configuration
+  - azure
+  - host-header
+image:
+  src: "/blog/openclaw/host-header-fallback.jpg"
+  alt: "Understanding OpenClaw dangerouslyAllowHostHeaderOriginFallback configuration"
+---
+
+## 🦞 The Config Setting With the Scariest Name
+
+If you've tried accessing OpenClaw's Control UI from a remote machine — say, from your laptop to an Azure VM — you've probably encountered a blank page or a connection refused error. The fix involves a setting whose name practically screams "don't use me":
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true
+```
+
+Let's unpack what this does, why it exists, and how to use it safely.
+
+---
+
+## 🧩 What the Setting Does
+
+OpenClaw's Control UI is a web dashboard served by the gateway process. Like any web application, it implements **origin checks** to prevent Cross-Site Request Forgery (CSRF) and other host-header injection attacks.
+
+By default, the Control UI only accepts requests where the `Host` header matches the expected origin (typically `localhost` or `127.0.0.1`). When you access the Control UI remotely — e.g., via `http://10.0.0.4:18790` or `http://your-vm.eastus.cloudapp.azure.com:18790` — the `Host` header contains the VM's IP or hostname, which doesn't match the expected origin.
+
+Setting `dangerouslyAllowHostHeaderOriginFallback` to `true` tells the gateway: **"Accept requests regardless of the Host header value."**
+
+---
+
+## 🔍 When You Need It
+
+### Remote Access Scenario
+
+```
+[Your Laptop] --SSH tunnel or direct--> [Azure VM:18790] ---> [Control UI]
+```
+
+Without the setting enabled:
+```bash
+$ curl -I http://10.0.0.4:18790
+# Returns 403 or blank page
+```
+
+With the setting enabled:
+```bash
+$ curl -I http://10.0.0.4:18790
+HTTP/1.1 200 OK
+```
+
+### Local Access Works Fine
+
+If you're accessing the Control UI from the VM itself (e.g., via `curl http://127.0.0.1:18790`), you don't need this setting. The Host header will be `127.0.0.1`, which matches the expected origin.
+
+---
+
+## ⚙️ How to Configure It
+
+### Enable via CLI
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true
+```
+
+This writes to `/home/azureuser/.openclaw/openclaw.json`. The resulting config section looks like:
+
+```json
+{
+  "gateway": {
+    "controlUi": {
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }
+  }
+}
+```
+
+### Restart Required
+
+After changing this configuration, restart the gateway for the change to take effect:
+
+```bash
+docker compose down && docker compose up -d
+```
+
+### Verify It's Set
+
+```bash
+docker compose run --rm openclaw-cli config get \
+  gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback
+```
+
+Or inspect the config file directly:
+
+```bash
+cat /home/azureuser/.openclaw/openclaw.json | python3 -m json.tool
+```
+
+---
+
+## ⚠️ Security Implications
+
+The "dangerously" prefix is well-deserved. Here's what the setting exposes:
+
+### Host Header Injection
+
+With this setting enabled, an attacker could send requests with forged `Host` headers. This can lead to:
+
+- **Cache poisoning** — If a reverse proxy caches responses keyed by Host header, a forged header could poison the cache with malicious content.
+- **Password reset poisoning** — If the app generates links based on the Host header, a forged header could redirect users to attacker-controlled domains.
+- **SSRF amplification** — Certain server-side request forgery vectors become easier when Host header validation is disabled.
+
+### CSRF Attacks
+
+The origin check is a defense layer against CSRF. Disabling it means other CSRF mitigations (tokens, SameSite cookies) become the sole defense.
+
+### Who Can Reach the Port?
+
+The real question is: **who can reach port 18790?**
+
+- If the port is only accessible via SSH tunnel → risk is minimal
+- If the port is exposed via Azure NSG to the public internet → risk is significant
+- If the port is behind a reverse proxy with its own origin checks → risk is mitigated
+
+---
+
+## 🛡️ Safer Alternatives
+
+### Option 1: SSH Tunnel (Recommended)
+
+Instead of enabling the fallback, use an SSH tunnel to access the Control UI as if you were local:
+
+```bash
+# From your laptop:
+ssh -L 18790:127.0.0.1:18790 azureuser@your-vm-ip
+```
+
+Then open `http://127.0.0.1:18790` in your browser. The Host header will be `127.0.0.1`, and no fallback is needed.
+
+### Option 2: Reverse Proxy with Origin Rewrite
+
+Put Nginx or Caddy in front of the Control UI and let it handle Host header normalization:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name openclaw.yourdomain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:18790;
+        proxy_set_header Host 127.0.0.1:18790;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+This rewrites the Host header to `127.0.0.1:18790` before it reaches the gateway, so the origin check passes.
+
+### Option 3: Enable the Fallback + Lock Down NSG
+
+If you must enable the fallback for convenience, at minimum restrict port 18790 in your Azure Network Security Group to only your IP:
+
+```bash
+az network nsg rule create \
+  --resource-group myRG \
+  --nsg-name myNSG \
+  --name AllowControlUI \
+  --priority 200 \
+  --source-address-prefixes YOUR_PUBLIC_IP/32 \
+  --destination-port-ranges 18790 \
+  --access Allow \
+  --protocol Tcp
+```
+
+---
+
+## 🧪 Verifying Remote Access
+
+After enabling the setting and restarting:
+
+```bash
+# From your laptop (replace with actual VM IP or hostname)
+curl -I http://your-vm-ip:18790
+
+# Expected:
+HTTP/1.1 200 OK
+```
+
+If you get a 200, the Control UI is accessible. Open the URL in your browser to see the dashboard.
+
+```bash
+# Also verify the gateway API
+curl -I http://your-vm-ip:18789
+
+# Expected:
+HTTP/1.1 200 OK
+```
+
+---
+
+## 📋 Quick Decision Tree
+
+```
+Need remote Control UI access?
+├── Yes
+│   ├── Can use SSH tunnel? → Use SSH tunnel (no config change needed)
+│   ├── Have reverse proxy? → Rewrite Host header at proxy
+│   └── Neither → Enable fallback + restrict NSG
+└── No
+    └── Don't enable it
+```
+
+---
+
+## 🔗 Series Navigation
+
+- Previous: [Diagnosing OpenClaw Gateway Crash-Restart Loops](/blog/diagnosing-openclaw-gateway-crash-restart-loops)
+- Next: [OpenClaw Gateway Startup Timing and Health Checks](/blog/openclaw-gateway-startup-timing-and-health-checks)

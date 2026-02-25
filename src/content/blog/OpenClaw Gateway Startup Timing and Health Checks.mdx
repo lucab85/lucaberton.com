@@ -1,0 +1,301 @@
+---
+draft: false
+title: "OpenClaw Gateway Startup Timing and Health Checks"
+snippet: "Master OpenClaw gateway startup timing, health checks, and readiness verification. Learn the boot sequence, hook loading, provider initialization, and how to build reliable health monitoring for production deployments."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - docker
+  - health-check
+  - startup
+  - monitoring
+  - azure
+  - production
+image:
+  src: "/blog/openclaw/startup-timing.jpg"
+  alt: "OpenClaw gateway startup timing and health checks"
+---
+
+## 🦞 The First 10 Seconds
+
+When you run `docker compose up -d`, the OpenClaw gateway container starts — but it's not immediately ready to serve requests. There's a startup window (typically 8–12 seconds) during which the gateway initializes its subsystems, loads hooks, and connects to external providers.
+
+During this window, any requests to the gateway will fail:
+
+```bash
+$ curl -I http://127.0.0.1:18789
+curl: (56) Recv failure: Connection reset by peer
+```
+
+This isn't a crash. It's the gateway booting up. Understanding this timing is critical for building reliable health checks and avoiding false positives in monitoring.
+
+---
+
+## 🔄 The Boot Sequence
+
+Based on real-world observation of OpenClaw v2026.2.25 startup logs, the gateway goes through these phases:
+
+### Phase 1: Container Init (~1-2s)
+
+Docker starts the container, `docker-init` spawns the gateway process:
+
+```
+$ docker exec openclaw-openclaw-gateway-1 ps aux
+PID  USER  COMMAND
+  1  node  /sbin/docker-init -- docker-entrypoint.sh openclaw-gateway
+  7  node  openclaw-gateway
+```
+
+The gateway process (PID 7) begins loading the Node.js runtime and parsing configuration.
+
+### Phase 2: Listener Binding (~2-4s)
+
+The gateway binds to the configured address and port:
+
+```
+[gateway] listening on ws://0.0.0.0:18789 (PID 7)
+```
+
+**Important:** Just because the port is bound doesn't mean the gateway is ready. The WebSocket server is listening, but hook loading hasn't completed yet.
+
+### Phase 3: Hook Loading (~4-8s)
+
+OpenClaw loads its hook system — the middleware pipeline that processes messages:
+
+```
+[gateway] hooks/
+[gateway]   ├─ health-monitor
+[gateway]   ├─ heartbeat
+[gateway]   ├─ canvas-mount
+[gateway]   ├─ browser
+[gateway]   └─ server
+```
+
+Each hook initializes in sequence. The hooks include:
+
+| Hook | Purpose |
+|------|---------|
+| `health-monitor` | Internal health tracking |
+| `heartbeat` | Keep-alive mechanism |
+| `canvas-mount` | UI canvas framework |
+| `browser` | Browser-based interactions |
+| `server` | HTTP/WS server endpoints |
+
+### Phase 4: Provider Initialization (~6-10s)
+
+Channel providers connect to their external services:
+
+```
+[discord] [default] starting provider (@openclaw)
+[discord] [default] logged in as MyBot#1234
+```
+
+This is where fatal errors typically occur (e.g., Discord Error 4014). If a provider fails to connect and the error is fatal, the gateway crashes and restarts.
+
+### Phase 5: Ready (~8-12s)
+
+Once all hooks and providers complete initialization, the gateway is fully operational:
+
+```bash
+$ curl -I http://127.0.0.1:18789
+HTTP/1.1 200 OK
+```
+
+---
+
+## ⏱️ Timing Breakdown
+
+Real-world measurements from an Azure Standard B2s VM (2 vCPU, 4 GiB RAM):
+
+| Phase | Time from start | Duration |
+|-------|----------------|----------|
+| Container init | 0s | ~1-2s |
+| Port binding | ~2s | ~1s |
+| Hook loading | ~3s | ~3-4s |
+| Provider init | ~6s | ~2-4s |
+| **Fully ready** | **~8-12s** | — |
+
+These timings vary based on:
+- **VM size**: Smaller VMs (B1s, B1ms) take longer
+- **Number of providers**: More channels = longer init
+- **External service latency**: Discord login, API key validation
+- **Cold start vs warm start**: First boot after image pull is slower
+
+---
+
+## 🏥 Building Health Checks
+
+### Docker Compose Health Check
+
+Add a health check to your `docker-compose.yml` (or override file):
+
+```yaml
+services:
+  openclaw-gateway:
+    # ... existing config ...
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:18789"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+```
+
+Key parameters:
+- **`start_period: 15s`** — Grace period before health checks begin. Set this to be longer than your typical startup time.
+- **`interval: 10s`** — Time between health checks after the start period.
+- **`retries: 5`** — Number of consecutive failures before marking unhealthy.
+
+### Checking Health Status
+
+```bash
+$ docker inspect --format='{{.State.Health.Status}}' \
+    openclaw-openclaw-gateway-1
+healthy
+```
+
+Possible statuses:
+- `starting` — Within the start_period
+- `healthy` — Last health check passed
+- `unhealthy` — Consecutive failures exceeded retries
+- (empty) — No health check configured
+
+### Startup Script Health Wait
+
+If you have scripts that need to wait for the gateway to be ready:
+
+```bash
+#!/bin/bash
+# wait-for-gateway.sh
+
+MAX_WAIT=30
+INTERVAL=2
+ELAPSED=0
+
+echo "Waiting for OpenClaw gateway..."
+
+while [ $ELAPSED -lt $MAX_WAIT ]; do
+    if curl -sf http://127.0.0.1:18789 > /dev/null 2>&1; then
+        echo "Gateway is ready! (${ELAPSED}s)"
+        exit 0
+    fi
+    sleep $INTERVAL
+    ELAPSED=$((ELAPSED + INTERVAL))
+done
+
+echo "Gateway failed to start within ${MAX_WAIT}s"
+exit 1
+```
+
+---
+
+## 📊 Monitoring Startup in Real Time
+
+### Method 1: Follow Logs
+
+```bash
+docker compose logs -f openclaw-gateway
+```
+
+Watch for the "listening on" message followed by provider login confirmation.
+
+### Method 2: Poll with Watch
+
+```bash
+watch -n 1 'docker compose ps && echo "---" && \
+  curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+  http://127.0.0.1:18789 2>/dev/null || echo "Not ready"'
+```
+
+This refreshes every second, showing you both the container status and HTTP readiness.
+
+### Method 3: Timestamps
+
+```bash
+# Record start time
+START=$(date +%s)
+docker compose up -d
+
+# Poll until ready
+while ! curl -sf http://127.0.0.1:18789 > /dev/null 2>&1; do
+    sleep 1
+done
+
+END=$(date +%s)
+echo "Ready in $((END - START)) seconds"
+```
+
+---
+
+## 🚨 Distinguishing Startup from Crash-Loop
+
+The symptoms look identical — both show connection resets. Here's how to tell them apart:
+
+| Indicator | Normal Startup | Crash-Restart Loop |
+|-----------|---------------|-------------------|
+| Duration | 8-12 seconds | Repeats indefinitely |
+| `docker compose ps` uptime | Increases steadily | Resets periodically |
+| Logs after 30s | Show "listening on" | Show fatal error or empty |
+| curl after 30s | Returns 200 | Still returns connection reset |
+
+**The 30-second test:** If `curl` still returns "Connection reset by peer" after 30 seconds, it's a crash loop, not a slow startup.
+
+---
+
+## 🔧 Tuning Startup Performance
+
+### Pre-pull the Image
+
+```bash
+docker compose pull
+```
+
+Pulling the image before starting avoids the large download during the first startup.
+
+### Reduce Provider Count
+
+If you only need the API gateway (no Discord, no other channels), disable unused providers:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  channels.discord.enabled false
+```
+
+Fewer providers = faster startup.
+
+### Increase VM Resources
+
+On an Azure B1s (1 vCPU, 1 GiB), startup can take 20+ seconds. Upgrading to a B2s (2 vCPU, 4 GiB) cuts it roughly in half.
+
+### Use docker compose up --wait
+
+Docker Compose v2 supports the `--wait` flag that blocks until health checks pass:
+
+```bash
+docker compose up -d --wait
+```
+
+This requires a `healthcheck` configured in `docker-compose.yml`.
+
+---
+
+## 📈 Production Readiness Checklist
+
+Before considering your OpenClaw deployment production-ready, verify:
+
+- [ ] Health checks configured in `docker-compose.yml`
+- [ ] `start_period` set to at least 15s (or your observed max startup time + buffer)
+- [ ] Monitoring/alerting on container health status
+- [ ] Startup wait script for dependent processes
+- [ ] Tested cold-start timing on your specific VM size
+- [ ] Crash-loop detection (alerts if uptime resets more than N times in M minutes)
+
+---
+
+## 🔗 Series Navigation
+
+- Previous: [Understanding OpenClaw dangerouslyAllowHostHeaderOriginFallback](/blog/understanding-openclaw-dangerously-allow-host-header-origin-fallback)
+- See Also: [Troubleshooting OpenClaw Docker Deployments](/blog/troubleshooting-openclaw-docker-deployments)

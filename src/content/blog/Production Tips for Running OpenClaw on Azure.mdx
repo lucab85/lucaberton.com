@@ -1,0 +1,359 @@
+---
+draft: false
+title: "Production Tips for Running OpenClaw on Azure: Operations and Monitoring"
+snippet: "Lessons learned from running OpenClaw in production on Azure — covering alternative LLM providers, startup timing, CLI best practices, Docker Compose optimizations, and day-to-day operations."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - production
+  - azure
+  - docker
+  - operations
+  - monitoring
+  - llm
+  - devops
+image:
+  src: "https://placehold.co/600x400?text=OpenClaw+Production+Tips"
+  alt: "Production tips for running OpenClaw on Azure"
+---
+
+## 🏭 Moving from Setup to Production
+
+Getting OpenClaw running on Azure is one thing — keeping it running reliably is another. This post collects the operational lessons I learned after deploying OpenClaw across multiple Azure VMs.
+
+---
+
+## ⏱️ Understanding Startup Timing
+
+One of the most confusing behaviors is the "connection reset by peer" that happens right after `docker compose up -d`. Here's what's actually going on:
+
+```
+Timeline after docker compose up -d:
+  0s  → Container created, port mapped via docker-proxy
+  1s  → Port is OPEN (docker-proxy listening) but app not ready
+  2s  → curl gets "Connection reset by peer" ← NORMAL
+  5s  → Node.js process binds to port, starts hooks
+  7s  → Gateway fully initialized, serving Control UI
+  8s  → curl returns HTTP 200 ← SUCCESS
+```
+
+### The fix: wait before testing
+
+```bash
+docker compose up -d
+sleep 10  # Give the gateway time to initialize
+curl -I http://127.0.0.1:18789
+```
+
+Or use a retry loop:
+
+```bash
+docker compose up -d
+for i in $(seq 1 30); do
+  if curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:18789 2>/dev/null | grep -q "200"; then
+    echo "Gateway ready after ${i}s"
+    break
+  fi
+  sleep 1
+done
+```
+
+---
+
+## 🐚 CLI as One-Shot, Not a Service
+
+The default `docker-compose.yml` starts both `openclaw-gateway` and `openclaw-cli` as long-running services. The CLI doesn't need to run as a daemon — it's a utility tool.
+
+### Problem
+
+Running `docker compose up -d` starts both:
+
+```
+openclaw-openclaw-cli-1       Up
+openclaw-openclaw-gateway-1   Up
+```
+
+The CLI container consumes resources and can cause volume contention with the gateway.
+
+### Solution: Start only the gateway
+
+```bash
+# Start only the gateway as a daemon
+docker compose up -d openclaw-gateway
+
+# Use CLI only when needed (one-shot)
+docker compose run --rm openclaw-cli config get
+docker compose run --rm openclaw-cli dashboard --no-open
+docker compose run --rm openclaw-cli security audit
+```
+
+### Permanent fix: Profile-gate the CLI
+
+Edit `docker-compose.yml`:
+
+```yaml
+services:
+  openclaw-gateway:
+    # ... existing config ...
+
+  openclaw-cli:
+    profiles: ["cli"]
+    # ... existing config ...
+```
+
+Now `docker compose up -d` only starts the gateway. To explicitly use the CLI service:
+
+```bash
+docker compose --profile cli run --rm openclaw-cli config get
+```
+
+Or just keep using `docker compose run --rm openclaw-cli ...` — it works regardless of profiles.
+
+---
+
+## 🔄 Alternative LLM Providers
+
+While this series used GitHub Copilot (via device-flow auth), OpenClaw supports multiple LLM backends. Here's a quick overview:
+
+| Provider | Auth Method | Config Key | Notes |
+|----------|------------|------------|-------|
+| GitHub Copilot | Device flow | (built-in) | Requires Copilot subscription |
+| OpenAI | API key | `providers.openai.apiKey` | GPT-4o, GPT-4 Turbo |
+| Anthropic | API key | `providers.anthropic.apiKey` | Claude family |
+| Google Gemini | API key or CLI auth | `providers.google.apiKey` | Gemini Pro/Ultra |
+| Local (Ollama) | No auth | `providers.ollama.baseUrl` | Self-hosted models |
+| Azure OpenAI | API key + endpoint | `providers.azureOpenai.*` | Enterprise |
+
+### Switching providers
+
+```bash
+# Example: Switch to OpenAI
+docker compose run --rm openclaw-cli config set \
+  providers.openai.apiKey "sk-..."
+
+# Example: Switch to a local Ollama instance
+docker compose run --rm openclaw-cli config set \
+  providers.ollama.baseUrl "http://host.docker.internal:11434"
+
+# Restart to apply
+docker compose down
+docker compose up -d openclaw-gateway
+```
+
+---
+
+## 📊 Monitoring and Health Checks
+
+### Basic health monitoring
+
+```bash
+# Check container status
+docker compose ps
+
+# Check if gateway is responding
+curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:18789
+
+# Check gateway logs (last 50 lines)
+docker compose logs --tail=50 openclaw-gateway
+
+# Check resource usage
+docker stats openclaw-openclaw-gateway-1 --no-stream
+```
+
+### Automated health check script
+
+Create `~/openclaw/healthcheck.sh`:
+
+```bash
+#!/bin/bash
+HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+  http://127.0.0.1:18789 2>/dev/null)
+
+if [ "$HTTP_CODE" != "200" ]; then
+  echo "$(date): Gateway unhealthy (HTTP $HTTP_CODE), restarting..."
+  cd ~/openclaw
+  docker compose down
+  docker compose up -d openclaw-gateway
+  sleep 10
+  NEW_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+    http://127.0.0.1:18789 2>/dev/null)
+  echo "$(date): After restart: HTTP $NEW_CODE"
+else
+  echo "$(date): Gateway healthy (HTTP 200)"
+fi
+```
+
+Add to cron for periodic checks:
+
+```bash
+chmod +x ~/openclaw/healthcheck.sh
+crontab -e
+# Add: */5 * * * * /home/azureuser/openclaw/healthcheck.sh >> /home/azureuser/openclaw/health.log 2>&1
+```
+
+---
+
+## 💾 Persistent Data and Backups
+
+### What needs to be backed up
+
+| Path (inside container) | Host mount | Contains |
+|------------------------|-----------|----------|
+| `/home/node/.openclaw/` | Docker volume | Config, conversation history, device pairs |
+| `~/openclaw/.env` | Host filesystem | Gateway token, bind settings, env vars |
+
+### Backup commands
+
+```bash
+# Backup config from the container volume
+docker compose run --rm openclaw-cli config get > ~/openclaw-config-backup.json
+
+# Backup the .env file
+cp ~/openclaw/.env ~/openclaw/.env.backup.$(date +%Y%m%d)
+
+# Full volume backup
+docker run --rm \
+  -v openclaw_openclaw-data:/data \
+  -v $(pwd):/backup \
+  alpine tar czf /backup/openclaw-data-$(date +%Y%m%d).tar.gz -C /data .
+```
+
+---
+
+## 🔧 Common Operational Tasks
+
+### Updating OpenClaw
+
+```bash
+cd ~/openclaw
+git pull
+docker compose down
+docker compose up -d --build --force-recreate openclaw-gateway
+docker compose logs --tail=50 openclaw-gateway
+```
+
+### Rotating the gateway token
+
+```bash
+NEW_TOKEN=$(openssl rand -hex 32)
+sed -i "s/OPENCLAW_GATEWAY_TOKEN=.*/OPENCLAW_GATEWAY_TOKEN=$NEW_TOKEN/" .env
+docker compose down
+docker compose up -d openclaw-gateway
+echo "New token: $NEW_TOKEN"
+```
+
+### Re-enabling Discord (after fixing intents)
+
+```bash
+# 1. Fix Discord Developer Portal settings first
+# 2. Then re-enable in OpenClaw
+docker compose run --rm openclaw-cli config set channels.discord.enabled true
+docker compose down
+docker compose up -d openclaw-gateway
+docker compose logs --tail=100 openclaw-gateway
+# Verify no "Fatal Gateway error: 4014"
+```
+
+### Running the doctor
+
+```bash
+docker compose run --rm openclaw-cli doctor --fix
+```
+
+### Running a security audit
+
+```bash
+docker compose run --rm openclaw-cli security audit
+```
+
+---
+
+## 🚫 Suppressing CLAUDE_* Warnings
+
+Those `WARN` messages about unset `CLAUDE_*` variables are harmless but noisy:
+
+```
+WARN[0000] The "CLAUDE_AI_SESSION_KEY" variable is not set. Defaulting to a blank string.
+WARN[0000] The "CLAUDE_WEB_SESSION_KEY" variable is not set. Defaulting to a blank string.
+WARN[0000] The "CLAUDE_WEB_COOKIE" variable is not set. Defaulting to a blank string.
+```
+
+### Fix: Add empty values to .env
+
+```bash
+cat >> ~/openclaw/.env << 'EOF'
+CLAUDE_AI_SESSION_KEY=
+CLAUDE_WEB_SESSION_KEY=
+CLAUDE_WEB_COOKIE=
+EOF
+```
+
+After this, the warnings disappear from every `docker compose` command.
+
+---
+
+## 📋 Quick Reference: Common Commands
+
+```bash
+# Start gateway only
+docker compose up -d openclaw-gateway
+
+# Stop everything
+docker compose down
+
+# View logs (live)
+docker compose logs -f openclaw-gateway
+
+# View logs (last 100 lines)
+docker compose logs --tail=100 openclaw-gateway
+
+# Check status
+docker compose ps
+
+# Run CLI command
+docker compose run --rm openclaw-cli <command>
+
+# Get current config
+docker compose run --rm openclaw-cli config get
+
+# Set a config value
+docker compose run --rm openclaw-cli config set <key> <value>
+
+# Generate dashboard URL
+docker compose run --rm openclaw-cli dashboard --no-open
+
+# List/approve devices
+docker compose run --rm openclaw-cli devices list
+docker compose run --rm openclaw-cli devices approve <requestId>
+
+# Security audit
+docker compose run --rm openclaw-cli security audit
+
+# Doctor (diagnose + fix)
+docker compose run --rm openclaw-cli doctor --fix
+
+# Rebuild from source
+docker compose up -d --build --force-recreate openclaw-gateway
+```
+
+---
+
+## 📚 Series Summary
+
+This 10-part series covered the complete journey of deploying OpenClaw on Azure:
+
+1. [What is OpenClaw?](/blog/what-is-openclaw-ai-gateway) — Overview and architecture
+2. [Azure VM Setup](/blog/setting-up-azure-vm-for-openclaw) — Creating and configuring the VM
+3. [Docker Installation](/blog/installing-docker-for-openclaw-on-azure) — Docker + Compose setup
+4. [Gateway Configuration](/blog/configuring-openclaw-gateway-bind-and-control-ui) — Bind modes and Control UI origins
+5. [Discord Integration](/blog/connecting-openclaw-to-discord-on-azure) — Bot setup and Fatal Gateway error 4014
+6. [Control UI Access](/blog/accessing-openclaw-control-ui-dashboard) — SSH tunnel and public access
+7. [Security Hardening](/blog/security-hardening-for-openclaw-on-azure) — Multi-layer security setup
+8. [Troubleshooting](/blog/troubleshooting-openclaw-docker-deployments) — Common errors and fixes
+9. [Copilot Authentication](/blog/github-copilot-authentication-for-openclaw) — Device flow on headless servers
+10. **Production Tips** (this post) — Operations and monitoring
+
+Every error message, configuration option, and workaround in this series was verified on a real Azure VM deployment. If you encounter issues not covered here, the `openclaw-cli doctor --fix` and `openclaw-cli security audit` commands are your best starting point.

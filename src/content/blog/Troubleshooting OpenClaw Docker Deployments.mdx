@@ -1,0 +1,316 @@
+---
+draft: false
+title: "Troubleshooting OpenClaw Docker Deployments: Common Errors and Fixes"
+snippet: "A field-tested troubleshooting guide for OpenClaw Docker deployments. Covers crash loops, Invalid bind errors, allowedOrigins failures, Discord 4014 errors, and container restart debugging techniques."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - docker
+  - troubleshooting
+  - debugging
+  - azure
+  - gateway
+  - errors
+  - devops
+image:
+  src: "https://placehold.co/600x400?text=OpenClaw+Troubleshooting"
+  alt: "Troubleshooting OpenClaw Docker deployments"
+---
+
+## 🔧 Debugging OpenClaw: A Field Guide
+
+After deploying OpenClaw on several Azure VMs, I've encountered (and fixed) every common error. This guide is a direct result of those real-world deployments — every error message and fix has been verified.
+
+---
+
+## 🚨 Error 1: Container Stuck in "Restarting (1)"
+
+### Symptoms
+
+```bash
+$ docker compose ps
+NAME                          STATUS
+openclaw-openclaw-gateway-1   Restarting (1) 6 seconds ago
+```
+
+The container starts, crashes within seconds, and Docker restarts it in an infinite loop.
+
+### Diagnosis
+
+Always start with logs:
+
+```bash
+docker compose logs --no-color --tail=200 openclaw-gateway
+```
+
+The last line before each restart reveals the exact error. Look for lines containing `Gateway failed to start:` or `Invalid --bind`.
+
+---
+
+## 🚨 Error 2: Invalid --bind
+
+### Error message
+
+```
+Invalid --bind (use "loopback", "lan", "tailnet", "auto", or "custom")
+```
+
+### Cause
+
+You set `OPENCLAW_GATEWAY_BIND` to an IP address like `0.0.0.0` or `127.0.0.1` instead of a named mode.
+
+### Fix
+
+Edit `.env`:
+
+```bash
+cd ~/openclaw
+nano .env
+```
+
+Change to a valid mode:
+
+```bash
+# Instead of: OPENCLAW_GATEWAY_BIND=0.0.0.0
+OPENCLAW_GATEWAY_BIND=lan
+
+# Instead of: OPENCLAW_GATEWAY_BIND=127.0.0.1
+OPENCLAW_GATEWAY_BIND=loopback
+```
+
+Restart:
+
+```bash
+docker compose down
+docker compose up -d --force-recreate
+```
+
+---
+
+## 🚨 Error 3: Non-loopback Control UI requires allowedOrigins
+
+### Error message
+
+```
+Gateway failed to start: Error: non-loopback Control UI requires
+gateway.controlUi.allowedOrigins (set explicit origins), or set
+gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true
+to use Host-header origin fallback mode
+```
+
+### Cause
+
+The gateway is bound to a non-loopback address (`lan`, `tailnet`, etc.) but no browser origins are configured for the Control UI.
+
+### Fix (Option A — explicit origins, recommended)
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.controlUi.allowedOrigins \
+  '["http://<VM_PUBLIC_IP>:18789","http://localhost:18789"]'
+```
+
+### Fix (Option B — host-header fallback, quick)
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true
+```
+
+### Fix (Option C — use loopback instead)
+
+```bash
+# In .env
+OPENCLAW_GATEWAY_BIND=loopback
+```
+
+Then access via SSH tunnel. No origin config needed.
+
+After any fix:
+
+```bash
+docker compose down
+docker compose up -d
+docker compose ps
+```
+
+---
+
+## 🚨 Error 4: Fatal Gateway error: 4014 (Discord)
+
+### Error message
+
+```
+[openclaw] Uncaught exception: Error: Fatal Gateway error: 4014
+    at GatewayPlugin.handleReconnectionAttempt
+```
+
+### Cause
+
+Discord rejected the bot's connection because it requested **privileged intents** that aren't enabled in the Discord Developer Portal.
+
+### Fix
+
+1. Go to [Discord Developer Portal](https://discord.com/developers/applications)
+2. Select your app → **Bot** → **Privileged Gateway Intents**
+3. Enable **Message Content Intent**
+4. Click **Save Changes**
+5. Restart:
+   ```bash
+   docker compose down
+   docker compose up -d
+   ```
+
+### Temporary workaround (disable Discord)
+
+If you just want the gateway stable while you fix Discord:
+
+```bash
+docker compose run --rm openclaw-cli config set channels.discord.enabled false
+docker compose down
+docker compose up -d
+```
+
+---
+
+## 🚨 Error 5: Discord config moved to channels.discord
+
+### Error message
+
+```
+Error: Config validation failed: discord: discord config moved
+to channels.discord (auto-migrated on load).
+```
+
+### Cause
+
+You tried to set config using the old `discord.*` namespace.
+
+### Fix
+
+Use `channels.discord.*` instead:
+
+```bash
+# Wrong
+docker compose run --rm openclaw-cli config set discord.enabled false
+
+# Correct
+docker compose run --rm openclaw-cli config set channels.discord.enabled false
+```
+
+---
+
+## 🚨 Error 6: CLAUDE_* variable warnings
+
+### Warning message
+
+```
+WARN[0000] The "CLAUDE_AI_SESSION_KEY" variable is not set. Defaulting to a blank string.
+WARN[0000] The "CLAUDE_WEB_SESSION_KEY" variable is not set. Defaulting to a blank string.
+WARN[0000] The "CLAUDE_WEB_COOKIE" variable is not set. Defaulting to a blank string.
+```
+
+### Cause
+
+These are Docker Compose warnings about undefined environment variables referenced in `docker-compose.yml`. They are **harmless** — the variables are optional and default to empty strings.
+
+### Fix (optional, cosmetic)
+
+To suppress the warnings, add empty values to your `.env`:
+
+```bash
+CLAUDE_AI_SESSION_KEY=
+CLAUDE_WEB_SESSION_KEY=
+CLAUDE_WEB_COOKIE=
+```
+
+---
+
+## 🚨 Error 7: Connection Refused on curl
+
+### Symptoms
+
+```bash
+$ curl -I http://127.0.0.1:18789
+curl: (7) Failed to connect to 127.0.0.1 port 18789: Couldn't connect to server
+```
+
+### Causes and fixes
+
+| Cause | How to check | Fix |
+|-------|-------------|-----|
+| Gateway not running | `docker compose ps` shows "Restarting" | Fix the underlying error (see above) |
+| Wrong bind mode | Gateway binds to different interface | Check `.env` OPENCLAW_GATEWAY_BIND |
+| Port conflict | `sudo ss -ltnp \| grep 18789` | Change port in `.env` |
+| Container just restarted | Timing issue — gateway takes a few seconds | Wait and retry |
+
+---
+
+## 🔍 General Debugging Workflow
+
+When something isn't working, follow this systematic approach:
+
+### Step 1: Check container status
+
+```bash
+docker compose ps
+```
+
+- **Up** = running normally
+- **Restarting** = crash loop — check logs
+- **Exited** = stopped — check logs for why
+
+### Step 2: Read the logs
+
+```bash
+# Last 200 lines
+docker compose logs --no-color --tail=200 openclaw-gateway
+
+# Live stream
+docker compose logs -f openclaw-gateway
+```
+
+### Step 3: Run foreground (for hard-to-catch errors)
+
+```bash
+docker compose down
+docker compose up openclaw-gateway
+# Watch output, Ctrl+C to stop
+```
+
+### Step 4: Check configuration
+
+```bash
+docker compose run --rm openclaw-cli config get
+docker compose run --rm openclaw-cli config get | grep -i "gateway\|discord\|bind"
+```
+
+### Step 5: Run the doctor
+
+```bash
+docker compose run --rm openclaw-cli doctor --fix
+```
+
+### Step 6: Security audit
+
+```bash
+docker compose run --rm openclaw-cli security audit
+```
+
+### Step 7: Nuclear option — rebuild everything
+
+```bash
+cd ~/openclaw
+git pull
+docker compose down
+docker compose up -d --build --force-recreate
+```
+
+---
+
+## ⏭️ Next Steps
+
+With troubleshooting covered, let's look at GitHub Copilot authentication: [GitHub Copilot Authentication for OpenClaw](/blog/github-copilot-authentication-for-openclaw).

@@ -1,0 +1,212 @@
+---
+draft: false
+title: "GitHub Copilot Authentication for OpenClaw: Device Flow on Headless Servers"
+snippet: "How GitHub Copilot device-flow authentication works with OpenClaw on headless Azure VMs. Covers the auth wizard, device codes, Copilot Proxy vs GitHub login, and re-authentication."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - github-copilot
+  - authentication
+  - oauth
+  - device-flow
+  - azure
+  - ai
+  - llm
+image:
+  src: "https://placehold.co/600x400?text=OpenClaw+Copilot+Auth"
+  alt: "GitHub Copilot authentication for OpenClaw"
+---
+
+## 🔑 Copilot as OpenClaw's AI Brain
+
+OpenClaw is model-agnostic — it can use various LLM providers. One of the most popular choices is **GitHub Copilot**, which provides access to models like Claude Opus 4.6 through your existing GitHub subscription.
+
+During the OpenClaw onboarding wizard, you'll see this screen:
+
+```
+Copilot auth method
+● GitHub Copilot (GitHub device login)
+○ Copilot Proxy (local)
+○ Back
+```
+
+This post explains both options and how to handle authentication on headless Azure VMs.
+
+---
+
+## 🎯 Option 1: GitHub Copilot (GitHub Device Login) — Recommended
+
+This is the standard option for most deployments, especially on headless servers like Azure VMs.
+
+### How it works
+
+GitHub's **device flow** (OAuth 2.0 Device Authorization Grant) is designed for environments without a browser:
+
+1. OpenClaw generates a **device code** and a **verification URL**
+2. You open the URL on **any device with a browser** (your laptop, phone, etc.)
+3. Enter the device code and authorize
+4. OpenClaw receives the token automatically
+
+### Step-by-step
+
+1. **Select "GitHub Copilot (GitHub device login)"** in the wizard
+
+2. The wizard will display something like:
+   ```
+   To sign in, visit: https://github.com/login/device
+   Enter code: ABCD-1234
+   ```
+
+3. On your laptop/phone browser:
+   - Open `https://github.com/login/device`
+   - Log in to your GitHub account (if not already)
+   - Enter the code `ABCD-1234`
+   - Click **Authorize**
+
+4. Return to the VM terminal — the wizard should automatically proceed
+
+### Prerequisites
+
+- A **GitHub account** with an active **Copilot subscription** (Individual, Business, or Enterprise)
+- The Copilot subscription must include API/model access
+
+### What model does it use?
+
+After authentication, OpenClaw logs the selected model:
+
+```
+[gateway] agent model: github-copilot/claude-opus-4.6
+```
+
+The specific model depends on your Copilot tier and OpenClaw configuration.
+
+---
+
+## 🔌 Option 2: Copilot Proxy (Local)
+
+This option is for advanced setups where you're running a **local Copilot proxy** — typically a bridge that translates between VS Code's Copilot extension protocol and OpenClaw's expected API format.
+
+### When to use it
+
+- You're running a local proxy that intercepts Copilot requests
+- You have a custom authentication flow
+- You're bridging between Copilot's internal API and OpenClaw
+
+### When NOT to use it
+
+- On Azure VMs (there's no "local" VS Code Copilot proxy)
+- For standard deployments
+- If you're not sure — use the GitHub device login instead
+
+---
+
+## 🔄 Re-authenticating
+
+If your Copilot token expires or you need to switch accounts:
+
+### Via the CLI
+
+```bash
+cd ~/openclaw
+
+# Re-run the configuration wizard
+docker compose run --rm openclaw-cli configure
+```
+
+This will walk you through the auth selection again.
+
+### Via config set
+
+If you know the specific config key:
+
+```bash
+docker compose run --rm openclaw-cli config get | grep -i copilot
+```
+
+Then update the relevant key and restart:
+
+```bash
+docker compose down
+docker compose up -d
+```
+
+---
+
+## 🖥️ Device Flow on Headless Servers
+
+The device flow is particularly elegant for Azure VMs because:
+
+1. **No browser needed on the server** — The VM just displays a code
+2. **Any device can authorize** — Use your laptop, phone, or tablet
+3. **Secure** — The code expires after a few minutes
+4. **One-time** — Once authorized, the token is stored persistently
+
+### SSH session workflow
+
+```
+[Your Laptop] ──SSH──> [Azure VM]
+                         │
+                         ├── OpenClaw shows: "Visit https://github.com/login/device"
+                         │                   "Enter code: ABCD-1234"
+                         │
+[Your Laptop Browser] ──> github.com/login/device
+                         │   Enter code, authorize
+                         │
+                         └── OpenClaw: "Authorized! Continuing setup..."
+```
+
+### Tips for headless auth
+
+- **Copy the URL and code** from your SSH terminal carefully
+- The code is case-insensitive but must match exactly
+- **Don't close the SSH session** while waiting for authorization
+- If the code expires, just restart the wizard — it generates a new one
+- The token is stored in the container's persistent volume (`~/.openclaw/`)
+
+---
+
+## 🔐 Token Storage and Security
+
+After authorization, the Copilot token is stored in OpenClaw's config directory:
+
+```bash
+# Inside the container
+/home/node/.openclaw/
+
+# Mapped from the host via Docker volume
+# Check docker-compose.yml for the volume mount
+```
+
+### Security considerations
+
+- The token grants access to your Copilot subscription's AI models
+- It's stored in the container's persistent volume
+- Protect the `.openclaw` directory with appropriate permissions
+- If you suspect the token is compromised, revoke it via GitHub Settings → Applications
+
+---
+
+## 🤔 Which Models Are Available?
+
+With GitHub Copilot auth, the available models depend on your subscription:
+
+| Copilot Tier | Available Models | Notes |
+|-------------|-----------------|-------|
+| Individual | GPT-4o, Claude Opus 4.6 | Varies by region |
+| Business | GPT-4o, Claude Opus 4.6 | Enterprise features |
+| Enterprise | Full model catalog | Custom model access |
+
+OpenClaw selects the model based on its configuration. You can check or change it:
+
+```bash
+docker compose run --rm openclaw-cli config get | grep -i model
+```
+
+---
+
+## ⏭️ Next Steps
+
+With authentication configured, let's wrap up with production operations and monitoring: [Production Tips for Running OpenClaw on Azure](/blog/production-tips-for-running-openclaw-on-azure).

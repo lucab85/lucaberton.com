@@ -1,0 +1,241 @@
+---
+draft: false
+title: "Accessing the OpenClaw Control UI Dashboard on Azure"
+snippet: "How to access the OpenClaw Control UI dashboard from an Azure VM — via SSH tunnel (secure) or public IP. Covers device pairing, dashboard authentication, and the browser-based management interface."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - dashboard
+  - control-ui
+  - azure
+  - ssh-tunnel
+  - monitoring
+  - web-ui
+  - docker
+image:
+  src: "https://placehold.co/600x400?text=OpenClaw+Control+UI"
+  alt: "OpenClaw Control UI dashboard access on Azure"
+---
+
+## 🖥️ The Control UI Dashboard
+
+OpenClaw ships with a browser-based **Control UI** (dashboard) for managing your AI agent. It's where you monitor conversations, configure settings, manage devices, and interact with the agent directly.
+
+The dashboard runs on the same port as the gateway (default: `18789`) and serves under the root path `/` (or a custom `basePath`).
+
+---
+
+## 🔐 Option A: SSH Tunnel (Recommended)
+
+The safest way to access the Control UI from your Azure VM is through an **SSH tunnel**. No public ports, no NSG rules, no origin configuration needed.
+
+### Step 1: Set bind to loopback
+
+On the VM:
+
+```bash
+cd ~/openclaw
+nano .env
+```
+
+Set:
+```
+OPENCLAW_GATEWAY_BIND=loopback
+```
+
+Restart:
+```bash
+docker compose down
+docker compose up -d
+```
+
+### Step 2: Create the SSH tunnel
+
+On your **local machine** (not the VM), open a terminal and run:
+
+```bash
+ssh -L 18789:127.0.0.1:18789 azureuser@<VM_PUBLIC_IP>
+```
+
+This forwards your local port `18789` to the VM's localhost `18789`.
+
+### Step 3: Open in your browser
+
+Navigate to:
+
+```
+http://127.0.0.1:18789
+```
+
+You should see the OpenClaw Control UI login/pairing screen.
+
+> **Tip:** Keep the SSH tunnel terminal open while you use the dashboard. Closing it will disconnect the tunnel.
+
+---
+
+## 🌐 Option B: Public Access
+
+If you need direct access via the VM's public IP (e.g., for team access or when SSH tunnels aren't practical):
+
+### Step 1: Set bind to LAN
+
+```bash
+cd ~/openclaw
+nano .env
+```
+
+Set:
+```
+OPENCLAW_GATEWAY_BIND=lan
+```
+
+### Step 2: Configure allowed origins
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.controlUi.allowedOrigins \
+  '["http://<VM_PUBLIC_IP>:18789"]'
+```
+
+### Step 3: Open the Azure NSG port
+
+In the Azure Portal:
+1. Go to your VM → **Networking**
+2. Click **Add inbound port rule**
+3. Configure:
+   - **Destination port:** `18789`
+   - **Protocol:** TCP
+   - **Source:** Your IP address (not `Any`)
+   - **Priority:** `1001`
+   - **Name:** `AllowOpenClaw`
+
+### Step 4: Restart and access
+
+```bash
+docker compose down
+docker compose up -d
+```
+
+Open in your browser:
+
+```
+http://<VM_PUBLIC_IP>:18789
+```
+
+---
+
+## 🔑 Device Pairing
+
+When you first access the Control UI, OpenClaw requires **device pairing** — a security mechanism that ensures only authorized browsers/devices can control the agent.
+
+### How it works
+
+1. Open the Control UI URL in your browser
+2. You'll see a pairing request screen
+3. Approve the device from the CLI:
+
+```bash
+cd ~/openclaw
+
+# List pending device pairing requests
+docker compose run --rm openclaw-cli devices list
+
+# Approve a specific device
+docker compose run --rm openclaw-cli devices approve <requestId>
+```
+
+### Generating a dashboard link
+
+If you need a fresh authenticated dashboard URL:
+
+```bash
+docker compose run --rm openclaw-cli dashboard --no-open
+```
+
+This outputs a URL with an embedded auth token — open it in your browser.
+
+---
+
+## 🔧 Dashboard Features
+
+Once authenticated, the Control UI provides:
+
+### Conversation Monitor
+- View active and historical conversations
+- See messages from all connected channels (Discord, Telegram, etc.)
+- Watch the AI agent's responses in real-time
+
+### Configuration Panel
+- Modify gateway settings through the UI
+- Manage channel configurations
+- View and update model settings
+
+### Agent Status
+- Current model (e.g., `github-copilot/claude-opus-4.6`)
+- Connected channels and their status
+- Hook/plugin status
+- Health monitor information
+
+### Device Management
+- List paired devices
+- Approve or revoke device access
+- View device identities
+
+---
+
+## 🔄 Accessing from Multiple Devices
+
+Each browser/device that accesses the Control UI needs to be paired. To pair additional devices:
+
+1. Open the Control UI URL from the new device
+2. On the VM, approve the pairing:
+
+```bash
+docker compose run --rm openclaw-cli devices list
+docker compose run --rm openclaw-cli devices approve <requestId>
+```
+
+---
+
+## 🐛 Common Access Issues
+
+### "Unauthorized / pairing required"
+
+```bash
+# Generate a new dashboard link with auth token
+docker compose run --rm openclaw-cli dashboard --no-open
+
+# Or approve pending devices
+docker compose run --rm openclaw-cli devices list
+docker compose run --rm openclaw-cli devices approve <requestId>
+```
+
+### curl works but browser shows blank/error
+
+This usually means the Control UI assets weren't built. Check:
+
+```bash
+docker compose logs --tail=50 openclaw-gateway | grep "control-ui\|controlUi\|assets"
+```
+
+If you see "Control UI assets not found":
+
+```bash
+docker compose down
+docker compose up -d --build --force-recreate
+```
+
+### Connection refused from laptop
+
+- Verify the SSH tunnel is active (Option A)
+- Verify the NSG rule allows your IP (Option B)
+- Verify the gateway is running: `docker compose ps`
+
+---
+
+## ⏭️ Next Steps
+
+Now that you can access the dashboard, let's harden the security: [Security Hardening for OpenClaw on Azure](/blog/security-hardening-for-openclaw-on-azure).

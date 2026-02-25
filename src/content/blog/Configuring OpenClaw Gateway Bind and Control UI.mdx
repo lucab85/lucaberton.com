@@ -1,0 +1,220 @@
+---
+draft: false
+title: "Configuring OpenClaw Gateway Bind and Control UI on Azure"
+snippet: "Deep dive into OpenClaw gateway bind modes (loopback, lan, tailnet, auto, custom), Control UI origin enforcement, and the allowedOrigins vs dangerouslyAllowHostHeaderOriginFallback trade-off."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - gateway
+  - configuration
+  - azure
+  - networking
+  - security
+  - cors
+  - docker
+image:
+  src: "https://placehold.co/600x400?text=OpenClaw+Gateway+Config"
+  alt: "Configuring OpenClaw Gateway bind and Control UI"
+---
+
+## ⚙️ Understanding Gateway Bind Modes
+
+One of the first configuration hurdles with OpenClaw on Azure is understanding the `--bind` parameter. Unlike a simple IP address (e.g., `0.0.0.0`), OpenClaw uses **named bind modes**:
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `loopback` | Binds to `127.0.0.1` only | SSH tunnel access (most secure) |
+| `lan` | Binds to all network interfaces | Direct LAN/public access |
+| `tailnet` | Binds to Tailscale interface | Zero-config VPN access |
+| `auto` | OpenClaw decides based on environment | Automatic detection |
+| `custom` | Custom bind address (requires additional config) | Advanced setups |
+
+### Setting the bind mode
+
+In your `.env` file on the VM:
+
+```bash
+# For SSH tunnel access (recommended)
+OPENCLAW_GATEWAY_BIND=loopback
+
+# For direct public/LAN access
+OPENCLAW_GATEWAY_BIND=lan
+```
+
+> **Common mistake:** Setting `OPENCLAW_GATEWAY_BIND=0.0.0.0` will fail with:
+> ```
+> Invalid --bind (use "loopback", "lan", "tailnet", "auto", or "custom")
+> ```
+> Use `lan` instead of `0.0.0.0`.
+
+---
+
+## 🔒 The Control UI Origin Enforcement
+
+When you bind to a non-loopback address (e.g., `lan`), OpenClaw enforces **browser-origin checks** on the Control UI. This prevents unauthorized browsers from connecting to your dashboard via DNS rebinding or cross-origin attacks.
+
+Without proper origin configuration, you'll see this crash loop:
+
+```
+Gateway failed to start: Error: non-loopback Control UI requires
+gateway.controlUi.allowedOrigins (set explicit origins), or set
+gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true
+to use Host-header origin fallback mode
+```
+
+You have two options to fix this:
+
+---
+
+## 🎯 Option A: Explicit Allowed Origins (Recommended)
+
+Set a specific list of trusted origins:
+
+```bash
+cd ~/openclaw
+
+docker compose run --rm openclaw-cli config set \
+  gateway.controlUi.allowedOrigins \
+  '["http://<VM_PUBLIC_IP>:18789","http://<VM_PRIVATE_IP>:18789","http://localhost:18789","http://127.0.0.1:18789"]'
+```
+
+Replace `<VM_PUBLIC_IP>` and `<VM_PRIVATE_IP>` with your actual IPs:
+
+```bash
+# Get your public IP
+curl -s ifconfig.me; echo
+
+# Get your private IP
+hostname -I
+```
+
+### Why this is recommended
+
+- Explicitly defines which browser origins can connect
+- Protects against DNS rebinding attacks
+- No security warnings in the gateway logs
+- Works with Azure NSG restrictions for defense in depth
+
+---
+
+## ⚡ Option B: Host-Header Origin Fallback (Quick but less secure)
+
+If you want to get running immediately:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true
+```
+
+This tells OpenClaw to trust the `Host` header from the browser request instead of checking against an explicit allowlist.
+
+### When this is acceptable
+
+- You restrict access via Azure NSG to your IP only
+- You're behind a reverse proxy that sets proper headers
+- You're in a development/testing environment
+- You understand the DNS rebinding risk
+
+### The security warning
+
+With this flag enabled, you'll see:
+
+```
+[gateway] security warning: dangerous config flags enabled:
+gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true.
+Run openclaw security audit.
+```
+
+This is expected and serves as a reminder to lock down access through other means.
+
+---
+
+## 🔄 Applying Configuration Changes
+
+After any config change, restart the gateway:
+
+```bash
+docker compose down
+docker compose up -d --force-recreate
+docker compose ps
+docker compose logs --tail=50 openclaw-gateway
+```
+
+Verify the gateway stays `Up` (not `Restarting`):
+
+```bash
+# Check multiple times over ~60 seconds
+docker compose ps
+# Wait 15 seconds
+docker compose ps
+# Wait 15 seconds  
+docker compose ps
+```
+
+---
+
+## 🛡️ Recommended Configuration for Azure
+
+### For SSH tunnel access (most secure)
+
+```bash
+# .env
+OPENCLAW_GATEWAY_BIND=loopback
+OPENCLAW_GATEWAY_PORT=18789
+```
+
+No origin configuration needed — loopback mode skips the origin check.
+
+Access via SSH tunnel:
+```bash
+# From your laptop
+ssh -L 18789:127.0.0.1:18789 azureuser@<VM_PUBLIC_IP>
+# Then open http://127.0.0.1:18789
+```
+
+### For direct public access
+
+```bash
+# .env
+OPENCLAW_GATEWAY_BIND=lan
+OPENCLAW_GATEWAY_PORT=18789
+```
+
+Plus explicit origins:
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.controlUi.allowedOrigins \
+  '["http://<VM_PUBLIC_IP>:18789"]'
+```
+
+Plus Azure NSG rule restricting TCP 18789 to your IP.
+
+---
+
+## 📋 Configuration Reference
+
+View your current configuration:
+
+```bash
+docker compose run --rm openclaw-cli config get
+```
+
+Key gateway settings:
+
+| Config Key | Default | Description |
+|-----------|---------|-------------|
+| `gateway.controlUi.enabled` | `true` | Enable/disable the Control UI |
+| `gateway.controlUi.basePath` | `/` | URL prefix for the UI (e.g., `/openclaw`) |
+| `gateway.controlUi.allowedOrigins` | `[]` | Browser-origin allowlist |
+| `gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback` | `false` | Host-header fallback mode |
+| `gateway.controlUi.allowInsecureAuth` | `false` | Allow token-only auth over HTTP |
+| `gateway.controlUi.dangerouslyDisableDeviceAuth` | `false` | Disable device identity checks |
+
+---
+
+## ⏭️ Next Steps
+
+With the gateway properly configured, let's connect a Discord bot: [Connecting OpenClaw to Discord on Azure](/blog/connecting-openclaw-to-discord-on-azure).

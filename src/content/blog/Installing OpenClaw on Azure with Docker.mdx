@@ -1,0 +1,221 @@
+---
+draft: false
+title: "Installing OpenClaw on Azure with Docker: Complete Walkthrough"
+snippet: "A hands-on guide to cloning, building, and running OpenClaw on an Azure VM using Docker Compose. Covers the docker-setup.sh wizard, the onboarding flow, and getting the gateway container running."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - docker
+  - azure
+  - installation
+  - docker-compose
+  - ai
+  - gateway
+  - tutorial
+image:
+  src: "https://placehold.co/600x400?text=Installing+OpenClaw+Docker"
+  alt: "Installing OpenClaw on Azure with Docker"
+---
+
+## 🐳 Installing OpenClaw with Docker
+
+With your Azure VM ready and Docker installed (see [Setting Up an Azure VM for OpenClaw](/blog/setting-up-azure-vm-for-openclaw)), it's time to clone the OpenClaw repository and run the Docker setup.
+
+---
+
+## 📥 Step 1: Clone the Repository
+
+SSH into your VM and clone:
+
+```bash
+ssh azureuser@<VM_PUBLIC_IP>
+git clone https://github.com/openclaw/openclaw.git
+cd openclaw
+```
+
+The repository is quite large — it includes the full source, documentation, extensions, and Docker configuration:
+
+```bash
+ls -la
+# You'll see:
+# docker-compose.yml    — Docker Compose configuration
+# docker-setup.sh       — Interactive setup script
+# .env.example          — Environment variable template
+# Dockerfile            — Container build instructions
+# src/                  — Source code
+# extensions/           — Channel and plugin extensions
+# docs/                 — Documentation
+```
+
+---
+
+## 🔧 Step 2: Run the Docker Setup Script
+
+The `docker-setup.sh` script automates the entire onboarding process:
+
+```bash
+./docker-setup.sh
+```
+
+This script will:
+
+1. **Build the Docker image** (`openclaw:local`) from the Dockerfile
+2. **Create the `.env` file** with generated secrets (gateway token, etc.)
+3. **Launch the onboarding wizard** — an interactive CLI that configures your agent
+4. **Start the gateway** via Docker Compose
+
+### The Onboarding Wizard
+
+The wizard walks you through several screens:
+
+#### Copilot Auth Method
+```
+Copilot auth method
+● GitHub Copilot (GitHub device login)
+○ Copilot Proxy (local)
+```
+
+**Choose GitHub Copilot (GitHub device login)** — this uses GitHub's OAuth device flow. The wizard will display a URL and one-time code. Open the URL in your browser, paste the code, and authorize.
+
+> **Tip:** If you're on a headless Azure VM, copy the URL from the SSH session and open it in your local browser. The wizard will proceed automatically once you authorize.
+
+#### Channel Selection
+```
+Select channel (QuickStart)
+│  Discord (Bot API)
+```
+
+Pick your preferred channel. Discord is the most common starting point.
+
+#### Channel Configuration
+For Discord, you'll be prompted for a **bot token**. We'll cover the full Discord setup in a dedicated post.
+
+---
+
+## 📄 Step 3: Understand the Docker Compose Setup
+
+After setup, examine the generated configuration:
+
+```bash
+cat docker-compose.yml
+```
+
+The key services are:
+
+### `openclaw-gateway`
+- The main gateway server
+- Exposes ports `18789` (Control UI + API) and `18790` (additional services)
+- Mounts `~/.openclaw` for persistent config/data
+- Reads environment variables from `.env`
+
+### `openclaw-cli`
+- A helper container for running CLI commands
+- Same image as the gateway
+- Used for `config set`, `config get`, `devices`, etc.
+
+### Environment Variables (`.env`)
+
+```bash
+cat .env
+```
+
+Key variables you'll see:
+
+| Variable | Purpose |
+|----------|---------|
+| `OPENCLAW_GATEWAY_BIND` | Bind mode: `loopback`, `lan`, `tailnet`, `auto`, `custom` |
+| `OPENCLAW_GATEWAY_PORT` | Gateway port (default: `18789`) |
+| `OPENCLAW_GATEWAY_TOKEN` | Auth token for the gateway (auto-generated) |
+| `CLAUDE_AI_SESSION_KEY` | Optional Claude AI session key |
+| `CLAUDE_WEB_SESSION_KEY` | Optional Claude web session key |
+
+> **Note:** The `CLAUDE_*` warnings you see in Docker Compose output are harmless — they're optional variables that default to blank strings.
+
+---
+
+## 🔍 Step 4: Verify the Container is Running
+
+```bash
+docker compose ps
+```
+
+You want to see the gateway with status `Up`:
+
+```
+NAME                          IMAGE            STATUS         PORTS
+openclaw-openclaw-gateway-1   openclaw:local   Up 45 seconds  0.0.0.0:18789-18790->18789-18790/tcp
+```
+
+### Check the logs
+
+```bash
+docker compose logs --tail=50 openclaw-gateway
+```
+
+A healthy startup looks like:
+
+```
+[canvas] host mounted at http://0.0.0.0:18789/__openclaw__/canvas/
+[heartbeat] started
+[health-monitor] started (interval: 300s, grace: 60s)
+[gateway] agent model: github-copilot/claude-opus-4.6
+[gateway] listening on ws://0.0.0.0:18789 (PID 7)
+[hooks:loader] Registered hook: boot-md -> gateway:startup
+[hooks] loaded 4 internal hook handlers
+```
+
+### If the container is restarting
+
+If you see `Restarting (1)` instead of `Up`, check the logs for the error:
+
+```bash
+docker compose logs --no-color --tail=200 openclaw-gateway
+```
+
+Common issues and their fixes are covered in [Troubleshooting OpenClaw Docker Deployments](/blog/troubleshooting-openclaw-docker-deployments).
+
+---
+
+## 🧪 Step 5: Quick Health Check
+
+From the VM, verify the gateway is responding:
+
+```bash
+curl -I http://127.0.0.1:18789
+```
+
+Expected response:
+
+```
+HTTP/1.1 200 OK
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+X-Frame-Options: DENY
+Content-Type: text/html; charset=utf-8
+Cache-Control: no-cache
+```
+
+If you get `Connection refused`, the gateway isn't running yet — check the logs.
+
+---
+
+## 🛠️ Useful Docker Compose Commands
+
+| Command | Purpose |
+|---------|---------|
+| `docker compose ps` | Check container status |
+| `docker compose logs -f openclaw-gateway` | Stream gateway logs |
+| `docker compose down` | Stop and remove containers |
+| `docker compose up -d` | Start in detached mode |
+| `docker compose up -d --force-recreate` | Restart with fresh containers |
+| `docker compose up -d --build` | Rebuild image and start |
+| `docker compose run --rm openclaw-cli <cmd>` | Run CLI commands |
+
+---
+
+## ⏭️ Next Steps
+
+Your OpenClaw container is running! Next, we'll configure the gateway bind and Control UI settings: [Configuring OpenClaw Gateway Bind and Control UI](/blog/configuring-openclaw-gateway-bind-and-control-ui).

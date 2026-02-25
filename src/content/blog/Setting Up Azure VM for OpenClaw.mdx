@@ -1,0 +1,210 @@
+---
+draft: false
+title: "Setting Up an Azure VM for OpenClaw: Prerequisites and Infrastructure"
+snippet: "Step-by-step guide to creating and configuring an Azure Virtual Machine optimized for running OpenClaw. Covers VM sizing, networking, SSH access, and Docker installation on Ubuntu."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - azure
+  - vm
+  - docker
+  - ubuntu
+  - infrastructure
+  - cloud
+  - devops
+image:
+  src: "https://placehold.co/600x400?text=OpenClaw+Azure+VM+Setup"
+  alt: "Setting up an Azure VM for OpenClaw deployment"
+---
+
+## ☁️ Why Azure for OpenClaw?
+
+OpenClaw runs as a Docker container and needs a persistent server. Azure Virtual Machines provide a reliable, scalable foundation with enterprise-grade networking and security. In this post, I'll walk through creating the perfect Azure VM for your OpenClaw deployment.
+
+---
+
+## 📋 Prerequisites
+
+Before you start, make sure you have:
+
+- An **Azure subscription** (free tier works for testing)
+- **SSH client** on your local machine (built into macOS/Linux; use Windows Terminal or PuTTY on Windows)
+- A **GitHub account** (for Copilot authentication later)
+- Optionally, a **Discord account** (for the bot channel)
+
+---
+
+## 🖥️ Step 1: Create the Azure VM
+
+### Via Azure Portal
+
+1. Navigate to **Azure Portal** → **Virtual machines** → **Create**
+2. Configure the basics:
+
+| Setting | Recommended Value |
+|---------|------------------|
+| **Image** | Ubuntu 22.04 LTS (or 24.04 LTS) |
+| **Size** | Standard_B2s (2 vCPU, 4 GB RAM) minimum |
+| **Authentication** | SSH public key |
+| **Username** | `azureuser` (default) |
+| **Inbound ports** | SSH (22) only |
+
+### Via Azure CLI
+
+```bash
+# Create resource group
+az group create \
+  --name rg-openclaw \
+  --location westeurope
+
+# Create VM
+az vm create \
+  --resource-group rg-openclaw \
+  --name vm-openclaw-01 \
+  --image Ubuntu2204 \
+  --size Standard_B2s \
+  --admin-username azureuser \
+  --generate-ssh-keys \
+  --public-ip-sku Standard
+```
+
+### Sizing recommendations
+
+| Workload | VM Size | vCPU | RAM | Notes |
+|----------|---------|------|-----|-------|
+| Testing/Dev | Standard_B2s | 2 | 4 GB | Minimum viable |
+| Light production | Standard_B2ms | 2 | 8 GB | Recommended start |
+| Heavy workloads | Standard_D4s_v5 | 4 | 16 GB | Multiple channels + plugins |
+
+---
+
+## 🌐 Step 2: Configure Networking
+
+### Keep it private (recommended)
+
+The most secure approach is to **not expose OpenClaw ports publicly** and access the Control UI via SSH tunnel. For this setup, you only need:
+
+- **Inbound:** SSH (TCP 22) from your IP
+- **Everything else:** deny
+
+### If you need public access
+
+Add an NSG (Network Security Group) rule for OpenClaw:
+
+```bash
+az network nsg rule create \
+  --resource-group rg-openclaw \
+  --nsg-name vm-openclaw-01NSG \
+  --name AllowOpenClaw \
+  --priority 1001 \
+  --destination-port-ranges 18789 18790 \
+  --source-address-prefixes "<YOUR_PUBLIC_IP>" \
+  --protocol Tcp \
+  --access Allow
+```
+
+> **Security note:** Always restrict the source to your IP address. Never use `*` or `0.0.0.0/0` for OpenClaw ports.
+
+---
+
+## 🔑 Step 3: SSH into the VM
+
+```bash
+ssh azureuser@<VM_PUBLIC_IP>
+```
+
+Verify you're connected:
+
+```bash
+uname -a
+# Linux vm-openclaw-01 6.x.x-azure ...
+```
+
+---
+
+## 🐳 Step 4: Install Docker + Compose
+
+Run this block to install Docker Engine and the Compose plugin:
+
+```bash
+# Update packages and install dependencies
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl gnupg git
+
+# Add Docker's official GPG key
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Add the Docker repository
+echo \
+"deb [arch=$(dpkg --print-architecture) \
+signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu \
+$(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+| sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker
+sudo apt-get update
+sudo apt-get install -y \
+  docker-ce \
+  docker-ce-cli \
+  containerd.io \
+  docker-buildx-plugin \
+  docker-compose-plugin
+
+# Add your user to the docker group
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+### Verify installation
+
+```bash
+docker version
+# Client: Docker Engine - Community
+# Version: 27.x.x ...
+
+docker compose version
+# Docker Compose version v2.x.x
+```
+
+---
+
+## ✅ Step 5: Verify Everything
+
+Run a quick sanity check:
+
+```bash
+# Docker works
+docker run --rm hello-world
+
+# Network connectivity
+curl -s https://github.com > /dev/null && echo "GitHub: OK"
+curl -s https://discord.com > /dev/null && echo "Discord: OK"
+
+# Disk space (OpenClaw image ~1-2 GB)
+df -h /
+```
+
+---
+
+## 📁 What You Should Have Now
+
+At this point, your Azure VM is ready with:
+
+- ✅ Ubuntu 22.04/24.04 LTS
+- ✅ Docker Engine + Compose plugin
+- ✅ SSH access configured
+- ✅ NSG rules for SSH (and optionally OpenClaw ports)
+- ✅ Your user in the `docker` group
+
+---
+
+## ⏭️ Next Steps
+
+Your infrastructure is ready! In the next post, we'll clone OpenClaw and run the Docker setup wizard: [Installing OpenClaw on Azure with Docker](/blog/installing-openclaw-on-azure-with-docker).

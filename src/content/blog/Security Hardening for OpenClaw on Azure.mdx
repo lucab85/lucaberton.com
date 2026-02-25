@@ -1,0 +1,247 @@
+---
+draft: false
+title: "Security Hardening for OpenClaw on Azure"
+snippet: "How to secure your OpenClaw deployment on Azure — from gateway auth tokens and device pairing to NSG rules, HTTPS with Tailscale, and the built-in security audit command."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - security
+  - azure
+  - hardening
+  - https
+  - tailscale
+  - nsg
+  - devops
+image:
+  src: "https://placehold.co/600x400?text=OpenClaw+Security+Hardening"
+  alt: "Security hardening for OpenClaw on Azure"
+---
+
+## 🛡️ Why Security Matters for AI Gateways
+
+OpenClaw sits between your AI models and your messaging platforms. A compromised gateway means:
+
+- Unauthorized access to your AI model API keys
+- Ability to impersonate your bot on connected channels
+- Access to conversation history and user data
+- Potential API cost exposure
+
+OpenClaw takes security seriously with multiple layers of protection. Let's configure them properly for Azure.
+
+---
+
+## 🔐 Layer 1: Gateway Authentication Token
+
+The gateway token is the first line of defense. It's auto-generated during `docker-setup.sh` and stored in `.env`:
+
+```bash
+cd ~/openclaw
+grep OPENCLAW_GATEWAY_TOKEN .env
+```
+
+### Best practices
+
+- **Never share the token** in plain text
+- **Rotate it periodically:**
+  ```bash
+  # Generate a new token
+  NEW_TOKEN=$(openssl rand -hex 32)
+  echo "New token: $NEW_TOKEN"
+  
+  # Update .env
+  sed -i "s/OPENCLAW_GATEWAY_TOKEN=.*/OPENCLAW_GATEWAY_TOKEN=$NEW_TOKEN/" .env
+  
+  # Restart
+  docker compose down
+  docker compose up -d
+  ```
+- **Use a strong token** — at least 32 hex characters
+
+---
+
+## 📱 Layer 2: Device Pairing
+
+OpenClaw requires browsers to **pair** with the gateway before accessing the Control UI. This creates a device identity tied to the browser's secure context.
+
+### How device pairing works
+
+1. Browser requests access → generates a device identity (requires HTTPS or localhost)
+2. Gateway stores the request as "pending"
+3. Operator approves via CLI
+4. Browser is paired and can authenticate
+
+### Managing devices
+
+```bash
+# List all paired and pending devices
+docker compose run --rm openclaw-cli devices list
+
+# Approve a pending device
+docker compose run --rm openclaw-cli devices approve <requestId>
+
+# Revoke a device (if supported)
+docker compose run --rm openclaw-cli devices list
+```
+
+### Break-glass access
+
+If you're locked out and can't pair (e.g., no HTTPS, no localhost):
+
+```bash
+# Generate a direct dashboard URL with token
+docker compose run --rm openclaw-cli dashboard --no-open
+```
+
+> **Warning:** The following flags should only be used temporarily for debugging:
+> - `gateway.controlUi.allowInsecureAuth` — allows token-only auth over HTTP
+> - `gateway.controlUi.dangerouslyDisableDeviceAuth` — disables device checks entirely
+
+---
+
+## 🌐 Layer 3: Network Security (Azure NSG)
+
+Azure Network Security Groups (NSGs) are your perimeter defense.
+
+### Recommended NSG rules
+
+| Priority | Name | Port | Source | Action |
+|----------|------|------|--------|--------|
+| 1000 | AllowSSH | 22 | Your IP | Allow |
+| 1001 | AllowOpenClaw | 18789-18790 | Your IP | Allow |
+| 65000 | DenyAll | * | * | Deny |
+
+### Setting up via Azure CLI
+
+```bash
+# Allow SSH from your IP only
+az network nsg rule create \
+  --resource-group rg-openclaw \
+  --nsg-name vm-openclaw-01NSG \
+  --name AllowSSH \
+  --priority 1000 \
+  --destination-port-ranges 22 \
+  --source-address-prefixes "<YOUR_IP>" \
+  --protocol Tcp --access Allow
+
+# Allow OpenClaw from your IP only (skip if using SSH tunnel)
+az network nsg rule create \
+  --resource-group rg-openclaw \
+  --nsg-name vm-openclaw-01NSG \
+  --name AllowOpenClaw \
+  --priority 1001 \
+  --destination-port-ranges 18789 18790 \
+  --source-address-prefixes "<YOUR_IP>" \
+  --protocol Tcp --access Allow
+```
+
+### If using SSH tunnel only
+
+You don't need the OpenClaw NSG rule at all — just allow SSH:
+
+```bash
+OPENCLAW_GATEWAY_BIND=loopback  # in .env
+```
+
+---
+
+## 🔒 Layer 4: CORS Origin Enforcement
+
+When the gateway binds to non-loopback, OpenClaw enforces browser origin checks.
+
+### Explicit origins (recommended)
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.controlUi.allowedOrigins \
+  '["https://openclaw.yourdomain.com"]'
+```
+
+### Dangerous flags to avoid in production
+
+| Flag | Risk Level | What it does |
+|------|-----------|--------------|
+| `dangerouslyAllowHostHeaderOriginFallback` | High | Trusts Host header for origin checks |
+| `dangerouslyDisableDeviceAuth` | Critical | Disables device identity checks entirely |
+| `allowInsecureAuth` | Medium | Allows token-only auth without device pairing |
+
+---
+
+## 🔏 Layer 5: HTTPS with Tailscale (Optional but Recommended)
+
+For production deployments with remote access, HTTPS is the gold standard. **Tailscale Serve** is the easiest way to add HTTPS to OpenClaw:
+
+### Install Tailscale on the VM
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up
+```
+
+### Expose OpenClaw via Tailscale Serve
+
+```bash
+sudo tailscale serve https / http://127.0.0.1:18789
+```
+
+Now access the Control UI at:
+
+```
+https://<your-machine-name>.<your-tailnet>.ts.net/
+```
+
+Benefits:
+- Automatic HTTPS certificates
+- No public ports needed
+- Device authentication works properly (secure context)
+- Access from any Tailscale-connected device
+
+---
+
+## 🔍 Layer 6: Built-in Security Audit
+
+OpenClaw includes a `security audit` command that checks your configuration:
+
+```bash
+docker compose run --rm openclaw-cli security audit
+```
+
+This command checks for:
+
+| Check | Severity | What it flags |
+|-------|----------|---------------|
+| Missing allowed origins | Critical | Non-loopback UI without origin allowlist |
+| Host-header fallback enabled | Warning/Critical | DNS rebinding risk |
+| Insecure auth enabled | Warning | Token-only auth without device pairing |
+| Device auth disabled | Critical | No device identity checks |
+| Missing gateway auth | Warning | No token/password on gateway |
+| Loopback without auth | Info | Localhost-only but no token |
+
+### Example audit output
+
+The audit will report findings with severity levels and remediation suggestions. Address all `critical` findings before going to production.
+
+---
+
+## 📋 Security Checklist
+
+Before running OpenClaw in production on Azure:
+
+- [ ] Gateway token is strong (32+ hex chars) and stored securely
+- [ ] `.env` file has restricted permissions (`chmod 600 .env`)
+- [ ] NSG rules restrict access to your IP(s) only
+- [ ] Bind mode is `loopback` (SSH tunnel) or `lan` with explicit `allowedOrigins`
+- [ ] No `dangerous*` flags enabled in production
+- [ ] Device pairing is active (not disabled)
+- [ ] `security audit` reports no critical findings
+- [ ] Bot tokens (Discord, etc.) are valid and not exposed
+- [ ] HTTPS via Tailscale Serve or reverse proxy (for remote access)
+- [ ] Regular token rotation schedule established
+
+---
+
+## ⏭️ Next Steps
+
+Now let's look at common deployment issues: [Troubleshooting OpenClaw Docker Deployments](/blog/troubleshooting-openclaw-docker-deployments).

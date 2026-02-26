@@ -1,0 +1,153 @@
+---
+draft: false
+title: "Infrastructure as Code in 2026: Terraform vs Pulumi vs Crossplane"
+snippet: "The IaC landscape has evolved. Compare Terraform, Pulumi, and Crossplane for modern cloud infrastructure management with practical migration guidance."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - terraform
+  - pulumi
+  - crossplane
+  - iac
+  - devops
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "IaC comparison 2026"
+---
+## 🏗️ The IaC Landscape Has Shifted
+
+Infrastructure as Code in 2026 isn't just Terraform anymore. Pulumi offers real programming languages, Crossplane brings IaC into Kubernetes, and OpenTofu provides a truly open alternative. Here's how to choose.
+
+## Quick Comparison
+
+| Feature | Terraform/OpenTofu | Pulumi | Crossplane |
+|---|---|---|---|
+| Language | HCL | Python/Go/TS/C# | YAML (K8s CRDs) |
+| State | Remote backend | Remote backend | Kubernetes etcd |
+| Drift detection | `plan` command | `preview` command | Continuous reconciliation |
+| Learning curve | Low (HCL) | Medium (programming) | Medium (K8s concepts) |
+| GitOps | Manual apply | Manual apply | Native (controller) |
+| Multi-cloud | Excellent | Excellent | Excellent |
+
+## Terraform/OpenTofu: The Standard
+
+Still the right choice for most teams:
+
+```hcl
+resource "aws_eks_cluster" "main" {
+  name     = "production"
+  role_arn = aws_iam_role.cluster.arn
+  version  = "1.31"
+
+  vpc_config {
+    subnet_ids              = module.vpc.private_subnets
+    endpoint_private_access = true
+    endpoint_public_access  = false
+  }
+
+  encryption_config {
+    provider {
+      key_arn = aws_kms_key.eks.arn
+    }
+    resources = ["secrets"]
+  }
+}
+```
+
+**Choose when**: Team knows HCL, mature modules exist, standard cloud provisioning.
+
+## Pulumi: Real Languages for Complex Logic
+
+When HCL isn't expressive enough:
+
+```python
+import pulumi
+import pulumi_aws as aws
+
+# Dynamic resource creation with real programming
+environments = ["dev", "staging", "production"]
+
+for env in environments:
+    cluster = aws.eks.Cluster(f"{env}-cluster",
+        name=f"{env}-cluster",
+        role_arn=cluster_role.arn,
+        vpc_config=aws.eks.ClusterVpcConfigArgs(
+            subnet_ids=vpc.private_subnet_ids,
+            endpoint_private_access=True,
+            endpoint_public_access=env == "dev",
+        ),
+        version="1.31",
+        tags={"Environment": env, "ManagedBy": "pulumi"},
+    )
+    
+    # Conditional GPU node group for production
+    if env == "production":
+        gpu_nodes = aws.eks.NodeGroup(f"{env}-gpu-nodes",
+            cluster_name=cluster.name,
+            instance_types=["p4d.24xlarge"],
+            scaling_config=aws.eks.NodeGroupScalingConfigArgs(
+                desired_size=2,
+                max_size=10,
+                min_size=0,
+            ),
+            labels={"accelerator": "nvidia-a100"},
+        )
+```
+
+**Choose when**: Complex logic, loops, conditionals, team prefers Python/Go/TypeScript.
+
+## Crossplane: Kubernetes-Native IaC
+
+Infrastructure managed like any other Kubernetes resource:
+
+```yaml
+apiVersion: database.aws.crossplane.io/v1beta1
+kind: RDSInstance
+metadata:
+  name: production-db
+spec:
+  forProvider:
+    dbInstanceClass: db.r6g.xlarge
+    engine: postgres
+    engineVersion: "16"
+    masterUsername: admin
+    allocatedStorage: 100
+    region: eu-west-1
+  writeConnectionSecretToRef:
+    name: db-credentials
+    namespace: app
+```
+
+**Choose when**: Kubernetes-first organization, want continuous reconciliation, platform team provides infrastructure APIs to developers.
+
+## Migration Paths
+
+### Terraform → OpenTofu
+```bash
+# Direct drop-in replacement
+brew install opentofu
+tofu init   # Same commands, same state format
+tofu plan
+tofu apply
+```
+
+### Terraform → Pulumi
+```bash
+pulumi convert --from terraform --language python
+```
+
+### Terraform → Crossplane
+Manual migration — different paradigm. Export existing resources and create Crossplane managed resources.
+
+## My Recommendation
+
+- **Default choice**: Terraform/OpenTofu — proven, massive ecosystem
+- **Complex environments**: Pulumi — when you need real programming logic
+- **Kubernetes platforms**: Crossplane — for self-service infrastructure via K8s APIs
+- **Hybrid**: Crossplane for developer-facing APIs, Terraform for foundational infra
+
+---
+
+*Choosing or migrating your IaC stack? I help teams design infrastructure automation strategies. [Get in touch](/contact/).*

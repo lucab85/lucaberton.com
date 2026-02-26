@@ -1,0 +1,151 @@
+---
+draft: false
+title: "Building a Private AI Cloud with RHEL AI and InstructLab"
+snippet: "Deploy a fully private AI cloud using RHEL AI and InstructLab. Custom model training, on-premises inference, and data sovereignty for regulated industries."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - rhel-ai
+  - instructlab
+  - private-cloud
+  - ai
+  - enterprise
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Private AI cloud with RHEL AI"
+---
+## 🏢 Your Own AI Cloud
+
+For regulated industries — healthcare, finance, defense, government — sending data to OpenAI or Anthropic isn't an option. RHEL AI and InstructLab let you build a fully private AI cloud with custom models trained on your data.
+
+## Architecture
+
+```
+RHEL AI (Base Platform)
+  ├── InstructLab (Model Customization)
+  │   ├── Taxonomy-based training
+  │   └── Synthetic data generation
+  ├── vLLM (Model Serving)
+  ├── Granite Models (Base Foundation)
+  └── GPU Management (NVIDIA drivers + container toolkit)
+```
+
+## Installation
+
+```bash
+# RHEL AI bootable container image
+sudo bootc switch registry.redhat.io/rhel-ai/rhel-ai-nvidia:1.4
+
+# Initialize InstructLab
+ilab config init
+ilab model download --repository instructlab/granite-7b-lab
+
+# Serve the base model
+ilab model serve
+```
+
+## Custom Model Training
+
+### 1. Define Your Knowledge
+
+Create taxonomy entries for your domain:
+
+```yaml
+# taxonomy/knowledge/company/policies/qna.yaml
+created_by: platform-team
+domain: company_policies
+seed_examples:
+  - question: What is the data retention policy?
+    answer: |
+      Data must be retained for 7 years for financial records,
+      3 years for operational data, and deleted within 30 days
+      upon customer request per GDPR Article 17.
+  - question: What are the approved cloud regions?
+    answer: |
+      Production workloads must run in EU-West-1 (Ireland) or
+      EU-Central-1 (Frankfurt). US regions require CISO approval.
+document:
+  repo: https://gitlab.internal/policies
+  commit: abc123
+  patterns:
+    - "*.md"
+```
+
+### 2. Generate Synthetic Training Data
+
+```bash
+ilab data generate \
+  --taxonomy-path ./taxonomy \
+  --num-instructions 1000 \
+  --model granite-7b-lab
+```
+
+InstructLab generates diverse question-answer pairs from your seed examples — multiplying 10 examples into 1000+ training samples.
+
+### 3. Train
+
+```bash
+ilab model train \
+  --model-path models/granite-7b-lab \
+  --data-path generated_data \
+  --num-epochs 5 \
+  --effective-batch-size 16 \
+  --device cuda
+```
+
+### 4. Evaluate and Deploy
+
+```bash
+# Test the model
+ilab model evaluate --model models/granite-7b-trained
+
+# Serve in production
+ilab model serve \
+  --model-path models/granite-7b-trained \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+## Production Deployment on Kubernetes
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: private-llm
+  namespace: ai-platform
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+      - name: vllm
+        image: registry.internal/vllm:latest
+        args:
+        - "--model=/models/granite-7b-company"
+        - "--max-model-len=8192"
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+        volumeMounts:
+        - name: models
+          mountPath: /models
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: model-storage
+```
+
+## Why Private AI?
+
+- **Data sovereignty**: Your data never leaves your infrastructure
+- **Compliance**: Meet GDPR, HIPAA, SOX requirements by design
+- **Customization**: Models trained on YOUR domain knowledge outperform general models
+- **Cost predictability**: No per-token API costs, just infrastructure
+- **Availability**: No dependency on external API providers
+
+---
+
+*Building a private AI cloud? I help organizations deploy RHEL AI and InstructLab for custom AI platforms. [Get in touch](/contact/).*

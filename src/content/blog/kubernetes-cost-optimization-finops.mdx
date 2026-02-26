@@ -1,0 +1,129 @@
+---
+draft: false
+title: "Kubernetes Cost Optimization: FinOps Strategies That Actually Work"
+snippet: "Practical Kubernetes cost reduction strategies: right-sizing, spot instances, autoscaling tuning, and namespace cost allocation with OpenCost."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - kubernetes
+  - finops
+  - cost-optimization
+  - cloud
+  - platform-engineering
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Kubernetes FinOps cost optimization"
+---\n## 💰 Stop Overpaying for Kubernetes
+
+Most organizations overprovision Kubernetes by 60-70%. That's not a guess — it's what I consistently find in cost audits. Here are the strategies that actually reduce your bill.
+
+## 1. Right-Size Your Workloads
+
+The biggest savings come from matching requests to actual usage:
+
+```bash
+# Install Goldilocks for right-sizing recommendations
+helm install goldilocks fairwinds-stable/goldilocks -n goldilocks --create-namespace
+
+# Enable VPA recommendations for a namespace
+kubectl label namespace production goldilocks.fairwinds.com/enabled=true
+
+# Check recommendations after 24-48 hours
+kubectl get vpa -n production -o yaml
+```
+
+Common findings:
+- Java apps requesting 4Gi memory but using 1.5Gi
+- CPU requests at 1000m but averaging 100m
+- Every pod requesting the same resources regardless of actual needs
+
+## 2. Use Spot/Preemptible Instances
+
+For fault-tolerant workloads, spot instances save 60-90%:
+
+```yaml
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: spot-pool
+spec:
+  template:
+    spec:
+      requirements:
+      - key: karpenter.sh/capacity-type
+        operator: In
+        values: ["spot"]
+      - key: node.kubernetes.io/instance-type
+        operator: In
+        values: ["m5.xlarge", "m5a.xlarge", "m6i.xlarge", "m6a.xlarge"]
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+```
+
+**Good for spot**: Stateless web servers, batch jobs, CI/CD runners, dev/staging environments.
+**Bad for spot**: Databases, stateful services, long-running training jobs.
+
+## 3. Namespace Cost Allocation with OpenCost
+
+```bash
+helm install opencost opencost/opencost -n opencost --create-namespace
+
+# Query costs per namespace
+curl -s http://opencost.opencost:9003/allocation/compute?window=7d&aggregate=namespace | \
+  python3 -m json.tool
+```
+
+Show teams what they're spending. Cost visibility drives behavior change faster than any policy.
+
+## 4. Autoscaling That Works
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  minReplicas: 2
+  maxReplicas: 20
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5 min before scaling down
+      policies:
+      - type: Percent
+        value: 25
+        periodSeconds: 60  # Scale down max 25% per minute
+    scaleUp:
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 30  # Scale up fast
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+```
+
+## 5. Quick Wins Checklist
+
+- [ ] Delete unused PVCs (check with `kubectl get pvc --all-namespaces | grep -v Bound`)
+- [ ] Remove unused LoadBalancer services (each costs $15-20/month on cloud)
+- [ ] Set resource quotas per namespace
+- [ ] Schedule dev/staging to scale down after hours
+- [ ] Use `ephemeral-storage` limits to prevent log-bombs
+- [ ] Compress container images (multi-stage builds, distroless base)
+
+Average savings from a thorough FinOps review: **40-60% reduction** in Kubernetes spend.
+
+---
+
+*Need a Kubernetes cost audit? I help organizations optimize their cloud spend without sacrificing reliability. [Get in touch](/contact/).*\n

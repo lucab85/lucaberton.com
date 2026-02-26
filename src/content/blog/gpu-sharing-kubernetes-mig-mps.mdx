@@ -1,0 +1,136 @@
+---
+draft: false
+title: "GPU Sharing on Kubernetes: MIG, MPS, and Time-Slicing Compared"
+snippet: "Comprehensive comparison of NVIDIA GPU sharing strategies on Kubernetes: Multi-Instance GPU, Multi-Process Service, and time-slicing. When to use each approach."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - gpu
+  - kubernetes
+  - nvidia
+  - mig
+  - ai-infrastructure
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "GPU sharing strategies on Kubernetes"
+---\n## 🎮 Stop Wasting Your GPUs
+
+A single NVIDIA A100 costs $10K+ and most organizations use them at 30% utilization. GPU sharing lets multiple workloads share a single GPU, dramatically improving efficiency.
+
+## The Three Approaches
+
+### 1. Time-Slicing
+
+The simplest approach — multiple pods take turns using the full GPU:
+
+```yaml
+# NVIDIA device plugin config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin
+  namespace: kube-system
+data:
+  config.yaml: |
+    version: v1
+    sharing:
+      timeSlicing:
+        renameByDefault: false
+        resources:
+        - name: nvidia.com/gpu
+          replicas: 4  # 4 pods share each GPU
+```
+
+**Pros**: Simple, no special hardware. **Cons**: No memory isolation — one pod can OOM-kill others. No performance guarantees.
+
+### 2. Multi-Instance GPU (MIG)
+
+Hardware-level partitioning on A100/A30/H100:
+
+```bash
+# Enable MIG mode
+nvidia-smi -i 0 -mig 1
+
+# Create GPU instances (A100 80GB example)
+nvidia-smi mig -cgi 9,9,9,9,9,9,9 -i 0  # 7x 10GB instances
+
+# Create compute instances
+nvidia-smi mig -cci -gi 0,1,2,3,4,5,6 -i 0
+```
+
+Kubernetes sees each MIG instance as a separate resource:
+
+```yaml
+resources:
+  limits:
+    nvidia.com/mig-1g.10gb: 1  # Request one MIG slice
+```
+
+**Pros**: Hardware isolation (memory + compute). Guaranteed performance. **Cons**: Only A100/A30/H100. Fixed partitioning — can't change without stopping workloads.
+
+### 3. Multi-Process Service (MPS)
+
+CUDA-level sharing with better concurrency than time-slicing:
+
+```yaml
+# Enable MPS in device plugin
+sharing:
+  mps:
+    renameByDefault: false
+    resources:
+    - name: nvidia.com/gpu
+      replicas: 10
+      memoryLimit: 8Gi  # Per-client memory limit
+```
+
+**Pros**: Better utilization than time-slicing, some memory isolation. **Cons**: Less isolation than MIG. Shared failure domain — one bad CUDA kernel affects all.
+
+## When to Use What
+
+| Scenario | Recommendation |
+|---|---|
+| Development/testing | Time-slicing (simple, flexible) |
+| Production inference (A100/H100) | MIG (hardware isolation) |
+| Production inference (T4/V100) | MPS (best available) |
+| Training | Don't share — training needs full GPU |
+| Multi-tenant | MIG only (isolation requirement) |
+
+## NVIDIA GPU Operator Setup
+
+```bash
+helm install gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator --create-namespace \
+  --set driver.enabled=true \
+  --set mig.strategy=mixed \
+  --set devicePlugin.config.name=nvidia-device-plugin
+```
+
+## Monitoring GPU Utilization
+
+```yaml
+# Prometheus rules for GPU waste detection
+groups:
+- name: gpu-efficiency
+  rules:
+  - alert: GPUUnderutilized
+    expr: avg_over_time(DCGM_FI_DEV_GPU_UTIL[1h]) < 20
+    for: 4h
+    labels:
+      severity: warning
+    annotations:
+      summary: "GPU {{ $labels.gpu }} utilized at {{ $value }}% for 4+ hours"
+```
+
+## Key Takeaways
+
+1. **Audit first** — measure current GPU utilization before choosing a sharing strategy
+2. **MIG for production** — the only option with true hardware isolation
+3. **Time-slicing for dev** — simple and good enough for non-production
+4. **Never share training GPUs** — training needs dedicated, uninterrupted access
+5. **Monitor constantly** — GPU utilization should be a dashboard metric
+
+---
+
+*Need to optimize your GPU infrastructure? I help organizations maximize GPU utilization on Kubernetes. [Let's connect](/contact/).*\n

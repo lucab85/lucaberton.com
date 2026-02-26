@@ -1,0 +1,111 @@
+---
+draft: false
+title: "Gateway API in Production: Replacing Ingress Controllers in 2026"
+snippet: "Gateway API has reached GA maturity. How to migrate from Ingress to Gateway API, with practical examples using Envoy Gateway and Cilium."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - kubernetes
+  - gateway-api
+  - networking
+  - envoy
+  - cloud-native
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Kubernetes Gateway API in production"
+---\n## 🚪 Gateway API: The New Standard
+
+Kubernetes Gateway API has reached GA and is rapidly replacing Ingress. If you're still using Ingress resources in 2026, you're leaving features on the table.
+
+## Why Migrate?
+
+Ingress was designed for simple HTTP routing. Gateway API supports:
+- **Multi-protocol**: HTTP, gRPC, TCP, UDP, TLS
+- **Role-based config**: Infrastructure providers, cluster operators, and app developers each manage their own resources
+- **Traffic splitting**: Native weighted routing for canary deployments
+- **Header-based routing**: No more implementation-specific annotations
+
+## Core Resources
+
+```yaml
+# 1. GatewayClass - defines the controller (infra team)
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy-gateway
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+
+# 2. Gateway - defines listeners (platform team)
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: production
+  namespace: gateway-system
+spec:
+  gatewayClassName: envoy-gateway
+  listeners:
+  - name: https
+    protocol: HTTPS
+    port: 443
+    tls:
+      mode: Terminate
+      certificateRefs:
+      - name: wildcard-cert
+    allowedRoutes:
+      namespaces:
+        from: Selector
+        selector:
+          matchLabels:
+            gateway-access: "true"
+
+# 3. HTTPRoute - defines routing (app team)
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: my-app
+  namespace: app-team
+spec:
+  parentRefs:
+  - name: production
+    namespace: gateway-system
+  hostnames:
+  - "app.example.com"
+  rules:
+  - matches:
+    - path:
+        type: PathPrefix
+        value: /api/v2
+    backendRefs:
+    - name: app-v2
+      port: 8080
+      weight: 90
+    - name: app-v3
+      port: 8080
+      weight: 10  # Canary
+```
+
+## Choosing Your Implementation
+
+| Implementation | Best For | gRPC | TCP/UDP |
+|---|---|---|---|
+| Envoy Gateway | New deployments, full-featured | ✅ | ✅ |
+| Cilium | eBPF performance, existing Cilium users | ✅ | ✅ |
+| Istio | Service mesh users | ✅ | ✅ |
+| NGINX Gateway Fabric | NGINX familiarity | ✅ | ❌ |
+
+## Migration Strategy
+
+1. **Deploy Gateway API CRDs** alongside existing Ingress
+2. **Create Gateway resources** matching your current Ingress config
+3. **Migrate routes one service at a time** — both can coexist
+4. **Remove Ingress resources** after validation
+5. **Leverage new features** — traffic splitting, header routing, cross-namespace refs
+
+Don't do a big-bang migration. Gateway API and Ingress coexist peacefully.
+
+---
+
+*Migrating to Gateway API? I help platform teams modernize their Kubernetes networking. [Get in touch](/contact/).*\n

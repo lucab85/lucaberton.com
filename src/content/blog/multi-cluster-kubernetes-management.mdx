@@ -1,0 +1,151 @@
+---
+draft: false
+title: "Multi-Cluster Kubernetes Management with Open Cluster Management"
+snippet: "Managing multiple Kubernetes clusters at scale using Open Cluster Management. Fleet-wide policy enforcement, workload distribution, and observability."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - kubernetes
+  - multi-cluster
+  - ocm
+  - fleet-management
+  - cloud-native
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Multi-cluster Kubernetes management"
+---\n## 🌐 Managing the Cluster Sprawl
+
+Most enterprises don't have one Kubernetes cluster — they have dozens. Different environments, regions, cloud providers, edge locations. Open Cluster Management (OCM) provides the control plane for managing them all.
+
+## Why Multi-Cluster?
+
+- **Blast radius reduction**: A bad deploy affects one cluster, not everything
+- **Compliance**: Data residency requirements demand regional clusters
+- **Hybrid cloud**: Some workloads on-prem, others in cloud
+- **High availability**: Active-active across regions
+- **Team isolation**: Separate clusters for different business units
+
+## OCM Architecture
+
+```
+Hub Cluster (Management)
+  ├── Managed Cluster: prod-us-east
+  ├── Managed Cluster: prod-eu-west
+  ├── Managed Cluster: staging
+  ├── Managed Cluster: edge-factory-1
+  └── Managed Cluster: on-prem-dc
+```
+
+### Setup
+
+```bash
+# Install OCM hub
+clusteradm init --wait
+
+# Join a managed cluster
+clusteradm get token | clusteradm join \
+  --hub-token <token> \
+  --hub-apiserver https://hub-api:6443 \
+  --cluster-name prod-us-east
+
+# Accept the cluster
+clusteradm accept --clusters prod-us-east
+```
+
+## Fleet-Wide Policy Enforcement
+
+Apply policies across all clusters:
+
+```yaml
+apiVersion: policy.open-cluster-management.io/v1
+kind: Policy
+metadata:
+  name: require-network-policies
+  namespace: open-cluster-management
+spec:
+  remediationAction: enforce
+  disabled: false
+  policy-templates:
+  - objectDefinition:
+      apiVersion: policy.open-cluster-management.io/v1
+      kind: ConfigurationPolicy
+      metadata:
+        name: deny-all-default
+      spec:
+        remediationAction: enforce
+        object-templates:
+        - complianceType: musthave
+          objectDefinition:
+            apiVersion: networking.k8s.io/v1
+            kind: NetworkPolicy
+            metadata:
+              name: deny-all
+              namespace: default
+            spec:
+              podSelector: {}
+              policyTypes:
+              - Ingress
+              - Egress
+---
+apiVersion: policy.open-cluster-management.io/v1
+kind: PlacementBinding
+metadata:
+  name: require-network-policies-binding
+spec:
+  placementRef:
+    name: all-production-clusters
+    apiGroup: cluster.open-cluster-management.io
+    kind: Placement
+  subjects:
+  - name: require-network-policies
+    apiGroup: policy.open-cluster-management.io
+    kind: Policy
+```
+
+## Workload Distribution
+
+Deploy workloads across clusters based on placement rules:
+
+```yaml
+apiVersion: cluster.open-cluster-management.io/v1beta1
+kind: Placement
+metadata:
+  name: production-clusters
+spec:
+  predicates:
+  - requiredClusterSelector:
+      labelSelector:
+        matchLabels:
+          environment: production
+      claimSelector:
+        matchExpressions:
+        - key: platform.open-cluster-management.io
+          operator: In
+          values: ["AWS", "Azure"]
+  numberOfClusters: 3
+```
+
+## Observability Across Clusters
+
+Aggregate metrics, logs, and traces from all clusters into the hub:
+
+```bash
+# Install observability addon
+clusteradm install hub-addon --names observability
+
+# All managed clusters now ship metrics to the hub's Thanos instance
+# Access unified Grafana dashboards on the hub
+```
+
+## Key Lessons
+
+1. **Start with GitOps** — manage cluster configs in Git, sync with ArgoCD/Flux
+2. **Standardize cluster bootstrapping** — every cluster should be identical at creation
+3. **Centralize policy, decentralize execution** — hub defines policies, clusters enforce locally
+4. **Plan for network partitions** — managed clusters must function when disconnected from hub
+
+---
+
+*Managing a growing fleet of Kubernetes clusters? I help organizations design multi-cluster strategies. [Let's connect](/contact/).*\n

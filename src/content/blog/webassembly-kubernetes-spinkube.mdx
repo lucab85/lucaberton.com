@@ -1,0 +1,138 @@
+---
+draft: false
+title: "WebAssembly on Kubernetes: Running Wasm Workloads with SpinKube"
+snippet: "Deploy WebAssembly workloads alongside containers on Kubernetes using SpinKube. Faster cold starts, smaller footprint, and polyglot serverless functions."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - kubernetes
+  - webassembly
+  - wasm
+  - spinkube
+  - cloud-native
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "WebAssembly on Kubernetes with SpinKube"
+---
+## 🧩 WebAssembly Meets Kubernetes
+
+WebAssembly (Wasm) is no longer just a browser technology. In 2026, SpinKube brings Wasm workloads to Kubernetes as first-class citizens — with cold start times under 1ms, memory footprints 10x smaller than containers, and polyglot runtime support.
+
+## Why Wasm on Kubernetes?
+
+| Metric | Container | Wasm |
+|--------|-----------|------|
+| Cold start | 1-30 seconds | < 1 ms |
+| Image size | 100MB-1GB | 1-10MB |
+| Memory overhead | 50-200MB | 5-20MB |
+| Isolation | Process/namespace | Sandboxed VM |
+| Languages | Any (Dockerfile) | Rust, Go, Python, JS, C++ |
+
+## SpinKube: The Stack
+
+SpinKube combines three components:
+1. **Spin Operator**: Kubernetes operator for Wasm workloads
+2. **Runtime Class Manager**: Manages containerd shims for Wasm runtimes
+3. **Spin Plugin for Kubernetes**: CLI tools for development
+
+### Installation
+
+```bash
+# Install cert-manager (prerequisite)
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.16.0/cert-manager.yaml
+
+# Install SpinKube
+kubectl apply -f https://github.com/spinkube/spin-operator/releases/download/v0.4.0/spin-operator.crds.yaml
+kubectl apply -f https://github.com/spinkube/spin-operator/releases/download/v0.4.0/spin-operator.runtime-class.yaml
+kubectl apply -f https://github.com/spinkube/spin-operator/releases/download/v0.4.0/spin-operator.shim-executor.yaml
+helm install spin-operator oci://ghcr.io/spinkube/charts/spin-operator
+```
+
+### Deploy a Wasm App
+
+```yaml
+apiVersion: core.spinoperator.dev/v1alpha1
+kind: SpinApp
+metadata:
+  name: api-gateway
+spec:
+  image: "ghcr.io/my-org/api-gateway:v1.0"
+  executor: containerd-shim-spin
+  replicas: 3
+  resources:
+    limits:
+      memory: "32Mi"
+      cpu: "100m"
+```
+
+### Build a Spin Application
+
+```rust
+use spin_sdk::http::{IntoResponse, Request, Response};
+use spin_sdk::http_component;
+
+#[http_component]
+fn handle_request(req: Request) -> anyhow::Result<impl IntoResponse> {
+    let uri = req.uri();
+    let body = format!("Hello from Wasm! Path: {}", uri);
+    
+    Ok(Response::builder()
+        .status(200)
+        .header("content-type", "text/plain")
+        .body(body)
+        .build())
+}
+```
+
+## Use Cases
+
+### 1. API Gateways and Edge Functions
+Sub-millisecond cold starts make Wasm ideal for serverless-style API handlers. No more paying for idle containers.
+
+### 2. Plugin Systems
+Let users deploy custom logic as Wasm modules — sandboxed, resource-limited, and language-agnostic.
+
+### 3. Event Processors
+Process Kafka/NATS events with minimal resource overhead. Run thousands of Wasm instances on a single node.
+
+### 4. AI Inference Pre/Post-Processing
+Use Wasm for lightweight data transformation before and after model inference. Keep GPU pods for the heavy lifting.
+
+## Wasm + Containers: Better Together
+
+You don't have to choose. Run Wasm and containers side by side:
+
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: main-app
+    image: myapp:latest  # Traditional container
+  - name: sidecar-processor
+    image: ghcr.io/my-org/processor:v1.0
+    runtimeClassName: wasmtime-spin  # Wasm sidecar
+```
+
+## Current Limitations
+
+- **Networking**: Limited socket support (improving rapidly)
+- **Filesystem**: Read-only by default, limited write support
+- **GPU access**: Not yet supported (containers still needed for AI inference)
+- **Debugging**: Tooling is immature compared to containers
+- **Ecosystem**: Fewer pre-built components than container ecosystem
+
+## Getting Started
+
+1. **Start with a stateless HTTP service** — the sweet spot for Wasm today
+2. **Use Rust or Go** — best Wasm compilation support
+3. **Deploy alongside containers** — Wasm complements, doesn't replace
+4. **Monitor cold starts and memory** — validate the performance claims in your environment
+
+Wasm on Kubernetes is production-ready for the right workloads. Start experimenting now.
+
+---
+
+*Exploring WebAssembly for your platform? I help teams evaluate and adopt emerging cloud-native technologies. [Get in touch](/contact/).*

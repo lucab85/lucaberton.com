@@ -1,0 +1,137 @@
+---
+draft: false
+title: "Shift-Left Security: Integrating Policy-as-Code in CI/CD Pipelines"
+snippet: "Implement policy-as-code with OPA Gatekeeper, Kyverno, and Checkov in your CI/CD pipelines. Catch misconfigurations before they reach production."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - security
+  - policy-as-code
+  - cicd
+  - opa
+  - kyverno
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Shift-left security with policy-as-code"
+---
+## 🛡️ Catch It Before Production
+
+Shift-left security means finding misconfigurations in CI/CD — not in production incident reports. Policy-as-code tools make this automated, consistent, and fast.
+
+## The Policy-as-Code Stack
+
+### Kyverno: Kubernetes-Native Policies
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-resource-limits
+spec:
+  validationFailureAction: Enforce
+  rules:
+  - name: check-limits
+    match:
+      any:
+      - resources:
+          kinds:
+          - Pod
+    validate:
+      message: "CPU and memory limits are required"
+      pattern:
+        spec:
+          containers:
+          - resources:
+              limits:
+                memory: "?*"
+                cpu: "?*"
+```
+
+### OPA/Gatekeeper: Flexible Policy Engine
+
+```yaml
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sDisallowedTags
+metadata:
+  name: no-latest-tag
+spec:
+  match:
+    kinds:
+    - apiGroups: [""]
+      kinds: ["Pod"]
+    namespaces: ["production"]
+  parameters:
+    tags: ["latest"]
+    exemptImages:
+    - "registry.internal/infra/*"
+```
+
+### Checkov: IaC Scanning
+
+```bash
+# Scan Terraform
+checkov -d ./terraform/ --framework terraform --output json
+
+# Scan Kubernetes manifests
+checkov -d ./k8s/ --framework kubernetes --compact
+
+# Scan Dockerfiles
+checkov -d . --framework dockerfile
+```
+
+## CI/CD Integration
+
+```yaml
+# GitLab CI example
+stages:
+  - validate
+  - build
+  - deploy
+
+security-scan:
+  stage: validate
+  image: bridgecrew/checkov:latest
+  script:
+    - checkov -d . --framework terraform,kubernetes,dockerfile
+      --output cli --output junitxml
+      --output-file-path console,checkov-results.xml
+      --soft-fail-on LOW
+      --hard-fail-on HIGH,CRITICAL
+  artifacts:
+    reports:
+      junit: checkov-results.xml
+
+kyverno-test:
+  stage: validate
+  image: ghcr.io/kyverno/kyverno-cli:latest
+  script:
+    - kyverno apply ./policies/ --resource ./k8s/
+  allow_failure: false
+```
+
+## Essential Policies
+
+Every Kubernetes deployment should enforce:
+
+1. **No `latest` tags** — pin image versions
+2. **Resource limits required** — prevent noisy neighbors
+3. **No privileged containers** — security baseline
+4. **Read-only root filesystem** — prevent runtime modification
+5. **Non-root user** — drop unnecessary privileges
+6. **Network policies exist** — default deny
+7. **No host networking** — container isolation
+8. **Liveness/readiness probes** — health checking
+
+## Key Practices
+
+- **Start with `Audit` mode** — see what would fail before enforcing
+- **Exempt system namespaces** — `kube-system` needs special permissions
+- **Version your policies** — treat them like code
+- **Document exceptions** — when a policy is bypassed, record why
+- **Report on compliance trends** — track improvement over time
+
+---
+
+*Implementing shift-left security? I help teams build secure CI/CD pipelines with policy-as-code. [Get in touch](/contact/).*

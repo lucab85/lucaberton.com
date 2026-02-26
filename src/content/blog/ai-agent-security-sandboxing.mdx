@@ -1,0 +1,276 @@
+---
+draft: false
+title: "AI Agent Security: Sandboxing and Permission Models for Production"
+snippet: "How to secure AI agents in production with container sandboxing, least-privilege permissions, and audit logging. Practical patterns for Kubernetes deployments."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - ai
+  - security
+  - agents
+  - sandboxing
+  - production
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "AI agent security and sandboxing"
+---
+
+## 🔐 Why Agent Security Is Different
+
+Traditional application security assumes software does what the developer programmed. AI agents don't — they make autonomous decisions, invoke tools, and generate code at runtime. This fundamentally changes your threat model.
+
+After securing several enterprise agent deployments, here are the patterns that work.
+
+## The Agent Threat Model
+
+AI agents introduce unique attack vectors:
+
+- **Prompt injection**: Malicious input tricks the agent into unauthorized actions
+- **Tool abuse**: The agent uses legitimate tools in unintended ways
+- **Data exfiltration**: The agent accesses sensitive data and leaks it through outputs
+- **Privilege escalation**: The agent chains tools to gain access beyond its intended scope
+- **Resource exhaustion**: Runaway agents consume unbounded compute or API credits
+
+## Sandboxing Architecture
+
+### Container-Level Isolation
+
+Every agent tool execution should run in an isolated container:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: agent-sandbox
+  annotations:
+    container.apparmor.security.beta.kubernetes.io/sandbox: runtime/default
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    fsGroup: 65534
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: sandbox
+    image: registry.internal/agent-sandbox:latest
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      capabilities:
+        drop: ["ALL"]
+    resources:
+      limits:
+        memory: "256Mi"
+        cpu: "500m"
+        ephemeral-storage: "100Mi"
+    volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+  volumes:
+  - name: tmp
+    emptyDir:
+      sizeLimit: 50Mi
+```
+
+### Network Isolation
+
+Restrict what the sandbox can reach:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-sandbox-policy
+spec:
+  podSelector:
+    matchLabels:
+      role: agent-sandbox
+  policyTypes:
+  - Egress
+  - Ingress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: agent-tools
+    ports:
+    - port: 443
+      protocol: TCP
+  ingress: []  # No inbound traffic
+```
+
+## Permission Models
+
+### Least Privilege Tool Access
+
+Define explicit tool permissions per agent role:
+
+```python
+AGENT_PERMISSIONS = {
+    "infrastructure_agent": {
+        "allowed_tools": ["kubectl_get", "ansible_check", "prometheus_query"],
+        "denied_tools": ["kubectl_delete", "ansible_run", "shell_exec"],
+        "resource_limits": {
+            "max_api_calls": 50,
+            "max_tokens": 100000,
+            "timeout_seconds": 300,
+        },
+        "data_access": {
+            "namespaces": ["monitoring", "app-staging"],
+            "secrets": False,
+            "configmaps": True,
+        }
+    },
+    "data_agent": {
+        "allowed_tools": ["sql_read", "api_get"],
+        "denied_tools": ["sql_write", "sql_drop", "api_post"],
+        "resource_limits": {
+            "max_api_calls": 100,
+            "max_tokens": 50000,
+            "timeout_seconds": 120,
+        },
+    }
+}
+
+def enforce_permissions(agent_role: str, tool: str, params: dict) -> bool:
+    perms = AGENT_PERMISSIONS.get(agent_role)
+    if not perms:
+        return False
+    
+    if tool in perms.get("denied_tools", []):
+        audit_log.warning(f"Denied: {agent_role} attempted {tool}")
+        return False
+    
+    if tool not in perms.get("allowed_tools", []):
+        audit_log.warning(f"Denied: {agent_role} not authorized for {tool}")
+        return False
+    
+    return True
+```
+
+### Action Classification
+
+Classify every tool action by risk level:
+
+```python
+class RiskLevel(Enum):
+    READ = "read"       # No side effects
+    MODIFY = "modify"   # Reversible changes
+    DELETE = "delete"    # Destructive
+    EXTERNAL = "external"  # Leaves the system boundary
+
+TOOL_RISK = {
+    "kubectl_get": RiskLevel.READ,
+    "kubectl_apply": RiskLevel.MODIFY,
+    "kubectl_delete": RiskLevel.DELETE,
+    "send_email": RiskLevel.EXTERNAL,
+    "ansible_check": RiskLevel.READ,
+    "ansible_run": RiskLevel.MODIFY,
+}
+
+async def execute_with_approval(tool: str, params: dict, agent: str):
+    risk = TOOL_RISK.get(tool, RiskLevel.DELETE)  # Default to highest risk
+    
+    if risk == RiskLevel.READ:
+        return await execute(tool, params)
+    elif risk == RiskLevel.MODIFY:
+        await log_action(agent, tool, params)
+        return await execute(tool, params)
+    elif risk in (RiskLevel.DELETE, RiskLevel.EXTERNAL):
+        approval = await request_human_approval(agent, tool, params)
+        if approval:
+            return await execute(tool, params)
+        raise PermissionDenied(f"Human denied {tool}")
+```
+
+## 📋 Audit Logging
+
+Log every agent decision and action immutably:
+
+```python
+@dataclass
+class AgentAuditEvent:
+    timestamp: datetime
+    agent_id: str
+    session_id: str
+    event_type: str  # "decision", "tool_call", "tool_result", "error"
+    tool: str | None
+    params: dict | None
+    result: str | None
+    tokens_used: int
+    risk_level: str
+    approval_status: str | None
+
+async def audit_log(event: AgentAuditEvent):
+    # Write to immutable append-only log
+    await audit_store.append(event)
+    
+    # Real-time alerting for high-risk actions
+    if event.risk_level in ("delete", "external"):
+        await alert_security_team(event)
+```
+
+## Prompt Injection Defense
+
+### Input Sanitization
+
+```python
+def sanitize_agent_input(user_input: str) -> str:
+    # Remove common injection patterns
+    dangerous_patterns = [
+        r"ignore previous instructions",
+        r"you are now",
+        r"system prompt",
+        r"</?(system|assistant|user)>",
+        r"ADMIN MODE",
+    ]
+    
+    sanitized = user_input
+    for pattern in dangerous_patterns:
+        if re.search(pattern, sanitized, re.IGNORECASE):
+            audit_log.warning(f"Potential injection detected: {pattern}")
+            sanitized = re.sub(pattern, "[FILTERED]", sanitized, flags=re.IGNORECASE)
+    
+    return sanitized
+```
+
+### Output Validation
+
+Always validate agent outputs before executing:
+
+```python
+async def validate_tool_call(tool: str, params: dict) -> bool:
+    # Check params against schema
+    schema = TOOL_SCHEMAS[tool]
+    try:
+        schema.validate(params)
+    except ValidationError:
+        return False
+    
+    # Check for suspicious patterns
+    for value in flatten_dict(params).values():
+        if isinstance(value, str):
+            if any(cmd in value for cmd in ["rm -rf", "DROP TABLE", "; curl"]):
+                audit_log.critical(f"Suspicious param value: {value}")
+                return False
+    
+    return True
+```
+
+## Key Takeaways
+
+1. **Assume the agent will misbehave** — design for containment, not prevention
+2. **Sandbox everything** — separate containers, network policies, resource limits
+3. **Least privilege always** — explicit allow-lists, never deny-lists
+4. **Log immutably** — every decision, every action, every result
+5. **Classify risk levels** — automated for reads, human approval for destructive actions
+6. **Defense in depth** — input sanitization + output validation + runtime monitoring
+
+Security isn't optional for agent deployments. It's the foundation everything else builds on.
+
+---
+
+*Deploying AI agents in a security-sensitive environment? I help organizations build secure agent architectures. [Let's talk](/contact/).*

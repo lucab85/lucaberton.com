@@ -1,0 +1,155 @@
+---
+draft: false
+title: "CRA Incident Reporting to ENISA: Technical Implementation Guide"
+snippet: "Build automated incident reporting for ENISA compliance. API integration, severity classification, and the 24/72-hour reporting workflow."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - cra
+  - incident-reporting
+  - enisa
+  - automation
+  - compliance
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "CRA Incident Reporting to ENISA: Technical Implementation Guide"
+---
+## 🚨 Building Automated ENISA Reporting
+
+The CRA requires reporting actively exploited vulnerabilities to ENISA within 24 hours. Manual processes won't scale. Here's how to automate it.
+
+## The Reporting Workflow
+
+```
+Vulnerability Detected
+  ↓ (automated triage)
+Is it actively exploited? ──No──→ Standard vulnerability handling
+  ↓ Yes
+START 24-HOUR CLOCK
+  ↓
+Hour 0-24: Early Warning to ENISA
+  ├── Product identification
+  ├── Severity assessment
+  └── Initial impact estimate
+  ↓
+Hour 24-72: Vulnerability Notification
+  ├── Technical details
+  ├── Affected versions
+  ├── Mitigation guidance
+  └── Patch timeline
+  ↓
+Day 14: Detailed Report
+  ├── Root cause analysis
+  ├── Full impact assessment
+  ├── Remediation status
+  └── Lessons learned
+```
+
+## Technical Implementation
+
+### Monitoring for Exploited Vulnerabilities
+
+```python
+import asyncio
+from datetime import datetime, timedelta
+
+class ExploitMonitor:
+    SOURCES = [
+        "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
+        "https://api.vulncheck.com/v3/index/initial-access",
+    ]
+    
+    async def check_for_exploits(self):
+        for source in self.SOURCES:
+            new_exploits = await self.fetch_updates(source)
+            
+            for exploit in new_exploits:
+                # Check if our products are affected
+                affected = await self.check_affected_products(exploit.cve_id)
+                
+                if affected:
+                    await self.trigger_reporting_workflow(exploit, affected)
+    
+    async def trigger_reporting_workflow(self, exploit, affected_products):
+        incident = CRAIncident(
+            cve_id=exploit.cve_id,
+            severity=exploit.cvss_score,
+            affected_products=affected_products,
+            deadline=datetime.utcnow() + timedelta(hours=24),
+            status="early_warning_pending",
+        )
+        
+        # Alert security team immediately
+        await self.alert_security_team(incident)
+        
+        # Start automated reporting
+        await self.enisa_reporter.submit_early_warning(incident)
+```
+
+### ENISA Report Generator
+
+```python
+class ENISAReportGenerator:
+    def generate_early_warning(self, incident):
+        return {
+            "report_type": "early_warning",
+            "timestamp": datetime.utcnow().isoformat(),
+            "manufacturer": {
+                "name": "Your Company",
+                "eu_contact": "security@company.eu",
+            },
+            "vulnerability": {
+                "cve_id": incident.cve_id,
+                "severity": incident.severity,
+                "actively_exploited": True,
+                "exploitation_details": incident.exploit_description,
+            },
+            "affected_products": [
+                {
+                    "name": p.name,
+                    "versions": p.affected_versions,
+                    "estimated_users": p.user_count,
+                    "regions": p.deployment_regions,
+                }
+                for p in incident.affected_products
+            ],
+            "initial_mitigation": incident.temporary_mitigation,
+            "expected_patch_date": incident.estimated_patch_date,
+        }
+```
+
+### Deadline Tracking Dashboard
+
+```yaml
+# Prometheus alerting for reporting deadlines
+groups:
+- name: cra-reporting
+  rules:
+  - alert: CRAReportingDeadlineApproaching
+    expr: (cra_incident_deadline_timestamp - time()) < 7200  # 2 hours remaining
+    labels:
+      severity: critical
+    annotations:
+      summary: "CRA ENISA report due in {{ $value | humanizeDuration }}"
+      
+  - alert: CRAReportingDeadlineMissed
+    expr: (cra_incident_deadline_timestamp - time()) < 0
+    labels:
+      severity: page
+    annotations:
+      summary: "CRA ENISA reporting deadline MISSED for incident {{ $labels.cve_id }}"
+```
+
+## Key Requirements
+
+1. **24/7 monitoring** — vulnerabilities don't wait for business hours
+2. **Automated SBOM scanning** — know immediately when a CVE affects your products
+3. **Pre-written templates** — don't draft reports under time pressure
+4. **Clear escalation paths** — who approves ENISA submissions?
+5. **Drill regularly** — practice the 24-hour workflow quarterly
+
+---
+
+*Need automated CRA incident reporting? I help organizations build compliant security response systems. [Get in touch](/contact/).*

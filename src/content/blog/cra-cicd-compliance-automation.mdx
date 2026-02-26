@@ -1,0 +1,163 @@
+---
+draft: false
+title: "Automating CRA Compliance in Your CI/CD Pipeline"
+snippet: "Integrate CRA compliance checks into your CI/CD pipeline. SBOM generation, vulnerability scanning, security testing, and documentation generation — all automated."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - cra
+  - cicd
+  - automation
+  - compliance
+  - devops
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Automating CRA Compliance in Your CI/CD Pipeline"
+---
+## 🔧 CRA Compliance as Code
+
+Don't treat CRA compliance as a separate project. Embed it into your CI/CD pipeline so every build automatically generates the evidence you need.
+
+## The CRA CI/CD Pipeline
+
+```yaml
+stages:
+  - security-scan    # SAST, dependency check
+  - build            # Container build
+  - sbom             # SBOM generation
+  - compliance       # CRA compliance checks
+  - sign             # Artifact signing
+  - document         # Technical documentation
+  - deploy           # Deploy with attestations
+
+# Stage 1: Security Scanning
+sast-scan:
+  stage: security-scan
+  script:
+    - semgrep --config auto --error --json -o sast-report.json .
+    - trivy fs --severity HIGH,CRITICAL --exit-code 1 .
+
+# Stage 2: Build
+build-image:
+  stage: build
+  script:
+    - docker build -t $IMAGE:$VERSION .
+
+# Stage 3: SBOM Generation
+generate-sbom:
+  stage: sbom
+  script:
+    - syft $IMAGE:$VERSION -o cyclonedx-json > sbom.json
+    - grype sbom:sbom.json -o json > vulnerability-report.json
+    - |
+      CRITICAL=$(jq '.matches | map(select(.vulnerability.severity=="Critical")) | length' vulnerability-report.json)
+      if [ "$CRITICAL" -gt 0 ]; then
+        echo "CRITICAL vulnerabilities found - blocking release"
+        exit 1
+      fi
+
+# Stage 4: CRA Compliance Checks
+cra-compliance:
+  stage: compliance
+  script:
+    # Verify SBOM completeness
+    - python3 check_sbom_completeness.py sbom.json
+    # Check for default credentials
+    - python3 check_no_default_creds.py
+    # Verify security headers
+    - python3 check_security_defaults.py
+    # Validate update mechanism
+    - python3 check_update_mechanism.py
+  artifacts:
+    paths:
+      - compliance-report.json
+
+# Stage 5: Sign Everything
+sign-artifacts:
+  stage: sign
+  script:
+    - cosign sign --key $SIGNING_KEY $IMAGE:$VERSION
+    - cosign attach sbom --sbom sbom.json $IMAGE:$VERSION
+    - cosign attest --key $SIGNING_KEY --predicate compliance-report.json $IMAGE:$VERSION
+
+# Stage 6: Generate Documentation
+generate-docs:
+  stage: document
+  script:
+    - python3 generate_model_card.py > technical-doc.md
+    - python3 generate_declaration.py > eu-declaration.md
+  artifacts:
+    paths:
+      - technical-doc.md
+      - eu-declaration.md
+  only:
+    - tags  # Only on releases
+```
+
+## Compliance Check Scripts
+
+```python
+# check_sbom_completeness.py
+import json, sys
+
+def check_sbom(sbom_path):
+    with open(sbom_path) as f:
+        sbom = json.load(f)
+    
+    checks = {
+        "has_components": len(sbom.get("components", [])) > 0,
+        "all_have_versions": all(
+            c.get("version") for c in sbom.get("components", [])
+        ),
+        "has_metadata": "metadata" in sbom,
+        "has_manufacturer": bool(
+            sbom.get("metadata", {}).get("manufacture", {}).get("name")
+        ),
+    }
+    
+    failed = [k for k, v in checks.items() if not v]
+    if failed:
+        print(f"SBOM completeness check FAILED: {failed}")
+        sys.exit(1)
+    print("SBOM completeness check PASSED")
+
+check_sbom(sys.argv[1])
+```
+
+## Continuous Monitoring (Post-Deploy)
+
+```yaml
+# CronJob: Daily vulnerability scan of deployed products
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cra-vuln-monitor
+spec:
+  schedule: "0 6 * * *"  # Daily at 6 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: scanner
+            image: registry.internal/cra-scanner:latest
+            env:
+            - name: PRODUCTS
+              value: "product-a:v2.1,product-b:v3.0"
+            - name: ALERT_WEBHOOK
+              value: "https://alerts.internal/cra"
+```
+
+## Key Practices
+
+1. **Fail the build** on critical vulnerabilities — don't ship known risks
+2. **Sign everything** — SBOM, images, attestations with Sigstore
+3. **Automate documentation** — generate technical docs from code and configs
+4. **Store compliance evidence** — every release must have a retrievable compliance package
+5. **Monitor post-deployment** — new CVEs affect already-shipped products
+
+---
+
+*Want to automate CRA compliance in your CI/CD pipeline? I help organizations build compliance-as-code. [Get in touch](/contact/).*

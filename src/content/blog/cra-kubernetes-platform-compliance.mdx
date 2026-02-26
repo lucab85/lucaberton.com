@@ -1,0 +1,117 @@
+---
+draft: false
+title: "Making Your Kubernetes Platform CRA-Compliant"
+snippet: "If you sell a Kubernetes-based platform, the CRA applies to your entire stack. How to achieve compliance for container orchestration products."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - cra
+  - kubernetes
+  - platform-engineering
+  - compliance
+  - security
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Making Your Kubernetes Platform CRA-Compliant"
+---
+## ☸️ CRA for Kubernetes Platforms
+
+If you sell a Kubernetes-based platform — whether a distribution, managed service, or enterprise product — the CRA applies to your entire stack. Here's what needs attention.
+
+## Your CRA Attack Surface
+
+```
+Your Kubernetes Product:
+├── Container Runtime (containerd/CRI-O) → Class II (EN 304 635)
+├── Linux Kernel/OS → Class I (EN 304 626)
+├── Networking Stack (CNI) → Potentially Class I (EN 304 625)
+├── Ingress/Gateway → Potentially Class I
+├── Security Components → Potentially Class II
+├── Management UI → Default Product
+└── CLI Tools → Default Product
+```
+
+## The Manufacturer Question
+
+**You are the manufacturer** if you:
+- Package and distribute the Kubernetes platform
+- Place it on the EU market under your brand
+- Provide commercial support
+
+Even if 90% of your platform is upstream open source, YOU are responsible for CRA compliance of the complete product.
+
+## Key Compliance Areas
+
+### 1. SBOM for the Entire Stack
+
+```bash
+# Generate SBOMs at every layer
+# OS layer
+syft registry.internal/platform-os:latest -o cyclonedx-json > os-sbom.json
+
+# Kubernetes components
+syft registry.internal/kube-apiserver:v1.32 -o cyclonedx-json > k8s-sbom.json
+
+# Your application components
+syft registry.internal/platform-console:v4.0 -o cyclonedx-json > console-sbom.json
+
+# Merge into a single product SBOM
+cyclonedx merge --input os-sbom.json k8s-sbom.json console-sbom.json --output product-sbom.json
+```
+
+### 2. Vulnerability Response Across Layers
+
+```python
+class KubernetesPlatformVulnHandler:
+    UPSTREAM_SOURCES = {
+        "kubernetes": "https://kubernetes.io/docs/reference/issues-security/",
+        "containerd": "https://github.com/containerd/containerd/security",
+        "linux": "https://www.kernel.org/category/releases.html",
+    }
+    
+    async def handle_upstream_cve(self, cve):
+        # Determine which layer is affected
+        layer = self.identify_affected_layer(cve)
+        
+        # Check if we've integrated the affected version
+        our_version = await self.get_bundled_version(layer)
+        
+        if self.is_affected(our_version, cve):
+            # Start CRA reporting clock if actively exploited
+            if cve.is_exploited:
+                await self.start_enisa_reporting(cve)
+            
+            # Build patched version
+            await self.trigger_patch_build(layer, cve)
+```
+
+### 3. Security by Design for Platform Components
+
+```yaml
+# Pod Security Standards (enforce on your platform pods)
+apiVersion: pod-security.admission.config.k8s.io/v1
+kind: PodSecurityConfiguration
+defaults:
+  enforce: restricted
+  enforce-version: latest
+  audit: restricted
+  audit-version: latest
+exemptions:
+  namespaces:
+  - kube-system  # Platform components may need elevated privileges
+```
+
+## Practical Steps
+
+1. **Map your components** to CRA classifications
+2. **Identify your manufacturer role** — are you the entity placing the product on the market?
+3. **Build layered SBOMs** — OS, runtime, K8s, your code
+4. **Monitor ALL upstreams** — Kubernetes, containerd, Linux kernel CVEs
+5. **Document your security architecture** — CRA requires technical documentation
+6. **Plan for third-party assessment** — Class II components may require it
+
+---
+
+*Building a Kubernetes platform for the EU market? I help organizations navigate CRA compliance. [Get in touch](/contact/).*

@@ -1,0 +1,155 @@
+---
+draft: false
+title: "CRA SBOM Requirements: How to Implement Software Bill of Materials"
+snippet: "The CRA mandates Software Bill of Materials for all products with digital elements. Here's how to implement SBOM generation in your CI/CD pipeline with CycloneDX and SPDX."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - cra
+  - sbom
+  - supply-chain
+  - cicd
+  - compliance
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "CRA SBOM Requirements: How to Implement Software Bill of Materials"
+---
+
+## 📋 SBOM Is Now Mandatory
+
+The CRA requires manufacturers to provide a Software Bill of Materials (SBOM) for every product with digital elements. An SBOM lists all software components — including open source dependencies — in a standardized, machine-readable format.
+
+## Choosing Your Format
+
+### CycloneDX (Recommended)
+- Designed specifically for security use cases
+- Native vulnerability correlation
+- Supports software, hardware, ML models, and services
+- OWASP project — strong community
+
+### SPDX
+- ISO/IEC 5962:2021 standard
+- Broader scope (licensing focus)
+- Linux Foundation project
+- Better for license compliance
+
+**My recommendation**: CycloneDX for CRA compliance — it's purpose-built for security SBOMs.
+
+## CI/CD Integration
+
+### Generate SBOM During Build
+
+```yaml
+# GitLab CI
+generate-sbom:
+  stage: build
+  image: cyclonedx/cyclonedx-cli:latest
+  script:
+    # For Node.js projects
+    - cyclonedx-npm --output-file sbom.json --output-format json
+    
+    # For Python projects
+    - cyclonedx-py requirements --output-file sbom.json -r requirements.txt
+    
+    # For Go projects
+    - cyclonedx-gomod app -json -output sbom.json
+    
+    # For container images
+    - syft myapp:latest -o cyclonedx-json > container-sbom.json
+  artifacts:
+    paths:
+      - sbom.json
+      - container-sbom.json
+```
+
+### Vulnerability Scanning Against SBOM
+
+```yaml
+vulnerability-scan:
+  stage: test
+  needs: [generate-sbom]
+  script:
+    - grype sbom:sbom.json --output json > vulnerabilities.json
+    - |
+      CRITICAL=$(jq '[.matches[] | select(.vulnerability.severity=="Critical")] | length' vulnerabilities.json)
+      if [ "$CRITICAL" -gt 0 ]; then
+        echo "CRITICAL vulnerabilities found!"
+        exit 1
+      fi
+  artifacts:
+    reports:
+      dependency_scanning: vulnerabilities.json
+```
+
+### Container Image SBOM with Syft
+
+```bash
+# Generate SBOM for a container image
+syft registry.internal/myapp:v2.1 -o cyclonedx-json > sbom.json
+
+# Attach SBOM to container image using cosign
+cosign attach sbom --sbom sbom.json registry.internal/myapp:v2.1
+
+# Verify SBOM is attached
+cosign verify-attestation registry.internal/myapp:v2.1
+```
+
+## What Must Your SBOM Include?
+
+Under the CRA, your SBOM must document:
+
+1. **All direct dependencies** — libraries, frameworks, packages
+2. **Transitive dependencies** — dependencies of dependencies
+3. **Version information** — exact versions of every component
+4. **License information** — for each component
+5. **Known vulnerabilities** — at time of release
+6. **Supplier information** — for each component
+
+## SBOM Management Platform
+
+For organizations with multiple products:
+
+```python
+class SBOMManager:
+    async def ingest(self, sbom_path: str, product: str, version: str):
+        sbom = parse_cyclonedx(sbom_path)
+        
+        # Store in database
+        await self.db.store_sbom(product, version, sbom)
+        
+        # Check for known vulnerabilities
+        vulns = await self.scan_vulnerabilities(sbom)
+        
+        # Alert if critical vulnerabilities in production products
+        critical = [v for v in vulns if v.severity == "CRITICAL"]
+        if critical:
+            await self.alert_security_team(product, version, critical)
+        
+        # Track component usage across products
+        for component in sbom.components:
+            await self.db.track_component_usage(
+                component.name,
+                component.version,
+                product,
+            )
+    
+    async def check_impact(self, cve_id: str):
+        # When a new CVE is published, find all affected products
+        affected = await self.db.find_products_using_component(cve_id)
+        return affected
+```
+
+## Key Practices
+
+1. **Generate SBOMs in CI/CD** — automated, every build, no exceptions
+2. **Sign your SBOMs** — use Sigstore/cosign for integrity verification
+3. **Monitor continuously** — new CVEs affect existing SBOMs
+4. **Track across products** — one vulnerable library may affect multiple products
+5. **Update before release** — SBOM must reflect the actual shipped product
+
+---
+
+*Need help implementing SBOM processes for CRA compliance? I help organizations build automated supply chain security. [Get in touch](/contact/).*
+

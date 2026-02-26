@@ -3,7 +3,7 @@ draft: false
 title: "Responsive Design Snippets: A Developer's Cheat Sheet"
 snippet: "Essential responsive web design patterns and techniques: viewport settings, media queries, flexbox layouts, and scalable images—all in one handy reference."
 publishDate: "2018-02-23"
-lastModified: 2025-03-25
+lastModified: "2025-03-25"
 category: "design"
 author: "Luca Berton"
 image:

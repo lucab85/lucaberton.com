@@ -10,10 +10,11 @@ export async function GET() {
     const hasVideoMeta = (post.data as any).video?.id;
     
     // Check if post content contains YouTube components (rough check)
-    const hasYouTubeComponent = post.body.includes('YouTubeVideoSEO') || 
-                               post.body.includes('<YouTube id=') ||
-                               post.body.includes('youtube.com/embed/') ||
-                               post.body.includes('youtube-nocookie.com/embed/');
+    const body = post.body ?? '';
+    const hasYouTubeComponent = body.includes('YouTubeVideoSEO') || 
+                               body.includes('<YouTube id=') ||
+                               body.includes('youtube.com/embed/') ||
+                               body.includes('youtube-nocookie.com/embed/');
     
     return hasVideoMeta || hasYouTubeComponent;
   });
@@ -45,7 +46,8 @@ export async function GET() {
   </url>`;
       } else {
         // Try to extract YouTube ID from content for posts without metadata
-        const youtubeMatches = post.body.match(/(?:<YouTube id="|youtube\.com\/watch\?v=|youtube-nocookie\.com\/embed\/)([a-zA-Z0-9_-]{11})/);
+        const bodyContent = post.body ?? '';
+        const youtubeMatches = bodyContent.match(/(?:<YouTube id="|youtube\.com\/watch\?v=|youtube-nocookie\.com\/embed\/)([a-zA-Z0-9_-]{11})/);
         const youtubeId = youtubeMatches ? youtubeMatches[1] : null;
         
         if (youtubeId) {

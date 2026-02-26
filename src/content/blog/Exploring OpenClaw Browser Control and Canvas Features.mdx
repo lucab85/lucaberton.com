@@ -1,0 +1,296 @@
+---
+draft: false
+title: "Exploring OpenClaw Browser Control and Canvas Features"
+snippet: "Discover OpenClaw's built-in Browser Control server and Canvas host. Learn how the gateway manages a headless Chromium instance on port 18791 and serves agent-generated visual content through the Canvas endpoint."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - browser
+  - canvas
+  - docker
+  - azure
+image:
+  src: "/blog/openclaw/browser-canvas.jpg"
+  alt: "Exploring OpenClaw browser control and canvas features"
+---
+
+import { Icon } from "astro-icon";
+
+## Two Hidden Features in the Boot Log
+
+If you've been reading your OpenClaw gateway logs carefully, you've noticed two lines that appear on every startup but are easy to overlook:
+
+```
+2026-02-25T23:38:09.648Z [canvas] host mounted at
+  http://0.0.0.0:18789/__openclaw__/canvas/ (root /home/node/.openclaw/canvas)
+```
+
+```
+2026-02-25T23:38:09.864Z [browser/server] Browser control listening on
+  http://127.0.0.1:18791/ (auth=token)
+```
+
+These are two distinct features that extend OpenClaw well beyond a simple chat relay.
+
+## The Canvas Host
+
+### What It Is
+
+The Canvas is a file-hosting endpoint built directly into the gateway. It serves static files from the agent's canvas directory at `/__openclaw__/canvas/` on the gateway's main port (18789).
+
+### Where Files Live
+
+Inside the container:
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 sh -lc \
+  'ls -la /home/node/.openclaw/canvas'
+```
+
+```
+total 8
+drwxr-xr-x  2 node node 4096 Feb 25 23:02 .
+drwxrwxr-x 11 node node 4096 Feb 25 23:36 ..
+```
+
+On the host (through the volume mount):
+
+```bash
+ls -la ~/.openclaw/canvas/
+```
+
+### How the Agent Uses It
+
+When the agent generates visual output — charts, diagrams, HTML reports — it writes files to the canvas directory. These files are immediately accessible via HTTP:
+
+```
+http://<your-vm-ip>:18789/__openclaw__/canvas/report.html
+http://<your-vm-ip>:18789/__openclaw__/canvas/chart.png
+```
+
+This means the agent can generate a visualization and share a direct link in a chat message — no separate file-hosting service needed.
+
+### Canvas Use Cases
+
+| Use Case | How It Works |
+|----------|-------------|
+| Data visualizations | Agent generates HTML/SVG chart → writes to canvas → shares link |
+| Status dashboards | Agent creates an HTML page with system metrics |
+| File sharing | Agent saves generated files for user download |
+| Rich responses | Embed images or interactive content in chat replies |
+
+### Accessing the Canvas
+
+From your local machine (via SSH tunnel):
+
+```bash
+ssh -L 18789:localhost:18789 azureuser@<vm-ip>
+# Then open: http://localhost:18789/__openclaw__/canvas/
+```
+
+Or directly if port 18789 is open in your NSG:
+
+```
+http://<vm-public-ip>:18789/__openclaw__/canvas/
+```
+
+## The Browser Control Server
+
+### What It Is
+
+OpenClaw includes a built-in **headless Chromium browser** that the agent can control programmatically. The browser control server listens on a separate port:
+
+```
+[browser/server] Browser control listening on
+  http://127.0.0.1:18791/ (auth=token)
+```
+
+Key details from the log:
+
+| Property | Value |
+|----------|-------|
+| Protocol | HTTP |
+| Bind | `127.0.0.1` (loopback only) |
+| Port | `18791` |
+| Auth | Token-based |
+
+### Why 127.0.0.1?
+
+The browser control server binds to localhost only — it's **not accessible from outside the container**. This is a security measure. The browser has full rendering capabilities and can access the internet, so exposing its control interface would be dangerous.
+
+Only the gateway process (running in the same container) can communicate with the browser server.
+
+### What the Agent Can Do
+
+With browser control, the agent can:
+
+- **Browse web pages** — Research information, read documentation
+- **Take screenshots** — Capture visual evidence of web pages
+- **Fill forms** — Interact with web applications
+- **Extract data** — Scrape structured data from websites
+- **Generate PDFs** — Render pages to PDF format
+
+### CLI Commands
+
+OpenClaw provides CLI commands to manage the browser:
+
+```bash
+# Browser management
+docker compose run --rm openclaw-cli browser --help
+```
+
+From the CLI help output:
+
+```
+browser *    Manage OpenClaw's dedicated browser (Chrome/Chromium)
+```
+
+### Port Relationship
+
+The three OpenClaw ports form a clear architecture:
+
+| Port | Service | Bind | Purpose |
+|------|---------|------|---------|
+| 18789 | Gateway + Canvas | `0.0.0.0` | WebSocket API + file serving |
+| 18790 | Control UI | `0.0.0.0` | Web dashboard |
+| 18791 | Browser Control | `127.0.0.1` | Headless Chromium control |
+
+In dev mode (`--dev`), these shift to 19001, 19002, and 19003 respectively.
+
+## Configuring the Browser
+
+### Resource Limits
+
+On an Azure B2s (2 vCPU, 4 GB RAM), Chromium can be memory-hungry. Configure resource limits in your Docker Compose file:
+
+```yaml
+services:
+  openclaw-gateway:
+    deploy:
+      resources:
+        limits:
+          memory: 2G  # Cap total container memory
+    environment:
+      - CHROMIUM_FLAGS=--disable-gpu --no-sandbox --disable-dev-shm-usage
+```
+
+### Disabling the Browser
+
+If you don't need browser capabilities, you can reduce memory usage by disabling it:
+
+```bash
+docker compose run --rm openclaw-cli config set browser.enabled false
+docker compose restart openclaw-gateway
+```
+
+Check the startup logs — the `[browser/server]` line should no longer appear.
+
+### Browser Data Persistence
+
+Browser data (cookies, local storage) lives inside the container. If you need persistent browser state across restarts, ensure the browser data directory is volume-mounted.
+
+## Canvas Directory Structure
+
+As the agent uses the system, the canvas directory populates:
+
+```
+~/.openclaw/canvas/
+├── index.html          # Auto-generated index (if enabled)
+├── reports/
+│   ├── daily-2026-02-25.html
+│   └── weekly-summary.html
+├── charts/
+│   └── memory-usage.svg
+└── exports/
+    └── conversation-log.pdf
+```
+
+### Keeping Canvas Clean
+
+The canvas directory grows over time. Add a cleanup cron job:
+
+```bash
+# Remove canvas files older than 7 days
+find ~/.openclaw/canvas/ -type f -mtime +7 -delete
+```
+
+Or use OpenClaw's built-in cron:
+
+```bash
+docker compose run --rm openclaw-cli cron --help
+```
+
+## Security Implications
+
+### Canvas Access Control
+
+The canvas endpoint inherits the gateway's security settings. If `dangerouslyAllowHostHeaderOriginFallback` is enabled, anyone who can reach port 18789 can access canvas files:
+
+```
+[gateway] security warning: dangerous config flags enabled:
+  gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true
+```
+
+In production, either:
+
+1. **Restrict with NSG rules** — limit port 18789 to trusted IPs
+2. **Use SSH tunnels** — access canvas only through tunneled connections
+3. **Set up a reverse proxy** — add authentication at the proxy layer
+
+### Browser Isolation
+
+The browser server's `127.0.0.1` bind is the primary security boundary. But the agent can still use the browser to:
+
+- Access internal network resources (if the container has network access)
+- Make outbound HTTP requests to any site
+- Store cookies and session data
+
+Monitor browser activity through the gateway logs:
+
+```bash
+docker logs --tail=200 openclaw-openclaw-gateway-1 | grep "\[browser"
+```
+
+## Verifying Both Features
+
+### Canvas Check
+
+```bash
+# Confirm canvas is mounted
+docker logs openclaw-openclaw-gateway-1 | grep "\[canvas\]"
+
+# Expected output:
+# [canvas] host mounted at http://0.0.0.0:18789/__openclaw__/canvas/
+#   (root /home/node/.openclaw/canvas)
+
+# List canvas files
+docker exec -it openclaw-openclaw-gateway-1 sh -lc \
+  'ls -la /home/node/.openclaw/canvas/'
+```
+
+### Browser Check
+
+```bash
+# Confirm browser server is running
+docker logs openclaw-openclaw-gateway-1 | grep "\[browser"
+
+# Expected output:
+# [browser/server] Browser control listening on
+#   http://127.0.0.1:18791/ (auth=token)
+
+# Test connectivity from inside the container
+docker exec -it openclaw-openclaw-gateway-1 sh -c \
+  'wget -qO- http://127.0.0.1:18791/health 2>/dev/null || echo "check auth"'
+```
+
+## Series Navigation
+
+**Previous:** [OpenClaw Agent Tool Execution Errors and Sandbox Permissions](/blog/openclaw-agent-tool-execution-errors-and-sandbox-permissions)
+**Next:** [OpenClaw Gmail Watcher and Email Channel Integration](/blog/openclaw-gmail-watcher-and-email-channel-integration)
+
+---
+
+*Part 28 of the OpenClaw on Azure series. Your agent now has eyes (browser) and a gallery wall (canvas) — it's not just chatting anymore.*

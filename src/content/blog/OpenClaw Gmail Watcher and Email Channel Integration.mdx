@@ -1,0 +1,263 @@
+---
+draft: false
+title: "OpenClaw Gmail Watcher and Email Channel Integration"
+snippet: "OpenClaw's Gmail Watcher runs silently alongside your gateway. Learn how the email channel integration works, how it starts and stops with the gateway lifecycle, and how to configure email-based agent interactions on Azure."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - gmail
+  - email
+  - channels
+  - docker
+  - azure
+image:
+  src: "/blog/openclaw/gmail-watcher.jpg"
+  alt: "OpenClaw Gmail watcher and email channel integration"
+---
+
+import { Icon } from "astro-icon";
+
+## The Gmail Watcher in Gateway Logs
+
+Every time your OpenClaw gateway shuts down — whether from a `docker compose restart`, a `SIGTERM`, or a container stop — you see this line:
+
+```
+2026-02-25T23:38:02.470Z [gmail-watcher] gmail watcher stopped
+```
+
+And when you look at the full shutdown sequence:
+
+```
+2026-02-25T23:38:02.429Z [gateway] signal SIGTERM received
+2026-02-25T23:38:02.437Z [gateway] received SIGTERM; shutting down
+2026-02-25T23:38:02.470Z [gmail-watcher] gmail watcher stopped
+```
+
+The Gmail Watcher is an **email channel provider** that monitors a Gmail inbox for incoming messages and routes them to the AI agent. It's part of OpenClaw's multi-channel architecture — just like Discord, Telegram, and Slack.
+
+## How It Fits in the Channel Architecture
+
+OpenClaw supports multiple chat channels simultaneously. Looking at the startup logs, you can see the channel providers loading:
+
+```
+2026-02-25T23:38:11.115Z [discord] [default] Discord Message Content Intent
+  is limited; bots under 100 servers can use it without verification.
+2026-02-25T23:38:11.118Z [discord] [default] starting provider (@openclaw)
+2026-02-25T23:38:11.878Z [discord] logged in to discord as 1476339958796259550
+```
+
+Discord starts explicitly because it's configured. The Gmail Watcher also starts automatically if its background initialization is triggered, using the `channels` subsystem.
+
+The CLI shows all available channels:
+
+```
+channels *   Manage connected chat channels (Telegram, Discord, etc.)
+```
+
+## The Gmail Watcher Lifecycle
+
+### Startup
+
+When the gateway starts, it initializes all configured channel providers. The Gmail Watcher:
+
+1. Authenticates using stored credentials
+2. Opens a persistent connection to Gmail's API
+3. Begins polling for new messages
+
+### During Operation
+
+The watcher continuously monitors the inbox:
+
+- **Incoming emails** → parsed and sent to the agent as messages
+- **Agent replies** → formatted and sent as email responses
+- **Attachments** → handled through the gateway's file pipeline
+
+### Shutdown
+
+On `SIGTERM`, the gateway gracefully shuts down each subsystem in order:
+
+```
+[gateway] received SIGTERM; shutting down
+[gmail-watcher] gmail watcher stopped      ← Gmail disconnects cleanly
+```
+
+This ensures no email is lost or stuck mid-processing.
+
+## Configuring Gmail Integration
+
+### Step 1: Channel Setup
+
+Use the interactive setup wizard:
+
+```bash
+docker compose run --rm openclaw-cli configure
+```
+
+Or manage channels directly:
+
+```bash
+docker compose run --rm openclaw-cli channels --help
+```
+
+### Step 2: Gmail Authentication
+
+Gmail requires OAuth2 credentials. The typical setup involves:
+
+1. **Create a Google Cloud project** and enable the Gmail API
+2. **Download OAuth credentials** (client ID + secret)
+3. **Run the auth flow** through the CLI:
+
+```bash
+docker compose run --rm openclaw-cli channels login --channel gmail --verbose
+```
+
+### Step 3: Verify the Watcher
+
+After configuration, restart the gateway and watch for the watcher initialization:
+
+```bash
+docker compose restart openclaw-gateway
+docker logs -f openclaw-openclaw-gateway-1 | grep -i gmail
+```
+
+You should see the watcher start (and stop on shutdown):
+
+```
+[gmail-watcher] gmail watcher started
+[gmail-watcher] gmail watcher stopped
+```
+
+## Email as an AI Agent Channel
+
+### Why Email?
+
+| Advantage | Description |
+|-----------|-------------|
+| Universal | Everyone has email — no app installation needed |
+| Async | No real-time requirement — agent processes at its pace |
+| Attachments | Rich document exchange (PDFs, spreadsheets, images) |
+| Thread tracking | Email threads map naturally to conversation sessions |
+| Mobile | Works on every phone without extra apps |
+
+### How Messages Flow
+
+```
+User sends email → Gmail API → Gmail Watcher → Gateway → Agent
+                                                           ↓
+User receives reply ← Gmail API ← Gmail Watcher ← Gateway ← Agent
+```
+
+### Compared to Other Channels
+
+| Feature | Discord | Gmail | Telegram |
+|---------|---------|-------|----------|
+| Real-time | Yes | No (polling) | Yes |
+| Rich media | Embeds | Attachments | Inline |
+| Group chats | Server channels | CC/BCC | Groups |
+| Auth model | Bot token | OAuth2 | Bot token |
+| Session mapping | Channel + thread | Email thread | Chat ID |
+| Offline handling | Catches up | Inbox persists | Catches up |
+
+## Troubleshooting
+
+### Gmail Watcher Not Starting
+
+If you don't see `[gmail-watcher]` in the startup logs, the channel isn't configured:
+
+```bash
+# Check channel configuration
+docker compose run --rm openclaw-cli config get channels.gmail
+```
+
+### Authentication Expired
+
+Gmail OAuth2 tokens expire. If the watcher stops working:
+
+```bash
+# Re-authenticate
+docker compose run --rm openclaw-cli channels login --channel gmail
+```
+
+### Watcher Stops Unexpectedly
+
+If the watcher crashes without a SIGTERM:
+
+```bash
+# Check for error messages
+docker logs --tail=200 openclaw-openclaw-gateway-1 | grep -i "gmail\|error"
+```
+
+Common issues:
+- **Rate limiting** — Gmail API has quota limits (250 quota units per user per second)
+- **Token revoked** — User revoked app access in Google Account settings
+- **Network issues** — VM lost outbound HTTPS access
+
+### Multiple Email Accounts
+
+OpenClaw supports multiple channel instances. Configure additional Gmail accounts:
+
+```bash
+docker compose run --rm openclaw-cli config set channels.gmail.accounts.work.enabled true
+docker compose run --rm openclaw-cli config set channels.gmail.accounts.personal.enabled true
+```
+
+## Security on Azure
+
+### Credential Storage
+
+Gmail credentials are stored in the `.openclaw/credentials/` directory:
+
+```bash
+ls -la ~/.openclaw/credentials/
+```
+
+Ensure proper permissions:
+
+```bash
+chmod 700 ~/.openclaw/credentials/
+chmod 600 ~/.openclaw/credentials/*
+```
+
+### Network Requirements
+
+The Gmail Watcher needs outbound HTTPS access to Google's APIs:
+
+| Endpoint | Port | Purpose |
+|----------|------|---------|
+| `gmail.googleapis.com` | 443 | Gmail API |
+| `oauth2.googleapis.com` | 443 | Token refresh |
+| `accounts.google.com` | 443 | Authentication |
+
+Ensure your Azure NSG allows outbound HTTPS (it does by default).
+
+### Email Content Privacy
+
+All email content passes through your self-hosted gateway — unlike cloud-based solutions, your emails never leave your infrastructure (except to/from the LLM provider). This is one of the key advantages of self-hosting OpenClaw.
+
+## Disabling the Gmail Watcher
+
+If you don't need email integration and want to save resources:
+
+```bash
+docker compose run --rm openclaw-cli config set channels.gmail.enabled false
+docker compose restart openclaw-gateway
+```
+
+Confirm it's gone from the logs:
+
+```bash
+docker logs openclaw-openclaw-gateway-1 | grep gmail
+# Should return nothing
+```
+
+## Series Navigation
+
+**Previous:** [Exploring OpenClaw Browser Control and Canvas Features](/blog/exploring-openclaw-browser-control-and-canvas-features)
+**Next:** [OpenClaw Memory CLI Index Search and Reindex Commands](/blog/openclaw-memory-cli-index-search-and-reindex-commands)
+
+---
+
+*Part 29 of the OpenClaw on Azure series. Your AI agent now reads email — just don't expect it to reply to newsletter spam.*

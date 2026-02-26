@@ -1,0 +1,359 @@
+---
+draft: false
+title: "OpenClaw Memory CLI Index Search and Reindex Commands"
+snippet: "Master OpenClaw's memory CLI subcommands. Fix the common 'unknown command reindex' error, learn the correct memory index command, search memory from the terminal, and build a reindexing workflow for your AI agent's knowledge base."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - memory
+  - cli
+  - troubleshooting
+  - docker
+  - azure
+image:
+  src: "/blog/openclaw/memory-cli-index.jpg"
+  alt: "OpenClaw memory CLI index search and reindex commands"
+---
+
+import { Icon } from "astro-icon";
+
+## The "Did You Mean index?" Moment
+
+You've set up memory flush, configured hybrid search with MiniLM-L6-v2, created your notes directory with seed files, and now you want to index everything. Naturally, you try:
+
+```bash
+docker compose run --rm openclaw-cli memory reindex \
+  --path /home/node/.openclaw/memory/notes --verbose
+```
+
+And OpenClaw gently corrects you:
+
+```
+🦞 OpenClaw 2026.2.25 (unknown)
+   Pairing codes exist because even bots believe in consent—
+   and good security hygiene.
+
+error: unknown command 'reindex'
+(Did you mean index?)
+```
+
+The command is `memory index`, not `memory reindex`. Let's explore the full memory CLI.
+
+## Memory CLI Overview
+
+From the CLI help output:
+
+```
+memory *     Search and reindex memory files
+```
+
+The `memory` command group contains subcommands for managing the agent's knowledge base — the same SQLite + embedding system configured via `memorySearch` settings.
+
+### Available Subcommands
+
+```bash
+docker compose run --rm openclaw-cli memory --help
+```
+
+The primary operations:
+
+| Command | Purpose |
+|---------|---------|
+| `memory index` | Build or rebuild the embedding index from memory files |
+| `memory search` | Query the memory store from the command line |
+| `memory status` | Show index statistics and health |
+
+## The `memory index` Command
+
+### Basic Usage
+
+Index all notes in the memory directory:
+
+```bash
+docker compose run --rm openclaw-cli memory index
+```
+
+### With a Specific Path
+
+Target a subdirectory:
+
+```bash
+docker compose run --rm openclaw-cli memory index \
+  --path /home/node/.openclaw/memory/notes
+```
+
+### Verbose Mode
+
+Watch the indexing process in detail:
+
+```bash
+docker compose run --rm openclaw-cli memory index --verbose
+```
+
+This shows:
+
+- Files discovered and scanned
+- Chunks extracted from each document
+- Embeddings generated (using `all-MiniLM-L6-v2`)
+- Records written to `main.sqlite`
+
+### What Indexing Does
+
+The index command processes your memory files through this pipeline:
+
+```
+.md/.txt files → Chunk splitting → Embedding generation → SQLite storage
+```
+
+1. **File discovery** — Scans the memory directory for `.md`, `.txt`, and other text files
+2. **Chunk splitting** — Breaks documents into searchable segments
+3. **Embedding generation** — Runs each chunk through the configured model (`all-MiniLM-L6-v2` locally) to produce 384-dimensional vectors
+4. **SQLite write** — Stores the chunks, metadata, and embedding vectors in `main.sqlite`
+
+### Why the Database Was Empty
+
+In earlier troubleshooting, we saw the SQLite database was 0 bytes:
+
+```bash
+ls -l ~/.openclaw/memory/main.sqlite
+# -rw-r--r-- 1 azureuser azureuser 0 Feb 25 23:37 main.sqlite
+```
+
+And querying tables returned nothing:
+
+```bash
+sqlite3 ~/.openclaw/memory/main.sqlite ".tables"
+# (empty output)
+```
+
+This happens because **creating the directory and restarting the gateway isn't enough** — you must explicitly run `memory index` to populate the database. The gateway creates the empty database file on startup, but it doesn't auto-index existing notes.
+
+### Full Indexing Workflow
+
+```bash
+# 1. Ensure the memory directory exists with proper permissions
+mkdir -p ~/.openclaw/memory/notes
+sudo chown -R 1000:1000 ~/.openclaw/memory
+chmod 770 ~/.openclaw/memory
+chmod 770 ~/.openclaw/memory/notes
+
+# 2. Create or add notes
+cat > ~/.openclaw/memory/notes/seed.md <<'EOF'
+# Seed note
+This is a test note to initialize file-backed memory/search.
+EOF
+
+cat > ~/.openclaw/memory/notes/infrastructure.md <<'EOF'
+# Infrastructure Notes
+- Azure VM: B2s (2 vCPU, 4 GB RAM)
+- Region: East US
+- Docker version: 28.x
+- OpenClaw version: 2026.2.25
+EOF
+
+# 3. Run the index command
+docker compose run --rm openclaw-cli memory index --verbose
+
+# 4. Verify the database was populated
+sqlite3 ~/.openclaw/memory/main.sqlite \
+  "SELECT COUNT(*) FROM sqlite_master WHERE type='table';"
+```
+
+## The `memory search` Command
+
+### Basic Search
+
+Query your indexed memory from the terminal:
+
+```bash
+docker compose run --rm openclaw-cli memory search "Azure VM setup"
+```
+
+### How Search Works
+
+The search uses the same hybrid pipeline configured via `memorySearch` settings:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "memorySearch": {
+        "provider": "local",
+        "model": "all-MiniLM-L6-v2",
+        "query": {
+          "hybrid": {
+            "enabled": true,
+            "vectorWeight": 0.7,
+            "textWeight": 0.3,
+            "candidateMultiplier": 4
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+With hybrid search enabled:
+
+1. **Vector search (70% weight)** — Your query is embedded and compared against stored vectors using cosine similarity
+2. **Text search (30% weight)** — Standard text matching against chunk content
+3. **Candidate multiplier (4x)** — Retrieves 4x more candidates than needed, then re-ranks for better results
+
+### Search from Inside the Gateway
+
+The agent uses the same search pipeline automatically. When the agent needs context, the `session-memory` hook triggers a memory search and injects relevant results into the conversation.
+
+## Index vs Reindex
+
+While the CLI command is `memory index` (not `reindex`), the behavior depends on whether the database already has content:
+
+| Scenario | Behavior |
+|----------|----------|
+| Empty database | Full index — all files processed |
+| Populated database | Incremental — only new/changed files indexed |
+| Force rebuild | Use `--force` flag to re-embed everything |
+
+### Force Re-Index
+
+If your model or chunking strategy changed, force a complete rebuild:
+
+```bash
+docker compose run --rm openclaw-cli memory index --force
+```
+
+This drops existing embeddings and regenerates everything. On a B2s VM, this takes roughly:
+
+| Notes Count | Estimated Time |
+|-------------|---------------|
+| 10 files | ~5 seconds |
+| 100 files | ~30 seconds |
+| 1,000 files | ~5 minutes |
+| 10,000 files | ~45 minutes |
+
+Times are approximate for `all-MiniLM-L6-v2` running on CPU.
+
+## Troubleshooting
+
+### "unable to open database file"
+
+```bash
+sqlite3 ~/.openclaw/memory/main.sqlite "SELECT COUNT(*) FROM embedding_cache;"
+# Error: unable to open database "/home/azureuser/.openclaw/memory/main.sqlite":
+#   unable to open database file
+```
+
+The directory doesn't exist yet:
+
+```bash
+mkdir -p ~/.openclaw/memory
+docker compose restart openclaw-gateway
+```
+
+### Database Exists but Empty (0 bytes)
+
+```bash
+ls -l ~/.openclaw/memory/main.sqlite
+# -rw-r--r-- 1 azureuser azureuser 0 Feb 25 23:37
+```
+
+The database was created but never populated. Run the index command:
+
+```bash
+docker compose run --rm openclaw-cli memory index
+```
+
+### Permission Denied During Index
+
+If the CLI can't write to the database:
+
+```bash
+sudo chown -R 1000:1000 ~/.openclaw/memory
+chmod 660 ~/.openclaw/memory/main.sqlite
+```
+
+### sqlite3 Not Available
+
+If you need to inspect the database directly:
+
+```bash
+sudo apt install sqlite3
+```
+
+Then verify the schema:
+
+```bash
+sqlite3 ~/.openclaw/memory/main.sqlite \
+  "SELECT name FROM sqlite_master WHERE type IN ('table','index','trigger','view');"
+```
+
+## Automating Index Updates
+
+### Cron-Based Reindexing
+
+Set up a cron job to reindex new notes periodically:
+
+```bash
+# Add to crontab:
+# Reindex memory every hour
+0 * * * * cd /home/azureuser/openclaw && \
+  docker compose run --rm openclaw-cli memory index 2>&1 | \
+  logger -t openclaw-memory-index
+```
+
+### Post-Flush Indexing
+
+When memory flush writes new notes (after session compaction), those notes won't be searchable until indexed. Combine flush and index:
+
+```bash
+#!/bin/bash
+# flush-and-index.sh
+# Run after long sessions or on schedule
+
+# The flush happens automatically during compaction.
+# Index any new flush notes:
+docker compose run --rm openclaw-cli memory index --verbose
+
+echo "Memory index updated at $(date)"
+```
+
+### OpenClaw Built-In Cron
+
+Use OpenClaw's internal cron scheduler:
+
+```bash
+docker compose run --rm openclaw-cli cron --help
+```
+
+## Quick Reference
+
+```bash
+# Index all memory files
+docker compose run --rm openclaw-cli memory index
+
+# Index with verbose output
+docker compose run --rm openclaw-cli memory index --verbose
+
+# Search memory
+docker compose run --rm openclaw-cli memory search "query text"
+
+# Force full reindex
+docker compose run --rm openclaw-cli memory index --force
+
+# Check memory status
+docker compose run --rm openclaw-cli memory status
+
+# WRONG — this command doesn't exist:
+# docker compose run --rm openclaw-cli memory reindex  ← error!
+```
+
+## Series Navigation
+
+**Previous:** [OpenClaw Gmail Watcher and Email Channel Integration](/blog/openclaw-gmail-watcher-and-email-channel-integration)
+
+---
+
+*Part 30 of the OpenClaw on Azure series. Remember: it's `index`, not `reindex`. The lobster remembers everything — if you index it first.*

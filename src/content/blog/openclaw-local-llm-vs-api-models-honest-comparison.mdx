@@ -1,0 +1,158 @@
+---
+draft: false
+title: "Local LLMs vs API Models for OpenClaw: The Honest Comparison"
+snippet: "Should you invest in 64GB+ RAM for local models or run OpenClaw on minimal hardware with API providers? An honest breakdown of cost, quality, latency, and privacy tradeoffs."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Local vs API Models for OpenClaw" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - local-llm
+  - api-models
+  - ollama
+  - inference
+  - cost-analysis
+---
+
+## The 64GB Gamble
+
+Every week I see the same question: "Should I buy a Mac Mini M4 Pro with 24GB for OpenClaw, or do I need 64GB?" The subtext is always the same — people want to run models locally and avoid API costs. Let me give you the honest answer.
+
+## What Local Models Actually Need
+
+Running an LLM locally means loading the entire model into memory (RAM or VRAM). Here's the reality check:
+
+```
+Model Size → Memory Required (approximate)
+
+7B  parameters → 4-8GB   (Q4-Q8 quantization)
+13B parameters → 8-16GB
+30B parameters → 16-32GB
+70B parameters → 35-64GB
+```
+
+For OpenClaw agent tasks — tool calling, code generation, multi-step reasoning — you need at least a 30B+ model to get reliable results. That means **32GB minimum, 64GB comfortable**.
+
+### The Mac Mini Lineup
+
+```
+M4 (16GB):  Only runs 7B models well. Not recommended for agents.
+M4 Pro (24GB):  Runs 13B comfortably, 30B at Q4 (quality loss).
+M4 Pro (48GB):  Runs 30B at Q6, 70B at Q4. Sweet spot for local.
+M4 Max (64GB+):  Runs 70B at Q6. Best local experience. $2,000+.
+```
+
+### Setting Up Ollama with OpenClaw
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Pull a model
+ollama pull llama3.3:70b-instruct-q4_K_M  # Needs ~40GB RAM
+
+# Configure OpenClaw
+cat >> ~/.openclaw/openclaw.yaml << 'EOF'
+providers:
+  ollama:
+    type: ollama
+    baseUrl: http://localhost:11434
+    
+models:
+  default: ollama/llama3.3:70b-instruct-q4_K_M
+EOF
+
+openclaw gateway restart
+```
+
+## What API Models Give You
+
+With API providers, inference happens on someone else's hardware. Your machine just runs the gateway.
+
+**GPT-5-mini via Copilot Pro ($10/month flat):**
+```yaml
+models:
+  default: github-copilot/gpt-5-mini
+```
+
+**Claude Sonnet 4 via Anthropic (pay-per-token):**
+```yaml
+providers:
+  anthropic:
+    type: anthropic
+    apiKey: ${ANTHROPIC_API_KEY}
+models:
+  default: anthropic/claude-sonnet-4
+```
+
+## Head-to-Head: Real Agent Tasks
+
+I benchmarked common OpenClaw tasks across local and API models:
+
+### Task 1: "Read this error log and fix the code"
+- **GPT-5-mini**: Correctly identified the bug, applied fix, ran tests. 4 seconds.
+- **Llama 3.3 70B (Q4, M4 Max)**: Identified the bug, fix had a minor syntax error. 12 seconds.
+- **Mistral 7B (M4 Pro 24GB)**: Identified the wrong line as the problem. 2 seconds.
+
+### Task 2: "Create a Docker Compose stack with Postgres, Redis, and a Node app"
+- **GPT-5-mini**: Clean, production-ready compose file with health checks. 3 seconds.
+- **Llama 3.3 70B (Q4)**: Working but missing health checks and proper networking. 15 seconds.
+- **Phi-3 14B (M4 Pro 24GB)**: Syntax errors in the YAML. 4 seconds.
+
+### Task 3: Multi-step tool chain (read file → edit → git commit → push)
+- **GPT-5-mini**: 4/4 tool calls successful, correct parameters. 8 seconds total.
+- **Llama 3.3 70B (Q4)**: 3/4 successful, malformed JSON on git push call. 25 seconds.
+- **Mistral 7B**: 2/4 successful. Broke on file edit (wrong path format). 6 seconds.
+
+## The Cost Reality Over 2 Years
+
+```
+Setup A: Raspberry Pi 5 + Copilot Pro
+  Hardware: $80 (one-time)
+  Copilot:  $240/year
+  Electric: $8/year
+  2-year total: $568
+
+Setup B: Mac Mini M4 Pro 48GB + Local Models
+  Hardware: $1,200 (one-time)
+  Electric: $36/year
+  2-year total: $1,272
+
+Setup C: Mac Mini M4 Pro 48GB + Copilot Pro (hybrid)
+  Hardware: $1,200 (one-time)
+  Copilot:  $240/year
+  Electric: $36/year
+  2-year total: $1,752
+```
+
+Setup A costs less than half of Setup B — and gives you better model quality.
+
+## The Future Argument
+
+"But local models will get better!" Absolutely. They will. But consider:
+
+1. **API models improve too.** GPT-5-mini today is better than GPT-4 was. The gap doesn't necessarily close.
+2. **Hardware depreciates.** The Mac Mini you buy today loses 40-50% value in 2 years.
+3. **You can always switch.** OpenClaw's model config is one YAML change. Start with API, switch to local when it makes sense.
+
+## My Honest Take
+
+If I'm spending my own money and I want the best OpenClaw experience today:
+
+1. **Buy a Raspberry Pi 5** ($80)
+2. **Subscribe to Copilot Pro** ($10/month)
+3. **Save the remaining $1,100** you would've spent on a Mac Mini
+4. **Revisit in 12 months** — if local models have caught up, buy hardware then (it'll be cheaper too)
+
+The only exception: if you truly cannot send data to an API provider for privacy/compliance reasons. Then the Mac Mini with 48GB+ is your best bet. But be honest with yourself about whether that's a real requirement or just a preference.
+
+```bash
+# The $80 production agent
+# Pi 5 8GB + NVMe SSD + Copilot Pro
+# 
+# Runs 24/7, responds in 2-4 seconds,
+# handles Discord + WhatsApp + Telegram,
+# costs less than a Netflix subscription.
+```

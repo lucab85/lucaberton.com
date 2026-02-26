@@ -1,0 +1,126 @@
+---
+draft: false
+title: "OpenClaw Meets Meshtastic: Off-Grid AI Agent Communication"
+snippet: "What if your AI agent could work without internet? I bridged OpenClaw to a Meshtastic LoRa mesh network for off-grid AI-assisted communication."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "OpenClaw Meets Meshtastic" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - meshtastic
+  - lora
+  - off-grid
+  - mesh-network
+  - raspberry-pi
+---
+
+## The Internet Goes Down. Now What?
+
+Meshtastic creates a peer-to-peer mesh network using LoRa radio — no internet, no cell towers, no infrastructure needed. Range: 1-10km line of sight, or further with repeaters.
+
+I built a bridge between OpenClaw and Meshtastic. When the internet works, OpenClaw uses GPT-5-mini normally. When it doesn't — or when I'm out of range — it falls back to Meshtastic for critical communication.
+
+## The Architecture
+
+```
+┌──────────────┐  LoRa  ┌──────────────┐  Serial  ┌──────────────┐
+│  T-Deck      │ ◄────► │  Meshtastic  │ ◄──────► │  Pi + OpenClaw│
+│  (portable)  │  915MHz │  Node (home) │  USB     │  Gateway      │
+└──────────────┘        └──────────────┘          └──────────────┘
+                                                        │
+                                                   GPT-5-mini
+                                                   (when online)
+```
+
+## Setting Up the Bridge
+
+```bash
+# Install meshtastic CLI on the OpenClaw Pi
+pip install meshtastic
+
+# Connect Meshtastic node via USB
+meshtastic --info  # Verify connection
+
+# Simple bridge script (runs alongside OpenClaw)
+cat > /home/pi/mesh-bridge.py << 'EOF'
+import meshtastic
+import meshtastic.serial_interface
+import requests
+import time
+
+interface = meshtastic.serial_interface.SerialInterface()
+
+def on_receive(packet, interface):
+    if 'decoded' in packet and 'text' in packet['decoded']:
+        msg = packet['decoded']['text']
+        sender = packet.get('fromId', 'unknown')
+        
+        # Forward to OpenClaw webhook
+        try:
+            requests.post('http://localhost:3000/api/webhook', 
+                json={'source': 'meshtastic', 'from': sender, 'text': msg})
+        except:
+            # Offline — use local response
+            interface.sendText(f"OpenClaw offline. Message logged: {msg[:50]}")
+
+from pubsub import pub
+pub.subscribe(on_receive, "meshtastic.receive.text")
+
+while True:
+    time.sleep(1)
+EOF
+```
+
+## Use Cases
+
+### Emergency Alerts
+When power/internet goes down, OpenClaw sends via Meshtastic:
+```
+📡 MESH: Power outage detected at home. UPS active (45 min remaining).
+Cameras recording to local storage. All systems nominal.
+```
+
+### Remote Queries
+From my T-Deck in the field:
+```
+ME → MESH: status home
+OPENCLAW → MESH: All systems OK. Temp 22C. No alerts. UPS 100%.
+```
+
+### Camping/Hiking
+```
+ME → MESH: weather forecast
+OPENCLAW → MESH: Clear, 18C, wind 5km/h NW. No rain 48h.
+```
+
+(OpenClaw cached the forecast before going offline.)
+
+## Limitations
+
+LoRa is slow. Really slow. 200-300 characters per message, maybe 1 message per few seconds. This isn't for chatting — it's for critical, concise communication.
+
+OpenClaw knows this and automatically:
+- Truncates responses to <200 chars
+- Strips formatting and emoji
+- Prioritizes actionable information
+- Queues non-urgent messages for when internet returns
+
+## Range Testing
+
+In my neighborhood (suburban, some trees):
+
+```
+Direct line of sight:  3.2 km
+Through buildings:     800m
+With one repeater:     5.5 km
+```
+
+Good enough to reach my Meshtastic node at home from anywhere in town.
+
+## Why Bother?
+
+Because infrastructure fails. Internet goes down. Cell towers overload during emergencies. Having an AI agent accessible via radio mesh means I always have a smart assistant, even when everything else fails.
+
+Total cost for the mesh: $35 for a Heltec V3 board + $5 for an antenna. Worth it for the peace of mind.

@@ -1,0 +1,134 @@
+---
+draft: false
+title: "Managing TrueNAS on Raspberry Pi with OpenClaw Agent Commands"
+snippet: "Run TrueNAS on a Pi and manage it through natural language. OpenClaw handles ZFS snapshots, disk health checks, and share management — no web UI needed."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Managing TrueNAS on Raspberry Pi with OpenClaw Agent Commands" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - truenas
+  - nas
+  - zfs
+  - raspberry-pi
+  - storage
+---
+
+## TrueNAS + Pi = Budget NAS
+
+Jeff Geerling proved TrueNAS runs on Raspberry Pi. I took it further — instead of clicking through the web UI, I manage my NAS through OpenClaw commands via Discord.
+
+## My NAS Setup
+
+```
+Hardware:
+- Raspberry Pi 5 (8GB)
+- Radxa SATA HAT (4x SATA)
+- 4x 2TB WD Red Plus (RAIDZ1)
+- NVMe boot drive (256GB)
+
+Software:
+- TrueNAS SCALE (Dragonfish)
+- OpenClaw on separate Pi
+```
+
+## Natural Language NAS Management
+
+Instead of opening the TrueNAS web UI, I just message OpenClaw:
+
+**"How's the NAS doing?"**
+```
+Pool: tank
+Status: ONLINE
+Used: 2.1TB / 5.4TB (39%)
+Last scrub: 2 days ago (0 errors)
+Disk temps: 34°C, 35°C, 33°C, 34°C
+```
+
+**"Take a snapshot of the media dataset"**
+```bash
+# OpenClaw runs via TrueNAS API:
+# POST /api/v2.0/zfs/snapshot
+# {"dataset": "tank/media", "name": "manual-2026-02-26"}
+✅ Snapshot created: tank/media@manual-2026-02-26
+```
+
+**"List recent snapshots"**
+```
+tank/media@auto-2026-02-26  (2h ago, 0B)
+tank/media@auto-2026-02-25  (1d ago, 1.2GB)
+tank/documents@auto-2026-02-26  (2h ago, 0B)
+```
+
+## TrueNAS API Integration
+
+TrueNAS SCALE has a REST API that OpenClaw calls directly:
+
+```yaml
+# OpenClaw skill configuration
+tools:
+  truenas:
+    type: rest-api
+    baseUrl: http://truenas.local/api/v2.0
+    headers:
+      Authorization: "Bearer YOUR_API_KEY"
+```
+
+Common API calls OpenClaw makes:
+```bash
+# Pool status
+GET /pool
+
+# Disk temperatures
+GET /disk/temperatures
+
+# Create snapshot
+POST /zfs/snapshot {"dataset": "tank/media", "name": "snap-name"}
+
+# List snapshots
+GET /zfs/snapshot?dataset=tank/media
+
+# Check alerts
+GET /alert/list
+```
+
+## Automated Checks
+
+Every 6 hours, OpenClaw checks:
+
+1. **ZFS pool health** — DEGRADED or FAULTED → immediate alert
+2. **Disk temperatures** — >45°C → warning
+3. **Disk SMART status** — any failures → critical alert
+4. **Snapshot age** — oldest auto-snapshot >7 days → cleanup reminder
+5. **Share accessibility** — SMB/NFS responding → OK
+
+## The Killer Feature: Smart Cleanup
+
+When the pool fills up, OpenClaw doesn't just alert — it suggests action:
+
+> ⚠️ **NAS pool at 85%**
+> Largest datasets:
+> - tank/media/movies: 1.8TB
+> - tank/media/tv: 1.2TB
+> - tank/backups: 800GB
+>
+> You have 23 snapshots older than 30 days (estimated 400GB reclaimable).
+> Want me to delete snapshots older than 30 days?
+
+One reply: "Yes, clean them up." Done.
+
+## Cost vs Cloud Storage
+
+```
+Pi NAS (one-time):     $350
+4x 2TB drives:         $240
+Monthly electricity:   $2
+Total year 1:          $614
+
+Google One 2TB:        $100/year
+iCloud+ 2TB:           $120/year
+But: 6TB usable, no subscription, fully private
+Break-even: ~5 years, then free forever
+```

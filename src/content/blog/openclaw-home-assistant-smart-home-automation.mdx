@@ -1,0 +1,117 @@
+---
+draft: false
+title: "Integrating OpenClaw with Home Assistant for Natural Language Home Control"
+snippet: "Stop fumbling with dashboards. Use OpenClaw as a natural language interface to Home Assistant — control lights, check sensors, and automate your home through Discord or WhatsApp."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Integrating OpenClaw with Home Assistant for Natural Language Home Control" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - home-assistant
+  - smart-home
+  - zigbee
+  - automation
+  - iot
+---
+
+## The Dashboard Problem
+
+Home Assistant is incredible. But controlling it means opening an app, finding the right dashboard, tapping the right entity. What if you could just text your house?
+
+"Turn off all the lights downstairs."
+"What's the temperature in the garage?"
+"Set the thermostat to 20°C when I leave."
+
+That's what OpenClaw + Home Assistant gives you.
+
+## Architecture
+
+```
+┌─────────────┐     ┌──────────────┐     ┌──────────────────┐
+│  Discord /   │────▶│  OpenClaw    │────▶│  Home Assistant   │
+│  WhatsApp    │◀────│  Gateway     │◀────│  REST API         │
+└─────────────┘     └──────────────┘     └──────────────────┘
+                         │                        │
+                    GPT-5-mini              Zigbee / Z-Wave
+                    (reasoning)              (200+ devices)
+```
+
+## Setting Up the Integration
+
+### Step 1: Create a Long-Lived Access Token in HA
+
+Go to your Home Assistant profile → Security → Long-Lived Access Tokens → Create Token.
+
+### Step 2: Configure OpenClaw
+
+```yaml
+# openclaw.yaml
+tools:
+  home-assistant:
+    type: rest-api
+    baseUrl: http://homeassistant.local:8123
+    headers:
+      Authorization: "Bearer YOUR_HA_TOKEN"
+```
+
+### Step 3: Create a Home Assistant Skill
+
+```markdown
+# skills/home-assistant/SKILL.md
+## Home Assistant Control
+
+When the user asks to control home devices:
+1. Query HA API for entity states: GET /api/states
+2. Match natural language to entity IDs
+3. Call services: POST /api/services/{domain}/{service}
+
+Common mappings:
+- "lights" → light.* entities
+- "temperature" → sensor.*_temperature
+- "thermostat" → climate.* entities
+- "lock/unlock" → lock.* entities
+```
+
+## Real-World Examples
+
+**Me:** "Good night"
+**OpenClaw:** Turns off all lights, locks front door, sets thermostat to 18°C, arms alarm system.
+
+**Me:** "Is the garage door open?"
+**OpenClaw:** Checks `cover.garage_door` state → "Yes, the garage door has been open for 2 hours. Want me to close it?"
+
+**Me:** "Too warm in the office"
+**OpenClaw:** Checks `sensor.office_temperature` (26°C), turns on `fan.office`, adjusts `climate.office` to 22°C.
+
+## Automations That Talk Back
+
+The real power is bidirectional. Home Assistant can trigger OpenClaw messages:
+
+```yaml
+# HA automation: notify via OpenClaw when washing machine finishes
+automation:
+  - alias: "Washing Machine Done"
+    trigger:
+      - platform: state
+        entity_id: sensor.washing_machine_power
+        to: "0"
+        for: "00:05:00"
+    action:
+      - service: rest_command.openclaw_notify
+        data:
+          message: "Washing machine finished 5 minutes ago"
+```
+
+OpenClaw receives this and forwards to your Discord/WhatsApp with context.
+
+## Privacy Advantage
+
+Everything runs locally:
+- Home Assistant on a Pi or NUC
+- OpenClaw on a Pi
+- Zigbee coordinator (no cloud)
+- GPT-5-mini via Copilot Pro (only text queries leave your network, no device data)
+
+No Google, no Amazon, no cloud dependency for device control.

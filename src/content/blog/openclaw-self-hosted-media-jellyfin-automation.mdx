@@ -1,0 +1,126 @@
+---
+draft: false
+title: "Automating Your Jellyfin Media Library with OpenClaw"
+snippet: "OpenClaw as your personal media librarian. Automatically organize downloads, notify when new content arrives, and answer questions about your library — all through chat."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Automating Your Jellyfin Media Library with OpenClaw" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - jellyfin
+  - self-hosted
+  - media
+  - automation
+  - homelab
+---
+
+## Self-Hosted Media + AI = Magic
+
+I run Jellyfin on a Pi for my family's media library. It's great, but managing it — organizing files, checking what's new, handling subtitles — is tedious. OpenClaw turns the tedium into conversation.
+
+## The Stack
+
+```
+Pi 5 (NAS):     Jellyfin + storage
+Pi 5 (OpenClaw): Gateway + automation
+Both on:        Local network, no cloud
+```
+
+## What OpenClaw Does
+
+### 1. Library Queries
+
+**"What movies do we have with Tom Hanks?"**
+OpenClaw queries Jellyfin's API and returns a list.
+
+```bash
+# Jellyfin API call
+curl -s "http://jellyfin:8096/Items?SearchTerm=Tom+Hanks&IncludeItemTypes=Movie" \
+  -H "X-Emby-Token: YOUR_API_KEY" | jq '.Items[].Name'
+```
+
+### 2. New Content Notifications
+
+When new files appear in the media directory, OpenClaw notices and announces:
+
+```bash
+# In HEARTBEAT.md
+# Check for new media files added in last 6 hours
+# Notify via Discord with title and type
+```
+
+> 🎬 **New in Jellyfin:**
+> - The Martian (2015) — Movie, 1080p
+> - Planet Earth III E04 — TV, 4K
+> Jellyfin library refreshed automatically.
+
+### 3. Subtitle Management
+
+**"Download Dutch subtitles for The Martian"**
+
+OpenClaw uses the Jellyfin API to search for and download subtitles:
+
+```bash
+# Search subtitles
+GET /Items/{id}/RemoteSearch/Subtitles/{language}
+
+# Download subtitle
+POST /Items/{id}/RemoteSearch/Subtitles/{subtitleId}
+```
+
+### 4. Storage Management
+
+**"How much space is left on the media drive?"**
+
+> 📊 Media storage: 1.8TB used / 4TB (45%)
+> Movies: 1.2TB (142 titles)
+> TV Shows: 450GB (23 series)
+> Music: 150GB (3,200 albums)
+
+## Jellyfin API Integration
+
+```yaml
+# OpenClaw configuration
+tools:
+  jellyfin:
+    type: rest-api
+    baseUrl: http://jellyfin.local:8096
+    headers:
+      X-Emby-Token: "YOUR_API_KEY"
+```
+
+## Family-Friendly Commands
+
+My kids use it too (via a family Discord channel):
+
+- "What can I watch?" → Age-appropriate suggestions from the library
+- "Put on something funny" → Random comedy from the library
+- "How long is Frozen 2?" → "1 hour 43 minutes"
+
+## The HandBrake Pipeline
+
+When I rip Blu-rays (MakeMKV → HandBrake), OpenClaw monitors the output directory:
+
+```bash
+# Watch for new .mkv files in the rip directory
+inotifywait -m /media/rips -e close_write |
+while read dir action file; do
+  # Notify OpenClaw
+  curl -X POST http://openclaw:3000/api/webhook \
+    -d "{\"message\": \"New rip completed: $file\"}"
+done
+```
+
+OpenClaw then:
+1. Identifies the movie/show (from filename or API lookup)
+2. Moves it to the correct Jellyfin directory
+3. Triggers a library scan
+4. Sends a notification
+
+## Why Not Plex?
+
+Plex wants cloud accounts, phone-home telemetry, and a subscription for basic features. Jellyfin is fully open source, fully local, and works perfectly with OpenClaw's local-first philosophy.
+
+My entire media setup: $0/month in subscriptions. Just electricity and the hardware I already own.

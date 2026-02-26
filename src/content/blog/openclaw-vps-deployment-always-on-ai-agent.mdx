@@ -1,0 +1,198 @@
+---
+draft: false
+title: "OpenClaw on a $5 VPS: Always-On AI Agent with Zero Hardware"
+snippet: "Deploy OpenClaw on a cheap cloud VPS with Docker and GPT-5-mini. A complete guide to running a production AI agent on Hetzner, DigitalOcean, or Oracle Cloud free tier."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "OpenClaw on VPS" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - vps
+  - docker
+  - cloud-deployment
+  - oracle-cloud
+  - always-on
+---
+
+## No Hardware, No Problem
+
+You don't need a Raspberry Pi. You don't need a Mac Mini. You don't need any hardware at all. A $5/month VPS runs OpenClaw perfectly — and Oracle Cloud's free tier means you can do it for $0.
+
+## Why a VPS Works
+
+OpenClaw's gateway requirements are minimal:
+
+- **CPU:** 1 vCPU (ARM or x86)
+- **RAM:** 1-2GB
+- **Storage:** 5GB for the gateway + workspace
+- **Network:** Stable internet (the gateway needs to maintain WebSocket connections to Discord, WhatsApp, etc.)
+
+That's well within the specs of the cheapest VPS tiers from any provider.
+
+## Option 1: Oracle Cloud Free Tier ($0/month)
+
+Oracle offers an always-free ARM instance with specs that dwarf what OpenClaw needs:
+
+```bash
+# Oracle Cloud free tier: ARM Ampere A1
+# 4 OCPUs, 24GB RAM, 200GB storage
+# Yes, really. For free. Forever.
+
+# Create an instance via Oracle Cloud Console:
+# Shape: VM.Standard.A1.Flex
+# Image: Ubuntu 24.04 (aarch64)
+# Storage: 50GB boot volume (plenty)
+```
+
+After provisioning:
+
+```bash
+# SSH in
+ssh ubuntu@<your-instance-ip>
+
+# Install Docker
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker $USER
+# Log out and back in
+
+# Deploy OpenClaw
+mkdir -p ~/openclaw && cd ~/openclaw
+
+cat > docker-compose.yml << 'EOF'
+version: '3.8'
+services:
+  openclaw:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: openclaw
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./config:/home/node/.openclaw
+      - ./workspace:/home/node/.openclaw/workspace
+    environment:
+      - TZ=Europe/Amsterdam
+EOF
+
+docker compose up -d
+
+# Run onboarding
+docker exec -it openclaw openclaw onboard
+```
+
+## Option 2: Hetzner Cloud (€3.79/month)
+
+Hetzner's CX22 is the best value in cloud:
+
+```bash
+# CX22: 2 vCPU, 4GB RAM, 40GB SSD, 20TB traffic
+# €3.79/month (~$4.10)
+
+# Create via Hetzner CLI or console
+hcloud server create \
+  --name openclaw \
+  --type cx22 \
+  --image ubuntu-24.04 \
+  --ssh-key my-key
+
+# Same Docker setup as above
+```
+
+## Option 3: DigitalOcean ($6/month)
+
+```bash
+# Basic droplet: 1 vCPU, 1GB RAM, 25GB SSD
+doctl compute droplet create openclaw \
+  --size s-1vcpu-1gb \
+  --image ubuntu-24-04-x64 \
+  --region ams3 \
+  --ssh-keys <key-fingerprint>
+```
+
+## Securing Your VPS
+
+A public-facing OpenClaw instance needs basic security:
+
+```bash
+# 1. Firewall — only allow SSH and OpenClaw control UI
+sudo ufw default deny incoming
+sudo ufw allow 22/tcp
+sudo ufw allow 3000/tcp  # Control UI (consider removing if not needed)
+sudo ufw enable
+
+# 2. SSH hardening
+sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+sudo systemctl restart sshd
+
+# 3. Auto-updates
+sudo apt install -y unattended-upgrades
+sudo dpkg-reconfigure -plow unattended-upgrades
+
+# 4. Fail2ban
+sudo apt install -y fail2ban
+sudo systemctl enable fail2ban
+```
+
+## Configuring GPT-5-mini
+
+```bash
+# Inside the container
+docker exec -it openclaw openclaw configure --section copilot
+
+# Set the model
+docker exec -it openclaw sh -c 'cat >> /home/node/.openclaw/openclaw.yaml << EOF
+models:
+  default: github-copilot/gpt-5-mini
+EOF'
+
+# Restart to apply
+docker compose restart
+```
+
+## Monitoring and Maintenance
+
+```bash
+# Check status
+docker exec openclaw openclaw status
+
+# View logs
+docker logs -f openclaw --tail 100
+
+# Auto-restart on crash (already handled by restart: unless-stopped)
+
+# Update to latest version
+docker compose pull
+docker compose up -d
+
+# Backup config and workspace
+tar czf openclaw-backup-$(date +%F).tar.gz config/ workspace/
+```
+
+## VPS vs Pi: When to Choose What
+
+**Choose VPS when:**
+- You don't want hardware at home
+- You need a static public IP
+- You want easy snapshots and backups
+- You're already managing cloud infrastructure
+
+**Choose Pi when:**
+- You want full physical control
+- You pair OpenClaw with home devices (cameras, speakers)
+- You prefer one-time cost over recurring
+- You're in a location with unreliable internet to cloud providers
+
+## Cost Summary
+
+```
+Oracle Cloud free tier:     $0/month  + $10 Copilot Pro = $10/month
+Hetzner CX22:              $4/month  + $10 Copilot Pro = $14/month
+DigitalOcean Basic:         $6/month  + $10 Copilot Pro = $16/month
+Raspberry Pi 5 (amortized): $3/month  + $10 Copilot Pro = $13/month
+```
+
+All of these are under $20/month for a state-of-the-art AI agent that's always on, always reachable, and handles everything from code generation to home automation.
+
+The Oracle Cloud free tier is genuinely hard to beat — 4 CPUs and 24GB RAM for free is absurd overkill for OpenClaw, but it means you'll never worry about resources.

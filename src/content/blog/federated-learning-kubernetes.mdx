@@ -1,0 +1,146 @@
+---
+draft: false
+title: "Federated Learning on Kubernetes: Privacy-Preserving AI Training"
+snippet: "Implement federated learning on Kubernetes for privacy-preserving model training across distributed data sources. Architecture patterns and practical implementation."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - federated-learning
+  - kubernetes
+  - privacy
+  - ai
+  - distributed
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Federated learning on Kubernetes"
+---
+## 🌐 Training Without Sharing Data
+
+Federated learning lets multiple organizations train a shared model without sharing their raw data. Each participant trains locally and shares only model updates. Kubernetes provides the orchestration layer.
+
+## How It Works
+
+```
+Coordinator (Hub Cluster)
+  ↓ sends global model
+Participant A (Hospital A) → trains on local data → sends model updates ↑
+Participant B (Hospital B) → trains on local data → sends model updates ↑
+Participant C (Hospital C) → trains on local data → sends model updates ↑
+  ↓ aggregates updates → new global model → repeat
+```
+
+## Architecture on Kubernetes
+
+### Coordinator
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fl-coordinator
+spec:
+  template:
+    spec:
+      containers:
+      - name: coordinator
+        image: registry.internal/fl-coordinator:v1.0
+        env:
+        - name: MIN_PARTICIPANTS
+          value: "3"
+        - name: ROUNDS
+          value: "50"
+        - name: AGGREGATION_STRATEGY
+          value: "fedavg"
+        ports:
+        - containerPort: 8080
+```
+
+### Participant
+
+```python
+import flwr as fl
+import torch
+
+class FederatedClient(fl.client.NumPyClient):
+    def __init__(self, model, trainloader):
+        self.model = model
+        self.trainloader = trainloader
+    
+    def get_parameters(self, config):
+        return [val.cpu().numpy() for val in self.model.parameters()]
+    
+    def fit(self, parameters, config):
+        # Update model with global parameters
+        set_parameters(self.model, parameters)
+        
+        # Train on local data
+        train(self.model, self.trainloader, epochs=config["local_epochs"])
+        
+        # Return updated parameters (NOT the data)
+        return self.get_parameters(config), len(self.trainloader.dataset), {}
+    
+    def evaluate(self, parameters, config):
+        set_parameters(self.model, parameters)
+        loss, accuracy = test(self.model, self.testloader)
+        return float(loss), len(self.testloader.dataset), {"accuracy": accuracy}
+
+# Connect to coordinator
+fl.client.start_client(
+    server_address="fl-coordinator.internal:8080",
+    client=FederatedClient(model, trainloader),
+)
+```
+
+## Privacy Enhancements
+
+### Differential Privacy
+
+Add noise to prevent reverse-engineering individual records:
+
+```python
+from opacus import PrivacyEngine
+
+privacy_engine = PrivacyEngine()
+model, optimizer, trainloader = privacy_engine.make_private_with_epsilon(
+    module=model,
+    optimizer=optimizer,
+    data_loader=trainloader,
+    target_epsilon=8.0,
+    target_delta=1e-5,
+    epochs=config["local_epochs"],
+    max_grad_norm=1.0,
+)
+```
+
+### Secure Aggregation
+
+Encrypt model updates so the coordinator can't see individual contributions:
+
+```python
+from cryptography.fernet import Fernet
+
+def encrypt_parameters(parameters, shared_key):
+    f = Fernet(shared_key)
+    serialized = pickle.dumps(parameters)
+    return f.encrypt(serialized)
+```
+
+## Use Cases
+
+- **Healthcare**: Train diagnostic models across hospitals without sharing patient records
+- **Finance**: Fraud detection models across banks without exposing transactions
+- **Manufacturing**: Quality prediction across factories without sharing proprietary process data
+- **Telecom**: Network optimization across operators without sharing customer data
+
+## Challenges
+
+1. **Non-IID data**: Participants have different data distributions — use FedProx or SCAFFOLD instead of FedAvg
+2. **Communication overhead**: Model updates can be large — use gradient compression
+3. **Stragglers**: Some participants are slower — use asynchronous aggregation
+4. **Free-riders**: Participants who benefit without contributing — implement contribution scoring
+
+---
+
+*Exploring federated learning for your organization? I help teams design privacy-preserving ML architectures. [Let's connect](/contact/).*

@@ -1,0 +1,155 @@
+---
+draft: false
+title: "GitOps at Scale: Fleet Management with Flux and ArgoCD"
+snippet: "Managing hundreds of Kubernetes clusters with GitOps. Multi-tenancy patterns, progressive delivery, and fleet-wide configuration management."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - gitops
+  - argocd
+  - flux
+  - kubernetes
+  - devops
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "GitOps fleet management at scale"
+---
+## 🔄 GitOps for 100+ Clusters
+
+GitOps at small scale is straightforward. At large scale — hundreds of clusters, thousands of applications, multiple teams — it requires careful architecture. Here's what works.
+
+## ArgoCD vs Flux: Quick Decision
+
+| Feature | ArgoCD | Flux |
+|---|---|---|
+| UI | Rich web UI | CLI + Grafana |
+| Multi-tenancy | ApplicationSets | Kustomization per tenant |
+| Multi-cluster | Centralized hub | Decentralized (per-cluster) |
+| Helm support | Native | HelmRelease CRD |
+| Notification | Built-in | Notification Controller |
+| Architecture | Hub-spoke | Distributed |
+| Best for | Teams wanting a UI | Teams wanting simplicity |
+
+## ArgoCD at Scale: ApplicationSets
+
+Manage hundreds of apps with a single definition:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: microservices
+  namespace: argocd
+spec:
+  goTemplate: true
+  generators:
+  - matrix:
+      generators:
+      - git:
+          repoURL: https://gitlab.internal/platform/app-registry
+          revision: HEAD
+          files:
+          - path: "apps/*/config.yaml"
+      - clusters:
+          selector:
+            matchLabels:
+              environment: production
+  template:
+    metadata:
+      name: '{{.path.basename}}-{{.name}}'
+    spec:
+      project: default
+      source:
+        repoURL: https://gitlab.internal/{{.values.repo}}
+        targetRevision: '{{.values.branch}}'
+        path: deploy/
+        helm:
+          valueFiles:
+          - values-{{.metadata.labels.region}}.yaml
+      destination:
+        server: '{{.server}}'
+        namespace: '{{.values.namespace}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+```
+
+## Flux at Scale: Multi-Tenancy
+
+```yaml
+# Platform team: bootstrap
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: tenants
+  namespace: flux-system
+spec:
+  interval: 10m
+  sourceRef:
+    kind: GitRepository
+    name: platform-config
+  path: ./tenants
+  prune: true
+
+# Per-tenant isolation
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: team-payments
+  namespace: team-payments
+spec:
+  interval: 5m
+  sourceRef:
+    kind: GitRepository
+    name: team-payments-repo
+  path: ./deploy
+  prune: true
+  serviceAccountName: team-payments-sa  # RBAC isolation
+  targetNamespace: team-payments
+```
+
+## Progressive Delivery
+
+### Canary Deployments with Flagger
+
+```yaml
+apiVersion: flagger.app/v1beta1
+kind: Canary
+metadata:
+  name: api
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api
+  progressDeadlineSeconds: 600
+  analysis:
+    interval: 1m
+    threshold: 5
+    maxWeight: 50
+    stepWeight: 10
+    metrics:
+    - name: request-success-rate
+      thresholdRange:
+        min: 99
+      interval: 1m
+    - name: request-duration
+      thresholdRange:
+        max: 500
+      interval: 1m
+```
+
+## Key Patterns
+
+1. **Separate app config from app code** — config in a dedicated repo, updated by CI
+2. **Environment promotion via PRs** — dev → staging → prod through Git PRs
+3. **Drift detection alerts** — alert when manual `kubectl` changes override Git state
+4. **Sealed Secrets or External Secrets** — never store plaintext secrets in Git
+5. **Namespace-per-team** — GitOps isolation boundaries match team boundaries
+
+---
+
+*Scaling GitOps for your organization? I help teams design multi-cluster GitOps architectures. [Get in touch](/contact/).*

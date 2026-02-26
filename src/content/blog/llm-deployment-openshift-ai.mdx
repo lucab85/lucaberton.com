@@ -1,0 +1,166 @@
+---
+draft: false
+title: "Running LLMs on OpenShift AI: A Complete Deployment Guide"
+snippet: "End-to-end guide to deploying large language models on OpenShift AI. From model selection to serving with vLLM, including GPU resource management and autoscaling."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openshift
+  - ai
+  - llm
+  - vllm
+  - gpu
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "LLM deployment on OpenShift AI"
+---\n## 🚀 LLMs on OpenShift AI
+
+OpenShift AI provides an enterprise-grade platform for deploying large language models. Here's the complete guide from model selection to production serving.
+
+## Platform Setup
+
+### Prerequisites
+
+```bash
+# Install OpenShift AI operator
+oc apply -f - <<EOF
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: rhods-operator
+  namespace: redhat-ods-operator
+spec:
+  channel: stable
+  name: rhods-operator
+  source: redhat-operators
+  sourceNamespace: openshift-marketplace
+EOF
+
+# Install NVIDIA GPU Operator
+oc apply -f - <<EOF
+apiVersion: operators.coreos.com/v1alpha1
+kind: Subscription
+metadata:
+  name: gpu-operator
+  namespace: nvidia-gpu-operator
+spec:
+  channel: v24.9
+  name: gpu-operator-certified
+  source: certified-operators
+  sourceNamespace: openshift-marketplace
+EOF
+```
+
+### Model Serving with vLLM
+
+```yaml
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: granite-34b
+  namespace: ai-serving
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: vLLM
+      runtime: vllm-runtime
+      storageUri: s3://models/granite-34b-code-instruct
+    resources:
+      limits:
+        nvidia.com/gpu: "2"
+        memory: "80Gi"
+      requests:
+        cpu: "8"
+        memory: "64Gi"
+```
+
+### Custom vLLM Runtime
+
+```yaml
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: vllm-runtime
+spec:
+  containers:
+  - name: vllm
+    image: quay.io/modh/vllm:latest
+    args:
+    - "--model=/mnt/models"
+    - "--max-model-len=8192"
+    - "--tensor-parallel-size=2"
+    - "--gpu-memory-utilization=0.9"
+    - "--enable-chunked-prefill"
+    ports:
+    - containerPort: 8000
+      protocol: TCP
+    volumeMounts:
+    - name: shm
+      mountPath: /dev/shm
+  volumes:
+  - name: shm
+    emptyDir:
+      medium: Memory
+      sizeLimit: 12Gi
+  supportedModelFormats:
+  - name: vLLM
+    autoSelect: true
+```
+
+## Model Selection Guide
+
+| Model | Size | GPU Requirement | Best For |
+|---|---|---|---|
+| Granite 8B | 8B | 1x A100 40GB | Code generation, general tasks |
+| Granite 34B | 34B | 2x A100 80GB | Complex reasoning, RAG |
+| Llama 3.1 70B | 70B | 4x A100 80GB | Maximum capability |
+| Mistral 7B | 7B | 1x T4/A10 | Cost-effective inference |
+
+## Autoscaling Configuration
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: llm-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: granite-34b-predictor
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+  - type: Pods
+    pods:
+      metric:
+        name: vllm_num_requests_waiting
+      target:
+        type: AverageValue
+        averageValue: "5"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+```
+
+## Production Checklist
+
+- [ ] GPU node pools with proper taints/tolerations
+- [ ] Model stored in S3/ODF with fast retrieval
+- [ ] vLLM configured with tensor parallelism for large models
+- [ ] HPA based on queue depth (not CPU)
+- [ ] Prometheus monitoring for token throughput and latency
+- [ ] Rate limiting per user/team
+- [ ] API key authentication
+- [ ] Response caching for common queries
+
+---
+
+*Deploying LLMs on OpenShift? I help organizations build production AI serving platforms. [Get in touch](/contact/).*\n

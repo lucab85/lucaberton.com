@@ -1,0 +1,128 @@
+---
+draft: false
+title: "Confidential Containers on Kubernetes: Running Encrypted Workloads"
+snippet: "Deploy confidential containers on Kubernetes using AMD SEV-SNP and Intel TDX. Protect sensitive AI workloads with hardware-level encryption in untrusted environments."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - kubernetes
+  - confidential-computing
+  - security
+  - containers
+  - cloud-native
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Confidential containers on Kubernetes"
+---\n## 🔒 Computing on Encrypted Data
+
+Confidential containers run workloads in hardware-encrypted enclaves. Even the cloud provider or cluster administrator can't see the data being processed. For AI workloads handling sensitive data — medical records, financial data, PII — this is a game-changer.
+
+## How It Works
+
+Confidential computing uses CPU hardware features:
+- **AMD SEV-SNP**: Encrypts entire VM memory with per-VM keys
+- **Intel TDX**: Trust Domain Extensions for VM-level isolation
+- **ARM CCA**: Confidential Compute Architecture (emerging)
+
+The CPU encrypts memory transparently. No code changes needed.
+
+## Kubernetes Integration
+
+### Confidential Containers Operator
+
+```bash
+# Install the operator
+kubectl apply -f https://github.com/confidential-containers/operator/releases/download/v0.10.0/deploy.yaml
+
+# Create a runtime class
+kubectl apply -f - <<EOF
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: kata-cc
+handler: kata-cc
+overhead:
+  podFixed:
+    memory: "256Mi"
+    cpu: "250m"
+scheduling:
+  nodeSelector:
+    cc.kata/enabled: "true"
+EOF
+```
+
+### Deploy a Confidential Pod
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: confidential-inference
+  annotations:
+    io.katacontainers.config.hypervisor.firmware: "OVMF_CODE.cc.fd"
+spec:
+  runtimeClassName: kata-cc
+  containers:
+  - name: inference
+    image: registry.internal/ai-inference:v1.0
+    resources:
+      limits:
+        memory: "4Gi"
+        cpu: "2"
+    env:
+    - name: MODEL_ENCRYPTION_KEY
+      valueFrom:
+        secretKeyRef:
+          name: model-key
+          key: encryption-key
+```
+
+## Use Cases for AI/ML
+
+1. **Multi-party ML training**: Train on combined datasets without any party seeing the other's data
+2. **Confidential inference**: Process sensitive queries (medical, legal, financial) without exposing data to the infrastructure operator
+3. **Model IP protection**: Protect proprietary model weights from extraction by the hosting environment
+4. **Regulatory compliance**: Meet GDPR/HIPAA requirements for data processing
+
+## Attestation: Proving Trust
+
+Remote attestation verifies the hardware is genuine and the software is unmodified:
+
+```python
+import requests
+
+def verify_attestation(attestation_report):
+    # Verify with AMD/Intel attestation service
+    result = requests.post(
+        "https://attestation.amd.com/verify",
+        json={"report": attestation_report}
+    )
+    
+    if result.json()["trusted"]:
+        # Safe to send sensitive data
+        return send_encrypted_data()
+    else:
+        raise SecurityError("Attestation failed")
+```
+
+## Current Limitations
+
+- **GPU support**: Limited — NVIDIA H100 supports confidential computing, older GPUs don't
+- **Performance overhead**: 2-15% depending on workload (mostly memory encryption)
+- **Node requirements**: Specific CPU models (AMD EPYC 7003+ or Intel Xeon 4th gen+)
+- **Debugging**: Harder to debug — by design, you can't inspect memory
+
+## Getting Started
+
+1. **Check your hardware** — AMD SEV-SNP or Intel TDX support required
+2. **Start with non-GPU workloads** — data processing, API services
+3. **Implement attestation** — verify the TEE before sending sensitive data
+4. **Plan for H100 nodes** — if you need confidential GPU computing
+
+Confidential containers are moving from experimental to production-ready. For regulated industries processing sensitive data, this is no longer optional — it's becoming expected.
+
+---
+
+*Need confidential computing for your AI workloads? I help organizations deploy secure, privacy-preserving infrastructure. [Get in touch](/contact/).*\n

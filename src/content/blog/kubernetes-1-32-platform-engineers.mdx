@@ -1,0 +1,136 @@
+---
+draft: false
+title: "Kubernetes 1.32: What Platform Engineers Need to Know"
+snippet: "Key features in Kubernetes 1.32 for platform teams: DRA improvements, sidecar containers GA, structured authorization, and in-place pod resizing."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - kubernetes
+  - platform-engineering
+  - cloud-native
+  - k8s
+  - "2026"
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Kubernetes 1.32 features for platform engineers"
+---
+## ⚙️ Kubernetes 1.32: The Platform Engineer's Perspective
+
+Kubernetes 1.32 landed with several features that directly impact platform engineering teams. Here's what matters and what you should plan for.
+
+## Key Features
+
+### 1. Sidecar Containers (GA)
+
+Finally stable. Native sidecar containers solve the long-standing issue of init containers that need to run alongside the main container:
+
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  initContainers:
+  - name: istio-proxy
+    image: istio/proxyv2:latest
+    restartPolicy: Always  # This makes it a sidecar
+    resources:
+      requests:
+        cpu: 100m
+        memory: 128Mi
+  containers:
+  - name: app
+    image: myapp:latest
+```
+
+**Why it matters**: Sidecars now have proper lifecycle management — they start before main containers and shut down after. No more race conditions with service mesh proxies.
+
+### 2. Dynamic Resource Allocation (DRA) Improvements
+
+DRA is maturing for GPU and accelerator management:
+
+```yaml
+apiVersion: resource.k8s.io/v1alpha3
+kind: ResourceClaim
+metadata:
+  name: gpu-claim
+spec:
+  devices:
+    requests:
+    - name: gpu
+      deviceClassName: gpu.nvidia.com
+      selectors:
+      - cel:
+          expression: "device.attributes['gpu-memory'].compareTo(quantity('40Gi')) >= 0"
+```
+
+**Why it matters**: More granular GPU allocation. Request specific GPU capabilities (memory, compute capability) instead of just "give me a GPU."
+
+### 3. In-Place Pod Vertical Resizing (Beta)
+
+Resize pod resources without restarting:
+
+```bash
+kubectl patch pod my-app -p '{"spec":{"containers":[{"name":"app","resources":{"requests":{"memory":"512Mi"},"limits":{"memory":"1Gi"}}}]}}'
+```
+
+**Why it matters**: Handle traffic spikes without pod restarts. Reduce disruption during scaling events.
+
+### 4. Structured Authorization Configuration
+
+More flexible authorization beyond just RBAC:
+
+```yaml
+apiVersion: apiserver.config.k8s.io/v1beta1
+kind: AuthorizationConfiguration
+authorizers:
+- type: Webhook
+  name: platform-authz
+  webhook:
+    timeout: 3s
+    subjectAccessReviewVersion: v1
+    matchConditions:
+    - expression: "request.resourceAttributes.namespace == 'production'"
+    connectionInfo:
+      type: InClusterConfig
+- type: RBAC
+  name: rbac
+```
+
+**Why it matters**: Implement custom authorization logic for sensitive namespaces without replacing RBAC entirely.
+
+### 5. Pod Lifecycle Sleep Action
+
+```yaml
+lifecycle:
+  preStop:
+    sleep:
+      seconds: 10
+```
+
+**Why it matters**: Simple graceful shutdown without shell commands. Better than `command: ["sleep", "10"]`.
+
+## What to Prioritize
+
+### Upgrade Now
+- **Sidecar containers**: If you use Istio/Linkerd, migrate to native sidecars
+- **Pod lifecycle sleep**: Drop your preStop shell hacks
+
+### Plan for Q2 2026
+- **In-place resizing**: Test in staging for stateful workloads
+- **DRA for GPUs**: If you're running AI workloads, start evaluating
+
+### Watch for GA
+- **Structured authorization**: Promising for multi-tenant platforms
+- **CEL admission policies**: Replacing OPA/Kyverno for simple cases
+
+## Migration Tips
+
+1. **Test sidecar containers in staging first** — lifecycle ordering behavior may differ from your current workarounds
+2. **Update your Helm charts** — new `restartPolicy: Always` on init containers changes template logic
+3. **Review your GPU scheduling** — DRA changes how GPU resources are requested
+4. **Audit resource requests** — in-place resizing means your initial requests matter less, but limits still matter
+
+---
+
+*Need help planning your Kubernetes upgrade? I help platform teams navigate version migrations safely. [Let's connect](/contact/).*

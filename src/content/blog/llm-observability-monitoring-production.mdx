@@ -1,0 +1,168 @@
+---
+draft: false
+title: "Model Observability: Monitoring LLM Performance in Production"
+snippet: "Monitor LLM quality, latency, cost, and drift in production. Practical setup with OpenTelemetry, Prometheus, and custom evaluation metrics."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - llm
+  - observability
+  - monitoring
+  - opentelemetry
+  - production
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "LLM observability and monitoring"
+---
+## 📊 You Can't Manage What You Can't Measure
+
+LLMs in production need different monitoring than traditional services. Response quality can degrade silently — the service is "up" but answers are wrong. Here's how to catch problems before users do.
+
+## The Four Pillars of LLM Observability
+
+### 1. Performance Metrics
+
+```python
+from prometheus_client import Histogram, Counter, Gauge
+
+# Track latency by operation
+llm_latency = Histogram(
+    'llm_request_duration_seconds',
+    'LLM request latency',
+    ['model', 'operation'],  # operation: generate, embed, rerank
+    buckets=[0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0]
+)
+
+# Track token throughput
+tokens_processed = Counter(
+    'llm_tokens_total',
+    'Total tokens processed',
+    ['model', 'direction']  # direction: input, output
+)
+
+# Track queue depth
+queue_depth = Gauge(
+    'llm_queue_depth',
+    'Number of requests waiting',
+    ['model']
+)
+```
+
+### 2. Quality Metrics
+
+```python
+async def evaluate_response(query, response, context=None):
+    metrics = {}
+    
+    # Faithfulness: Does the response match the provided context?
+    if context:
+        metrics["faithfulness"] = await check_faithfulness(response, context)
+    
+    # Relevance: Does the response answer the question?
+    metrics["relevance"] = await check_relevance(query, response)
+    
+    # Toxicity: Is the response safe?
+    metrics["toxicity_score"] = await toxicity_classifier(response)
+    
+    # Length: Unreasonably short/long responses indicate problems
+    metrics["response_length"] = len(response.split())
+    
+    return metrics
+```
+
+### 3. Cost Tracking
+
+```python
+MODEL_COSTS = {
+    "granite-34b": {"input": 0.0008, "output": 0.0024},  # per 1K tokens
+    "granite-8b": {"input": 0.0002, "output": 0.0006},
+}
+
+def track_cost(model, input_tokens, output_tokens):
+    costs = MODEL_COSTS[model]
+    total = (input_tokens * costs["input"] + output_tokens * costs["output"]) / 1000
+    
+    cost_counter.labels(model=model).inc(total)
+    daily_budget_gauge.labels(model=model).set(get_remaining_budget(model))
+```
+
+### 4. Drift Detection
+
+```python
+# Compare response distributions over time
+def detect_drift(current_window, baseline_window):
+    metrics = {
+        "avg_response_length": compare_distributions(
+            current_window.response_lengths,
+            baseline_window.response_lengths
+        ),
+        "avg_latency": compare_distributions(
+            current_window.latencies,
+            baseline_window.latencies
+        ),
+        "refusal_rate": current_window.refusal_count / current_window.total,
+    }
+    
+    if metrics["refusal_rate"] > 0.1:  # More than 10% refusals
+        alert("High refusal rate detected")
+    
+    return metrics
+```
+
+## OpenTelemetry Integration
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+
+tracer = trace.get_tracer("llm-service")
+
+@tracer.start_as_current_span("llm_generate")
+async def generate(prompt, model="granite-34b"):
+    span = trace.get_current_span()
+    span.set_attribute("llm.model", model)
+    span.set_attribute("llm.prompt_tokens", count_tokens(prompt))
+    
+    response = await model.generate(prompt)
+    
+    span.set_attribute("llm.completion_tokens", response.usage.output_tokens)
+    span.set_attribute("llm.total_cost", calculate_cost(response.usage))
+    
+    return response
+```
+
+## Alerting Rules
+
+```yaml
+groups:
+- name: llm-alerts
+  rules:
+  - alert: LLMHighLatency
+    expr: histogram_quantile(0.95, llm_request_duration_seconds_bucket) > 5
+    for: 5m
+    annotations:
+      summary: "LLM P95 latency above 5 seconds"
+      
+  - alert: LLMHighErrorRate
+    expr: rate(llm_errors_total[5m]) / rate(llm_requests_total[5m]) > 0.05
+    for: 3m
+    
+  - alert: LLMBudgetExceeded
+    expr: llm_daily_cost_total > 500
+    annotations:
+      summary: "Daily LLM spend exceeded $500"
+```
+
+## Key Takeaways
+
+1. **Monitor quality, not just uptime** — an LLM can be "up" and still give wrong answers
+2. **Track costs per-request** — LLM costs can spiral without visibility
+3. **Detect drift** — model behavior changes over time
+4. **Trace end-to-end** — from user query through RAG pipeline to response
+5. **Alert on business metrics** — refusal rate, user satisfaction, task completion
+
+---
+
+*Need LLM observability for your AI platform? I help teams build comprehensive monitoring for production AI. [Get in touch](/contact/).*

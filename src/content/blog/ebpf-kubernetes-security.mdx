@@ -1,0 +1,139 @@
+---
+draft: false
+title: "eBPF for Kubernetes Security: Beyond Traditional Network Policies"
+snippet: "How eBPF-based security tools like Cilium Tetragon and Falco provide runtime visibility and enforcement that network policies can't match."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - kubernetes
+  - ebpf
+  - security
+  - cilium
+  - cloud-native
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "eBPF security for Kubernetes"
+---\n## 🐝 eBPF: Security at the Kernel Level
+
+Traditional Kubernetes security operates at the API level — network policies, RBAC, admission webhooks. eBPF operates at the kernel level, giving you visibility and enforcement that higher-level tools simply can't provide.
+
+## What eBPF Enables
+
+- **Runtime process monitoring**: See every process execution, even inside containers
+- **Network flow visibility**: L3/L4/L7 traffic without sidecars
+- **File access auditing**: Track every file open/read/write in real-time
+- **Syscall filtering**: Block specific system calls per workload
+
+## Cilium Tetragon: Runtime Security
+
+Tetragon provides kernel-level security observability:
+
+```yaml
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: detect-privilege-escalation
+spec:
+  kprobes:
+  - call: "security_file_open"
+    syscall: false
+    args:
+    - index: 0
+      type: "file"
+    selectors:
+    - matchArgs:
+      - index: 0
+        operator: "Prefix"
+        values:
+        - "/etc/shadow"
+        - "/etc/passwd"
+    - matchActions:
+      - action: Sigkill  # Kill the process immediately
+      - action: NotifyEnforcer
+
+  - call: "__x64_sys_setuid"
+    syscall: true
+    selectors:
+    - matchActions:
+      - action: Post
+        rateLimit: "1m"
+```
+
+This policy detects and kills any container process trying to read `/etc/shadow` — something network policies can't do.
+
+## Beyond Network Policies
+
+Traditional NetworkPolicy:
+```yaml
+# Can only filter by IP/port
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-policy
+spec:
+  podSelector:
+    matchLabels:
+      app: api
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: frontend
+    ports:
+    - port: 8080
+```
+
+Cilium Network Policy (L7-aware):
+```yaml
+# Can filter by HTTP method, path, headers
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: api-l7-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: api
+  ingress:
+  - fromEndpoints:
+    - matchLabels:
+        app: frontend
+    toPorts:
+    - ports:
+      - port: "8080"
+        protocol: TCP
+      rules:
+        http:
+        - method: "GET"
+          path: "/api/v1/.*"
+        - method: "POST"
+          path: "/api/v1/orders"
+          headers:
+          - 'X-Auth-Token: .*'
+```
+
+## Practical Use Cases
+
+1. **Detect cryptominer processes**: Monitor for suspicious CPU-intensive processes in containers
+2. **Prevent container escapes**: Block mount syscalls and privilege escalation attempts
+3. **DNS monitoring**: Track all DNS queries from pods without modifying applications
+4. **Forensics**: Complete audit trail of all process executions and network connections
+
+## Getting Started
+
+```bash
+# Install Cilium with Tetragon
+cilium install --version 1.16 --set tetragon.enabled=true
+
+# View security events
+kubectl logs -n kube-system -l app.kubernetes.io/name=tetragon -c export-stdout -f | \
+  tetra getevents -o compact
+```
+
+eBPF-based security is no longer experimental. If you're running Kubernetes in production, it should be part of your security stack.
+
+---
+
+*Want to implement eBPF-based security? I help teams design defense-in-depth strategies for Kubernetes. [Let's connect](/contact/).*\n

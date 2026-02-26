@@ -1,0 +1,149 @@
+---
+draft: false
+title: "MLOps Pipeline Automation with Ansible and Kubeflow"
+snippet: "Automate your entire MLOps lifecycle with Ansible and Kubeflow Pipelines. From data preparation to model deployment, with reproducible infrastructure-as-code."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "Automation"
+author: "Luca Berton"
+tags:
+  - mlops
+  - ansible
+  - kubeflow
+  - automation
+  - ai
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "MLOps pipeline with Ansible and Kubeflow"
+---\n## 🔄 MLOps: Where Ansible Meets Kubeflow
+
+MLOps pipelines need two things: reproducible ML workflows (Kubeflow) and reproducible infrastructure (Ansible). Together, they automate the entire lifecycle from data preparation to model serving.
+
+## Architecture
+
+```
+Ansible (Infrastructure Layer)
+  ├── Provision GPU nodes
+  ├── Install Kubeflow
+  ├── Configure storage (S3/Ceph)
+  └── Set up monitoring
+
+Kubeflow (ML Layer)
+  ├── Data preparation pipeline
+  ├── Model training
+  ├── Evaluation & validation
+  └── Model deployment (KServe)
+```
+
+## Ansible: The Infrastructure Layer
+
+### Install Kubeflow
+
+```yaml
+---
+- name: Deploy Kubeflow on Kubernetes
+  hosts: k8s_control_plane
+  tasks:
+    - name: Add Kubeflow manifests
+      ansible.builtin.git:
+        repo: https://github.com/kubeflow/manifests
+        dest: /opt/kubeflow-manifests
+        version: v1.9.0
+
+    - name: Install Kubeflow with kustomize
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ item }}"
+      loop:
+        - /opt/kubeflow-manifests/common/cert-manager/
+        - /opt/kubeflow-manifests/common/istio/
+        - /opt/kubeflow-manifests/apps/pipeline/
+
+    - name: Configure GPU node pool
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Node
+          metadata:
+            labels:
+              accelerator: nvidia-a100
+            name: "{{ item }}"
+      loop: "{{ gpu_nodes }}"
+
+    - name: Install NVIDIA device plugin
+      kubernetes.core.helm:
+        name: nvidia-device-plugin
+        chart_ref: nvidia/k8s-device-plugin
+        release_namespace: kube-system
+```
+
+## Kubeflow: The ML Layer
+
+### Training Pipeline
+
+```python
+from kfp import dsl
+
+@dsl.component(base_image="python:3.11")
+def prepare_data(dataset_path: str, output_path: dsl.Output[dsl.Dataset]):
+    import pandas as pd
+    df = pd.read_parquet(dataset_path)
+    df_clean = df.dropna().drop_duplicates()
+    df_clean.to_parquet(output_path.path)
+
+@dsl.component(base_image="pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime")
+def train_model(dataset: dsl.Input[dsl.Dataset], model: dsl.Output[dsl.Model]):
+    import torch
+    # Training logic here
+    torch.save(trained_model.state_dict(), model.path)
+
+@dsl.component
+def evaluate_model(model: dsl.Input[dsl.Model]) -> float:
+    # Evaluation logic
+    return accuracy
+
+@dsl.pipeline(name="training-pipeline")
+def training_pipeline(dataset_path: str):
+    data = prepare_data(dataset_path=dataset_path)
+    model = train_model(dataset=data.outputs["output_path"])
+    evaluation = evaluate_model(model=model.outputs["model"])
+```
+
+## Automated Retraining with Ansible + Cron
+
+```yaml
+---
+- name: Trigger model retraining
+  hosts: localhost
+  tasks:
+    - name: Check model drift
+      uri:
+        url: "http://monitoring.internal/api/v1/query"
+        body: '{"query": "model_accuracy_score < 0.85"}'
+        method: POST
+      register: drift_check
+
+    - name: Trigger Kubeflow pipeline
+      uri:
+        url: "http://kubeflow.internal/pipeline/apis/v2beta1/runs"
+        method: POST
+        body_format: json
+        body:
+          display_name: "Automated retrain - {{ ansible_date_time.iso8601 }}"
+          pipeline_version_reference:
+            pipeline_id: "training-pipeline"
+      when: drift_check.json.data.result | length > 0
+```
+
+## Key Practices
+
+1. **Version everything** — data, code, models, and infrastructure
+2. **Ansible for infra, Kubeflow for ML** — don't mix concerns
+3. **Automate retraining** — trigger on drift, not on schedule
+4. **Test in staging** — full pipeline dry runs before production
+5. **Track lineage** — every model should trace back to its data and code
+
+---
+
+*Building MLOps pipelines? I help teams automate the full ML lifecycle with Ansible and Kubeflow. [Let's connect](/contact/).*\n

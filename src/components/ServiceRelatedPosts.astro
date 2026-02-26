@@ -1,0 +1,49 @@
+---
+/**
+ * Shows latest blog posts related to a service page, based on matching tags/categories.
+ * Provides automatic internal linking from service pages to blog content.
+ */
+import { getCollection } from 'astro:content';
+
+export interface Props {
+  keywords: string[];
+  limit?: number;
+}
+
+const { keywords, limit = 3 } = Astro.props;
+
+const allPosts = (await getCollection('blog'))
+  .filter(post => !post.data.draft);
+
+// Score posts by keyword matches in tags + category
+const scored = allPosts
+  .map(post => {
+    const postText = [
+      post.data.category.toLowerCase(),
+      ...post.data.tags.map(t => t.toLowerCase()),
+      post.data.title.toLowerCase(),
+    ].join(' ');
+    const score = keywords.filter(k => postText.includes(k.toLowerCase())).length;
+    return { post, score };
+  })
+  .filter(s => s.score > 0)
+  .sort((a, b) => b.score - a.score || new Date(b.post.data.publishDate).getTime() - new Date(a.post.data.publishDate).getTime())
+  .slice(0, limit);
+---
+
+{scored.length > 0 && (
+  <div class="mt-12 mb-8">
+    <h2 class="text-2xl font-bold text-gray-900 mb-6">Related Articles</h2>
+    <div class="grid gap-4 md:grid-cols-3">
+      {scored.map(({ post }) => (
+        <a href={`/blog/${post.slug}/`} class="group block border border-gray-200 rounded-lg p-4 hover:border-blue-500 hover:shadow-md transition-all">
+          <span class="text-blue-400 uppercase tracking-wider text-xs font-medium">{post.data.category}</span>
+          <h3 class="font-semibold text-gray-900 mt-1 group-hover:text-blue-700 transition-colors line-clamp-2">
+            {post.data.title}
+          </h3>
+          <p class="text-sm text-gray-500 mt-2 line-clamp-2">{post.data.snippet}</p>
+        </a>
+      ))}
+    </div>
+  </div>
+)}

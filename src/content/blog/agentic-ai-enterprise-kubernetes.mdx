@@ -1,0 +1,203 @@
+---
+draft: false
+title: "Agentic AI in Enterprise: Building Autonomous Workflows with Kubernetes"
+snippet: "How enterprises are deploying agentic AI systems on Kubernetes to automate complex workflows. Architecture patterns, orchestration strategies, and lessons from production deployments."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - ai
+  - kubernetes
+  - agents
+  - automation
+  - enterprise
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Agentic AI enterprise workflows on Kubernetes"
+---
+
+## 🤖 The Agentic AI Shift
+
+2026 has brought a fundamental change in how enterprises deploy AI. We've moved from simple prompt-response patterns to **agentic AI** — autonomous systems that plan, execute, and iterate on complex tasks without constant human intervention.
+
+Having helped multiple organizations deploy agentic systems on Kubernetes, I've seen what works and what doesn't. Here's the practical guide.
+
+## What Makes AI "Agentic"?
+
+An agentic AI system differs from a traditional LLM integration in three key ways:
+
+- **Autonomy**: The agent decides what actions to take, not just what to say
+- **Tool Use**: It interacts with external systems — APIs, databases, infrastructure
+- **Planning**: It breaks complex goals into steps and executes them iteratively
+
+In enterprise contexts, this means AI agents that can:
+- Process and route support tickets across systems
+- Monitor infrastructure and take remediation actions
+- Orchestrate multi-step data pipelines
+- Manage deployment workflows with approval gates
+
+## Architecture: Agents on Kubernetes
+
+The natural home for enterprise agentic AI is Kubernetes. Here's why:
+
+```yaml
+# Agent deployment with resource limits and GPU access
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-agent-worker
+  namespace: agentic-platform
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: ai-agent
+  template:
+    metadata:
+      labels:
+        app: ai-agent
+    spec:
+      containers:
+      - name: agent
+        image: registry.internal/ai-agent:v2.1
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+            nvidia.com/gpu: "1"
+          limits:
+            memory: "8Gi"
+            nvidia.com/gpu: "1"
+        env:
+        - name: AGENT_MAX_STEPS
+          value: "20"
+        - name: AGENT_TIMEOUT_SECONDS
+          value: "300"
+        - name: TOOL_SANDBOX_ENABLED
+          value: "true"
+        volumeMounts:
+        - name: tool-configs
+          mountPath: /etc/agent/tools
+          readOnly: true
+      volumes:
+      - name: tool-configs
+        configMap:
+          name: agent-tool-definitions
+```
+
+### Key Design Decisions
+
+**1. Stateless Agent Workers**
+
+Each agent invocation should be stateless. Persist conversation state in Redis or PostgreSQL, not in the pod. This lets Kubernetes scale agents horizontally and recover from failures.
+
+**2. Tool Execution Sandboxing**
+
+Never let agents execute tools in the same container they run in. Use separate sandboxed containers or Kubernetes Jobs for tool execution:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agent-tool-exec-${EXECUTION_ID}
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        readOnlyRootFilesystem: true
+      containers:
+      - name: sandbox
+        image: registry.internal/tool-sandbox:latest
+        resources:
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+```
+
+**3. Circuit Breakers for Agent Loops**
+
+Agents can get stuck in loops. Implement hard limits:
+- Maximum steps per task (I recommend 15-25)
+- Total execution timeout (5 minutes for most tasks)
+- Cost ceiling per invocation
+- Human-in-the-loop checkpoints for destructive actions
+
+## 🏗️ Production Patterns
+
+### The Supervisor Pattern
+
+Deploy a lightweight "supervisor" agent that routes tasks to specialized worker agents:
+
+```
+User Request → Supervisor Agent → Route to:
+  ├── Infrastructure Agent (Ansible/Terraform tools)
+  ├── Data Agent (SQL/API tools)
+  ├── Code Agent (Git/CI tools)
+  └── Communication Agent (Email/Slack tools)
+```
+
+Each worker agent has a restricted tool set, reducing the blast radius of any single agent.
+
+### Event-Driven Agents
+
+Combine agents with Kubernetes event streams for reactive automation:
+
+```python
+from kubernetes import client, watch
+
+def watch_events():
+    v1 = client.CoreV1Api()
+    w = watch.Watch()
+    
+    for event in w.stream(v1.list_event_for_all_namespaces):
+        if should_handle(event):
+            agent.run(
+                task=f"Investigate and remediate: {event['object'].message}",
+                context={
+                    "namespace": event['object'].metadata.namespace,
+                    "resource": event['object'].involved_object.name,
+                    "severity": classify_severity(event),
+                },
+                max_steps=10,
+            )
+```
+
+### Observability
+
+Every agent action must be traced. Use OpenTelemetry to track:
+- Agent reasoning steps and decisions
+- Tool invocations and their results
+- Token usage and latency per step
+- Success/failure rates by task type
+
+## ⚠️ Lessons from Production
+
+After deploying agentic systems at several enterprises, these are the hard-won lessons:
+
+1. **Start narrow**: Don't build a general-purpose agent. Start with one well-defined workflow (e.g., "handle Jira tickets for database issues") and expand from there.
+
+2. **Human approval gates are non-negotiable**: Any action that modifies production state must go through approval. Agents suggest; humans approve (at least initially).
+
+3. **Cost controls matter**: An agent in a loop can burn through thousands of dollars in API calls. Set hard budget limits per task.
+
+4. **Test with chaos**: Inject failures, timeouts, and unexpected responses. Agents must handle gracefully, not loop forever.
+
+5. **Audit everything**: Every agent decision and action must be logged immutably. Compliance teams will ask.
+
+## Getting Started
+
+If you're evaluating agentic AI for your organization:
+
+1. **Identify a high-value, well-bounded workflow** — something that's manual, repetitive, and has clear success criteria
+2. **Deploy on Kubernetes with proper isolation** — GPU nodes for inference, sandboxed pods for tool execution
+3. **Instrument from day one** — OpenTelemetry traces, cost tracking, decision logging
+4. **Start with human-in-the-loop** — gradually increase autonomy as confidence grows
+
+The enterprises winning with agentic AI in 2026 aren't the ones with the biggest models — they're the ones with the best guardrails.
+
+---
+
+*Need help deploying agentic AI on Kubernetes? I help organizations design and implement production-grade agent architectures. [Get in touch](/contact/).*

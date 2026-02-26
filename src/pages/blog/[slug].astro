@@ -2,6 +2,8 @@
 import { getCollection } from "astro:content";
 import Layout from "@layouts/Layout.astro";
 import Container from "@components/container.astro";
+import Breadcrumb from "@components/Breadcrumb.astro";
+import { getReadingTime } from "@utils/readingTime";
 
 // Generate a new path for every collection entry
 export async function getStaticPaths() {
@@ -41,9 +43,20 @@ if (redirect) {
 
 // Get the entry directly from the prop on render
 const { Content } = await entry.render();
+
+// Calculate reading time from raw body
+const readingTime = getReadingTime(entry.body || '');
+
+// Get related posts (same category, excluding current)
+const allPosts = await getCollection("blog", ({ data }) => !data.draft);
+const relatedPosts = allPosts
+  .filter(p => p.slug !== entry.slug && p.data.category === entry.data.category)
+  .sort((a, b) => new Date(b.data.publishDate).getTime() - new Date(a.data.publishDate).getTime())
+  .slice(0, 3);
 ---
 
 <Layout title={entry.data.title}>
+  <Breadcrumb items={[{ name: "Blog", url: "/blog/" }, { name: entry.data.title }]} />
   <Container>
     <div class="mx-auto max-w-3xl mt-14">
       <span class="text-blue-400 uppercase tracking-wider text-sm font-medium">
@@ -63,6 +76,8 @@ const { Content } = await entry.render();
           datetime={entry.data.publishDate.toISOString()}>
           {entry.data.publishDate.toDateString()}
         </time>
+        <span class="text-gray-400">•</span>
+        <span class="text-gray-400">{readingTime}</span>
         <span class="text-gray-400 hidden md:block">•</span>
         <div class="w-full md:w-auto flex flex-wrap gap-3">
           {
@@ -84,6 +99,32 @@ const { Content } = await entry.render();
         >← Back to Blog</a
       >
     </div>
+
+    {relatedPosts.length > 0 && (
+      <div class="mx-auto max-w-5xl mt-16">
+        <h2 class="text-2xl font-bold text-gray-900 mb-8">Related Articles</h2>
+        <div class="grid sm:grid-cols-2 md:grid-cols-3 gap-8">
+          {relatedPosts.map((post) => (
+            <a href={`/blog/${post.slug}/`} class="group block">
+              <article class="border border-gray-200 rounded-xl p-5 hover:border-blue-500 hover:shadow-lg transition-all h-full flex flex-col">
+                <span class="text-blue-400 uppercase tracking-wider text-xs font-medium">
+                  {post.data.category}
+                </span>
+                <h3 class="font-semibold text-gray-900 mt-2 group-hover:text-blue-700 transition-colors line-clamp-2">
+                  {post.data.title}
+                </h3>
+                <p class="text-sm text-gray-500 mt-2 line-clamp-2 flex-1">
+                  {post.data.snippet}
+                </p>
+                <time class="text-xs text-gray-400 mt-3" datetime={post.data.publishDate.toISOString()}>
+                  {post.data.publishDate.toDateString()}
+                </time>
+              </article>
+            </a>
+          ))}
+        </div>
+      </div>
+    )}
   </Container>
 </Layout>
 

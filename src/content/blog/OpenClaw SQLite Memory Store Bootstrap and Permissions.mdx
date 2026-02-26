@@ -1,0 +1,243 @@
+---
+draft: false
+title: "OpenClaw SQLite Memory Store Bootstrap and Permissions"
+snippet: "Troubleshoot the OpenClaw SQLite memory database — from empty files to permission errors. Learn how to bootstrap the memory store, fix Docker UID mapping, and verify the database is writable inside the container."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - sqlite
+  - memory
+  - docker
+  - permissions
+  - azure
+image:
+  src: "/blog/openclaw/sqlite-memory-store.jpg"
+  alt: "OpenClaw SQLite memory store bootstrap and permissions"
+---
+
+import { Icon } from "astro-icon";
+
+## The Empty Database Problem
+
+After configuring memory search, you might try to inspect the SQLite database and find — nothing:
+
+```bash
+sqlite3 ~/.openclaw/memory/main.sqlite "SELECT COUNT(*) FROM embedding_cache;"
+```
+
+```
+Error: unable to open database "/home/azureuser/.openclaw/memory/main.sqlite":
+unable to open database file
+```
+
+This happens because the memory directory doesn't exist yet on the host. The gateway creates its database inside the container at `/home/node/.openclaw/memory/`, not on the host at `/home/azureuser/.openclaw/memory/`.
+
+## Understanding the Path Mapping
+
+OpenClaw's Docker Compose typically mounts the host's `~/.openclaw` into the container:
+
+```yaml
+volumes:
+  - ~/.openclaw:/home/node/.openclaw
+```
+
+This means:
+- **Host path:** `/home/azureuser/.openclaw/memory/`
+- **Container path:** `/home/node/.openclaw/memory/`
+- **Same files** — but ownership and permissions must work for both the host user and the container's `node` user (UID 1000)
+
+## Step-by-Step Bootstrap
+
+### 1. Create the Directory Structure
+
+```bash
+mkdir -p ~/.openclaw/memory
+mkdir -p ~/.openclaw/memory/notes
+```
+
+### 2. Set Permissions
+
+The container runs as user `node` (UID 1000). The directories need to be readable and writable by that UID:
+
+```bash
+chmod 770 ~/.openclaw/memory
+chmod 770 ~/.openclaw/memory/notes
+```
+
+### 3. Fix Ownership
+
+```bash
+sudo chown -R 1000:1000 ~/.openclaw/memory
+```
+
+This maps ownership to the container's `node` user. Without this, the gateway process can't create or write the SQLite database.
+
+### 4. Restart the Gateway
+
+```bash
+docker compose restart openclaw-gateway
+```
+
+### 5. Verify the Database Was Created
+
+```bash
+find ~/.openclaw/memory -maxdepth 2 -type f \
+  \( -name "*.sqlite" -o -name "*.db" \) -ls
+```
+
+Expected output:
+
+```
+1670790  0 -rw-r--r-- 1 azureuser azureuser  0 Feb 25 23:37
+  /home/azureuser/.openclaw/memory/main.sqlite
+```
+
+> **Note:** The file may initially be 0 bytes. The gateway creates the file on startup but only initializes the schema when the first memory operation occurs.
+
+## Verifying Permissions Inside the Container
+
+The most reliable way to verify is to test write access **from inside** the container:
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 sh -lc '
+  echo test > /home/node/.openclaw/memory/._write_test && \
+  ls -la /home/node/.openclaw/memory && \
+  rm -f /home/node/.openclaw/memory/._write_test
+'
+```
+
+Expected output:
+
+```
+total 16
+drwxrwx---  3 node node 4096 Feb 25 23:41 .
+drwxrwxr-x 11 node node 4096 Feb 25 23:36 ..
+-rw-r--r--  1 node node    5 Feb 25 23:41 ._write_test
+-rw-rw----  1 node node    0 Feb 25 23:37 main.sqlite
+drwxrwx---  2 node node 4096 Feb 25 23:37 notes
+```
+
+If you see the `._write_test` file, the container can write to the memory directory.
+
+## Inspecting the Container's File System
+
+Before troubleshooting permissions, check what the gateway sees:
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 sh -lc '
+  ls -la /home/node/.openclaw && \
+  ls -la /home/node/.openclaw/memory || true
+'
+```
+
+A healthy installation shows:
+
+```
+drwxrwxr-x 11 node node 4096 .
+drwx------  3 node node 4096 agents
+drwxr-xr-x  2 node node 4096 canvas
+drwxr-xr-x  2 node node 4096 completions
+drwx------  2 node node 4096 credentials
+drwxr-xr-x  2 node node 4096 cron
+drwxrwxr-x  2 node node 4096 identity
+drwx------  2 node node 4096 logs
+drwx------  3 node node 4096 memory        ← Must be owned by node
+-rw-------  1 node node 2810 openclaw.json
+drwxrwxr-x  4 node node 4096 workspace
+```
+
+Key things to verify:
+- `memory` directory is owned by `node:node`
+- `memory` directory has at least `rwx` for owner
+- `openclaw.json` is owned by `node` (same UID)
+
+## Installing sqlite3 on the Host
+
+If you want to inspect the database from the host, install sqlite3 first:
+
+```bash
+sudo apt install sqlite3
+```
+
+Then query:
+
+```bash
+sqlite3 ~/.openclaw/memory/main.sqlite "PRAGMA journal_mode;"
+# Expected: delete
+
+sqlite3 ~/.openclaw/memory/main.sqlite \
+  "SELECT name FROM sqlite_master WHERE type IN ('table','index','trigger','view');"
+```
+
+> **Warning:** Don't query the SQLite file while the gateway is actively writing to it. Use `docker compose stop openclaw-gateway` first for safe inspection, or use the `memory` CLI commands instead.
+
+## Using the CLI Instead of Raw SQLite
+
+OpenClaw provides CLI commands for memory operations that are safer than raw SQLite access:
+
+```bash
+# Search memory
+docker compose run --rm openclaw-cli memory search "your query"
+
+# Reindex all memory files
+docker compose run --rm openclaw-cli memory reindex
+
+# List memory contents
+docker compose run --rm openclaw-cli memory list
+```
+
+## Common Permission Patterns
+
+| Scenario | Fix |
+|----------|-----|
+| `main.sqlite` is 0 bytes | Normal — schema created on first write |
+| `Permission denied` inside container | `sudo chown -R 1000:1000 ~/.openclaw/memory` |
+| File exists but UID mismatch | Check container's UID: `docker exec openclaw-openclaw-gateway-1 id` |
+| Directory doesn't exist in container | Volume mount may be wrong — check `docker compose.yml` |
+| Database locked errors | Stop concurrent access; only one process should write |
+
+## The UID Mapping Gotcha
+
+The most common issue is a UID mismatch between the host and container:
+
+```
+Host user (azureuser) = UID 1000
+Container user (node)  = UID 1000   ← Must match!
+```
+
+If your host user isn't UID 1000, you have two options:
+
+**Option A:** Change ownership to the container's UID
+```bash
+sudo chown -R 1000:1000 ~/.openclaw/memory
+```
+
+**Option B:** Run the container with your host UID
+```yaml
+# In docker-compose.yml
+services:
+  openclaw-gateway:
+    user: "${UID}:${GID}"
+```
+
+## Backup Strategy
+
+The SQLite database and notes directory contain all of your agent's long-term memory. Include them in your backup plan:
+
+```bash
+# Backup memory store
+tar czf openclaw-memory-backup-$(date +%Y%m%d).tar.gz \
+  ~/.openclaw/memory/
+
+# Restore
+tar xzf openclaw-memory-backup-*.tar.gz -C ~/
+```
+
+## Series Navigation
+
+- **Previous:** [Setting Up OpenClaw Hybrid Memory Search with Local Embeddings](/blog/setting-up-openclaw-hybrid-memory-search-with-local-embeddings)
+- **Next:** [OpenClaw File-Backed Memory Notes for Durable Agent Knowledge](/blog/openclaw-file-backed-memory-notes-for-durable-agent-knowledge)
+- **Series index:** [What is OpenClaw AI Agent Gateway?](/blog/what-is-openclaw-ai-agent-gateway)

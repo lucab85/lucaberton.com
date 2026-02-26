@@ -1,0 +1,255 @@
+---
+draft: false
+title: "Setting Up OpenClaw Hybrid Memory Search with Local Embeddings"
+snippet: "Configure OpenClaw's hybrid memory search using local sentence-transformer embeddings. Set up the all-MiniLM-L6-v2 model, tune vector and text search weights, and enable the embedding cache for fast semantic retrieval."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - memory
+  - embeddings
+  - vector-search
+  - configuration
+  - azure
+image:
+  src: "/blog/openclaw/hybrid-memory-search.jpg"
+  alt: "Setting up OpenClaw hybrid memory search with local embeddings"
+---
+
+import { Icon } from "astro-icon";
+
+## What Is Hybrid Memory Search?
+
+OpenClaw agents can search their own memory notes using **hybrid search** — a combination of:
+
+- **Vector search** (semantic): Finds notes with similar *meaning* using sentence embeddings
+- **Text search** (lexical): Finds notes with matching *keywords* using full-text indexing
+
+By blending both approaches, hybrid search retrieves results that are both semantically relevant and keyword-precise. This is critical for long-running agents that accumulate knowledge across many sessions.
+
+## Architecture Overview
+
+```
+Agent query → Hybrid search engine
+                ├─ Vector path (0.7 weight)
+                │   └─ all-MiniLM-L6-v2 embeddings
+                │       └─ Cosine similarity ranking
+                └─ Text path (0.3 weight)
+                    └─ Full-text keyword matching
+                → Merged & re-ranked candidates
+                → Top results returned to agent
+```
+
+## Configuration Walkthrough
+
+All settings live under `agents.defaults.memorySearch`. Here's the complete setup from a real Azure deployment:
+
+### Step 1: Set the Provider to Local
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.provider local
+```
+
+The `local` provider runs embeddings on the gateway container itself — no external API calls, no data leaving your VM.
+
+### Step 2: Choose the Embedding Model
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.model all-MiniLM-L6-v2
+```
+
+**all-MiniLM-L6-v2** is a sentence-transformer model optimized for:
+- Fast inference on CPU (important when running on an Azure B2s VM)
+- 384-dimensional embeddings (compact vector size)
+- Good quality for short-to-medium text passages
+
+### Step 3: Set the Model Path
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.local.modelPath \
+  sentence-transformers/all-MiniLM-L6-v2
+```
+
+This tells the local provider where to find (or download) the model. On first run, the gateway downloads it from the Hugging Face model hub.
+
+### Step 4: Enable Hybrid Search
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.enabled true
+```
+
+### Step 5: Tune the Search Weights
+
+The vector and text weights control how much each search path contributes to the final ranking:
+
+```bash
+# Semantic similarity gets 70% weight
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.vectorWeight 0.7
+
+# Keyword matching gets 30% weight
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.textWeight 0.3
+```
+
+| Weight Split | Best For |
+|---|---|
+| 0.9 vector / 0.1 text | Conversational queries, fuzzy recall |
+| 0.7 vector / 0.3 text | General-purpose (recommended) |
+| 0.5 vector / 0.5 text | Balanced, when exact terms matter |
+| 0.3 vector / 0.7 text | Technical docs with specific jargon |
+
+### Step 6: Set the Candidate Multiplier
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.candidateMultiplier 4
+```
+
+The candidate multiplier controls how many raw candidates each search path retrieves before fusion. With a multiplier of `4`, if you request 10 results, each path fetches 40 candidates — giving the re-ranker more material to work with.
+
+### Step 7: Enable the Embedding Cache
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.cache.enabled true
+
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.cache.maxEntries 50000
+```
+
+The cache stores computed embeddings so identical queries don't need re-embedding. With `50000` entries and 384-dimensional vectors, the cache uses roughly:
+
+$$50000 \times 384 \times 4\text{ bytes} \approx 73\text{ MB}$$
+
+That's well within the 2 GB RAM of an Azure B2s VM.
+
+### Step 8: Restart the Gateway
+
+```bash
+docker compose restart openclaw-gateway
+```
+
+## Gateway Log Verification
+
+After applying all settings, check the gateway logs for config reload confirmations:
+
+```bash
+docker logs openclaw-openclaw-gateway-1 | grep -i "memorySearch"
+```
+
+You should see sequential reload entries for each setting:
+
+```
+[reload] config change detected; evaluating reload
+  (meta.lastTouchedAt, agents.defaults.memorySearch)
+[reload] config change applied (dynamic reads:
+  meta.lastTouchedAt, agents.defaults.memorySearch)
+
+[reload] config change detected; evaluating reload
+  (meta.lastTouchedAt, agents.defaults.memorySearch.model)
+[reload] config change applied (dynamic reads:
+  meta.lastTouchedAt, agents.defaults.memorySearch.model)
+
+[reload] config change detected; evaluating reload
+  (meta.lastTouchedAt, agents.defaults.memorySearch.local)
+...
+```
+
+Each pair confirms the gateway detected and applied the change dynamically.
+
+## Full Config JSON
+
+After completing all steps, the config section looks like:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "memorySearch": {
+        "provider": "local",
+        "model": "all-MiniLM-L6-v2",
+        "local": {
+          "modelPath": "sentence-transformers/all-MiniLM-L6-v2"
+        },
+        "query": {
+          "hybrid": {
+            "enabled": true,
+            "vectorWeight": 0.7,
+            "textWeight": 0.3,
+            "candidateMultiplier": 4
+          }
+        },
+        "cache": {
+          "enabled": true,
+          "maxEntries": 50000
+        }
+      }
+    }
+  }
+}
+```
+
+## Understanding the all-MiniLM-L6-v2 Model
+
+| Property | Value |
+|----------|-------|
+| Architecture | 6-layer MiniLM (distilled BERT) |
+| Output dimensions | 384 |
+| Max sequence length | 256 tokens |
+| Model size | ~80 MB |
+| Speed | ~14,000 sentences/sec on CPU |
+| Quality | Competitive with larger models for retrieval tasks |
+
+The model is downloaded once and cached inside the Docker container's filesystem. On an Azure B2s VM with 2 vCPUs, expect first-run download to take 30–60 seconds.
+
+## Performance Tuning Tips
+
+### For Small Memory Stores (< 1,000 notes)
+- `candidateMultiplier: 2` is sufficient
+- Cache may not provide significant benefit
+- Text weight can be higher for precision
+
+### For Large Memory Stores (> 10,000 notes)
+- `candidateMultiplier: 4-8` improves recall
+- Enable cache with generous `maxEntries`
+- Higher vector weight helps with semantic similarity
+
+### Memory Usage on Azure B2s
+
+| Component | Approximate RAM |
+|-----------|----------------|
+| Gateway base | ~200 MB |
+| MiniLM-L6-v2 model | ~80 MB |
+| Embedding cache (50K entries) | ~73 MB |
+| SQLite index | ~10–50 MB |
+| **Total** | **~363–403 MB** |
+
+This leaves roughly 1.6 GB for the OS and other containers — comfortable but monitor with `docker stats`.
+
+## Troubleshooting
+
+**Model download fails:**
+- Check internet connectivity from the container: `docker exec -it openclaw-openclaw-gateway-1 sh -lc 'wget -q --spider https://huggingface.co && echo OK'`
+- Verify DNS resolution works inside the container
+- Pre-download the model and mount it as a Docker volume
+
+**Embeddings seem wrong:**
+- Ensure `model` and `local.modelPath` match (both should reference `all-MiniLM-L6-v2`)
+- Clear the cache and restart: `docker compose run --rm openclaw-cli config set agents.defaults.memorySearch.cache.enabled false` then re-enable
+
+**Search returns no results:**
+- Verify memory notes exist: `docker exec -it openclaw-openclaw-gateway-1 sh -lc 'ls -la /home/node/.openclaw/memory/notes'`
+- Check that the SQLite database was created (see the memory store article)
+
+## Series Navigation
+
+- **Previous:** [Configuring OpenClaw Memory Flush for Context Compaction](/blog/configuring-openclaw-memory-flush-for-context-compaction)
+- **Next:** [OpenClaw SQLite Memory Store Bootstrap and Permissions](/blog/openclaw-sqlite-memory-store-bootstrap-and-permissions)
+- **Series index:** [What is OpenClaw AI Agent Gateway?](/blog/what-is-openclaw-ai-agent-gateway)

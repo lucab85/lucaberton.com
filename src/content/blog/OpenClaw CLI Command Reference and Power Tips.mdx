@@ -1,0 +1,309 @@
+---
+draft: false
+title: "OpenClaw CLI Command Reference and Power Tips"
+snippet: "A comprehensive guide to the OpenClaw CLI — from gateway management and agent control to memory search, cron jobs, and security audits. Master the command-line interface for efficient OpenClaw administration."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - cli
+  - reference
+  - docker
+  - administration
+  - azure
+image:
+  src: "/blog/openclaw/cli-reference.jpg"
+  alt: "OpenClaw CLI command reference and power tips"
+---
+
+import { Icon } from "astro-icon";
+
+## CLI Overview
+
+The OpenClaw CLI (`openclaw-cli`) is the primary tool for configuring, managing, and troubleshooting your gateway. When running via Docker Compose, every CLI command follows this pattern:
+
+```bash
+docker compose run --rm openclaw-cli <command> [options]
+```
+
+Running `--help` shows the full command tree:
+
+```bash
+docker compose run --rm openclaw-cli --help
+```
+
+## Command Categories
+
+OpenClaw v2026.2.25 ships with 40+ top-level commands organized into logical groups:
+
+### Gateway & Infrastructure
+
+| Command | Description |
+|---------|-------------|
+| `gateway *` | Run, inspect, and query the WebSocket Gateway |
+| `health` | Fetch health from the running gateway |
+| `status` | Show channel health and recent session recipients |
+| `doctor` | Health checks + quick fixes for the gateway and channels |
+| `logs` | Tail gateway file logs via RPC |
+| `dashboard` | Open the Control UI with your current token |
+
+### Configuration
+
+| Command | Description |
+|---------|-------------|
+| `config *` | Non-interactive config helpers (get/set/unset) |
+| `configure` | Interactive setup wizard for credentials, channels, gateway, and agent defaults |
+| `setup` | Initialize local config and agent workspace |
+| `onboard` | Interactive onboarding wizard for gateway, workspace, and skills |
+| `reset` | Reset local config/state (keeps the CLI installed) |
+
+### Agent & Conversations
+
+| Command | Description |
+|---------|-------------|
+| `agent` | Run one agent turn via the Gateway |
+| `agents *` | Manage isolated agents (workspaces, auth, routing) |
+| `sessions *` | List stored conversation sessions |
+| `message *` | Send, read, and manage messages |
+| `memory *` | Search and reindex memory files |
+
+### Channels & Communication
+
+| Command | Description |
+|---------|-------------|
+| `channels *` | Manage connected chat channels (Telegram, Discord, etc.) |
+| `directory *` | Lookup contact and group IDs (self, peers, groups) |
+| `pairing *` | Secure DM pairing (approve inbound requests) |
+| `webhooks *` | Webhook helpers and integrations |
+
+### Security & Administration
+
+| Command | Description |
+|---------|-------------|
+| `security *` | Security tools and local config audits |
+| `approvals *` | Manage exec approvals (gateway or node host) |
+| `devices *` | Device pairing + token management |
+| `update *` | Update OpenClaw and inspect update channel status |
+| `uninstall` | Uninstall the gateway service + local data |
+
+### Advanced
+
+| Command | Description |
+|---------|-------------|
+| `cron *` | Manage cron jobs via the Gateway scheduler |
+| `hooks *` | Manage internal agent hooks |
+| `models *` | Discover, scan, and configure models |
+| `skills *` | List and inspect available skills |
+| `plugins *` | Manage OpenClaw plugins and extensions |
+| `sandbox *` | Manage sandbox containers for agent isolation |
+| `browser *` | Manage OpenClaw's dedicated browser (Chrome/Chromium) |
+| `dns *` | DNS helpers for wide-area discovery (Tailscale + CoreDNS) |
+| `nodes *` | Manage gateway-owned node pairing and node commands |
+| `node *` | Run and manage the headless node host service |
+| `acp *` | Agent Control Protocol tools |
+| `tui` | Open a terminal UI connected to the Gateway |
+
+## Essential Config Commands
+
+### Get a Config Value
+
+```bash
+docker compose run --rm openclaw-cli config get agents.defaults.memorySearch.provider
+```
+
+### Set a Config Value
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.enabled true
+```
+
+### Unset a Config Value
+
+```bash
+docker compose run --rm openclaw-cli config unset \
+  agents.defaults.compaction.memoryFlush.systemPrompt
+```
+
+### Batch Configuration
+
+Run multiple `config set` commands in sequence. Each change generates a SHA-256 hash trail:
+
+```bash
+docker compose run --rm openclaw-cli config set key1 value1
+docker compose run --rm openclaw-cli config set key2 value2
+docker compose run --rm openclaw-cli config set key3 value3
+docker compose restart openclaw-gateway
+```
+
+The config file tracks changes with hash chains:
+
+```
+sha256 d6d04328... -> dd9c4954...  (first change)
+sha256 dd9c4954... -> 00585ebf...  (second change)
+sha256 00585ebf... -> 77d13c91...  (third change)
+```
+
+## Global Options
+
+| Option | Description |
+|--------|-------------|
+| `--dev` | Dev profile: isolate state under `~/.openclaw-dev` |
+| `--profile <name>` | Named profile under `~/.openclaw-<name>` |
+| `--log-level <level>` | Override log level (silent\|fatal\|error\|warn\|info\|debug\|trace) |
+| `--no-color` | Disable ANSI colors |
+| `-V, --version` | Print version number |
+
+### Profile Isolation
+
+Profiles let you run multiple OpenClaw instances with separate state:
+
+```bash
+# Production
+docker compose run --rm openclaw-cli config set gateway.port 18789
+
+# Development (isolated state)
+docker compose run --rm openclaw-cli --dev gateway
+# Uses port 19001, state in ~/.openclaw-dev/
+```
+
+## Power Tips
+
+### Tip 1: Suppress Warning Noise
+
+When environment variables like `CLAUDE_WEB_COOKIE` aren't set, Docker Compose emits warnings:
+
+```
+WARN[0000] The "CLAUDE_WEB_COOKIE" variable is not set.
+Defaulting to a blank string.
+```
+
+Suppress these by adding empty defaults to your `.env` file:
+
+```bash
+cat >> ~/openclaw/.env <<'EOF'
+CLAUDE_WEB_COOKIE=
+CLAUDE_AI_SESSION_KEY=
+CLAUDE_WEB_SESSION_KEY=
+EOF
+```
+
+### Tip 2: Use Shell History Wisely
+
+OpenClaw CLI commands can be long. Create aliases:
+
+```bash
+# Add to ~/.bashrc
+alias oc='docker compose run --rm openclaw-cli'
+alias oc-config='docker compose run --rm openclaw-cli config'
+alias oc-restart='docker compose restart openclaw-gateway'
+```
+
+Then:
+
+```bash
+oc config set agents.defaults.memorySearch.provider local
+oc-restart
+```
+
+### Tip 3: Inspect Config as JSON
+
+View the current full config:
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 sh -lc \
+  'cat /home/node/.openclaw/openclaw.json' | python3 -m json.tool
+```
+
+### Tip 4: Diff Config Changes
+
+Compare current config with the last backup:
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 sh -lc \
+  'diff /home/node/.openclaw/openclaw.json.bak /home/node/.openclaw/openclaw.json'
+```
+
+### Tip 5: Use the Doctor Command
+
+When things aren't working, `doctor` runs automated health checks:
+
+```bash
+docker compose run --rm openclaw-cli doctor
+```
+
+### Tip 6: Generate Shell Completions
+
+```bash
+docker compose run --rm openclaw-cli completion > /tmp/openclaw-completion.sh
+source /tmp/openclaw-completion.sh
+```
+
+## The Lobster Taglines
+
+You may notice the CLI prints a random tagline on every run:
+
+```
+🦞 OpenClaw 2026.2.25 (unknown)
+   curl for conversations.
+
+🦞 OpenClaw 2026.2.25 (unknown)
+   I'm the reason your shell history looks like a hacker-movie montage.
+
+🦞 OpenClaw 2026.2.25 (unknown)
+   Your .env is showing; don't worry, I'll pretend I didn't see it.
+```
+
+These are built into the CLI binary — a nice touch of personality in an otherwise serious tool. Each invocation shows a different one.
+
+## Memory CLI Commands
+
+```bash
+# Search agent memory
+docker compose run --rm openclaw-cli memory search "deployment configuration"
+
+# Reindex memory files (after manual edits)
+docker compose run --rm openclaw-cli memory reindex
+
+# List memory contents
+docker compose run --rm openclaw-cli memory list
+```
+
+## Security Commands
+
+```bash
+# Run security audit
+docker compose run --rm openclaw-cli security audit
+
+# Check for dangerous config flags
+docker compose run --rm openclaw-cli security check
+```
+
+## Helpful Debugging Pattern
+
+When troubleshooting, follow this sequence:
+
+```bash
+# 1. Check health
+docker compose run --rm openclaw-cli health
+
+# 2. Check channel status
+docker compose run --rm openclaw-cli status
+
+# 3. Run doctor
+docker compose run --rm openclaw-cli doctor
+
+# 4. Check logs
+docker compose run --rm openclaw-cli logs
+
+# 5. Verify config
+docker compose run --rm openclaw-cli config get gateway
+```
+
+## Series Navigation
+
+- **Previous:** [OpenClaw File-Backed Memory Notes for Durable Agent Knowledge](/blog/openclaw-file-backed-memory-notes-for-durable-agent-knowledge)
+- **Next:** [Docker Volume Permissions for OpenClaw on Linux](/blog/docker-volume-permissions-for-openclaw-on-linux)
+- **Series index:** [What is OpenClaw AI Agent Gateway?](/blog/what-is-openclaw-ai-agent-gateway)

@@ -1,0 +1,269 @@
+---
+draft: false
+title: "OpenClaw Agent Tool Execution Errors and Sandbox Permissions"
+snippet: "Troubleshoot 'Permission denied' errors when OpenClaw's AI agent tries to execute tools like jest, npm, or shell commands. Understand the agent sandbox, tool execution model, and how to configure safe tool access inside Docker containers."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - troubleshooting
+  - sandbox
+  - security
+  - docker
+  - azure
+image:
+  src: "/blog/openclaw/tool-exec-errors.jpg"
+  alt: "OpenClaw agent tool execution errors and sandbox permissions"
+---
+
+import { Icon } from "astro-icon";
+
+## The Tool Execution Error
+
+While tailing the OpenClaw gateway logs, you notice this:
+
+```
+2026-02-26T00:10:35.329+00:00 [tools] exec failed:
+  sh: 1: jest: Permission denied
+
+Command not found
+```
+
+The agent tried to run `jest` — a JavaScript test runner — and the container's shell denied the execution. This isn't a bug; it's the **sandbox doing its job**. But understanding *why* it happened and how to control tool access is essential for production deployments.
+
+## How Agent Tool Execution Works
+
+When OpenClaw's AI agent decides it needs to run a shell command, the execution flow is:
+
+1. **Agent decides** — The LLM (e.g., `github-copilot/claude-opus-4.6`) generates a tool call requesting command execution
+2. **Gateway intercepts** — The gateway evaluates the tool call against the approval policy
+3. **Sandbox executes** — If approved, the command runs inside the agent's sandbox environment
+4. **Result returns** — stdout/stderr are captured and returned to the agent
+
+The `[tools] exec failed` log message means step 3 failed — the command was approved but couldn't actually execute.
+
+## Why "Permission Denied" Happens
+
+### 1. Binary Not Installed
+
+The most common cause: the tool simply doesn't exist in the container. OpenClaw's Docker image is a minimal Node.js environment — it doesn't ship with development tools like `jest`, `pytest`, `gcc`, or most CLI utilities:
+
+```bash
+# Check what's available inside the container
+docker exec -it openclaw-openclaw-gateway-1 sh -c 'which jest || echo "not found"'
+# Output: not found
+```
+
+### 2. PATH Restrictions
+
+Even if a binary exists, the sandbox may run with a restricted `$PATH` that excludes it:
+
+```bash
+# Check the sandbox PATH
+docker exec -it openclaw-openclaw-gateway-1 sh -c 'echo $PATH'
+```
+
+### 3. File Permission Bits
+
+If you've installed tools manually inside the container, they may lack execute permissions:
+
+```bash
+# Check permissions on a binary
+docker exec -it openclaw-openclaw-gateway-1 sh -c 'ls -la /usr/local/bin/jest 2>/dev/null'
+```
+
+### 4. Sandbox Isolation
+
+OpenClaw can run agent commands in an isolated sandbox container. If sandbox mode is enabled, the tool execution happens in a separate, even more restricted environment:
+
+```bash
+# Check sandbox configuration
+docker compose run --rm openclaw-cli config get agents.defaults.sandbox
+```
+
+## The Exec Approval System
+
+Before a command even reaches the sandbox, OpenClaw's **approval system** gates it. Check the current approval policy:
+
+```bash
+docker compose run --rm openclaw-cli approvals --help
+```
+
+Approvals can be configured to:
+
+| Mode | Behavior |
+|------|----------|
+| `auto` | All commands execute without user confirmation |
+| `prompt` | Each command requires interactive approval |
+| `allowlist` | Only pre-approved commands run |
+| `deny` | All tool execution is blocked |
+
+The "Permission denied" error in the logs means the command passed the approval gate but failed at the OS level.
+
+## Fixing Tool Execution Errors
+
+### Option 1: Install the Missing Tool
+
+If the agent legitimately needs `jest` (or any other tool), install it inside the container:
+
+```bash
+# Install globally inside the running container
+docker exec -it openclaw-openclaw-gateway-1 sh -c 'npm install -g jest'
+```
+
+> **Warning:** This change is ephemeral — it's lost on container restart. For persistence, create a custom Dockerfile.
+
+### Option 2: Custom Dockerfile
+
+Create a `Dockerfile.custom` that extends the OpenClaw image with your tools:
+
+```dockerfile
+FROM openclaw:local
+
+# Install development tools the agent might need
+RUN npm install -g jest typescript ts-node eslint prettier
+
+# Install system utilities
+USER root
+RUN apk add --no-cache python3 py3-pip git curl jq sqlite
+USER node
+```
+
+Update your `docker-compose.yml`:
+
+```yaml
+services:
+  openclaw-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.custom
+    # ... rest of config
+```
+
+Then rebuild:
+
+```bash
+docker compose build openclaw-gateway
+docker compose up -d openclaw-gateway
+```
+
+### Option 3: Mount Host Tools
+
+Map host directories into the container so the agent can use tools installed on the VM:
+
+```yaml
+services:
+  openclaw-gateway:
+    volumes:
+      - /home/azureuser/.openclaw:/home/node/.openclaw
+      - /usr/local/bin/jq:/usr/local/bin/jq:ro  # Read-only mount
+```
+
+### Option 4: Use Sandbox Containers
+
+OpenClaw supports running agent commands in dedicated sandbox containers that come pre-loaded with tools:
+
+```bash
+# Configure sandbox
+docker compose run --rm openclaw-cli config set agents.defaults.sandbox.enabled true
+docker compose run --rm openclaw-cli config set agents.defaults.sandbox.image "node:20-alpine"
+```
+
+The sandbox container can be a standard `node:20` image with all development tooling pre-installed, while the gateway container remains slim.
+
+## Understanding the Error Message
+
+Let's decode the full error:
+
+```
+2026-02-26T00:10:35.329+00:00 [tools] exec failed:
+  sh: 1: jest: Permission denied
+```
+
+| Part | Meaning |
+|------|---------|
+| `[tools]` | The gateway's tool execution subsystem |
+| `exec failed` | The shell command returned a non-zero exit |
+| `sh: 1:` | POSIX shell, line 1 of the command |
+| `jest` | The binary the agent tried to run |
+| `Permission denied` | OS-level denial (missing binary or no execute bit) |
+
+The separate line `Command not found` is OpenClaw's own interpretation — it recognizes the pattern and provides a cleaner message.
+
+## Auditing Agent Tool Usage
+
+Watch what tools the agent tries to use:
+
+```bash
+# Filter logs for all tool execution events
+docker logs --tail=500 openclaw-openclaw-gateway-1 | \
+  grep -E "\[tools\]" | tail -20
+```
+
+The `command-logger` hook (automatically registered on startup) records every command the agent executes:
+
+```
+[hooks:loader] Registered hook: command-logger -> command
+```
+
+This means every tool call is logged. You can review the log to understand what tools the agent needs most and configure your environment accordingly.
+
+## Security Considerations
+
+### Don't Install Everything
+
+It's tempting to install every possible tool the agent might need. Resist this urge — each binary you add to the container increases the attack surface.
+
+### Use Read-Only Mounts
+
+When mounting host tools into the container, always use `:ro` to prevent the agent from modifying them:
+
+```yaml
+volumes:
+  - /host/path/tool:/container/path/tool:ro
+```
+
+### The Approvals Layer
+
+Configure the approval system to allowlist specific commands:
+
+```bash
+# Enable approval prompts for dangerous commands
+docker compose run --rm openclaw-cli config set agents.defaults.approvals.mode allowlist
+```
+
+### Monitor Tool Calls
+
+Set up a log watcher for tool execution failures to catch unexpected agent behavior:
+
+```bash
+#!/bin/bash
+# monitor-tool-errors.sh
+ERRORS=$(docker logs --tail=100 openclaw-openclaw-gateway-1 2>&1 | \
+  grep -c "\[tools\] exec failed")
+
+if [ "$ERRORS" -gt 5 ]; then
+  echo "ALERT: $ERRORS tool execution failures in recent logs"
+fi
+```
+
+## Common Tool Errors Reference
+
+| Error Message | Cause | Fix |
+|---------------|-------|-----|
+| `Permission denied` | Binary missing or not executable | Install tool or fix perms |
+| `Command not found` | Not in PATH | Install or add to PATH |
+| `Operation not permitted` | Sandbox/seccomp restriction | Check sandbox config |
+| `No such file or directory` | Wrong path or missing dependency | Install package |
+| `exec format error` | Architecture mismatch (ARM vs x86) | Use correct image |
+
+## Series Navigation
+
+**Previous:** [Fixing OpenClaw Gateway Token Mismatch WebSocket Errors](/blog/fixing-openclaw-gateway-token-mismatch-websocket-errors)
+**Next:** [Exploring OpenClaw Browser Control and Canvas Features](/blog/exploring-openclaw-browser-control-and-canvas-features)
+
+---
+
+*Part 27 of the OpenClaw on Azure series. The sandbox is your friend — it keeps the agent from running `rm -rf /` while you sleep.*

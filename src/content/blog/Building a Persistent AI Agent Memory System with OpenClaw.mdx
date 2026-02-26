@@ -1,0 +1,360 @@
+---
+draft: false
+title: "Building a Persistent AI Agent Memory System with OpenClaw"
+snippet: "End-to-end guide to building a complete persistent memory system for your OpenClaw AI agent. Combine memory flush, hybrid search, file-backed notes, SQLite indexing, and session hooks into a cohesive knowledge architecture."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - memory
+  - architecture
+  - embeddings
+  - docker
+  - azure
+image:
+  src: "/blog/openclaw/persistent-memory.jpg"
+  alt: "Building a persistent AI agent memory system with OpenClaw"
+---
+
+import { Icon } from "astro-icon";
+
+## The Memory Architecture
+
+An OpenClaw agent without persistent memory loses everything when a session ends or context compacts. By combining four subsystems — **memory flush**, **hybrid search**, **file-backed notes**, and **session hooks** — you create an agent that remembers across conversations, retrieves relevant context, and builds knowledge over time.
+
+```
+┌──────────────────────────────────────────────────────┐
+│                  Agent Conversation                   │
+│                                                      │
+│  ┌──────────────┐    ┌──────────────┐                │
+│  │ Memory Search │◄──│ Session Hook  │ (on new)      │
+│  │ (retrieval)   │    │ (lifecycle)   │                │
+│  └──────┬───────┘    └──────┬───────┘                │
+│         │                    │                        │
+│         ▼                    ▼                        │
+│  ┌──────────────┐    ┌──────────────┐                │
+│  │ SQLite Index  │    │ Memory Flush │ (on compact)  │
+│  │ (embeddings)  │    │ (persistence)│                │
+│  └──────┬───────┘    └──────┬───────┘                │
+│         │                    │                        │
+│         └────────┬───────────┘                        │
+│                  ▼                                    │
+│         ┌──────────────┐                              │
+│         │ Notes (*.md)  │                              │
+│         │ File Storage  │                              │
+│         └──────────────┘                              │
+└──────────────────────────────────────────────────────┘
+```
+
+## Complete Setup Guide
+
+This guide assumes you're starting from a working OpenClaw Docker Compose deployment on Azure. If you haven't set that up yet, start with [Installing OpenClaw on Azure with Docker](/blog/installing-openclaw-on-azure-with-docker).
+
+### Phase 1: Prepare the Storage Layer
+
+Create the directory structure and set permissions:
+
+```bash
+# Create directories
+mkdir -p ~/.openclaw/memory/notes
+
+# Set ownership to container's node user (UID 1000)
+sudo chown -R 1000:1000 ~/.openclaw/memory
+
+# Set permissions
+chmod 770 ~/.openclaw/memory
+chmod 770 ~/.openclaw/memory/notes
+```
+
+### Phase 2: Configure Memory Flush
+
+Enable the compaction flush so the agent saves knowledge before context is trimmed:
+
+```bash
+# Enable the flush
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.enabled true
+
+# Set token threshold (flush fires at 4000 tokens before limit)
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.softThresholdTokens 4000
+
+# System prompt for the flush agent turn
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.systemPrompt \
+  "Session nearing compaction. Store durable memories now."
+
+# User prompt telling agent what to save and where
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.prompt \
+  "Write any lasting notes to memory/YYYY-MM-DD.md; reply with NO_REPLY if nothing to store."
+```
+
+### Phase 3: Configure Hybrid Memory Search
+
+Set up the local embedding model and search parameters:
+
+```bash
+# Use local embeddings (no external API)
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.provider local
+
+# Embedding model
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.model all-MiniLM-L6-v2
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.local.modelPath \
+  sentence-transformers/all-MiniLM-L6-v2
+
+# Enable hybrid search
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.enabled true
+
+# Search weights: 70% semantic, 30% keyword
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.vectorWeight 0.7
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.textWeight 0.3
+
+# Candidate multiplier for better recall
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.candidateMultiplier 4
+
+# Enable embedding cache
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.cache.enabled true
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.cache.maxEntries 50000
+```
+
+### Phase 4: Create Seed Notes
+
+Give the agent initial knowledge to bootstrap memory search:
+
+```bash
+cat > ~/.openclaw/memory/notes/system-context.md <<'EOF'
+# System Context
+
+## Deployment
+- OpenClaw v2026.2.25 on Azure B2s VM
+- Docker Compose deployment
+- Gateway port: 18789, Control UI: 18790
+- Discord channel integration active
+
+## Configuration
+- Local embeddings: all-MiniLM-L6-v2
+- Hybrid search: 70/30 vector/text split
+- Memory flush: 4000 token threshold
+- Embedding cache: 50K entries
+EOF
+```
+
+### Phase 5: Apply and Verify
+
+```bash
+# Restart to apply all changes
+docker compose restart openclaw-gateway
+
+# Verify hook registration
+docker logs openclaw-openclaw-gateway-1 | grep "hooks:loader"
+# Expected: Registered hook: session-memory -> command:new, command:reset
+
+# Verify config reloads
+docker logs openclaw-openclaw-gateway-1 | grep "reload"
+# Expected: Multiple "config change applied" entries
+
+# Verify SQLite created
+find ~/.openclaw/memory -name "*.sqlite" -ls
+# Expected: main.sqlite file
+
+# Test write access
+docker exec -it openclaw-openclaw-gateway-1 sh -lc '
+  echo test > /home/node/.openclaw/memory/._test && \
+  echo OK && rm -f /home/node/.openclaw/memory/._test
+'
+# Expected: OK
+```
+
+## The Complete Config JSON
+
+After all phases, the relevant config section:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "compaction": {
+        "memoryFlush": {
+          "enabled": true,
+          "softThresholdTokens": 4000,
+          "systemPrompt": "Session nearing compaction. Store durable memories now.",
+          "prompt": "Write any lasting notes to memory/YYYY-MM-DD.md; reply with NO_REPLY if nothing to store."
+        }
+      },
+      "memorySearch": {
+        "provider": "local",
+        "model": "all-MiniLM-L6-v2",
+        "local": {
+          "modelPath": "sentence-transformers/all-MiniLM-L6-v2"
+        },
+        "query": {
+          "hybrid": {
+            "enabled": true,
+            "vectorWeight": 0.7,
+            "textWeight": 0.3,
+            "candidateMultiplier": 4
+          }
+        },
+        "cache": {
+          "enabled": true,
+          "maxEntries": 50000
+        }
+      }
+    }
+  }
+}
+```
+
+## Memory Flow in Practice
+
+Here's what happens during a real agent conversation:
+
+### Session Start
+
+1. User sends first message
+2. `session-memory` hook fires (`command:new`)
+3. Hook queries memory search with session context
+4. Relevant notes retrieved via hybrid search
+5. Notes injected into agent's system context
+6. Agent responds with historical knowledge available
+
+### Mid-Conversation (Compaction)
+
+1. Conversation reaches soft threshold (4000 tokens before limit)
+2. Memory flush fires
+3. Agent receives flush system prompt + user prompt
+4. Agent writes notes to `memory/YYYY-MM-DD.md`
+5. Agent replies `NO_REPLY` or confirms save
+6. Context compacted (old messages trimmed)
+7. Conversation continues with fresh token budget
+
+### Session End
+
+1. Session reset or new session starts
+2. `session-memory` hook fires (`command:reset`)
+3. Hook evaluates session for saveable content
+4. Important context written to memory notes
+5. Notes indexed for future retrieval
+
+## Resource Budget on Azure B2s
+
+| Component | RAM | CPU Impact |
+|-----------|-----|------------|
+| OpenClaw Gateway | ~200 MB | Low |
+| MiniLM-L6-v2 Model | ~80 MB | Spikes on embedding |
+| Embedding Cache (50K) | ~73 MB | None |
+| SQLite Index | ~10-50 MB | Low (I/O bound) |
+| Notes Storage | < 1 MB | None |
+| **Total Memory System** | **~363-403 MB** | **Moderate** |
+
+The B2s VM has 4 GB RAM — the memory system uses about 10% of available memory. Monitor with:
+
+```bash
+docker stats openclaw-openclaw-gateway-1
+```
+
+## Monitoring and Maintenance
+
+### Daily Health Check
+
+```bash
+# Check hook is registered
+docker logs --tail=50 openclaw-openclaw-gateway-1 | grep "session-memory"
+
+# Count memory notes
+ls -la ~/.openclaw/memory/notes/ | wc -l
+
+# Check SQLite size
+ls -lh ~/.openclaw/memory/main.sqlite
+
+# Check disk usage
+du -sh ~/.openclaw/memory/
+```
+
+### Weekly Maintenance
+
+```bash
+# Reindex memory (after manual note edits)
+docker compose run --rm openclaw-cli memory reindex
+
+# Review agent-generated notes
+cat ~/.openclaw/memory/notes/$(date +%Y-%m-%d).md
+
+# Backup memory
+tar czf ~/backup/openclaw-memory-$(date +%Y%m%d).tar.gz \
+  ~/.openclaw/memory/
+```
+
+### Troubleshooting Decision Tree
+
+```
+Problem: Agent doesn't remember previous sessions
+│
+├─ Check: Hook registered?
+│  └─ No → Verify memoryFlush + memorySearch config
+│
+├─ Check: Notes exist?
+│  └─ No → Test write permissions, check flush config
+│
+├─ Check: SQLite has data?
+│  └─ No → Run `memory reindex`
+│
+├─ Check: Search returns results?
+│  └─ No → Verify model + hybrid config
+│
+└─ Check: Notes are relevant?
+   └─ No → Tune search weights or improve flush prompts
+```
+
+## Scaling Considerations
+
+### For Longer Sessions (Higher Token Models)
+
+```bash
+# Increase soft threshold proportionally
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.softThresholdTokens 8000
+```
+
+### For More Memory Notes (Thousands)
+
+```bash
+# Increase candidate multiplier
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.candidateMultiplier 8
+
+# Increase cache
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.cache.maxEntries 100000
+```
+
+### For Better Accuracy
+
+```bash
+# Shift toward vector search
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.vectorWeight 0.85
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.textWeight 0.15
+```
+
+## Series Navigation
+
+- **Previous:** [Running OpenClaw Security Audit and Managing Warnings](/blog/running-openclaw-security-audit-and-managing-warnings)
+- **Series index:** [What is OpenClaw AI Agent Gateway?](/blog/what-is-openclaw-ai-agent-gateway)
+
+---
+
+*This is Part 25 of the OpenClaw series — the capstone article tying together memory flush, hybrid search, file storage, and session hooks into a production-ready persistent memory architecture.*

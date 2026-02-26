@@ -1,0 +1,279 @@
+---
+draft: false
+title: "OpenClaw Session Memory Hooks Automating Knowledge Capture"
+snippet: "Deep dive into OpenClaw's session-memory hook — how it triggers on conversation events, integrates with memory flush, and automates durable knowledge capture across agent sessions."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - hooks
+  - memory
+  - automation
+  - docker
+  - azure
+image:
+  src: "/blog/openclaw/session-hooks.jpg"
+  alt: "OpenClaw session memory hooks for automating knowledge capture"
+---
+
+import { Icon } from "astro-icon";
+
+## What Are Session Memory Hooks?
+
+OpenClaw's **hooks system** lets the gateway execute automated actions when specific events occur. The most important built-in hook is `session-memory`, which triggers on conversation lifecycle events to manage the agent's durable memory.
+
+In the gateway logs, you'll see it registered on every startup:
+
+```
+[hooks:loader] Registered hook: session-memory
+  -> command:new, command:reset
+```
+
+This means the `session-memory` hook fires whenever:
+- A **new session** starts (`command:new`)
+- A **session is reset** (`command:reset`)
+
+## Why Session Hooks Matter
+
+Without hooks, memory management would be entirely manual — you'd need to tell the agent to save important information before ending each conversation. Session hooks automate this by:
+
+1. **Capturing end-of-session knowledge** — saving context before a session closes
+2. **Loading relevant memory** — fetching applicable notes when a new session starts
+3. **Maintaining continuity** — ensuring the agent remembers across conversation boundaries
+
+## The Hook Lifecycle
+
+```
+New session starts (command:new)
+  → session-memory hook fires
+  → Hook searches memory for relevant context
+  → Matching notes injected into agent context
+  → Conversation proceeds with memory-augmented context
+
+Session resets (command:reset)
+  → session-memory hook fires
+  → Hook evaluates what to preserve
+  → Important context written to memory notes
+  → Session cleared with knowledge safely stored
+```
+
+## How It Integrates with Memory Flush
+
+The session-memory hook works in concert with the memory flush system:
+
+| System | When It Fires | What It Does |
+|--------|---------------|--------------|
+| **Memory flush** | Before compaction (token threshold) | Saves notes mid-conversation |
+| **Session-memory hook** | On new/reset events | Loads/saves notes at session boundaries |
+
+Together, they create a complete memory lifecycle:
+
+```
+Session start → Load relevant notes (hook)
+  → Long conversation → Flush notes (compaction)
+  → Continue → Flush again if needed
+  → Session end/reset → Save final notes (hook)
+→ Next session → Load again (hook)
+```
+
+## Verifying Hook Registration
+
+After starting or restarting the gateway, check that the hook is registered:
+
+```bash
+docker logs openclaw-openclaw-gateway-1 | grep "hooks:loader"
+```
+
+Expected output:
+
+```
+[hooks:loader] Registered hook: session-memory
+  -> command:new, command:reset
+```
+
+If you don't see this line, the hook system may not be properly initialized. Check:
+
+1. Memory flush is enabled in config
+2. Memory search provider is configured
+3. The memory directory exists and is writable
+
+## Hook Configuration Prerequisites
+
+The session-memory hook requires these features to be configured:
+
+### 1. Memory Flush (for saving)
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.enabled true
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.softThresholdTokens 4000
+```
+
+### 2. Memory Search (for loading)
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.provider local
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.model all-MiniLM-L6-v2
+```
+
+### 3. Memory Directory (for storage)
+
+```bash
+mkdir -p ~/.openclaw/memory/notes
+sudo chown -R 1000:1000 ~/.openclaw/memory
+```
+
+## Managing Hooks via CLI
+
+The OpenClaw CLI provides a dedicated `hooks` command:
+
+```bash
+# List all registered hooks
+docker compose run --rm openclaw-cli hooks list
+
+# Inspect a specific hook
+docker compose run --rm openclaw-cli hooks inspect session-memory
+
+# List available hook events
+docker compose run --rm openclaw-cli hooks events
+```
+
+## Hook Events Reference
+
+The hooks system supports various events beyond session management:
+
+| Event | Triggered When |
+|-------|----------------|
+| `command:new` | New conversation session created |
+| `command:reset` | Session reset (history cleared) |
+| `message:incoming` | New message received from user |
+| `message:outgoing` | Agent sends response |
+| `compaction:before` | Before context compaction |
+| `compaction:after` | After context compaction |
+| `gateway:start` | Gateway process starts |
+| `gateway:stop` | Gateway process stops |
+
+The `session-memory` hook specifically listens to `command:new` and `command:reset`.
+
+## Custom Hooks
+
+Beyond the built-in `session-memory` hook, you can create custom hooks for additional automation:
+
+### Example: Daily Summary Hook
+
+A hook that generates a daily summary when the first session of the day starts:
+
+```json
+{
+  "hooks": {
+    "daily-summary": {
+      "events": ["command:new"],
+      "condition": "firstSessionOfDay",
+      "action": {
+        "type": "agentTurn",
+        "prompt": "Review memory/notes from yesterday. Write a summary to memory/daily/YYYY-MM-DD-summary.md"
+      }
+    }
+  }
+}
+```
+
+### Example: Backup Hook
+
+A hook that triggers a memory backup on session reset:
+
+```json
+{
+  "hooks": {
+    "memory-backup": {
+      "events": ["command:reset"],
+      "action": {
+        "type": "exec",
+        "command": "tar czf /backup/memory-$(date +%s).tar.gz /home/node/.openclaw/memory/"
+      }
+    }
+  }
+}
+```
+
+## Observing Hook Execution
+
+Enable trace-level logging to see hooks fire in real-time:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.logLevel trace
+
+docker logs -f openclaw-openclaw-gateway-1 | grep -i "hook"
+```
+
+You'll see detailed execution traces:
+
+```
+[hooks:exec] session-memory: triggered by command:new
+[hooks:exec] session-memory: searching memory (query: session context)
+[hooks:exec] session-memory: found 3 relevant notes
+[hooks:exec] session-memory: injected 847 tokens from memory
+```
+
+Remember to reset the log level after debugging:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.logLevel info
+```
+
+## The Session-Memory Flow in Detail
+
+### On `command:new` (New Session)
+
+1. Hook receives the new session event
+2. Extracts context clues (user identity, channel, time)
+3. Queries memory search with context
+4. Ranks results by relevance score
+5. Injects top-K matching notes into the agent's system context
+6. Session starts with historical knowledge available
+
+### On `command:reset` (Session Reset)
+
+1. Hook receives the reset event
+2. Evaluates current session for saveable content
+3. If the session has meaningful content:
+   - Generates a summary using the agent
+   - Writes to `memory/notes/` as a Markdown file
+4. Clears the session history
+5. The agent starts fresh, but memory persists
+
+## Troubleshooting
+
+**Hook not registered:**
+```bash
+# Check if memory features are configured
+docker compose run --rm openclaw-cli config get agents.defaults.compaction.memoryFlush.enabled
+docker compose run --rm openclaw-cli config get agents.defaults.memorySearch.provider
+```
+
+**Hook fires but no notes saved:**
+- Check memory directory permissions (see the SQLite article)
+- Verify the flush prompt tells the agent where to write
+- Look for errors: `docker logs openclaw-openclaw-gateway-1 | grep -i "error\|hook"`
+
+**Duplicate hook registrations:**
+- This is normal — each gateway restart re-registers hooks
+- Multiple log entries don't mean multiple hook instances
+
+**Hook not loading memory into session:**
+- Verify memory notes exist with content
+- Run `memory reindex` to rebuild the search index
+- Check hybrid search configuration
+
+## Series Navigation
+
+- **Previous:** [OpenClaw Config Hot Reload Zero-Downtime Configuration](/blog/openclaw-config-hot-reload-zero-downtime-configuration)
+- **Next:** [Running OpenClaw Security Audit and Managing Warnings](/blog/running-openclaw-security-audit-and-managing-warnings)
+- **Series index:** [What is OpenClaw AI Agent Gateway?](/blog/what-is-openclaw-ai-agent-gateway)

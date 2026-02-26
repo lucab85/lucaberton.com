@@ -1,0 +1,273 @@
+---
+draft: false
+title: "Docker Volume Permissions for OpenClaw on Linux"
+snippet: "Fix Docker volume permission issues when running OpenClaw on Linux. Understand UID mapping between host and container, set correct ownership for the node user, and verify write access for memory, config, and log directories."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - docker
+  - permissions
+  - linux
+  - volumes
+  - azure
+image:
+  src: "/blog/openclaw/docker-permissions.jpg"
+  alt: "Docker volume permissions for OpenClaw on Linux"
+---
+
+import { Icon } from "astro-icon";
+
+## The Permission Problem
+
+Running OpenClaw via Docker Compose on Linux creates a classic volume permission challenge: the container's `node` user (UID 1000) needs read/write access to directories that are owned by your host user (often `azureuser` on Azure VMs, which is also UID 1000 — but not always).
+
+When permissions are wrong, you'll see:
+- Empty SQLite databases that never get initialized
+- Missing log files
+- Config changes that don't persist
+- Silent failures with no error messages
+
+## Understanding the UID Mapping
+
+Docker containers on Linux share the host kernel, so file ownership is determined by **numeric UIDs**, not usernames:
+
+```
+Host:      azureuser (UID 1000) ← same number
+Container: node      (UID 1000) ← same number
+```
+
+If both are UID 1000, things generally "just work." But there are common scenarios where they diverge:
+
+| Scenario | Host UID | Container UID | Works? |
+|----------|----------|---------------|--------|
+| Default Azure VM | 1000 | 1000 | ✅ |
+| Root-created directories | 0 | 1000 | ❌ |
+| Multi-user system | 1001+ | 1000 | ❌ |
+| Custom container image | 1000 | varies | ❌ |
+
+## Verifying UIDs
+
+### Check the Container's User
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 id
+```
+
+Expected:
+```
+uid=1000(node) gid=1000(node) groups=1000(node)
+```
+
+### Check Host File Ownership
+
+```bash
+ls -lan ~/.openclaw/
+```
+
+Look at the numeric UID/GID columns (3rd and 4th):
+
+```
+drwxrwxr-x 11 1000 1000 4096 Feb 25 23:36 .
+-rw-------  1 1000 1000 2810 Feb 25 23:35 openclaw.json
+drwx------  3 1000 1000 4096 Feb 25 23:36 memory
+```
+
+If the UID is `0` (root) or differs from the container's UID, you need to fix it.
+
+## Fixing Ownership
+
+### The Universal Fix
+
+```bash
+sudo chown -R 1000:1000 ~/.openclaw/memory
+```
+
+This sets ownership to UID 1000 (the container's `node` user) regardless of the host username.
+
+### Full State Directory Fix
+
+If multiple directories have wrong ownership:
+
+```bash
+sudo chown -R 1000:1000 ~/.openclaw/
+```
+
+### Targeted Fixes
+
+Fix specific directories that need write access:
+
+```bash
+sudo chown -R 1000:1000 ~/.openclaw/memory
+sudo chown -R 1000:1000 ~/.openclaw/logs
+sudo chown -R 1000:1000 ~/.openclaw/agents
+sudo chown -R 1000:1000 ~/.openclaw/credentials
+```
+
+## Setting Correct Permissions
+
+After fixing ownership, set appropriate permission modes:
+
+```bash
+# Memory directories — owner + group read/write/execute
+chmod 770 ~/.openclaw/memory
+chmod 770 ~/.openclaw/memory/notes
+
+# SQLite database — owner + group read/write
+chmod 660 ~/.openclaw/memory/main.sqlite
+
+# Config file — owner read/write only
+chmod 600 ~/.openclaw/openclaw.json
+
+# Credentials — restrictive
+chmod 700 ~/.openclaw/credentials
+```
+
+### Permission Reference Table
+
+| Path | Mode | Rationale |
+|------|------|-----------|
+| `memory/` | 770 | Container needs read/write/list |
+| `memory/notes/` | 770 | Agent writes Markdown notes |
+| `memory/main.sqlite` | 660 | Database read/write |
+| `openclaw.json` | 600 | Sensitive config (API keys) |
+| `credentials/` | 700 | Most sensitive — tokens, keys |
+| `logs/` | 700 | Gateway writes log files |
+| `agents/` | 700 | Agent workspace state |
+| `workspace/` | 770 | Shared workspace files |
+
+## Testing Write Access
+
+The most reliable verification is to test from **inside the container**:
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 sh -lc '
+  echo test > /home/node/.openclaw/memory/._write_test && \
+  echo "WRITE OK" && \
+  rm -f /home/node/.openclaw/memory/._write_test
+'
+```
+
+If you see `WRITE OK`, the container can write to the memory directory.
+
+### Full Write Test Script
+
+Test all critical directories at once:
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 sh -lc '
+  for dir in memory memory/notes logs agents; do
+    path="/home/node/.openclaw/$dir"
+    if echo test > "$path/._test" 2>/dev/null; then
+      echo "✅ $dir: writable"
+      rm -f "$path/._test"
+    else
+      echo "❌ $dir: NOT writable"
+    fi
+  done
+'
+```
+
+## Docker Compose Volume Mounts
+
+OpenClaw's `docker-compose.yml` maps the host's `~/.openclaw` into the container:
+
+```yaml
+services:
+  openclaw-gateway:
+    image: openclaw:local
+    volumes:
+      - ~/.openclaw:/home/node/.openclaw
+    ports:
+      - "18789:18789"
+      - "18790:18790"
+```
+
+### Important Mount Behaviors
+
+- **Bind mounts** preserve host ownership — the container sees the host's UIDs
+- **If the host directory doesn't exist**, Docker creates it as **root** — causing immediate permission issues
+- **Named volumes** would let Docker manage ownership, but OpenClaw uses bind mounts for direct host access
+
+### Pre-Create Directories
+
+Always create required directories before first run:
+
+```bash
+mkdir -p ~/.openclaw/memory/notes
+mkdir -p ~/.openclaw/logs
+mkdir -p ~/.openclaw/agents
+mkdir -p ~/.openclaw/credentials
+sudo chown -R 1000:1000 ~/.openclaw/
+```
+
+## Alternative: Running as Host UID
+
+If your host UID isn't 1000, you can override the container's user:
+
+```yaml
+services:
+  openclaw-gateway:
+    image: openclaw:local
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ~/.openclaw:/home/node/.openclaw
+```
+
+Set `UID` and `GID` in your `.env` file:
+
+```bash
+echo "UID=$(id -u)" >> ~/openclaw/.env
+echo "GID=$(id -g)" >> ~/openclaw/.env
+```
+
+> **Caveat:** Changing the container user may break internal scripts that assume `node` user. Test thoroughly.
+
+## The `.openclaw` Directory Layout
+
+Here's what a healthy installation looks like inside the container:
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 sh -lc \
+  'ls -la /home/node/.openclaw'
+```
+
+```
+drwxrwxr-x 11 node node 4096 .
+drwx------  3 node node 4096 agents
+drwxr-xr-x  2 node node 4096 canvas
+drwxr-xr-x  2 node node 4096 completions
+drwx------  2 node node 4096 credentials
+drwxr-xr-x  2 node node 4096 cron
+drwxrwxr-x  2 node node 4096 identity
+drwx------  2 node node 4096 logs
+drwx------  3 node node 4096 memory
+-rw-------  1 node node 2810 openclaw.json
+-rw-------  1 node node 2779 openclaw.json.bak
+-rw-------  1 node node 2723 openclaw.json.bak.1
+-rw-------  1 node node 2685 openclaw.json.bak.2
+-rw-------  1 node node 2654 openclaw.json.bak.3
+-rw-------  1 node node 2621 openclaw.json.bak.4
+-rw-r--r--  1 node node   49 update-check.json
+drwxrwxr-x  4 node node 4096 workspace
+```
+
+Notice the **backup chain**: `openclaw.json.bak` through `.bak.4` — OpenClaw keeps the last 5 config versions.
+
+## Troubleshooting Checklist
+
+1. **Check container UID:** `docker exec openclaw-openclaw-gateway-1 id`
+2. **Check host ownership:** `ls -lan ~/.openclaw/`
+3. **Fix if mismatched:** `sudo chown -R <container-uid>:<container-gid> ~/.openclaw/`
+4. **Set permissions:** `chmod 770 ~/.openclaw/memory`
+5. **Test write:** Write test from inside container
+6. **Restart:** `docker compose restart openclaw-gateway`
+7. **Verify:** Check that SQLite and notes are being written
+
+## Series Navigation
+
+- **Previous:** [OpenClaw CLI Command Reference and Power Tips](/blog/openclaw-cli-command-reference-and-power-tips)
+- **Next:** [OpenClaw Config Hot Reload Zero-Downtime Configuration](/blog/openclaw-config-hot-reload-zero-downtime-configuration)
+- **Series index:** [What is OpenClaw AI Agent Gateway?](/blog/what-is-openclaw-ai-agent-gateway)

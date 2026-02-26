@@ -1,0 +1,239 @@
+---
+draft: false
+title: "Running OpenClaw Security Audit and Managing Warnings"
+snippet: "Address persistent security warnings in OpenClaw deployments. Run the built-in security audit, understand dangerous config flags, and implement proper alternatives to keep your AI agent gateway secure."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - security
+  - audit
+  - configuration
+  - docker
+  - azure
+image:
+  src: "/blog/openclaw/security-audit.jpg"
+  alt: "Running OpenClaw security audit and managing configuration warnings"
+---
+
+import { Icon } from "astro-icon";
+
+## The Persistent Warning
+
+If you've been following the OpenClaw series, you've seen this warning appear on **every gateway startup**:
+
+```
+[gateway] security warning: dangerous config flags enabled:
+gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true.
+Run `openclaw security audit`.
+```
+
+This isn't just noise — it's OpenClaw's built-in security system telling you that your configuration includes flags that weaken the gateway's security posture. In a real deployment, those warnings appear in the logs on every restart:
+
+```
+2026-02-25T23:23:42 [gateway] security warning: dangerous config flags...
+2026-02-25T23:34:51 [gateway] security warning: dangerous config flags...
+2026-02-25T23:35:59 [gateway] security warning: dangerous config flags...
+2026-02-25T23:37:09 [gateway] security warning: dangerous config flags...
+2026-02-25T23:37:32 [gateway] security warning: dangerous config flags...
+2026-02-25T23:38:09 [gateway] security warning: dangerous config flags...
+```
+
+Six restarts, six warnings — they never go away until you address the underlying config.
+
+## Running the Security Audit
+
+OpenClaw provides a CLI command to get a comprehensive security assessment:
+
+```bash
+docker compose run --rm openclaw-cli security audit
+```
+
+The audit examines:
+- **Dangerous config flags** — settings that bypass security checks
+- **Exposed ports** — services reachable from outside the host
+- **Credential storage** — whether API keys are properly secured
+- **TLS configuration** — encrypted connections
+- **Permission model** — who can access what
+
+## Understanding Dangerous Config Flags
+
+### `dangerouslyAllowHostHeaderOriginFallback`
+
+This is the most common flag seen in development deployments. It disables Host header origin validation for the Control UI:
+
+```json
+{
+  "gateway": {
+    "controlUi": {
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }
+  }
+}
+```
+
+**What it does:** Normally, the Control UI rejects requests where the `Origin` or `Referer` header doesn't match the expected host. This flag bypasses that check, letting any origin access the UI.
+
+**Why it's dangerous:** Without origin validation, the Control UI is vulnerable to:
+- **CSRF attacks** — malicious sites can submit requests on your behalf
+- **Host header injection** — attackers can manipulate which host the UI thinks it's serving
+- **Cache poisoning** — CDNs or proxies may cache responses with wrong origins
+
+**Why you might need it:** When accessing the Control UI remotely (e.g., via SSH tunnel or direct IP), the browser's Host header won't match the expected origin. The flag is a quick workaround, but it's not the right long-term solution.
+
+## Security Audit Checklist
+
+After running the audit, work through these categories:
+
+### 1. Network Exposure
+
+| Check | Secure | Action Needed |
+|-------|--------|---------------|
+| Gateway port (18789) | Bound to 0.0.0.0 | Use NSG rules to restrict access |
+| Control UI (18790) | Bound to 0.0.0.0 | Restrict to known IPs |
+| SSH (22) | Open | Key-based auth only |
+| Discord webhook | Outbound only | No action needed |
+
+**Azure NSG lockdown:**
+
+```bash
+# Allow gateway access only from your IP
+az network nsg rule create \
+  --nsg-name vm-openclaw-01-nsg \
+  --name AllowGateway \
+  --priority 200 \
+  --source-address-prefixes YOUR_IP/32 \
+  --destination-port-ranges 18789 18790 \
+  --access Allow
+```
+
+### 2. Config Flag Resolution
+
+For each dangerous flag, the audit recommends a safer alternative:
+
+| Flag | Quick Fix | Proper Fix |
+|------|-----------|------------|
+| `dangerouslyAllowHostHeaderOriginFallback` | SSH tunnel | Reverse proxy with TLS |
+| `dangerouslyDisableAuth` | Remove flag | Configure proper auth tokens |
+| `dangerouslyAllowUnsafePlugins` | Remove flag | Vet plugins individually |
+
+### 3. Credential Storage
+
+```bash
+# Check credential file permissions
+docker exec -it openclaw-openclaw-gateway-1 sh -lc \
+  'ls -la /home/node/.openclaw/credentials/'
+```
+
+Credentials should be:
+- Owned by `node:node` (UID 1000)
+- Mode `600` or `700` — no group or other access
+- Not committed to version control
+
+## Removing the Host Header Fallback
+
+The recommended path to removing `dangerouslyAllowHostHeaderOriginFallback`:
+
+### Option A: SSH Tunnel (Simplest)
+
+Access the Control UI through an SSH tunnel so the browser sees `localhost`:
+
+```bash
+# From your local machine
+ssh -L 18790:localhost:18790 azureuser@vm-openclaw-01.eastus.cloudapp.azure.com
+```
+
+Then visit `http://localhost:18790` — no origin mismatch, no dangerous flag needed.
+
+### Option B: Reverse Proxy with TLS
+
+Set up nginx or Caddy in front of the Control UI:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name openclaw.yourdomain.com;
+
+    ssl_certificate /etc/letsencrypt/live/openclaw.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/openclaw.yourdomain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://localhost:18790;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+### Option C: Bind to Localhost
+
+If you only access the Control UI via SSH tunnel, bind it to localhost:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.controlUi.bind 127.0.0.1
+
+# Then remove the dangerous flag
+docker compose run --rm openclaw-cli config unset \
+  gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback
+
+docker compose restart openclaw-gateway
+```
+
+## After Removing Dangerous Flags
+
+Verify the warning is gone:
+
+```bash
+docker logs openclaw-openclaw-gateway-1 | grep -i "dangerous\|security warning"
+```
+
+If no output, the gateway is running with a clean security posture.
+
+## Additional Security Commands
+
+```bash
+# Check for known issues
+docker compose run --rm openclaw-cli security check
+
+# View current audit status
+docker compose run --rm openclaw-cli security audit --json
+
+# List active tokens
+docker compose run --rm openclaw-cli devices list
+```
+
+## Production Security Hardening Checklist
+
+| Item | Command/Action |
+|------|---------------|
+| Remove all `dangerously*` flags | `config unset` each one |
+| Restrict gateway port with NSG | Azure portal or `az network nsg rule` |
+| Use SSH tunnel for Control UI | `ssh -L 18790:localhost:18790` |
+| Rotate API keys regularly | Update via `config set` |
+| Monitor security warnings | `docker logs | grep security` |
+| Run audit periodically | `openclaw-cli security audit` |
+| Keep OpenClaw updated | `openclaw-cli update` |
+| Enable TLS for external access | Reverse proxy with Let's Encrypt |
+| Restrict file permissions | `chmod 600 openclaw.json` |
+| Back up credentials separately | Encrypted backup for credentials dir |
+
+## The Warning as a Feature
+
+OpenClaw's persistent security warnings are intentionally impossible to silence without actually fixing the issue. This is a good design pattern:
+
+1. **Visible** — appears on every startup, not buried in debug logs
+2. **Actionable** — tells you exactly which flag is the problem
+3. **Prescriptive** — suggests the `security audit` command
+4. **Persistent** — won't go away until you fix it
+5. **Specific** — names the exact config path
+
+If your production logs show security warnings, treat them as technical debt — schedule time to implement the proper alternatives.
+
+## Series Navigation
+
+- **Previous:** [OpenClaw Session Memory Hooks Automating Knowledge Capture](/blog/openclaw-session-memory-hooks-automating-knowledge-capture)
+- **Next:** [Building a Persistent AI Agent Memory System with OpenClaw](/blog/building-a-persistent-ai-agent-memory-system-with-openclaw)
+- **Series index:** [What is OpenClaw AI Agent Gateway?](/blog/what-is-openclaw-ai-agent-gateway)

@@ -1,0 +1,277 @@
+---
+draft: false
+title: "Fixing OpenClaw Gateway Token Mismatch WebSocket Errors"
+snippet: "Diagnose and fix the 'unauthorized: gateway token mismatch' WebSocket error in OpenClaw. Learn how gateway auth tokens work, why token_mismatch happens after restarts, and how to restore connectivity between CLI tools and the running gateway."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - troubleshooting
+  - websocket
+  - security
+  - docker
+  - azure
+image:
+  src: "/blog/openclaw/gateway-token-mismatch.jpg"
+  alt: "Fixing OpenClaw gateway token mismatch WebSocket errors"
+---
+
+import { Icon } from "astro-icon";
+
+## The Token Mismatch Error
+
+You've been running OpenClaw happily on your Azure VM, configs changed, gateway restarted multiple times — then suddenly you see this in the logs:
+
+```
+2026-02-26T00:00:15.484Z [ws] unauthorized conn=f5c5408b-6704-4451-8e6d-858fb7052533
+  remote=127.0.0.1 client=gateway-client backend vdev reason=token_mismatch
+```
+
+Followed immediately by:
+
+```
+2026-02-26T00:00:15.487+00:00 gateway connect failed:
+  Error: unauthorized: gateway token mismatch (provide gateway auth token)
+```
+
+And the connection is torn down:
+
+```
+2026-02-26T00:00:15.505Z [ws] closed before connect
+  conn=f5c5408b-6704-4451-8e6d-858fb7052533 remote=127.0.0.1
+  fwd=n/a origin=n/a host=127.0.0.1:18789 ua=n/a
+  code=1008 reason=unauthorized: gateway token mismatch (provide gateway auth token)
+```
+
+This is a **WebSocket-level authentication failure** — the client tried to connect to the gateway but presented a stale or wrong auth token.
+
+## How Gateway Tokens Work
+
+OpenClaw uses a token-based authentication system for all WebSocket connections to the gateway. When the gateway starts, it reads (or generates) an auth token stored in its state directory:
+
+```
+~/.openclaw/credentials/
+```
+
+Every client connecting to `ws://0.0.0.0:18789` must present this token. That includes:
+
+- **The CLI** (`openclaw-cli`) when executing commands via the gateway
+- **The Control UI** dashboard
+- **Paired devices** (phones, other machines)
+- **Internal gateway-client connections** (backend services)
+
+## Why Token Mismatch Occurs
+
+The most common scenarios:
+
+### 1. Token Regenerated After Restart
+
+If the gateway regenerates its token on startup (due to missing or corrupted credential files), all previously-connected clients still hold the old token.
+
+### 2. Multiple Config/Restart Cycles
+
+In a session like the one shown in the terminal output where you run many `config set` commands followed by `docker compose restart`, the gateway may cycle through multiple restarts. If a background client was connected to a previous instance, it reconnects with an outdated token:
+
+```bash
+# Rapid config changes — each followed by restart
+docker compose run --rm openclaw-cli config set agents.defaults.memorySearch.provider local
+docker compose run --rm openclaw-cli config set agents.defaults.memorySearch.model all-MiniLM-L6-v2
+# ... 7 more config sets ...
+docker compose restart openclaw-gateway
+```
+
+### 3. Dev vs Production Profile Mismatch
+
+Running `openclaw --dev gateway` isolates state under `~/.openclaw-dev/`, generating a separate token. If you then connect a client configured for the production profile, it's a guaranteed mismatch:
+
+```bash
+# Dev mode uses isolated state
+openclaw --dev gateway     # token in ~/.openclaw-dev/credentials/
+openclaw gateway           #  token in ~/.openclaw/credentials/
+```
+
+### 4. Docker Volume Token Persistence
+
+If you rebuild the Docker image or recreate volumes, the in-container token at `/home/node/.openclaw/credentials/` may differ from what paired devices remember:
+
+```bash
+# This preserves credentials:
+docker compose restart openclaw-gateway
+
+# This may regenerate credentials:
+docker compose down && docker compose up -d
+```
+
+## Diagnosing the Problem
+
+### Step 1: Check the Gateway Logs
+
+Filter for authentication-related events:
+
+```bash
+docker logs --tail=100 openclaw-openclaw-gateway-1 | \
+  grep -i "unauthorized\|token_mismatch\|closed before connect"
+```
+
+Look for the `reason=token_mismatch` field — it confirms the token itself is wrong, not an origin or header issue.
+
+### Step 2: Inspect the Connection Details
+
+The log line contains useful metadata:
+
+| Field | Meaning |
+|-------|---------|
+| `conn=f5c5408b-...` | Unique connection ID |
+| `remote=127.0.0.1` | Client IP (localhost means internal) |
+| `client=gateway-client` | Which component tried to connect |
+| `code=1008` | WebSocket close code (Policy Violation) |
+| `ua=n/a` | No User-Agent (internal client) |
+
+### Step 3: Check Current Token
+
+From inside the container:
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 sh -lc \
+  'ls -la /home/node/.openclaw/credentials/'
+```
+
+Or via CLI:
+
+```bash
+docker compose run --rm openclaw-cli config get gateway.auth
+```
+
+## Fixing the Mismatch
+
+### Option 1: Restart the Client
+
+If the gateway token is correct and the client is stale, simply restart whatever client was trying to connect. For the internal `gateway-client backend vdev`:
+
+```bash
+docker compose restart
+```
+
+### Option 2: Re-pair Devices
+
+If paired devices (phone, laptop) can't connect:
+
+```bash
+# List all paired devices
+docker compose run --rm openclaw-cli devices list
+
+# Generate a new pairing code
+docker compose run --rm openclaw-cli qr
+```
+
+Scan the new QR code from your device to re-authenticate with the current gateway token.
+
+### Option 3: Force Token Reset
+
+If the token state is corrupted, you can force the gateway to regenerate:
+
+```bash
+# Stop the gateway
+docker compose down openclaw-gateway
+
+# Remove the credentials directory (it will be regenerated)
+rm -rf ~/.openclaw/credentials/
+
+# Restart — a new token is generated
+docker compose up -d openclaw-gateway
+```
+
+> **Warning:** This invalidates ALL existing connections and paired devices. Every client must re-authenticate.
+
+### Option 4: Copy Token to Client
+
+If you're connecting from another machine or a dev profile, copy the token manually:
+
+```bash
+# Read the current gateway token
+docker compose run --rm openclaw-cli config get gateway.auth.token
+
+# Set it on the client machine
+openclaw config set gateway.auth.token <TOKEN_VALUE>
+```
+
+## Preventing Future Mismatches
+
+### 1. Batch Config Changes
+
+Instead of running multiple `config set` + `restart` cycles, batch your changes and restart once:
+
+```bash
+# All changes, then ONE restart
+docker compose run --rm openclaw-cli config set agents.defaults.memorySearch.provider local
+docker compose run --rm openclaw-cli config set agents.defaults.memorySearch.model all-MiniLM-L6-v2
+docker compose run --rm openclaw-cli config set agents.defaults.memorySearch.cache.enabled true
+# ... more config sets ...
+
+# Single restart at the end
+docker compose restart openclaw-gateway
+```
+
+Many settings are hot-reloaded anyway — check the gateway logs for `[reload] config change applied` messages before restarting unnecessarily.
+
+### 2. Use `restart` Instead of `down/up`
+
+`docker compose restart` preserves the container's state directory. Avoid `docker compose down` unless you intend to recreate containers:
+
+```bash
+# Preserves token:
+docker compose restart openclaw-gateway
+
+# May generate new token:
+docker compose down && docker compose up -d
+```
+
+### 3. Persist Credentials in Named Volumes
+
+Ensure your `docker-compose.yml` maps a named or bind-mount volume for the `.openclaw` directory:
+
+```yaml
+services:
+  openclaw-gateway:
+    volumes:
+      - /home/azureuser/.openclaw:/home/node/.openclaw
+```
+
+This ensures credentials survive container recreation.
+
+### 4. Monitor WebSocket Health
+
+Add a health check that watches for token errors:
+
+```bash
+#!/bin/bash
+# check-ws-auth.sh
+ERROR_COUNT=$(docker logs --tail=50 openclaw-openclaw-gateway-1 2>&1 | \
+  grep -c "token_mismatch")
+
+if [ "$ERROR_COUNT" -gt 0 ]; then
+  echo "WARNING: $ERROR_COUNT token mismatch errors in recent logs"
+fi
+```
+
+## WebSocket Close Codes Reference
+
+| Code | Meaning | Common Cause |
+|------|---------|-------------|
+| 1000 | Normal closure | Clean disconnect |
+| 1006 | Abnormal closure | Network drop, container killed |
+| 1008 | Policy violation | **Token mismatch**, origin rejected |
+| 1011 | Unexpected condition | Internal server error |
+
+The `code=1008` in our error maps to a policy violation — the gateway rejected the connection because the authentication didn't pass.
+
+## Series Navigation
+
+**Previous:** [Building a Persistent AI Agent Memory System with OpenClaw](/blog/building-a-persistent-ai-agent-memory-system-with-openclaw)
+**Next:** [OpenClaw Agent Tool Execution Errors and Sandbox Permissions](/blog/openclaw-agent-tool-execution-errors-and-sandbox-permissions)
+
+---
+
+*Part 26 of the OpenClaw on Azure series. Your gateway's locked tight — just make sure you've got the right key.*

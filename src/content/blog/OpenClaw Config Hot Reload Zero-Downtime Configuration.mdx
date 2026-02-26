@@ -1,0 +1,265 @@
+---
+draft: false
+title: "OpenClaw Config Hot Reload Zero-Downtime Configuration"
+snippet: "Learn how OpenClaw handles live config changes without gateway restarts. Understand dynamic vs static settings, the reload detection pipeline, and which configuration changes apply instantly versus requiring a full restart."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - configuration
+  - hot-reload
+  - zero-downtime
+  - docker
+  - azure
+image:
+  src: "/blog/openclaw/config-hot-reload.jpg"
+  alt: "OpenClaw config hot reload for zero-downtime configuration changes"
+---
+
+import { Icon } from "astro-icon";
+
+## Hot Reload in Action
+
+One of OpenClaw's most powerful features is **config hot reload** — the ability to apply configuration changes without stopping the gateway. When you run `config set`, the gateway detects the change and applies it dynamically:
+
+```
+[reload] config change detected; evaluating reload
+  (meta.lastTouchedAt, agents.defaults.memorySearch)
+[reload] config change applied (dynamic reads:
+  meta.lastTouchedAt, agents.defaults.memorySearch)
+```
+
+This means agents can continue handling conversations while you tune search weights, update prompts, or adjust cache sizes.
+
+## How It Works
+
+### The Reload Pipeline
+
+```
+config set command
+  → openclaw.json written (new SHA-256 hash)
+  → File watcher detects change
+  → Gateway evaluates affected paths
+  → Dynamic settings applied immediately
+  → Static settings queued (need restart)
+  → Log entry confirms action
+```
+
+### SHA-256 Change Tracking
+
+Each `config set` command updates the JSON file and logs the hash transition:
+
+```
+Config overwrite: /home/node/.openclaw/openclaw.json
+(sha256 d6d04328... -> dd9c4954...,
+ backup=/home/node/.openclaw/openclaw.json.bak)
+```
+
+The gateway uses these hashes to:
+1. Detect that the file actually changed (not just touched)
+2. Determine which config paths were modified
+3. Decide if a dynamic reload is sufficient or a restart is needed
+
+## Dynamic vs Static Settings
+
+Not all settings support hot reload. Here's the classification from a real deployment session:
+
+### Dynamic Settings (No Restart Needed)
+
+These are applied instantly by the reload pipeline:
+
+| Config Path | Description |
+|-------------|-------------|
+| `agents.defaults.memorySearch` | Memory search provider |
+| `agents.defaults.memorySearch.model` | Embedding model name |
+| `agents.defaults.memorySearch.local` | Local model path |
+| `agents.defaults.memorySearch.query.hybrid.*` | All hybrid search weights/settings |
+| `agents.defaults.memorySearch.cache.*` | Cache enabled/maxEntries |
+| `agents.defaults.compaction.memoryFlush.*` | All memory flush settings |
+
+Each of these shows the two-line log pattern:
+
+```
+[reload] config change detected; evaluating reload
+  (meta.lastTouchedAt, agents.defaults.memorySearch.query.hybrid.vectorWeight)
+[reload] config change applied (dynamic reads:
+  meta.lastTouchedAt, agents.defaults.memorySearch.query.hybrid.vectorWeight)
+```
+
+### Static Settings (Restart Required)
+
+Some settings modify core gateway behavior and require `docker compose restart`:
+
+| Config Path | Why Restart Needed |
+|-------------|-------------------|
+| `gateway.port` | TCP listener must rebind |
+| `gateway.controlUi.port` | HTTP listener must rebind |
+| `gateway.bind` | Network interface change |
+| `channels.discord.token` | Discord client reconnect |
+| `agents.defaults.model` | Provider initialization |
+
+The CLI tells you when a restart is needed:
+
+```
+Updated agents.defaults.compaction.memoryFlush.enabled.
+Restart the gateway to apply.
+```
+
+> **Note:** Even though the CLI says "Restart to apply" for all settings, dynamic settings actually take effect immediately. The message is a conservative default.
+
+## Observing Hot Reload in Logs
+
+Monitor the gateway logs in real-time while making config changes:
+
+```bash
+# Terminal 1: Watch logs
+docker logs -f openclaw-openclaw-gateway-1 | grep -i "reload"
+
+# Terminal 2: Make changes
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.vectorWeight 0.8
+```
+
+In Terminal 1, you'll see the change detected and applied within seconds:
+
+```
+2026-02-25T23:35:31.177Z [reload] config change detected;
+  evaluating reload (meta.lastTouchedAt,
+  agents.defaults.memorySearch.query.hybrid.vectorWeight)
+2026-02-25T23:35:31.182Z [reload] config change applied
+  (dynamic reads: meta.lastTouchedAt,
+  agents.defaults.memorySearch.query.hybrid.vectorWeight)
+```
+
+The timestamp delta (5 milliseconds in this case) shows how fast the reload pipeline operates.
+
+## Rapid Config Iteration
+
+Hot reload enables a fast feedback loop for tuning agent behavior:
+
+```bash
+# Tune vector weight
+oc config set agents.defaults.memorySearch.query.hybrid.vectorWeight 0.8
+
+# Test memory search
+oc memory search "deployment configuration"
+
+# Adjust if results aren't ideal
+oc config set agents.defaults.memorySearch.query.hybrid.vectorWeight 0.6
+
+# Test again
+oc memory search "deployment configuration"
+```
+
+No restarts between iterations — changes apply in under 100ms.
+
+## The Backup Chain
+
+Each config change creates a backup before writing. OpenClaw maintains a chain of up to 5 backups:
+
+```
+openclaw.json       ← Current config
+openclaw.json.bak   ← Previous version
+openclaw.json.bak.1 ← Two versions ago
+openclaw.json.bak.2 ← Three versions ago
+openclaw.json.bak.3 ← Four versions ago
+openclaw.json.bak.4 ← Five versions ago
+```
+
+This gives you a rollback path if a config change causes problems:
+
+```bash
+# Inside container: restore previous config
+docker exec -it openclaw-openclaw-gateway-1 sh -lc '
+  cp /home/node/.openclaw/openclaw.json.bak \
+     /home/node/.openclaw/openclaw.json
+'
+
+# The file watcher triggers a reload automatically
+```
+
+## Batching Changes
+
+When making multiple related changes, you can batch them — the reload pipeline handles each one as it arrives:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.enabled true
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.vectorWeight 0.7
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.textWeight 0.3
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.candidateMultiplier 4
+```
+
+Each command triggers its own reload cycle. In the logs:
+
+```
+[reload] config change detected; evaluating reload
+  (...hybrid.enabled)
+[reload] config change applied
+[reload] config change detected; evaluating reload
+  (...hybrid.vectorWeight)
+[reload] config change applied
+[reload] config change detected; evaluating reload
+  (...hybrid.textWeight)
+[reload] config change applied
+[reload] config change detected; evaluating reload
+  (...hybrid.candidateMultiplier)
+[reload] config change applied
+```
+
+## When to Actually Restart
+
+Even though hot reload handles most settings, restart in these cases:
+
+1. **After changing ports or bind addresses** — TCP listeners can't rebind live
+2. **After changing channel tokens** — Discord/Telegram clients need to reconnect
+3. **After a crash or OOM** — state may be corrupted
+4. **After an OpenClaw update** — new binary code isn't hot-loadable
+5. **If logs show reload failures** — some edge cases require a clean start
+
+```bash
+docker compose restart openclaw-gateway
+```
+
+## Hook Reload
+
+The gateway also reloads hooks on restart. You'll see this in logs:
+
+```
+[hooks:loader] Registered hook: session-memory
+  -> command:new, command:reset
+```
+
+The `session-memory` hook is registered on every gateway start and listens for `command:new` and `command:reset` events — this is how memory flush integrates with the session lifecycle.
+
+## Monitoring Config State
+
+### Current Config Hash
+
+The SHA-256 hash in the log output uniquely identifies the config state. Track it to verify which settings are active:
+
+```bash
+docker logs openclaw-openclaw-gateway-1 | grep "sha256" | tail -1
+```
+
+### Config Diff
+
+Compare any two backup versions:
+
+```bash
+docker exec -it openclaw-openclaw-gateway-1 sh -lc '
+  diff <(python3 -m json.tool /home/node/.openclaw/openclaw.json.bak) \
+       <(python3 -m json.tool /home/node/.openclaw/openclaw.json)
+'
+```
+
+## Series Navigation
+
+- **Previous:** [Docker Volume Permissions for OpenClaw on Linux](/blog/docker-volume-permissions-for-openclaw-on-linux)
+- **Next:** [OpenClaw Session Memory Hooks Automating Knowledge Capture](/blog/openclaw-session-memory-hooks-automating-knowledge-capture)
+- **Series index:** [What is OpenClaw AI Agent Gateway?](/blog/what-is-openclaw-ai-agent-gateway)

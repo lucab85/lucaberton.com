@@ -1,0 +1,213 @@
+---
+draft: false
+title: "Configuring OpenClaw Memory Flush for Context Compaction"
+snippet: "Learn how to configure OpenClaw's memory flush system before context compaction. Set threshold tokens, custom system prompts, and flush prompts so your AI agent preserves critical knowledge before conversation history is trimmed."
+publishDate: "2026-02-26"
+lastModified: 2026-02-26
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - memory
+  - compaction
+  - configuration
+  - docker
+  - azure
+image:
+  src: "/blog/openclaw/memory-flush.jpg"
+  alt: "Configuring OpenClaw memory flush for context compaction"
+---
+
+import { Icon } from "astro-icon";
+
+## Why Memory Flush Matters
+
+AI agents running through OpenClaw process long conversations that eventually hit token limits. When that happens, the gateway performs **context compaction** — trimming older messages to free up token budget. Without memory flush, any knowledge from those trimmed messages is lost forever.
+
+OpenClaw's **memory flush** feature intercepts the compaction cycle to give the agent a final chance to write important information to durable storage **before** old context is discarded. Think of it as the agent's opportunity to take notes before the whiteboard is erased.
+
+## The Compaction Lifecycle
+
+```
+Long conversation → Token threshold reached → Memory flush fires
+→ Agent writes notes → Context compacted → Conversation continues
+```
+
+The flush happens at a **soft threshold** — before the hard token limit forces an immediate truncation. This gives the agent adequate space to generate a meaningful summary or store key facts.
+
+## Enabling Memory Flush
+
+All memory flush settings live under `agents.defaults.compaction.memoryFlush` in the OpenClaw config. Use the CLI to configure each setting:
+
+### Step 1: Enable the Feature
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.enabled true
+```
+
+Output confirms the config change:
+
+```
+Config overwrite: /home/node/.openclaw/openclaw.json
+(sha256 d6d04328... -> dd9c4954..., backup=openclaw.json.bak)
+Updated agents.defaults.compaction.memoryFlush.enabled.
+Restart the gateway to apply.
+```
+
+### Step 2: Set the Soft Threshold
+
+The `softThresholdTokens` value determines how many tokens remain before the flush fires. Set it high enough that the agent has room to write its notes:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.softThresholdTokens 4000
+```
+
+With `4000`, the agent gets approximately 4,000 tokens of breathing room — enough for a detailed summary or several memory notes.
+
+### Step 3: Configure the System Prompt
+
+The system prompt is injected when the memory flush fires, giving the agent its instructions:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.systemPrompt \
+  "Session nearing compaction. Store durable memories now."
+```
+
+Keep this concise — it consumes tokens from the agent's remaining budget.
+
+### Step 4: Set the User Prompt
+
+The `prompt` field is the actual user-turn message sent to the agent during the flush:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.prompt \
+  "Write any lasting notes to memory/YYYY-MM-DD.md; reply with NO_REPLY if nothing to store."
+```
+
+The `NO_REPLY` convention prevents the agent from generating unnecessary output when there's nothing worth saving.
+
+### Step 5: Restart the Gateway
+
+```bash
+docker compose restart openclaw-gateway
+```
+
+## Understanding the Config Chain
+
+Each CLI `config set` command modifies the JSON config file at `/home/node/.openclaw/openclaw.json`. OpenClaw tracks changes via SHA-256 hashes and creates `.bak` files:
+
+```
+sha256 d6d04328... -> dd9c4954...  (enabled)
+sha256 dd9c4954... -> 00585ebf...  (softThresholdTokens)
+sha256 00585ebf... -> 77d13c91...  (systemPrompt)
+sha256 77d13c91... -> 8cd96c63...  (prompt)
+```
+
+This creates an audit trail — you can always diff `.bak` files to see what changed.
+
+## Full Config JSON Structure
+
+After all four commands, the relevant section in `openclaw.json` looks like:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "compaction": {
+        "memoryFlush": {
+          "enabled": true,
+          "softThresholdTokens": 4000,
+          "systemPrompt": "Session nearing compaction. Store durable memories now.",
+          "prompt": "Write any lasting notes to memory/YYYY-MM-DD.md; reply with NO_REPLY if nothing to store."
+        }
+      }
+    }
+  }
+}
+```
+
+## Configuration Reference
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `enabled` | boolean | `false` | Activates memory flush before compaction |
+| `softThresholdTokens` | number | — | Token count that triggers pre-compaction flush |
+| `systemPrompt` | string | — | System instruction injected during flush |
+| `prompt` | string | — | User-turn message sent to agent during flush |
+
+## Best Practices
+
+### Choose the Right Threshold
+
+- **Too low** (e.g., 500): Agent doesn't have enough tokens to write meaningful notes
+- **Too high** (e.g., 20000): Flush fires too early, wasting context window
+- **Sweet spot** (2000–6000): Enough room for structured notes without premature compaction
+
+### Design Effective Prompts
+
+Your flush prompt should tell the agent:
+1. **Where** to write (file path with date template)
+2. **What** to preserve (key facts, decisions, context)
+3. **When to skip** (NO_REPLY pattern to avoid noise)
+
+### Example Prompt Variations
+
+**Structured notes:**
+```
+Write key decisions and context to memory/YYYY-MM-DD.md using bullet points.
+Include: user preferences, project state, open questions.
+Reply NO_REPLY if nothing significant to record.
+```
+
+**Minimal footprint:**
+```
+Save essential context to memory/session-notes.md. Be brief. NO_REPLY if empty.
+```
+
+**Project-specific:**
+```
+Update memory/project-status.md with: current task, blockers, next steps.
+Append rather than overwrite. NO_REPLY if no changes.
+```
+
+## Verifying It Works
+
+After configuration, trigger a compaction by running a long conversation and check the gateway logs:
+
+```bash
+docker logs openclaw-openclaw-gateway-1 | grep -i "memoryFlush\|compaction\|flush"
+```
+
+You should see config change detection in the logs:
+
+```
+[reload] config change detected; evaluating reload
+  (meta.lastTouchedAt, agents.defaults.compaction.memoryFlush)
+[reload] config change applied
+  (dynamic reads: meta.lastTouchedAt, agents.defaults.compaction.memoryFlush)
+```
+
+## Troubleshooting
+
+**Flush not firing:**
+- Verify `enabled` is `true` — run `docker compose run --rm openclaw-cli config get agents.defaults.compaction.memoryFlush.enabled`
+- Check that `softThresholdTokens` is set to a reasonable value
+- Ensure the gateway was restarted after config changes
+
+**Agent not writing files:**
+- The memory directory must exist and be writable (see the memory store setup guide)
+- Check agent permissions with `docker exec -it openclaw-openclaw-gateway-1 sh -lc 'ls -la /home/node/.openclaw/memory'`
+
+**Empty or unhelpful notes:**
+- Refine the `prompt` to be more specific about what to save
+- Increase `softThresholdTokens` to give the agent more room
+
+## Series Navigation
+
+- **Previous:** [OpenClaw Gateway Startup Timing and Health Checks](/blog/openclaw-gateway-startup-timing-and-health-checks)
+- **Next:** [Setting Up OpenClaw Hybrid Memory Search with Local Embeddings](/blog/setting-up-openclaw-hybrid-memory-search-with-local-embeddings)
+- **Series index:** [What is OpenClaw AI Agent Gateway?](/blog/what-is-openclaw-ai-agent-gateway)

@@ -1,0 +1,162 @@
+---
+draft: false
+title: "How I Hit 100 Vercel Deployments in a Day and What I Learned"
+snippet: "I burned through Vercel's free tier daily deployment limit while debugging copypastelearn.com. Here's what triggers excessive deployments and how to avoid the 'api-deployments-free-per-day' error."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Vercel deployment limit" }
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - vercel
+  - deployment
+  - free-tier
+  - ci-cd
+  - rate-limiting
+  - lessons-learned
+---
+
+## The Wall of Red
+
+I stared at my Vercel dashboard this morning and saw something painful: every single deployment — **Error**. A wall of red dots. And when I tried to create a new deployment manually, Vercel hit me with:
+
+> Resource is limited - try again in 25 minutes (more than 100, code: "api-deployments-free-per-day").
+
+100 deployments in one day. On the free tier. For [copypastelearn.com](https://www.copypastelearn.com/).
+
+How did I get here? Let me walk you through it so you don't make the same mistakes.
+
+## What Triggers a Vercel Deployment
+
+Every push to **any branch** in your connected GitHub repo triggers a deployment. That includes:
+
+- Pushes to `main` (production)
+- Pushes to feature branches (preview deployments)
+- Pull request updates
+- Even force-pushes and rebases
+
+I was debugging multiple issues across several branches:
+
+```
+fix/force-dynamic-all-db-pages      → 4b75df2
+001-mvp-platform                     → 03236e7
+fix/dashboard-dynamic                → multiple commits
+fix/sitemap-sort-order               → adb5a7c
+```
+
+Each fix-commit-push cycle burned a deployment. With 6+ branches and rapid iteration, I hit 100 before lunch.
+
+## The Math of Deployment Burn
+
+```
+Branches active:           6
+Average commits per branch: 8-10
+Rebases/force-pushes:      ~15
+Vercel preview deploys:    1 per push per branch
+
+Total: 6 × 10 + 15 = ~75 deploys
+Plus main branch merges:   ~25
+Grand total:               ~100 deploys 💥
+```
+
+## How to Avoid This
+
+### 1. Disable Auto-Deploy on Non-Production Branches
+
+In your `vercel.json`:
+
+```json
+{
+  "git": {
+    "deploymentEnabled": {
+      "main": true,
+      "001-mvp-platform": false,
+      "fix/*": false
+    }
+  }
+}
+```
+
+Or in the Vercel dashboard: **Settings → Git → Ignored Build Step**. Add a script that skips builds on branches you don't need previews for.
+
+### 2. Use the Ignored Build Step
+
+Create a script that Vercel runs before building. If it exits with `0`, the build proceeds. If it exits with `1`, it's skipped:
+
+```bash
+#!/bin/bash
+# vercel-ignore-build.sh
+
+# Only build on main or staging
+if [[ "$VERCEL_GIT_COMMIT_REF" == "main" || "$VERCEL_GIT_COMMIT_REF" == "staging" ]]; then
+  echo "✅ Building: $VERCEL_GIT_COMMIT_REF"
+  exit 1  # Proceed with build
+fi
+
+echo "🚫 Skipping: $VERCEL_GIT_COMMIT_REF"
+exit 0  # Skip build
+```
+
+Set this in **Settings → General → Build & Development Settings → Ignored Build Step**.
+
+### 3. Batch Your Commits
+
+Instead of push-per-fix:
+
+```bash
+# Don't do this
+git commit -m "fix typo" && git push
+git commit -m "fix another typo" && git push
+git commit -m "actually fix it" && git push
+# = 3 deployments
+
+# Do this instead
+git commit -m "fix typo"
+git commit -m "fix another typo"
+git commit -m "actually fix it"
+git push
+# = 1 deployment
+```
+
+### 4. Develop Locally First
+
+This seems obvious, but when you're debugging Prisma/auth issues that only manifest on Vercel's serverless runtime, you're tempted to "just push and see." Resist. Use `vercel dev` locally:
+
+```bash
+# Run Vercel's serverless environment locally
+npx vercel dev
+```
+
+It's not perfect parity, but it catches 80% of issues without burning deployments.
+
+### 5. Consider Vercel Pro (If This Happens Often)
+
+Vercel Pro gives you 6,000 deployments/month ($20/month). If you're consistently hitting free tier limits, the math works out: your time is worth more than $20.
+
+## The Actual Bugs I Was Fixing
+
+For context, here's what drove the deployment frenzy on copypastelearn.com:
+
+1. **Prisma/auth pages need `force-dynamic`** — statically prerendered pages that use database queries crash at build time. Every auth-protected page needs `export const dynamic = 'force-dynamic'`.
+
+2. **Sitemap using wrong sort field** — `sortOrder` vs `order` for lessons. One commit, one push, one deployment to verify.
+
+3. **Stripe client lazy-init** — the Stripe client was initializing at import time, crashing builds when `STRIPE_SECRET_KEY` wasn't available during static generation.
+
+Each fix was small. But each required a Vercel deployment to verify because the issues were specific to the serverless environment.
+
+## Lessons Learned
+
+1. **Free tier limits are real.** 100 deployments/day sounds generous until you're debugging in production.
+2. **Every branch push costs a deployment.** Disable preview deployments on branches you don't need.
+3. **Batch your commits, push once.** Your future self will thank you.
+4. **`vercel dev` is your friend.** Use it before pushing.
+5. **The 25-minute cooldown is frustrating** but gives you time to batch more fixes together. Silver lining.
+
+The wall of red errors on my dashboard was a learning moment. Now my deployment hygiene is much better — and copypastelearn.com is running smoothly.
+
+```bash
+# Current deployment count today: 3
+# Branches with auto-deploy: main only
+# Feeling: much calmer
+```

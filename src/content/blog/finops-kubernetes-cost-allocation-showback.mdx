@@ -1,0 +1,190 @@
+---
+draft: false
+title: "FinOps for Kubernetes: Cost Allocation and Showback That Actually Works"
+snippet: "Kubernetes makes it easy to overspend. Here's how to implement cost allocation, showback dashboards, and right-sizing automation for multi-tenant clusters."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "FinOps Kubernetes cost allocation" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - finops
+  - kubernetes
+  - cost-optimization
+  - showback
+  - opencost
+  - platform-engineering
+---
+
+## The $200K Surprise
+
+A client's Kubernetes bill jumped from $40K to $200K in three months. Nobody noticed because nobody owned the cost. Five teams shared three clusters with no visibility into who consumed what.
+
+This is the FinOps problem for Kubernetes: shared infrastructure with zero accountability.
+
+## Step 1: Cost Visibility with OpenCost
+
+OpenCost is the CNCF project for Kubernetes cost monitoring. It breaks down costs by namespace, label, deployment, or any Kubernetes dimension:
+
+```bash
+helm install opencost opencost/opencost \
+  --namespace opencost \
+  --set opencost.exporter.defaultClusterId=prod-eu \
+  --set opencost.ui.enabled=true
+```
+
+Query costs via API:
+
+```bash
+# Cost by namespace for the last 7 days
+curl "http://opencost:9003/allocation/compute?window=7d&aggregate=namespace"
+```
+
+```json
+{
+  "team-payments": {
+    "cpuCost": 342.50,
+    "ramCost": 128.30,
+    "pvCost": 45.00,
+    "totalCost": 515.80
+  },
+  "team-search": {
+    "cpuCost": 1205.00,
+    "ramCost": 890.40,
+    "gpuCost": 2100.00,
+    "totalCost": 4195.40
+  }
+}
+```
+
+Now you can answer: "Team Search is spending $4,200/week, 60% on GPU."
+
+## Step 2: Cost Allocation Strategy
+
+### Label Everything
+
+```yaml
+# Require cost labels on all workloads
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-cost-labels
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: require-team-label
+      match:
+        resources:
+          kinds: ["Deployment", "StatefulSet", "Job"]
+      validate:
+        message: "All workloads must have team and cost-center labels"
+        pattern:
+          metadata:
+            labels:
+              team: "?*"
+              cost-center: "?*"
+```
+
+### Allocation Models
+
+```
+Proportional (recommended):
+  Team cost = (team resource usage / total cluster usage) × cluster bill
+
+Fixed allocation:
+  Team cost = reserved resources × unit price
+  (Good for guaranteed capacity)
+
+Hybrid:
+  Base cost (namespace reservation) + variable (actual usage above base)
+```
+
+## Step 3: Right-Sizing Automation
+
+Most Kubernetes workloads are over-provisioned. VPA (Vertical Pod Autoscaler) fixes this:
+
+```yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: api-vpa
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-service
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+      - containerName: api
+        minAllowed:
+          cpu: 100m
+          memory: 128Mi
+        maxAllowed:
+          cpu: 2
+          memory: 4Gi
+```
+
+In my experience, VPA recommendations reduce resource requests by 40-60% on average. That translates directly to cost savings.
+
+## Step 4: Showback Dashboard
+
+Build a Grafana dashboard teams can self-serve. I use the monitoring patterns from [Kubernetes Recipes](https://kubernetes.recipes/):
+
+```
+Row 1: Executive Summary
+  - Total monthly spend (actual vs budget)
+  - Cost trend (30-day rolling)
+  - Top 5 most expensive namespaces
+  - Waste score (requested vs used)
+
+Row 2: Per-Team Breakdown
+  - Cost by team (stacked bar, weekly)
+  - Resource efficiency (used/requested ratio)
+  - Cost per request/transaction (unit economics)
+
+Row 3: Optimization Opportunities
+  - Over-provisioned deployments (>50% idle)
+  - Idle PVCs (attached but unused)
+  - Unscaled HPA (always at minimum)
+```
+
+## Step 5: Budget Alerts
+
+```yaml
+# Prometheus alert for cost spikes
+- alert: TeamBudgetExceeded
+  expr: |
+    sum by (team) (
+      opencost_allocation_total_cost_daily
+    ) * 30 > on(team) opencost_team_monthly_budget
+  for: 1h
+  labels:
+    severity: warning
+  annotations:
+    summary: "Team {{ $labels.team }} projected to exceed monthly budget"
+    description: "Projected: ${{ $value | humanize }}. Budget: check team allocation."
+```
+
+## Automating FinOps with Ansible
+
+I deploy the full FinOps stack (OpenCost, VPA, Kyverno policies, Grafana dashboards) across clusters with Ansible:
+
+```yaml
+- name: Deploy FinOps stack
+  hosts: k8s_clusters
+  roles:
+    - role: opencost
+    - role: vpa-controller
+    - role: cost-labels-policy
+    - role: finops-dashboards
+```
+
+Patterns at [Ansible Pilot](https://www.ansiblepilot.com/). Terraform-managed infrastructure cost tagging at [Terraform Pilot](https://www.terraformpilot.com/).
+
+## The Cultural Shift
+
+FinOps isn't a tool — it's a practice. The goal: teams understand and own their infrastructure costs, like they own their code quality. Visibility drives accountability. Accountability drives optimization.
+
+That $200K surprise? After implementing showback, teams self-optimized to $65K within two months. Nobody likes seeing their name next to the biggest number on the cost dashboard.

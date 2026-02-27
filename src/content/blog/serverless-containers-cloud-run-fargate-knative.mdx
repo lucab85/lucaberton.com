@@ -1,0 +1,162 @@
+---
+draft: false
+title: "Serverless Containers: Cloud Run vs Fargate vs Knative Compared"
+snippet: "Run containers without managing servers. Comparing Google Cloud Run, AWS Fargate, and Knative for cost, performance, and developer experience in 2026."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Serverless containers comparison" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - serverless
+  - cloud-run
+  - fargate
+  - knative
+  - containers
+  - cloud-native
+---
+
+## Containers Without the Cluster
+
+You want the portability of containers without managing Kubernetes. Or you have Kubernetes but want scale-to-zero for bursty workloads. Serverless containers solve both.
+
+## The Contenders
+
+### Google Cloud Run
+
+```bash
+# Deploy a container in one command
+gcloud run deploy my-api \
+  --image gcr.io/myproject/api:v1 \
+  --region europe-west4 \
+  --allow-unauthenticated \
+  --min-instances 0 \
+  --max-instances 100 \
+  --memory 512Mi \
+  --cpu 1 \
+  --concurrency 80
+```
+
+**Strengths:** Best developer experience, fastest cold starts (~200ms), generous free tier, scale-to-zero
+**Weaknesses:** GCP only (unless using Cloud Run on GKE), 60-min max request timeout
+
+### AWS Fargate
+
+```yaml
+# ECS Fargate task definition
+{
+  "family": "my-api",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "containerDefinitions": [{
+    "name": "api",
+    "image": "123456.dkr.ecr.eu-west-1.amazonaws.com/api:v1",
+    "portMappings": [{"containerPort": 8080}],
+    "logConfiguration": {
+      "logDriver": "awslogs",
+      "options": {
+        "awslogs-group": "/ecs/my-api",
+        "awslogs-region": "eu-west-1"
+      }
+    }
+  }]
+}
+```
+
+**Strengths:** Deep AWS integration, long-running tasks, ECS + EKS support, Fargate Spot for cost savings
+**Weaknesses:** Slower cold starts (~1-3s), more configuration needed, no scale-to-zero without extra tooling
+
+### Knative (Self-Hosted)
+
+```yaml
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: my-api
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "100"
+    spec:
+      containers:
+        - image: registry.company.com/api:v1
+          resources:
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          ports:
+            - containerPort: 8080
+```
+
+**Strengths:** Cloud-agnostic, runs on any Kubernetes, full control, no vendor lock-in
+**Weaknesses:** You manage Kubernetes, operational overhead, slower iteration than managed services
+
+## Comparison Matrix
+
+```
+                    Cloud Run     Fargate        Knative
+Scale to zero       Yes           No (native)    Yes
+Cold start          ~200ms        ~1-3s          ~500ms-2s
+Max timeout         60min         Unlimited      Configurable
+GPU support         Yes           No             Yes (with K8s)
+Pricing model       Per-request   Per-second     Your K8s cost
+Vendor lock-in      GCP           AWS            None
+Min config          1 command     ~50 lines      K8s + Knative
+Observability       Built-in      CloudWatch     BYO (Prometheus)
+```
+
+## When to Use What
+
+```
+"I want the simplest possible deployment"
+  → Cloud Run
+
+"I'm already on AWS and need long-running containers"
+  → Fargate
+
+"I need cloud portability and already run Kubernetes"
+  → Knative
+
+"I need scale-to-zero AND I'm on AWS"
+  → Cloud Run (yes, consider multi-cloud) or Karpenter + KEDA
+
+"I have bursty traffic with long idle periods"
+  → Cloud Run (scale-to-zero saves money)
+```
+
+## Cost Comparison (1M Requests/Month)
+
+```
+Assumptions: 200ms avg response, 512MB memory, 1 vCPU
+
+Google Cloud Run:
+  Compute: 1M × 0.2s × $0.00002400/vCPU-s = $4.80
+  Memory:  1M × 0.2s × $0.00000250/GiB-s  = $0.25
+  Requests: 1M × $0.40/million              = $0.40
+  Total: ~$5.45/month
+
+AWS Fargate (always-on, 2 tasks):
+  vCPU: 2 × $0.04048/hr × 730h            = $59.10
+  Memory: 2 × 1GB × $0.004445/hr × 730h   = $6.49
+  Total: ~$65.59/month
+
+Knative (on existing K8s):
+  Incremental cost on existing cluster     = ~$0 (idle)
+  (But you're paying for the cluster anyway)
+```
+
+Cloud Run wins dramatically for bursty workloads. Fargate wins for steady-state. Knative is "free" if you already have Kubernetes capacity.
+
+## My Recommendation
+
+For new projects without cloud commitment: **start with Cloud Run.** The developer experience is unmatched, and you can always migrate to Kubernetes later (the container is portable).
+
+For existing Kubernetes users wanting serverless-like scaling: **add Knative** to your cluster. I deploy it with Ansible (patterns at [Ansible Pilot](https://www.ansiblepilot.com/)) and detail the Kubernetes integration at [Kubernetes Recipes](https://kubernetes.recipes/).
+
+For Terraform-managed infrastructure across clouds, including serverless container services, see [Terraform Pilot](https://www.terraformpilot.com/).
+
+The serverless container space is mature. The question isn't whether to use it — it's which flavor fits your architecture.

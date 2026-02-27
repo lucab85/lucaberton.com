@@ -1,0 +1,199 @@
+---
+draft: false
+title: "Zero Trust for Kubernetes: Service Mesh, mTLS, and OPA Policies"
+snippet: "Kubernetes networking is insecure by default. Here's how to implement zero trust with service mesh, mutual TLS, and Open Policy Agent for real security posture."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Zero trust Kubernetes" }
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - zero-trust
+  - kubernetes
+  - service-mesh
+  - mtls
+  - opa
+  - security
+---
+
+## Kubernetes Is Not Secure by Default
+
+Out of the box, any pod can talk to any other pod. No authentication, no encryption, no authorization. A compromised pod has free reign to lateral-move across your cluster.
+
+Zero trust means: never trust, always verify. Every service-to-service call is authenticated, encrypted, and authorized.
+
+## Layer 1: mTLS with Service Mesh
+
+### Istio (Full-Featured)
+
+```yaml
+# Enable strict mTLS cluster-wide
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  mtls:
+    mode: STRICT
+```
+
+Every pod-to-pod call is now encrypted with mutual TLS. Both sides prove their identity with certificates. No code changes needed — the sidecar proxy handles it.
+
+### Cilium (eBPF-Based, No Sidecar)
+
+```yaml
+# Cilium network policy with identity-based access
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: payment-service-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: payment-service
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: api-gateway
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            app: database
+      toPorts:
+        - ports:
+            - port: "5432"
+```
+
+Cilium enforces at the kernel level using eBPF — no sidecar overhead. For high-performance workloads (edge AI inference, real-time APIs), this matters.
+
+I cover Cilium deployment patterns at [Kubernetes Recipes](https://kubernetes.recipes/).
+
+## Layer 2: Authorization with OPA/Gatekeeper
+
+mTLS handles authentication (who are you?). OPA handles authorization (what can you do?):
+
+```rego
+# OPA policy: restrict container capabilities
+package kubernetes.admission
+
+deny[msg] {
+    input.request.kind.kind == "Pod"
+    container := input.request.object.spec.containers[_]
+    container.securityContext.privileged == true
+    msg := sprintf("Privileged containers not allowed: %v", [container.name])
+}
+
+deny[msg] {
+    input.request.kind.kind == "Pod"
+    container := input.request.object.spec.containers[_]
+    not container.securityContext.runAsNonRoot
+    msg := sprintf("Container must run as non-root: %v", [container.name])
+}
+
+deny[msg] {
+    input.request.kind.kind == "Pod"
+    container := input.request.object.spec.containers[_]
+    not startswith(container.image, "registry.company.com/")
+    msg := sprintf("Only images from company registry allowed: %v", [container.image])
+}
+```
+
+Deploy with Gatekeeper:
+
+```yaml
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRestrictedContainers
+metadata:
+  name: no-privileged
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    excludedNamespaces: ["kube-system"]
+```
+
+## Layer 3: Network Segmentation
+
+```yaml
+# Default deny all traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Allow specific traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-to-db
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: database
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api
+      ports:
+        - port: 5432
+```
+
+## Automating Zero Trust with Ansible
+
+For multi-cluster deployments, I automate the zero trust setup with Ansible:
+
+```yaml
+- name: Deploy zero trust to K8s cluster
+  hosts: k8s_clusters
+  tasks:
+    - name: Install Cilium
+      helm:
+        name: cilium
+        chart_ref: cilium/cilium
+        release_namespace: kube-system
+        values:
+          hubble.relay.enabled: true
+          encryption.enabled: true
+          encryption.type: wireguard
+
+    - name: Apply default deny policies
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ item }}"
+      loop: "{{ lookup('fileglob', 'policies/network/*.yml', wantlist=True) }}"
+
+    - name: Deploy OPA Gatekeeper
+      helm:
+        name: gatekeeper
+        chart_ref: gatekeeper/gatekeeper
+        release_namespace: gatekeeper-system
+```
+
+The full automation patterns for Kubernetes security at [Ansible Pilot](https://www.ansiblepilot.com/) and [Ansible by Example](https://www.ansiblebyexample.com/).
+
+## The Zero Trust Maturity Model
+
+```
+Level 0: No network policies, no encryption (most clusters)
+Level 1: NetworkPolicies for namespace isolation
+Level 2: mTLS between services (Istio/Cilium)
+Level 3: OPA admission control for workload policies
+Level 4: Full zero trust (identity-aware, least-privilege, audited)
+```
+
+Most organizations are at Level 0. Getting to Level 2 takes a week. The security improvement is massive. Start there.

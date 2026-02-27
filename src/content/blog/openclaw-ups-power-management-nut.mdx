@@ -1,0 +1,150 @@
+---
+draft: false
+title: "OpenClaw + NUT: Smart UPS Monitoring and Graceful Shutdown Automation"
+snippet: "When the power goes out, OpenClaw coordinates the shutdown. Using NUT (Network UPS Tools) for monitoring and AI-powered decision making for graceful infrastructure shutdown."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "OpenClaw + NUT" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - nut
+  - ups
+  - power-management
+  - homelab
+  - automation
+---
+
+## Power Goes Out. Then What?
+
+Jeff Geerling's "NUT on my Pi" post resonated with every homelabber. Uninterruptible Power Supplies keep things running during outages — but someone needs to decide when to shut down. That someone is now OpenClaw.
+
+## The Setup
+
+```
+UPS (CyberPower 1500VA)
+    │ USB
+    ▼
+Pi 5 (NUT Server + OpenClaw)
+    │ Network
+    ├── Pi (k3s cluster)
+    ├── Pi (NAS)
+    └── Switch
+```
+
+## Installing NUT
+
+```bash
+# On the Pi connected to UPS via USB
+sudo apt install nut
+
+# Configure NUT
+sudo cat > /etc/nut/ups.conf << 'EOF'
+[cyberpower]
+  driver = usbhid-ups
+  port = auto
+  desc = "CyberPower CP1500AVRLCD"
+EOF
+
+# Start NUT
+sudo systemctl enable nut-server
+sudo systemctl start nut-server
+
+# Test
+upsc cyberpower@localhost
+```
+
+## OpenClaw Monitors NUT
+
+Every heartbeat cycle, OpenClaw checks the UPS:
+
+```bash
+# Quick UPS status check
+upsc cyberpower@localhost battery.charge
+upsc cyberpower@localhost ups.status
+upsc cyberpower@localhost battery.runtime
+```
+
+## The Intelligence Layer
+
+Here's where OpenClaw beats a simple NUT script. Instead of "battery below 20% → shutdown everything," OpenClaw makes smart decisions:
+
+### Scenario 1: Brief Outage
+```
+Power out. Battery: 95%. Runtime: 45 minutes.
+→ OpenClaw: "Power outage detected. Battery at 95% (45 min runtime). 
+   Monitoring. No action needed yet."
+→ Waits quietly.
+→ Power returns after 3 minutes.
+→ OpenClaw: "Power restored. Total outage: 3 minutes. Battery at 92%."
+```
+
+### Scenario 2: Extended Outage
+```
+Power out. Battery: 60%. Runtime: 25 minutes.
+→ OpenClaw: "⚠️ Power out for 15 minutes. Battery at 60%.
+   Plan: At 30% I'll shut down the NAS (save data).
+   At 20% I'll shut down k3s workers.
+   At 10% I'll shut down everything except myself."
+```
+
+### Scenario 3: Critical
+```
+Battery: 15%. Runtime: 6 minutes.
+→ OpenClaw: "🔴 CRITICAL: Battery at 15%. Initiating shutdown sequence."
+   1. SSH to NAS: "sudo zpool export tank && sudo shutdown -h now" ✅
+   2. SSH to k3s nodes: "kubectl drain && sudo shutdown -h now" ✅
+   3. "All nodes shut down safely. I'll power off at 5%."
+   4. Final message: "Going dark. Everything shut down clean. 
+      I'll restart when power returns."
+```
+
+## The Shutdown Script
+
+```bash
+#!/bin/bash
+# /home/pi/graceful-shutdown.sh
+# Called by OpenClaw when battery critical
+
+echo "Phase 1: Stopping services"
+ssh pi-nas "sudo systemctl stop jellyfin && sudo zpool export tank && sudo shutdown -h now"
+
+echo "Phase 2: Draining k3s"
+ssh pi-k3s-1 "kubectl drain pi-k3s-2 --ignore-daemonsets --force"
+ssh pi-k3s-2 "sudo shutdown -h now"
+ssh pi-k3s-1 "sudo shutdown -h now"
+
+echo "Phase 3: Self-shutdown at 5%"
+# OpenClaw will call: sudo shutdown -h now
+```
+
+## Power-On Recovery
+
+When power returns, the Pi (set to boot on power restore in BIOS/firmware) starts up, OpenClaw comes online, and:
+
+1. Checks which nodes are back
+2. Waits for NAS to boot and import ZFS pool
+3. Verifies k3s cluster health
+4. Sends recovery report:
+
+> ✅ **Power Restored — Recovery Complete**
+> Outage duration: 1 hour 23 minutes
+> All 4 nodes back online
+> ZFS pool: ONLINE, no errors
+> k3s: 23/23 pods running
+> UPS: Charging (currently 34%)
+
+## UPS Sizing
+
+For my 30W homelab:
+```
+CyberPower 1500VA / 900W
+Actual load: 30W
+Runtime at 30W: ~2+ hours
+Cost: $150
+
+That's 2+ hours of grace period. More than enough for most outages.
+```
+
+The UPS doesn't just keep things running — combined with OpenClaw, it orchestrates a clean shutdown and recovery. No data loss, no ZFS corruption, no orphaned pods.

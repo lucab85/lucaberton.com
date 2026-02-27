@@ -1,0 +1,180 @@
+---
+draft: false
+title: "Sustainable IT: Carbon-Aware Kubernetes Scheduling"
+snippet: "Schedule Kubernetes workloads when and where the grid is greenest. How carbon-aware scheduling works, the tools available, and the business case for sustainable compute."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Carbon-aware Kubernetes scheduling" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - sustainability
+  - green-it
+  - kubernetes
+  - carbon-aware
+  - scheduling
+  - cloud-native
+---
+
+## The Carbon Cost of Compute
+
+A single GPU training run can emit as much CO2 as five transatlantic flights. But it doesn't have to — if you run it when the electricity grid is powered by renewables.
+
+Carbon-aware scheduling shifts deferrable workloads to times and regions where the carbon intensity of electricity is lowest. Same computation, fraction of the emissions.
+
+## How Carbon Intensity Varies
+
+```
+Grid carbon intensity (gCO2/kWh):
+
+Netherlands (typical):
+  02:00 (wind heavy):    80 gCO2/kWh
+  14:00 (solar peak):   120 gCO2/kWh
+  19:00 (gas peakers):  450 gCO2/kWh
+
+France (nuclear heavy):
+  Average:               60 gCO2/kWh
+  Peak:                 120 gCO2/kWh
+
+Poland (coal heavy):
+  Average:              650 gCO2/kWh
+  Best:                 400 gCO2/kWh
+```
+
+Running the same workload in France at 2 AM instead of Poland at 7 PM reduces emissions by 10x.
+
+## KEDA + Carbon Intensity API
+
+Use KEDA (Kubernetes Event-Driven Autoscaling) to scale batch workloads based on carbon intensity:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: carbon-aware-batch
+spec:
+  jobTargetRef:
+    template:
+      spec:
+        containers:
+          - name: ml-training
+            image: registry.internal/ml-trainer:v2
+  triggers:
+    - type: metrics-api
+      metadata:
+        targetValue: "200"  # Only run when <200 gCO2/kWh
+        url: "http://carbon-api:8080/intensity/current"
+        valueLocation: "carbonIntensity"
+  pollingInterval: 300
+  minReplicaCount: 0
+  maxReplicaCount: 10
+```
+
+When grid carbon intensity drops below 200 gCO2/kWh, KEDA scales up batch jobs. When it rises, jobs scale to zero.
+
+## Carbon-Aware Scheduling with Green Software Foundation SDK
+
+```python
+from carbon_aware_sdk import CarbonAwareClient
+
+client = CarbonAwareClient()
+
+# Find the best time to run a 4-hour workload in the next 24 hours
+best_window = client.get_best_time(
+    locations=["NL", "DE", "FR"],
+    duration_hours=4,
+    window_hours=24
+)
+
+print(f"Run in {best_window.location} at {best_window.start_time}")
+print(f"Estimated intensity: {best_window.carbon_intensity} gCO2/kWh")
+print(f"vs worst option: {best_window.worst_intensity} gCO2/kWh")
+print(f"Emissions saved: {best_window.savings_percent}%")
+```
+
+## Multi-Region Carbon-Aware Deployment
+
+```yaml
+# Schedule workloads on the greenest cluster
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: nightly-analytics
+  labels:
+    carbon-aware: "true"
+    deferrable: "true"
+    max-delay-hours: "8"
+spec:
+  template:
+    spec:
+      nodeSelector:
+        carbon-zone: low  # Updated by carbon controller
+      containers:
+        - name: analytics
+          image: registry.internal/analytics:v3
+```
+
+A custom controller updates node labels based on real-time carbon data:
+
+```python
+async def update_carbon_labels():
+    """Run every 15 minutes — label nodes by carbon zone."""
+    for cluster in clusters:
+        intensity = await carbon_api.get_intensity(cluster.region)
+
+        label = "low" if intensity < 150 else "medium" if intensity < 300 else "high"
+
+        for node in cluster.nodes:
+            patch_node_label(node, "carbon-zone", label)
+```
+
+## What's Deferrable?
+
+Not all workloads can be shifted. The key distinction:
+
+```
+Deferrable (carbon-aware candidates):
+  ✓ ML training runs
+  ✓ Batch analytics / ETL
+  ✓ CI/CD builds (non-urgent)
+  ✓ Database backups
+  ✓ Log aggregation
+  ✓ Image/model optimization
+
+Not deferrable:
+  ✗ User-facing APIs
+  ✗ Real-time inference
+  ✗ Interactive services
+  ✗ Security-critical jobs
+```
+
+## The Business Case
+
+### Regulatory
+
+The EU Corporate Sustainability Reporting Directive (CSRD) requires Scope 2 and Scope 3 emissions reporting. Your cloud compute is Scope 2 (or Scope 3 if using a provider). Carbon-aware scheduling reduces reported emissions.
+
+### Cost Correlation
+
+Green electricity is often cheap electricity. Wind and solar have near-zero marginal cost. Carbon-aware scheduling frequently aligns with cost optimization:
+
+```
+Netherlands electricity price correlation with carbon intensity:
+  Low carbon (night, windy):     €0.05-0.08/kWh
+  High carbon (evening, calm):   €0.15-0.35/kWh
+```
+
+Running batch jobs during low-carbon periods saves money AND emissions.
+
+### ESG Reporting
+
+For clients in financial services, ESG metrics matter for investor relations. I help quantify compute emissions using the patterns above, automated with Ansible at [Ansible Pilot](https://www.ansiblepilot.com/) and Kubernetes monitoring at [Kubernetes Recipes](https://kubernetes.recipes/).
+
+## Getting Started
+
+1. **Measure** — Add carbon intensity data to your monitoring dashboard
+2. **Identify** — Tag deferrable workloads in your cluster
+3. **Shift** — Use KEDA or custom scheduling to prefer low-carbon windows
+4. **Report** — Track emissions reduction over time
+
+The tools exist. The APIs exist. The business case exists. Carbon-aware scheduling is one of the rare wins where doing the right thing also saves money.

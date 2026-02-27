@@ -1,0 +1,167 @@
+---
+draft: false
+title: "Prompt Engineering Is Dead, Context Engineering Is King"
+snippet: "Stop optimizing prompts. Start optimizing context. The shift from clever prompt tricks to structured context delivery is the real unlock for production AI systems."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Context engineering vs prompt engineering" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - context-engineering
+  - prompt-engineering
+  - llm
+  - ai-production
+  - rag
+---
+
+## The Prompt Engineering Trap
+
+I spent months in 2024 crafting elaborate prompts. "Act as a senior DevOps engineer with 15 years of experience..." — adding persona, chain-of-thought, few-shot examples. It worked... sometimes.
+
+Then I noticed something: a simple prompt with the right context consistently outperformed a brilliant prompt with generic context. The model doesn't need to be told to think step-by-step if you give it the actual documentation, the actual error logs, the actual architecture diagram.
+
+## What Context Engineering Means
+
+Context engineering is the discipline of delivering the right information to the model at the right time. It's not about tricking the model — it's about informing it.
+
+```
+Prompt Engineering (2023-2024):
+  "You are a Kubernetes expert. Think step by step.
+   Use best practices. Be concise but thorough..."
+  → Hope the model knows current K8s APIs
+
+Context Engineering (2025-2026):
+  "Here's the K8s 1.31 API reference for CronJobs.
+   Here's our cluster config. Here's the failing manifest.
+   Fix the issue."
+  → Model has everything it needs
+```
+
+Tools like [Context7](https://context7.com/) exemplify this shift — they provide up-to-date library documentation directly to the model, eliminating hallucinations at the source.
+
+## The Context Stack
+
+I think of context delivery in layers:
+
+### Layer 1: System Context (static)
+Your system prompt. Keep it short — role, constraints, output format. This is the only layer where traditional prompt engineering still matters.
+
+### Layer 2: Domain Context (semi-static)
+Documentation, API references, coding standards. Changes with versions but not per-request. This is where tools like Context7 and RAG shine.
+
+### Layer 3: Task Context (dynamic)
+The specific files, logs, data relevant to this request. Retrieved per-query.
+
+### Layer 4: Conversation Context (ephemeral)
+Chat history, previous tool results, user corrections.
+
+```python
+def build_context(task):
+    context = []
+
+    # Layer 1: Static system prompt (200 tokens)
+    context.append(SYSTEM_PROMPT)
+
+    # Layer 2: Relevant documentation (2000 tokens)
+    docs = context7.fetch(task.libraries, task.versions)
+    context.append(docs)
+
+    # Layer 3: Task-specific data (variable)
+    relevant_files = retriever.search(task.query, top_k=5)
+    context.append(format_files(relevant_files))
+
+    # Layer 4: Recent conversation (last 5 turns)
+    context.append(format_history(task.history[-5:]))
+
+    return "\n---\n".join(context)
+```
+
+## Practical Context Engineering Patterns
+
+### Pattern 1: Context Pruning
+Don't dump everything into the context. More context ≠ better results. Irrelevant context actively degrades performance.
+
+```python
+def prune_context(documents, query, max_tokens=4000):
+    """Keep only the most relevant context."""
+    scored = []
+    for doc in documents:
+        relevance = embedding_similarity(query, doc)
+        scored.append((relevance, doc))
+
+    scored.sort(reverse=True)
+
+    # Take top documents until token budget exhausted
+    selected = []
+    tokens = 0
+    for score, doc in scored:
+        doc_tokens = count_tokens(doc)
+        if tokens + doc_tokens > max_tokens:
+            break
+        if score < 0.3:  # Relevance threshold
+            break
+        selected.append(doc)
+        tokens += doc_tokens
+
+    return selected
+```
+
+### Pattern 2: Structured Context
+Format context for the model to parse easily:
+
+```markdown
+## Current Error
+```
+TypeError: Cannot read property 'map' of undefined
+  at UserList (src/components/UserList.tsx:42)
+```
+
+## Relevant Source Code
+```typescript
+// src/components/UserList.tsx
+export function UserList({ users }) {  // Line 38
+  return (
+    <ul>
+      {users.map(u => <li key={u.id}>{u.name}</li>)}  // Line 42
+    </ul>
+  );
+}
+```
+
+## API Response (actual)
+```json
+{ "data": null, "error": "Unauthorized" }
+```
+```
+
+This structured format leads to better diagnoses than "my code is broken, here's the whole file."
+
+### Pattern 3: Negative Context
+Tell the model what NOT to use:
+
+```
+Do NOT suggest:
+- getServerSideProps (deprecated in Next.js 15)
+- Tailwind @apply in CSS files (we use v4 CSS-first approach)
+- Class components (project uses only hooks)
+```
+
+Negative context prevents the most common hallucination patterns.
+
+## The Infrastructure Angle
+
+Context engineering isn't just an AI skill — it's an infrastructure problem. You need:
+
+- **Vector databases** for semantic retrieval (I cover infrastructure patterns at [Open Empower](https://www.openempower.com/))
+- **Document pipelines** for ingestion and chunking
+- **Caching layers** for frequently-accessed context
+- **Token budgeting** across context layers
+
+For teams running Kubernetes, this means deploying embedding models, vector stores, and retrieval APIs as platform services. I detail Kubernetes-native AI infrastructure at [Kubernetes Recipes](https://kubernetes.recipes/).
+
+## The Mindset Shift
+
+Stop asking "how do I write a better prompt?" Start asking "what information does the model need to give a correct answer?" Then build the infrastructure to deliver that information reliably.
+
+That's context engineering. And it's the real skill that separates AI demos from AI products.

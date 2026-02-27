@@ -1,0 +1,230 @@
+---
+draft: false
+title: "Edge AI Monitoring with Prometheus and Grafana: Fleet Observability"
+snippet: "How to monitor hundreds of edge AI devices with Prometheus and Grafana. Inference latency, model accuracy drift, GPU temperature, and alerting for production deployments."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Edge AI monitoring Prometheus Grafana" }
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - edge-ai
+  - monitoring
+  - prometheus
+  - grafana
+  - observability
+  - fleet-management
+---
+
+## You Can't Improve What You Can't Measure
+
+An edge AI model in production without monitoring is a ticking time bomb. Models drift. Hardware degrades. Cameras get dirty. You need to know when performance drops — before the business does.
+
+## The Metrics That Matter
+
+### Inference Metrics
+
+```python
+from prometheus_client import Histogram, Counter, Gauge, start_http_server
+
+# Core inference metrics
+INFERENCE_LATENCY = Histogram(
+    'inference_latency_seconds',
+    'Inference latency in seconds',
+    buckets=[0.005, 0.01, 0.015, 0.02, 0.05, 0.1, 0.5]
+)
+
+INFERENCE_COUNT = Counter(
+    'inference_total',
+    'Total inferences processed',
+    ['model_version', 'result']
+)
+
+CONFIDENCE_SCORE = Histogram(
+    'prediction_confidence',
+    'Model confidence scores',
+    buckets=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99]
+)
+
+MODEL_VERSION = Gauge(
+    'model_version_info',
+    'Currently loaded model version',
+    ['version']
+)
+
+# Usage in inference loop
+@INFERENCE_LATENCY.time()
+def run_inference(image):
+    prediction = model.predict(image)
+    INFERENCE_COUNT.labels(
+        model_version='3.2',
+        result=prediction.label
+    ).inc()
+    CONFIDENCE_SCORE.observe(prediction.confidence)
+    return prediction
+
+# Expose metrics on :9090/metrics
+start_http_server(9090)
+```
+
+### Hardware Metrics
+
+```python
+import subprocess
+import json
+
+GPU_TEMP = Gauge('gpu_temperature_celsius', 'GPU temperature')
+GPU_UTIL = Gauge('gpu_utilization_percent', 'GPU utilization')
+MEMORY_USED = Gauge('gpu_memory_used_bytes', 'GPU memory used')
+
+def collect_jetson_metrics():
+    """Collect Jetson hardware metrics via tegrastats."""
+    stats = subprocess.check_output(['tegrastats', '--interval', '1000', '--count', '1'])
+    # Parse tegrastats output
+    gpu_temp = parse_temp(stats)
+    gpu_util = parse_util(stats)
+    mem_used = parse_memory(stats)
+
+    GPU_TEMP.set(gpu_temp)
+    GPU_UTIL.set(gpu_util)
+    MEMORY_USED.set(mem_used)
+```
+
+### Data Quality Metrics
+
+```python
+IMAGE_BRIGHTNESS = Histogram(
+    'input_image_brightness',
+    'Average brightness of input images',
+    buckets=[20, 40, 60, 80, 100, 120, 140, 160, 180, 200]
+)
+
+IMAGE_BLUR = Histogram(
+    'input_image_blur_score',
+    'Laplacian variance (blur detection)',
+    buckets=[10, 50, 100, 200, 500, 1000]
+)
+
+def check_image_quality(image):
+    brightness = image.mean()
+    blur = cv2.Laplacian(image, cv2.CV_64F).var()
+
+    IMAGE_BRIGHTNESS.observe(brightness)
+    IMAGE_BLUR.observe(blur)
+
+    if brightness < 30:
+        alert("Camera may be obstructed or lighting failed")
+    if blur < 50:
+        alert("Camera may be out of focus")
+```
+
+## Prometheus Configuration
+
+```yaml
+# prometheus.yml - Central Prometheus scraping edge devices
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: 'edge-ai-fleet'
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/edge_targets/*.json
+        refresh_interval: 5m
+
+  # Or use DNS service discovery if devices register
+  - job_name: 'edge-ai-dns'
+    dns_sd_configs:
+      - names:
+          - '_metrics._tcp.edge.internal'
+        type: SRV
+        refresh_interval: 60s
+
+# Alert rules
+rule_files:
+  - /etc/prometheus/rules/edge_ai_alerts.yml
+```
+
+## Alert Rules
+
+```yaml
+# edge_ai_alerts.yml
+groups:
+  - name: edge_ai
+    rules:
+      - alert: HighInferenceLatency
+        expr: histogram_quantile(0.95, rate(inference_latency_seconds_bucket[5m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High inference latency on {{ $labels.instance }}"
+          description: "P95 latency is {{ $value }}s (threshold: 50ms)"
+
+      - alert: LowConfidenceSpike
+        expr: rate(prediction_confidence_bucket{le="0.5"}[15m]) / rate(prediction_confidence_count[15m]) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Model confidence dropping on {{ $labels.instance }}"
+          description: ">10% of predictions below 0.5 confidence — possible model drift"
+
+      - alert: GPUOverheating
+        expr: gpu_temperature_celsius > 85
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU overheating on {{ $labels.instance }}"
+
+      - alert: DeviceUnreachable
+        expr: up{job="edge-ai-fleet"} == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Edge device {{ $labels.instance }} unreachable"
+```
+
+## Model Accuracy Drift Detection
+
+The most insidious edge AI failure: the model slowly gets worse. New product variants, lighting changes, seasonal differences.
+
+```python
+# Track accuracy against known-good reference images
+VALIDATION_ACCURACY = Gauge(
+    'model_validation_accuracy',
+    'Accuracy on reference validation set'
+)
+
+def periodic_validation():
+    """Run every hour against reference images."""
+    correct = 0
+    total = 0
+    for image, expected in REFERENCE_SET:
+        prediction = model.predict(image)
+        if prediction.label == expected:
+            correct += 1
+        total += 1
+
+    accuracy = correct / total
+    VALIDATION_ACCURACY.set(accuracy)
+
+    if accuracy < 0.95:
+        alert(f"Model accuracy dropped to {accuracy:.1%} — retrain needed")
+```
+
+## Grafana Dashboard
+
+Key panels for the edge AI fleet dashboard:
+
+1. **Fleet Overview** — map or table showing all devices, status, model version
+2. **Inference Performance** — latency p50/p95/p99 per device, aggregated
+3. **Model Confidence Distribution** — histogram showing confidence spread (drift = left shift)
+4. **Hardware Health** — GPU temp, utilization, memory across fleet
+5. **Defect Rate Trend** — is the defect detection rate changing? Could indicate model issue OR real quality issue
+6. **Alert Timeline** — recent alerts with severity
+
+Monitoring edge AI is harder than monitoring cloud services because devices fail in ways cloud servers don't — dirty cameras, power fluctuations, physical damage. Build your dashboards with these failure modes in mind.

@@ -1,0 +1,176 @@
+---
+draft: false
+title: "Golden Paths: Opinionated CI/CD Templates That Actually Get Adopted"
+snippet: "Why most CI/CD standardization fails and how golden paths succeed. Practical templates for GitLab CI, GitHub Actions, and ArgoCD that developers choose to use."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Golden paths CI/CD" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - golden-paths
+  - cicd
+  - gitlab-ci
+  - platform-engineering
+  - developer-experience
+---
+
+## Why Standardization Fails
+
+"We standardized our CI/CD!" means nothing if 40% of teams aren't using it. I've seen this pattern repeatedly: platform team builds a beautiful pipeline, mandates adoption, and 6 months later half the org is running rogue Jenkins instances.
+
+Golden paths work differently. They're so good, so frictionless, that teams voluntarily adopt them.
+
+## What Makes a Golden Path Golden
+
+1. **Zero-config start** — works out of the box with sensible defaults
+2. **Escape hatches** — teams can customize without forking
+3. **Maintained** — updated regularly, never stale
+4. **Documented** — clear docs on what it does and how to extend it
+5. **Observable** — built-in metrics, logs, and alerts
+
+## GitLab CI Golden Path
+
+```yaml
+# .gitlab-ci-template.yml — the golden path
+# Teams include this, override only what they need
+
+stages:
+  - test
+  - build
+  - security
+  - deploy-staging
+  - deploy-production
+
+variables:
+  DOCKER_REGISTRY: registry.gitlab.com/$CI_PROJECT_PATH
+  K8S_NAMESPACE: $CI_PROJECT_NAME
+  DEPLOY_TIMEOUT: "300s"
+
+# --- Test ---
+test:
+  stage: test
+  image: $TEST_IMAGE
+  script:
+    - make test
+  coverage: '/coverage: \d+\.\d+%/'
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# --- Build ---
+build:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  script:
+    - docker build -t $DOCKER_REGISTRY:$CI_COMMIT_SHA .
+    - docker push $DOCKER_REGISTRY:$CI_COMMIT_SHA
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# --- Security ---
+trivy-scan:
+  stage: security
+  image: aquasec/trivy:latest
+  script:
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL $DOCKER_REGISTRY:$CI_COMMIT_SHA
+  allow_failure: false
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# --- Deploy ---
+deploy-staging:
+  stage: deploy-staging
+  environment:
+    name: staging
+  script:
+    - helm upgrade --install $CI_PROJECT_NAME ./chart
+      --namespace ${K8S_NAMESPACE}-staging
+      --set image.tag=$CI_COMMIT_SHA
+      --wait --timeout $DEPLOY_TIMEOUT
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+deploy-production:
+  stage: deploy-production
+  environment:
+    name: production
+  script:
+    - helm upgrade --install $CI_PROJECT_NAME ./chart
+      --namespace ${K8S_NAMESPACE}
+      --set image.tag=$CI_COMMIT_SHA
+      --wait --timeout $DEPLOY_TIMEOUT
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+```
+
+Teams adopt this by adding one line to their `.gitlab-ci.yml`:
+
+```yaml
+include:
+  - project: 'platform/ci-templates'
+    file: '.gitlab-ci-template.yml'
+
+variables:
+  TEST_IMAGE: python:3.12  # Override defaults
+```
+
+## The Adoption Strategy
+
+Don't mandate. Demonstrate.
+
+**Week 1-2:** Build the golden path, deploy it on 2-3 willing teams
+**Week 3-4:** Gather feedback, iterate
+**Month 2:** Internal demo showing before/after metrics
+**Month 3:** Publish as the "recommended" approach (not required)
+**Month 6:** Measure adoption naturally (target: >70%)
+
+Teams that don't adopt? Talk to them. Maybe the golden path doesn't fit their use case. That's valuable feedback, not defiance.
+
+## Escape Hatches
+
+The golden path should cover 80% of cases. For the other 20%, provide extension points:
+
+```yaml
+# Team can add custom stages
+include:
+  - project: 'platform/ci-templates'
+    file: '.gitlab-ci-template.yml'
+
+# Custom: add performance testing
+performance-test:
+  stage: test
+  script:
+    - k6 run load-test.js
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+```
+
+The key: teams extend, they don't fork. If they need to fork the template, the golden path has failed.
+
+## Measuring Golden Path Health
+
+Track these metrics:
+
+```
+Adoption rate: % of repos using the golden path template
+Drift rate: % of repos that override >3 defaults
+Build success rate: golden path vs custom pipelines
+Mean time to production: golden path vs custom
+Developer satisfaction: survey score for CI/CD experience
+```
+
+For the Kubernetes deployment patterns behind these pipelines, see [Kubernetes Recipes](https://kubernetes.recipes/). For the infrastructure automation that provisions the GitLab runners and K8s clusters, I use Ansible — detailed at [Ansible Pilot](https://www.ansiblepilot.com/).
+
+## The Cultural Shift
+
+Golden paths aren't a technical project — they're a cultural one. You're asking teams to trust the platform team's judgment. That trust is earned through:
+
+- Reliability (the golden path doesn't break)
+- Responsiveness (feedback is acted on quickly)
+- Transparency (the roadmap is public)
+
+Get the culture right, and adoption follows naturally.

@@ -1,0 +1,108 @@
+---
+draft: false
+title: "OpenClaw in a Mini Rack: AI-Powered Homelab Monitoring"
+snippet: "I added an OpenClaw Pi to my mini rack and now my homelab monitors itself. Automated health checks, disk alerts, temperature warnings — all through Discord."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "OpenClaw in a Mini Rack" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - homelab
+  - mini-rack
+  - monitoring
+  - raspberry-pi
+  - infrastructure
+---
+
+## The Mini Rack Craze
+
+Jeff Geerling started a movement with his mini rack project, and I jumped on board. My 10-inch rack holds a Pi cluster, a NAS, networking gear, and now — an OpenClaw agent that watches everything.
+
+## My Rack Layout
+
+```
+┌─────────────────────────────────┐
+│  1U  │ MikroTik 2.5G Switch     │
+├──────┼──────────────────────────┤
+│  1U  │ Pi 5 (OpenClaw Gateway)   │
+├──────┼──────────────────────────┤
+│  1U  │ Pi 5 (k3s control plane)  │
+├──────┼──────────────────────────┤
+│  1U  │ Pi 5 (k3s worker)         │
+├──────┼──────────────────────────┤
+│  2U  │ 4-bay NVMe NAS (Pi 5)     │
+├──────┼──────────────────────────┤
+│  1U  │ UPS + power strip         │
+└──────┴──────────────────────────┘
+```
+
+## What OpenClaw Monitors
+
+Every 30 minutes (via heartbeat), OpenClaw checks:
+
+```bash
+# HEARTBEAT.md
+- SSH into each Pi and check: CPU temp, disk usage, memory, uptime
+- Query k3s: kubectl get nodes, check pod health
+- Check NAS: ZFS pool status, disk temps, scrub schedule
+- Check UPS: battery level, load percentage
+- Check network: ping gateway, check DNS resolution
+```
+
+## The Monitoring Script
+
+OpenClaw runs these checks through SSH tool calls:
+
+```bash
+# Check all Pi temperatures
+for host in pi-openclaw pi-k3s-1 pi-k3s-2 pi-nas; do
+  temp=$(ssh $host "vcgencmd measure_temp" 2>/dev/null)
+  echo "$host: $temp"
+done
+
+# Check ZFS pool health
+ssh pi-nas "zpool status -x"
+
+# Check k3s cluster
+ssh pi-k3s-1 "kubectl get nodes -o wide"
+ssh pi-k3s-1 "kubectl get pods -A | grep -v Running | grep -v Completed"
+```
+
+## Alert Thresholds
+
+OpenClaw doesn't just dump data — it knows what's important:
+
+- **CPU temp > 70°C** → Warning: "pi-k3s-1 is running hot (72°C). Check ventilation."
+- **Disk usage > 85%** → Alert: "NAS pool is at 87%. Time to clean up or add storage."
+- **Pod crashlooping** → Alert: "grafana pod has restarted 5 times in the last hour."
+- **UPS < 50%** → Warning: "UPS battery at 45%. Power has been out for 12 minutes."
+- **Everything normal** → Silence (HEARTBEAT_OK)
+
+## Daily Summary
+
+Once a day at 8 AM, OpenClaw sends a digest:
+
+> 📊 **Homelab Daily Report**
+> 🟢 All 4 nodes healthy (avg temp: 52°C)
+> 🟢 k3s: 23 pods running, 0 issues
+> 🟢 NAS: 2.1TB used / 4TB (52%), last scrub 3 days ago
+> 🟢 UPS: 100%, 45W load
+> 🟢 Network: 0 packet loss, 1ms gateway latency
+
+## Power Draw
+
+The entire rack, including OpenClaw:
+
+```
+MikroTik switch:     8W
+Pi 5 (OpenClaw):     5W
+Pi 5 (k3s x2):      10W
+Pi 5 (NAS):          7W
+Total:               ~30W
+
+Monthly cost: ~$3 electricity
+```
+
+A 30-watt homelab that monitors itself. Jeff would approve.

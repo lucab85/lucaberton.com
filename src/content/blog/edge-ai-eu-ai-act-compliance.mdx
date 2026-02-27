@@ -1,0 +1,196 @@
+---
+draft: false
+title: "Edge AI and the EU AI Act: Compliance Requirements for On-Device Intelligence"
+snippet: "The EU AI Act applies to edge AI too. Transparency, logging, and risk classification requirements for models running on devices outside the cloud."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Edge AI EU AI Act compliance" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - edge-ai
+  - eu-ai-act
+  - compliance
+  - regulation
+  - gdpr
+  - governance
+---
+
+## Edge AI Has a Compliance Problem
+
+Most edge AI teams think compliance is the cloud team's problem. It's not. The EU AI Act doesn't care where your model runs — if it processes data about EU citizens, it's in scope.
+
+And edge AI has unique compliance challenges that cloud deployments don't face.
+
+## EU AI Act Risk Classification at the Edge
+
+The AI Act classifies systems by risk level. Common edge AI use cases:
+
+```
+HIGH RISK:
+  - Safety components in machinery (quality inspection)
+  - Biometric identification (facial recognition)
+  - Critical infrastructure monitoring
+  - Worker management/surveillance
+
+LIMITED RISK:
+  - Chatbots/kiosks (transparency obligation)
+  - Emotion recognition systems
+  - Deep fakes / synthetic content
+
+MINIMAL RISK:
+  - Spam filters
+  - AI-powered search
+  - Recommendation systems
+```
+
+Most industrial edge AI falls into **high risk** because it's a safety component. That triggers the full compliance stack.
+
+## High-Risk Requirements Applied to Edge
+
+### 1. Risk Management System
+
+You need documented risk assessment for each edge deployment:
+
+```yaml
+# risk_assessment.yml - per deployment site
+deployment: factory-amsterdam-line-3
+system: defect-detection-v3.2
+risk_level: high
+classification_reason: "Safety component in industrial machinery"
+
+identified_risks:
+  - risk: "Model fails to detect critical defect"
+    severity: high
+    mitigation: "Dual-model ensemble, human backup inspector"
+    residual_risk: low
+
+  - risk: "Adversarial input causes false negative"
+    severity: medium
+    mitigation: "Input validation, confidence thresholds"
+    residual_risk: low
+
+  - risk: "Device failure halts production line"
+    severity: medium
+    mitigation: "Automatic fallback to manual mode"
+    residual_risk: low
+
+last_review: "2026-01-15"
+next_review: "2026-04-15"
+```
+
+### 2. Data Governance
+
+The AI Act requires documentation of training data. For edge models:
+
+- What data was used to train the model?
+- Were edge-collected images included in training? (consent implications)
+- How is training data quality verified?
+- Is there demographic bias in the training set?
+
+### 3. Technical Documentation
+
+Article 11 requires comprehensive technical docs. For edge systems, this includes:
+
+```markdown
+## Edge AI System Technical Documentation
+
+### Architecture
+- Model: YOLOv8-medium, quantized INT8
+- Hardware: NVIDIA Jetson Orin Nano
+- Inference latency: 12ms average
+- Deployment: containerized, K3s orchestration
+
+### Performance Metrics
+- Precision: 97.3% (on production validation set)
+- Recall: 98.1%
+- F1 Score: 97.7%
+- False negative rate: 1.9%
+
+### Limitations
+- Minimum illumination: 200 lux
+- Maximum line speed: 15 parts/second
+- Not validated for parts smaller than 5mm
+```
+
+### 4. Logging — The Edge Challenge
+
+Article 12 requires automatic logging of AI system operations. In the cloud, this is easy. At the edge, it's hard:
+
+```python
+import json
+import logging
+from datetime import datetime
+
+class ComplianceLogger:
+    """EU AI Act compliant logging for edge inference."""
+
+    def __init__(self, log_path='/var/log/ai-compliance/'):
+        self.logger = logging.getLogger('ai_compliance')
+        handler = logging.handlers.RotatingFileHandler(
+            f'{log_path}/inference.jsonl',
+            maxBytes=100_000_000,  # 100MB per file
+            backupCount=90  # 90 days retention
+        )
+        self.logger.addHandler(handler)
+
+    def log_inference(self, input_metadata, prediction, confidence):
+        # Log decision, NOT the raw input (GDPR)
+        record = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'model_version': '3.2',
+            'input_hash': hash_image(input_metadata),
+            'prediction': prediction,
+            'confidence': confidence,
+            'action_taken': 'reject' if prediction == 'defect' else 'pass',
+            'device_id': get_device_id(),
+            'human_override': False
+        }
+        self.logger.info(json.dumps(record))
+```
+
+Key constraint: you must log the decision and its basis, but **GDPR means you often can't log the raw input** (especially if it contains personal data like faces). Hash the input, log the metadata, store the decision.
+
+### 5. Human Oversight
+
+High-risk systems need human oversight mechanisms:
+
+```python
+# Automatic escalation to human reviewer
+if prediction.confidence < CONFIDENCE_THRESHOLD:
+    pause_production_line()
+    alert_human_inspector(
+        device=device_id,
+        image_ref=image_hash,
+        model_prediction=prediction,
+        reason="Low confidence — human review required"
+    )
+    # Log that human oversight was triggered
+    compliance_logger.log_escalation(image_hash, prediction)
+```
+
+## The GDPR × AI Act Intersection
+
+Edge AI often processes personal data (camera feeds with people). You now need:
+- AI Act compliance (transparency, logging, risk management)
+- GDPR compliance (lawful basis, data minimization, DPIA)
+
+**Data Protection Impact Assessment (DPIA)** is mandatory for any edge AI processing personal data. I recommend combining the AI Act risk assessment and GDPR DPIA into a single document to avoid duplication.
+
+## Practical Compliance Architecture
+
+```
+Edge Device
+  ├── Inference engine (model runs here)
+  ├── Compliance logger (local JSONL files)
+  ├── Log sync agent (encrypted upload to central)
+  └── Human oversight interface (local dashboard)
+
+Central Compliance Server
+  ├── Aggregated logs (90-day retention)
+  ├── Model registry (version tracking)
+  ├── Risk assessments (per deployment)
+  └── Audit trail (who deployed what, when)
+```
+
+The central server is your audit trail for regulators. The edge device handles the real-time compliance (logging, human oversight triggers). Design both from the start — retrofitting compliance onto a deployed edge fleet is a project nobody wants.

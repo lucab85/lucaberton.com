@@ -1,0 +1,218 @@
+---
+draft: false
+title: "DORA Compliance Automation with Ansible"
+snippet: "The EU Digital Operational Resilience Act requires financial institutions to prove ICT resilience. Here's how to automate DORA compliance checks and reporting with Ansible."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "DORA compliance Ansible" }
+category: "Automation"
+author: "Luca Berton"
+tags:
+  - dora
+  - compliance
+  - ansible
+  - automation
+  - financial-services
+  - regulation
+---
+
+## DORA Is Not Optional
+
+The Digital Operational Resilience Act (DORA) went into full effect in January 2025. Every financial institution in the EU — banks, insurers, payment processors, crypto providers — must demonstrate ICT risk management, incident reporting, resilience testing, and third-party risk management.
+
+The penalty for non-compliance? Up to 2% of annual worldwide turnover or €10 million.
+
+## What DORA Requires (Technical View)
+
+```
+Pillar 1: ICT Risk Management
+  → Asset inventory, vulnerability management, patch management
+
+Pillar 2: Incident Reporting
+  → Detection, classification, reporting within 4 hours
+
+Pillar 3: Resilience Testing
+  → Threat-led penetration testing (TLPT)
+  → Regular recovery testing
+
+Pillar 4: Third-Party Risk
+  → ICT service provider oversight
+  → Concentration risk assessment
+
+Pillar 5: Information Sharing
+  → Threat intelligence sharing (voluntary)
+```
+
+## Automating Pillar 1: ICT Risk Management
+
+### Asset Inventory
+
+```yaml
+# Ansible playbook: collect complete ICT asset inventory
+- name: DORA - ICT Asset Inventory
+  hosts: all
+  gather_facts: yes
+  tasks:
+    - name: Collect system information
+      setup:
+        gather_subset:
+          - hardware
+          - network
+          - virtual
+
+    - name: Collect installed packages
+      package_facts:
+        manager: auto
+
+    - name: Collect running services
+      service_facts:
+
+    - name: Collect container inventory
+      command: docker ps --format json
+      register: containers
+      ignore_errors: yes
+
+    - name: Collect Kubernetes workloads
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        namespace: "{{ item }}"
+      loop: "{{ k8s_namespaces }}"
+      register: k8s_workloads
+      when: "'k8s_nodes' in group_names"
+
+    - name: Generate asset report
+      template:
+        src: dora-asset-report.json.j2
+        dest: /tmp/dora-asset-{{ inventory_hostname }}.json
+
+    - name: Upload to compliance platform
+      uri:
+        url: "{{ compliance_api }}/assets"
+        method: POST
+        body_format: json
+        body: "{{ lookup('file', '/tmp/dora-asset-' + inventory_hostname + '.json') }}"
+```
+
+### Vulnerability Management
+
+```yaml
+- name: DORA - Vulnerability Scan and Remediation
+  hosts: all
+  tasks:
+    - name: Run vulnerability scan
+      command: >
+        trivy fs --scanners vuln
+        --format json
+        --output /tmp/vuln-report.json
+        /
+
+    - name: Parse critical vulnerabilities
+      set_fact:
+        critical_vulns: "{{ lookup('file', '/tmp/vuln-report.json') | from_json | json_query('Results[].Vulnerabilities[?Severity==`CRITICAL`]') | flatten }}"
+
+    - name: Alert on critical vulnerabilities
+      mail:
+        to: security@company.com
+        subject: "DORA Alert: {{ critical_vulns | length }} critical vulnerabilities on {{ inventory_hostname }}"
+        body: "{{ critical_vulns | to_nice_json }}"
+      when: critical_vulns | length > 0
+
+    - name: Auto-patch non-breaking updates
+      apt:
+        name: "{{ item.PkgName }}"
+        state: latest
+      loop: "{{ critical_vulns }}"
+      when:
+        - item.FixedVersion is defined
+        - auto_patch_enabled | default(false)
+```
+
+## Automating Pillar 3: Resilience Testing
+
+```yaml
+- name: DORA - Backup Recovery Test
+  hosts: database_servers
+  tasks:
+    - name: Create test backup
+      command: pg_dump -Fc {{ db_name }} -f /tmp/dora-test-backup.dump
+
+    - name: Restore to test instance
+      command: >
+        pg_restore -d {{ db_name }}_dora_test
+        -h {{ test_db_host }}
+        /tmp/dora-test-backup.dump
+
+    - name: Validate restored data
+      postgresql_query:
+        db: "{{ db_name }}_dora_test"
+        login_host: "{{ test_db_host }}"
+        query: "SELECT count(*) FROM {{ critical_table }}"
+      register: row_count
+
+    - name: Compare with production
+      postgresql_query:
+        db: "{{ db_name }}"
+        query: "SELECT count(*) FROM {{ critical_table }}"
+      register: prod_count
+
+    - name: Verify data integrity
+      assert:
+        that:
+          - row_count.query_result[0].count == prod_count.query_result[0].count
+        fail_msg: "Backup integrity check FAILED"
+        success_msg: "Backup integrity verified"
+
+    - name: Generate DORA test report
+      template:
+        src: dora-resilience-report.j2
+        dest: /var/log/dora/resilience-test-{{ ansible_date_time.date }}.json
+```
+
+## Scheduling Compliance Checks
+
+```yaml
+# Ansible Tower/AWX job templates
+# Scheduled via cron or Ansible Tower schedules
+
+Daily:   Asset inventory scan, vulnerability scan
+Weekly:  Patch compliance check, access review
+Monthly: Backup recovery test, failover test
+Quarterly: Full DORA compliance report generation
+Annually: TLPT coordination (manual + automated)
+```
+
+For the Kubernetes-specific DORA requirements — pod security, network segmentation, workload resilience — see [Kubernetes Recipes](https://kubernetes.recipes/). For Terraform-managed infrastructure compliance at [Terraform Pilot](https://www.terraformpilot.com/). Detailed Ansible patterns at [Ansible Pilot](https://www.ansiblepilot.com/) and [Ansible by Example](https://www.ansiblebyexample.com/).
+
+## The Compliance Dashboard
+
+Automate report generation so auditors get real-time visibility:
+
+```yaml
+- name: Generate DORA compliance dashboard data
+  hosts: localhost
+  tasks:
+    - name: Aggregate all compliance data
+      set_fact:
+        dora_report:
+          assessment_date: "{{ ansible_date_time.iso8601 }}"
+          asset_coverage: "{{ (scanned_hosts / total_hosts * 100) | round(1) }}%"
+          vulnerability_sla:
+            critical_mttr_hours: "{{ critical_mttr }}"
+            high_mttr_hours: "{{ high_mttr }}"
+            target: "Critical: 24h, High: 72h"
+          backup_tests:
+            last_test: "{{ last_backup_test }}"
+            result: "{{ backup_test_result }}"
+          patch_compliance: "{{ patched_hosts / total_hosts * 100 | round(1) }}%"
+
+    - name: Push to Grafana
+      uri:
+        url: "{{ grafana_api }}/api/annotations"
+        method: POST
+        body_format: json
+        body:
+          text: "DORA compliance scan completed"
+          tags: ["dora", "compliance"]
+```
+
+DORA compliance isn't a one-time project — it's a continuous process. Ansible makes it automated, repeatable, and auditable. Which is exactly what regulators want to see.

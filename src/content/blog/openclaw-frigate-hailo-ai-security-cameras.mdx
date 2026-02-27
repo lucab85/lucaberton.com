@@ -1,0 +1,124 @@
+---
+draft: false
+title: "OpenClaw + Frigate + Hailo: AI-Powered Home Security on a Raspberry Pi"
+snippet: "How I connected OpenClaw to Frigate NVR with a Hailo AI HAT for real-time object detection alerts. Get Discord notifications when someone's at your door — with AI that actually works."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "OpenClaw + Frigate + Hailo" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - frigate
+  - hailo
+  - raspberry-pi
+  - home-security
+  - ai-inference
+---
+
+## Why Frigate + OpenClaw
+
+I've been running Frigate NVR on a Raspberry Pi 5 for months. It's excellent at detecting people, cars, and packages with the Hailo-8L AI HAT doing object detection at 13 TOPS. But the notification system? Basic. I wanted something smarter.
+
+Enter OpenClaw. Instead of simple push notifications, I now have an AI agent that:
+- Analyzes Frigate events and decides what's worth alerting
+- Sends contextual Discord/WhatsApp messages ("Person at front door, carrying a package, 2:34 PM")
+- Responds to natural language queries ("Show me the last detection at the back gate")
+- Learns my patterns and reduces false alerts over time
+
+## The Setup
+
+Hardware:
+- Raspberry Pi 5 (8GB) — runs Frigate
+- Hailo-8L AI HAT — 13 TOPS neural network accelerator
+- Raspberry Pi 5 (4GB) — runs OpenClaw gateway
+- 2x PoE IP cameras (Amcrest 4K)
+
+```bash
+# On the Frigate Pi — docker-compose.yml
+services:
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:stable
+    container_name: frigate
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - ./config:/config
+      - /dev/bus/usb:/dev/bus/usb
+    ports:
+      - "5000:5000"
+      - "8554:8554"  # RTSP
+    environment:
+      - FRIGATE_RTSP_PASSWORD=changeme
+```
+
+## Connecting OpenClaw to Frigate
+
+Frigate publishes events via MQTT. I wrote a simple bridge that OpenClaw monitors:
+
+```yaml
+# openclaw.yaml — webhook configuration
+webhooks:
+  frigate:
+    url: http://frigate-pi:5000/api/events
+    poll_interval: 30s
+    
+# Or use MQTT directly
+mqtt:
+  broker: mqtt://frigate-pi:1883
+  topics:
+    - frigate/events
+```
+
+## The Smart Alert Logic
+
+Instead of getting 50 notifications a day for squirrels, OpenClaw filters intelligently:
+
+```yaml
+# In HEARTBEAT.md or a custom skill
+# Check Frigate events every 5 minutes
+# Only alert on: person, car, package
+# Ignore: cat, dog, bird (unless inside the house)
+# Group rapid-fire events (same object, <2 min apart)
+```
+
+When a person is detected at the front door, OpenClaw sends me:
+
+> 🚪 **Front Door — Person Detected**
+> Time: 2:34 PM | Confidence: 94%
+> Duration: 12 seconds
+> Note: Appears to be a delivery driver (package visible)
+
+## The Hailo Difference
+
+Without the Hailo HAT, Frigate runs object detection on the Pi's CPU at maybe 5 FPS with high latency. With Hailo:
+
+```
+Detection FPS: 30+
+Latency: <50ms
+CPU usage: 15% (vs 95% without Hailo)
+Power draw: ~8W total
+```
+
+The Pi barely breaks a sweat. This is genuinely impressive hardware for $70.
+
+## Voice Queries
+
+The best part? I can ask OpenClaw about my cameras:
+
+- "Any activity at the front door today?" → Gets a summary from Frigate's API
+- "How many cars parked in the driveway this week?" → Queries event database
+- "Show me the last 5 detections" → Returns thumbnail links
+
+## Cost Breakdown
+
+```
+Frigate Pi 5 (8GB):          $80
+Hailo-8L AI HAT:             $70
+OpenClaw Pi 5 (4GB):         $60
+2x Amcrest 4K PoE cameras:  $120
+PoE switch:                  $40
+Total:                       $370
+```
+
+Compare that to a Ring or Nest subscription — $100+/year, cloud-dependent, and they can see your footage. This setup is fully local, fully private, and way smarter with OpenClaw handling the brains.

@@ -1,0 +1,152 @@
+---
+draft: false
+title: "Edge AI Security: Protecting Models and Data on Untrusted Devices"
+snippet: "Your AI model is deployed on hardware you don't physically control. How do you prevent model theft, data tampering, and adversarial attacks at the edge?"
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Edge AI security" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - edge-ai
+  - security
+  - model-protection
+  - tpm
+  - encryption
+  - adversarial-attacks
+---
+
+## The Threat Model Changes at the Edge
+
+In the cloud, you control the hardware. At the edge, someone can physically unplug your device, clone the storage, and extract your model. The security assumptions are fundamentally different.
+
+I've audited edge AI deployments where the model — worth millions in R&D — was sitting unencrypted on an SD card. Let's fix that.
+
+## Threat 1: Model Theft
+
+Your trained model is intellectual property. At the edge, it's sitting on a device that might be in a public retail store or a partner's facility.
+
+### Mitigations
+
+**Encrypt the model at rest:**
+
+```python
+from cryptography.fernet import Fernet
+import os
+
+# Encrypt model before deployment
+key = Fernet.generate_key()
+cipher = Fernet(key)
+
+with open('model.onnx', 'rb') as f:
+    encrypted = cipher.encrypt(f.read())
+
+with open('model.onnx.enc', 'wb') as f:
+    f.write(encrypted)
+```
+
+**Store decryption keys in hardware TPM:**
+
+```bash
+# Use TPM2 to seal the decryption key
+tpm2_createprimary -C e -c primary.ctx
+tpm2_create -C primary.ctx -u key.pub -r key.priv \
+  -i model_key.bin
+tpm2_load -C primary.ctx -u key.pub -r key.priv -c key.ctx
+
+# Key is only accessible on THIS specific device
+```
+
+**Use NVIDIA's encrypted model loading** (Jetson):
+
+```
+# TensorRT encrypted engine
+trtexec --onnx=model.onnx --saveEngine=model.plan --encrypt
+```
+
+## Threat 2: Data Exfiltration
+
+Edge devices process sensitive data — security camera feeds, medical images, financial documents. A compromised device could exfiltrate this data.
+
+### Mitigations
+
+- **Process data in memory, never write to disk** — inference input goes in, prediction comes out, raw data is discarded
+- **Network egress filtering** — the device should only communicate with your cloud endpoints
+- **Encrypted channels only** — mTLS between edge and cloud
+
+```yaml
+# K3s NetworkPolicy — restrict egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: inference-egress
+spec:
+  podSelector:
+    matchLabels:
+      app: inference
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 10.0.0.0/8  # Internal only
+    ports:
+    - port: 443
+```
+
+## Threat 3: Adversarial Attacks
+
+Someone places a carefully crafted sticker on a product, and your defect detection model misses a real defect. Adversarial attacks at the edge are physical, not just digital.
+
+### Mitigations
+
+- **Input validation** — reject images that are statistically anomalous (brightness, contrast, noise levels outside expected ranges)
+- **Ensemble models** — two different architectures are harder to fool simultaneously
+- **Confidence thresholds** — if the model isn't confident, flag for human review
+
+```python
+prediction = model.predict(image)
+confidence = prediction.max()
+
+if confidence < 0.85:
+    # Low confidence — possible adversarial input
+    flag_for_review(image, prediction)
+    use_fallback_model(image)
+```
+
+## Threat 4: Device Tampering
+
+Physical access to the device means everything from JTAG debugging to replacing the firmware.
+
+### Mitigations
+
+- **Secure boot chain** — verify firmware integrity on every boot
+- **Tamper detection** — accelerometer-based tamper switches, case-open detection
+- **Remote attestation** — device proves its integrity to your cloud before receiving model updates
+
+```bash
+# Verify device integrity before pushing model update
+ATTESTATION=$(curl -s https://edge-device/attest)
+if verify_attestation "$ATTESTATION"; then
+    push_model_update edge-device model-v3.1.enc
+else
+    alert "Device attestation failed: $(hostname)"
+fi
+```
+
+## The Security Checklist
+
+For every edge AI deployment, I walk through this:
+
+1. ☐ Model encrypted at rest (TPM-sealed keys)
+2. ☐ Secure boot enabled
+3. ☐ Network egress restricted to known endpoints
+4. ☐ mTLS between edge and cloud
+5. ☐ No raw data persisted to disk
+6. ☐ Firmware update requires signed packages
+7. ☐ Remote attestation before model updates
+8. ☐ Confidence-based fallback for anomalous inputs
+9. ☐ Physical tamper detection (if applicable)
+10. ☐ Audit logging with tamper-evident storage
+
+Edge AI security isn't optional — it's the cost of deploying intelligence outside your perimeter. Get it right from the start, because retrofitting security onto deployed edge devices is a nightmare.

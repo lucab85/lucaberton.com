@@ -1,0 +1,130 @@
+---
+draft: false
+title: "OpenClaw Agent for Grafana and Prometheus Alerting"
+snippet: "Replace PagerDuty with OpenClaw. Get intelligent alerts from Prometheus/Grafana through Discord or WhatsApp, with AI-powered analysis and auto-remediation suggestions."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "OpenClaw Agent for Grafana and Prometheus Alerting" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - grafana
+  - prometheus
+  - monitoring
+  - alerting
+  - devops
+---
+
+## Why AI-Powered Alerting
+
+Traditional alerting is noisy. Prometheus fires alerts, Alertmanager routes them, and you get 47 messages at 3 AM because a disk is at 81%. OpenClaw adds intelligence: it analyzes alerts, correlates events, and only wakes you up when it matters.
+
+## Architecture
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────┐
+│  Prometheus  │────▶│ Alertmanager │────▶│  OpenClaw    │
+│  (metrics)   │     │  (routing)   │     │  (analysis)  │
+└──────────────┘     └──────────────┘     └──────────────┘
+       ▲                                        │
+┌──────┴───────┐                          Discord/WhatsApp
+│   Grafana    │                          (smart alerts)
+│  (dashboards)│
+└──────────────┘
+```
+
+## Setting Up the Webhook
+
+Configure Alertmanager to send to OpenClaw:
+
+```yaml
+# alertmanager.yml
+receivers:
+  - name: 'openclaw'
+    webhook_configs:
+      - url: 'http://openclaw-pi:3000/api/webhook'
+        send_resolved: true
+
+route:
+  receiver: 'openclaw'
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+```
+
+## Smart Alert Processing
+
+When OpenClaw receives a Prometheus alert, it doesn't just forward it. It:
+
+1. **Checks severity** — critical alerts wake you up, warnings wait for morning
+2. **Correlates** — "disk full" + "backup running" = expected, don't alert
+3. **Suggests fixes** — "Node memory at 95%. Top process: java (elasticsearch). Consider increasing heap or adding a node."
+4. **Tracks trends** — "This is the 3rd time this week node-2 has high CPU. Might need a hardware upgrade."
+
+## Example Alerts
+
+**Raw Prometheus alert:**
+```json
+{"labels":{"alertname":"HighMemoryUsage","instance":"node-2:9100","severity":"warning"},"annotations":{"summary":"Memory usage above 90%","value":"93.2%"}}
+```
+
+**What OpenClaw sends:**
+> ⚠️ **node-2: Memory at 93%**
+> Top consumers: elasticsearch (4.2GB), prometheus (1.8GB), grafana (600MB)
+> Trend: Memory has been climbing 2% per day since Monday.
+> Suggestion: Elasticsearch heap is undersized. Consider `ES_JAVA_OPTS=-Xms4g -Xmx4g`
+> This is a warning — I'll escalate if it hits 97%.
+
+## Grafana Integration
+
+OpenClaw can also query Grafana dashboards on demand:
+
+**"How's the cluster doing?"**
+```bash
+# OpenClaw queries Grafana API
+GET /api/datasources/proxy/1/api/v1/query?query=up
+
+# Response
+All 4 nodes reporting. CPU avg: 23%. Memory avg: 61%. 
+Network: 2.4 Gbps aggregate throughput. No anomalies.
+```
+
+**"Show me the CPU graph for the last hour"**
+```bash
+# OpenClaw fetches a Grafana rendered panel
+GET /render/d-solo/abc123/cluster?panelId=2&from=now-1h&to=now&width=800&height=400
+```
+
+## Auto-Remediation
+
+For known issues, OpenClaw can fix things automatically:
+
+```yaml
+# Auto-remediation rules (in OpenClaw skill)
+rules:
+  - alert: DiskSpaceLow
+    condition: disk_usage > 90%
+    action: |
+      1. Find and delete files in /tmp older than 7 days
+      2. Clear docker image cache
+      3. Report what was cleaned and new disk usage
+    
+  - alert: PodCrashLooping
+    condition: restart_count > 5
+    action: |
+      1. Collect pod logs (last 50 lines)
+      2. Analyze error pattern
+      3. If OOMKilled: suggest memory limit increase
+      4. If CrashBackOff: report logs for human review
+```
+
+## Cost Comparison
+
+```
+PagerDuty:          $21/user/month
+Opsgenie:           $9/user/month
+OpenClaw + Pi:      $10/month (Copilot Pro)
+```
+
+Plus OpenClaw does way more than just alerting — it's your full AI assistant that also handles monitoring.

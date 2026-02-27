@@ -1,0 +1,218 @@
+---
+draft: false
+title: "Multi-Cloud Terraform Patterns That Aren't a Nightmare"
+snippet: "Multi-cloud Terraform is notorious for complexity. Here are the patterns that keep it manageable: shared modules, provider abstraction, and workspace strategies."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Multi-cloud Terraform patterns" }
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - terraform
+  - multi-cloud
+  - iac
+  - aws
+  - gcp
+  - azure
+---
+
+## The Multi-Cloud Reality
+
+Nobody chooses multi-cloud. It happens to you. An acquisition brings GCP. A client requires Azure. Your ML team needs AWS SageMaker. Suddenly you're managing infrastructure across three clouds.
+
+The question isn't whether multi-cloud is a good idea — it's how to survive it.
+
+## Pattern 1: Provider-Agnostic Modules
+
+Abstract cloud differences behind a consistent interface:
+
+```hcl
+# modules/database/main.tf
+variable "provider" {
+  type = string
+  validation {
+    condition     = contains(["aws", "gcp", "azure"], var.provider)
+    error_message = "Provider must be aws, gcp, or azure"
+  }
+}
+
+variable "config" {
+  type = object({
+    name           = string
+    engine         = string
+    engine_version = string
+    instance_size  = string
+    storage_gb     = number
+    multi_az       = bool
+  })
+}
+
+module "aws_rds" {
+  source = "./aws"
+  count  = var.provider == "aws" ? 1 : 0
+  config = var.config
+}
+
+module "gcp_cloudsql" {
+  source = "./gcp"
+  count  = var.provider == "gcp" ? 1 : 0
+  config = var.config
+}
+
+module "azure_flexible" {
+  source = "./azure"
+  count  = var.provider == "azure" ? 1 : 0
+  config = var.config
+}
+
+output "connection_string" {
+  value = coalesce(
+    try(module.aws_rds[0].connection_string, ""),
+    try(module.gcp_cloudsql[0].connection_string, ""),
+    try(module.azure_flexible[0].connection_string, "")
+  )
+}
+```
+
+Usage:
+
+```hcl
+module "payments_db" {
+  source   = "./modules/database"
+  provider = "aws"
+  config = {
+    name           = "payments"
+    engine         = "postgres"
+    engine_version = "16"
+    instance_size  = "medium"
+    storage_gb     = 100
+    multi_az       = true
+  }
+}
+```
+
+Same interface, any cloud. I maintain a library of these at [Terraform Pilot](https://www.terraformpilot.com/).
+
+## Pattern 2: Repository Structure
+
+```
+terraform/
+├── modules/              # Reusable, provider-agnostic
+│   ├── database/
+│   ├── kubernetes/
+│   ├── networking/
+│   └── monitoring/
+├── environments/
+│   ├── production/
+│   │   ├── aws-eu/       # AWS eu-west-1
+│   │   │   ├── main.tf
+│   │   │   ├── variables.tf
+│   │   │   └── terraform.tfvars
+│   │   ├── gcp-eu/       # GCP europe-west4
+│   │   └── azure-eu/     # Azure westeurope
+│   ├── staging/
+│   └── dev/
+└── shared/               # Cross-cloud resources
+    ├── dns/              # Route53/Cloud DNS
+    ├── monitoring/       # Datadog/Grafana Cloud
+    └── iam/              # Cross-cloud identity
+```
+
+## Pattern 3: State Management
+
+```hcl
+# Per-cloud, per-environment state
+# AWS environments → S3 backend
+terraform {
+  backend "s3" {
+    bucket         = "terraform-state-prod"
+    key            = "aws-eu/terraform.tfstate"
+    region         = "eu-west-1"
+    dynamodb_table = "terraform-locks"
+    encrypt        = true
+  }
+}
+
+# GCP environments → GCS backend
+terraform {
+  backend "gcs" {
+    bucket = "terraform-state-prod-gcp"
+    prefix = "gcp-eu"
+  }
+}
+```
+
+**Never share state across clouds.** Each cloud environment gets its own state file. Cross-cloud references use data sources or remote state:
+
+```hcl
+# In GCP config, reference AWS outputs
+data "terraform_remote_state" "aws" {
+  backend = "s3"
+  config = {
+    bucket = "terraform-state-prod"
+    key    = "aws-eu/terraform.tfstate"
+    region = "eu-west-1"
+  }
+}
+
+# Use AWS VPN endpoint in GCP
+resource "google_compute_vpn_tunnel" "to_aws" {
+  peer_ip = data.terraform_remote_state.aws.outputs.vpn_endpoint_ip
+}
+```
+
+## Pattern 4: Size Mapping
+
+Cloud instance sizes don't map 1:1. Abstract them:
+
+```hcl
+locals {
+  size_map = {
+    small = {
+      aws   = "t3.small"
+      gcp   = "e2-small"
+      azure = "Standard_B1ms"
+    }
+    medium = {
+      aws   = "t3.medium"
+      gcp   = "e2-medium"
+      azure = "Standard_B2s"
+    }
+    large = {
+      aws   = "m6i.xlarge"
+      gcp   = "n2-standard-4"
+      azure = "Standard_D4s_v5"
+    }
+  }
+
+  actual_size = local.size_map[var.instance_size][var.provider]
+}
+```
+
+## Anti-Patterns
+
+1. **Lowest common denominator** — Don't avoid cloud-specific features. Use them, but abstract the interface.
+2. **One mega-module** — Don't create a god module that handles every cloud. Keep modules focused.
+3. **Copy-paste across clouds** — Use the module pattern above. Duplicated code drifts.
+4. **Managing all clouds from one CI pipeline** — Separate pipelines per cloud. A GCP change shouldn't risk AWS.
+
+## Automating Multi-Cloud with Ansible
+
+Terraform handles provisioning. Ansible handles configuration. Together they're powerful for multi-cloud:
+
+```yaml
+# Ansible inventory from Terraform outputs
+- name: Configure databases across clouds
+  hosts: databases
+  tasks:
+    - name: Apply security hardening
+      include_role:
+        name: database-hardening
+      # Same role works on RDS, CloudSQL, and Azure Flexible
+```
+
+I detail the Ansible + Terraform integration at [Ansible Pilot](https://www.ansiblepilot.com/) and maintain ready-to-use Terraform modules at [Terraform Pilot](https://www.terraformpilot.com/).
+
+## The Honest Truth
+
+Multi-cloud doubles your operational complexity. Don't do it unless you have a business reason. But when you must, these patterns keep it manageable. The key: standardize the interface, not the implementation.

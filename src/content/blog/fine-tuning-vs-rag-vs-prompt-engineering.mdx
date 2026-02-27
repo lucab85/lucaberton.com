@@ -1,0 +1,160 @@
+---
+draft: false
+title: "Fine-Tuning vs RAG vs Prompt Engineering: The Decision Framework"
+snippet: "When should you fine-tune a model, build a RAG pipeline, or just write a better prompt? A practical decision framework based on cost, accuracy, and maintenance."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Fine-tuning vs RAG vs prompting" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - fine-tuning
+  - rag
+  - prompt-engineering
+  - llm
+  - ai-strategy
+  - decision-framework
+---
+
+## The Most Common AI Architecture Question
+
+"Should we fine-tune, build RAG, or just prompt better?" I get asked this in every AI consulting engagement. The answer depends on your data, your budget, and your accuracy requirements.
+
+## The Quick Decision Tree
+
+```
+Is your knowledge in public documentation?
+  YES → Use Context7 or similar. Done.
+  NO ↓
+
+Does the knowledge change frequently (weekly+)?
+  YES → RAG
+  NO ↓
+
+Do you need the model to behave differently (tone, format, domain expertise)?
+  YES → Fine-tuning
+  NO ↓
+
+Is accuracy critical (>95% required)?
+  YES → RAG + fine-tuning (hybrid)
+  NO → Prompt engineering
+```
+
+## Detailed Comparison
+
+### Prompt Engineering
+
+**What it is:** Crafting system prompts, few-shot examples, and structured instructions.
+
+**Best for:**
+- General-purpose tasks
+- Prototyping and MVPs
+- Tasks where the base model already knows the domain
+
+**Cost:** $0 upfront, pay-per-token at inference
+
+**Example:**
+```python
+SYSTEM_PROMPT = """You are a Kubernetes troubleshooting assistant.
+When diagnosing issues:
+1. Check the pod status first
+2. Review events and logs
+3. Suggest the most likely root cause
+4. Provide the exact kubectl command to fix it
+
+Format: use markdown with code blocks for commands."""
+```
+
+**Limitation:** Context window is finite. You can't stuff an entire knowledge base into a prompt.
+
+### RAG (Retrieval-Augmented Generation)
+
+**What it is:** Retrieve relevant documents at query time and include them in the prompt.
+
+**Best for:**
+- Large, frequently updated knowledge bases
+- When you need citations/sources
+- Compliance requirements (traceable answers)
+
+**Cost:** Vector DB hosting ($50-500/month), embedding costs, engineering time
+
+**Architecture:**
+```python
+async def rag_query(question):
+    # 1. Embed the question
+    query_embedding = await embed(question)
+
+    # 2. Retrieve relevant chunks
+    chunks = await vector_db.search(query_embedding, top_k=5)
+
+    # 3. Build context
+    context = "\n\n".join([c.text for c in chunks])
+
+    # 4. Generate answer with context
+    response = await llm.generate(
+        system="Answer based on the provided context. Cite sources.",
+        user=f"Context:\n{context}\n\nQuestion: {question}"
+    )
+    return response, chunks  # Return sources for transparency
+```
+
+I manage the infrastructure for these pipelines using Ansible — automating the vector DB deployment, embedding service, and retrieval API. See [Ansible Pilot](https://www.ansiblepilot.com/) for the infrastructure-as-code patterns.
+
+### Fine-Tuning
+
+**What it is:** Training the model on your specific data to change its behavior permanently.
+
+**Best for:**
+- Domain-specific language (legal, medical, financial)
+- Consistent output format
+- Reducing token usage (fine-tuned models need shorter prompts)
+- When RAG retrieval quality is insufficient
+
+**Cost:** $50-5,000 per training run, requires labeled data
+
+**Example (OpenAI fine-tuning format):**
+```jsonl
+{"messages": [{"role": "system", "content": "You are a K8s expert."}, {"role": "user", "content": "Pod stuck in CrashLoopBackOff"}, {"role": "assistant", "content": "Check the container logs with `kubectl logs <pod> --previous`. Common causes: 1) Application crash on startup..."}]}
+{"messages": [{"role": "system", "content": "You are a K8s expert."}, {"role": "user", "content": "ImagePullBackOff error"}, {"role": "assistant", "content": "The cluster can't pull the container image. Verify: 1) Image name and tag are correct..."}]}
+```
+
+## The Hybrid Approach (What I Actually Recommend)
+
+In practice, the best production systems combine all three:
+
+```
+Layer 1: Fine-tuned base model
+  → Knows your domain, speaks your language
+
+Layer 2: RAG for dynamic knowledge
+  → Retrieves current documentation, tickets, runbooks
+
+Layer 3: Prompt engineering for task-specific behavior
+  → Structures output format, enforces constraints
+```
+
+For Kubernetes-related AI assistants, I've found that a fine-tuned model + RAG over the latest K8s docs (via [Kubernetes Recipes](https://kubernetes.recipes/)) + structured prompts delivers the best results.
+
+## Cost Comparison (Annual, 10K Queries/Day)
+
+```
+                    Prompt Only    RAG           Fine-Tune     Hybrid
+Upfront             $0            $5,000        $2,000        $7,000
+Monthly infra       $0            $300          $0            $300
+Token cost/month    $1,200        $800          $600          $500
+Annual total        $14,400       $16,100       $9,200        $13,600
+Accuracy            75-85%        85-92%        88-93%        93-97%
+Maintenance         Low           Medium        Low           Medium
+```
+
+The hybrid approach costs slightly more than fine-tuning alone but delivers significantly better accuracy. For enterprise clients where accuracy matters, it's the right trade-off.
+
+## When to Start Simple
+
+My advice: **always start with prompt engineering.** Build the MVP, measure accuracy, identify failure cases. Only then decide:
+
+- Failures due to missing knowledge → Add RAG
+- Failures due to wrong behavior/format → Add fine-tuning
+- Failures due to outdated library docs → Add Context7
+
+Don't over-engineer from day one. Let the failure modes guide your architecture.

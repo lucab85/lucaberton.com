@@ -1,0 +1,185 @@
+---
+draft: false
+title: "Ansible + AI: Using LLMs to Generate and Validate Playbooks"
+snippet: "LLMs can write Ansible playbooks, but should you trust them? Here's how to use AI for playbook generation with proper validation, linting, and safety guardrails."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Ansible AI playbook generation" }
+category: "Automation"
+author: "Luca Berton"
+tags:
+  - ansible
+  - ai
+  - llm
+  - automation
+  - playbook-generation
+  - devops
+---
+
+## The Promise and the Peril
+
+"Write me an Ansible playbook to harden SSH on RHEL 9." GPT-4o generates something plausible in 5 seconds. But is it correct? Is it safe? Will it lock you out of your servers?
+
+I've been using AI for Ansible development for over a year. Here's what works, what doesn't, and the validation pipeline that makes it safe.
+
+## What AI Does Well
+
+### Boilerplate Generation
+
+AI excels at generating the structure you'd write anyway:
+
+```
+Prompt: "Create an Ansible role for deploying PostgreSQL 16 on Ubuntu 24.04 
+with replication, SSL, and automated backups"
+
+Result: Complete role with tasks/main.yml, handlers, defaults, templates 
+for postgresql.conf and pg_hba.conf, backup cron job
+```
+
+This saves 30-60 minutes of scaffolding. The structure is usually correct. The details need review.
+
+### Module Discovery
+
+```
+Prompt: "What Ansible module handles AWS Secrets Manager?"
+
+AI: "community.aws.secretsmanager_secret — here's an example..."
+```
+
+Faster than searching docs. But verify the module exists in your collection version — AI often suggests modules from different versions.
+
+### Error Diagnosis
+
+```
+Prompt: "This playbook fails with 'msg: Unsupported parameters for 
+(ansible.builtin.apt) module: update-cache'. Why?"
+
+AI: "The parameter is 'update_cache' (underscore), not 'update-cache' (hyphen)"
+```
+
+AI is excellent at catching common Ansible gotchas.
+
+## What AI Gets Wrong
+
+### Deprecated Modules
+
+AI frequently suggests:
+- `command` instead of `ansible.builtin.command` (FQCN)
+- `apt_key` (deprecated) instead of signed-by in apt repository
+- `docker_container` instead of `community.docker.docker_container`
+
+### Security Anti-Patterns
+
+```yaml
+# AI-generated — NEVER do this
+- name: Set root password
+  user:
+    name: root
+    password: "{{ 'mysecretpassword' | password_hash('sha512') }}"
+
+# The password is in plaintext in the playbook!
+```
+
+### Idempotency Violations
+
+AI loves `shell` and `command` modules. These aren't idempotent by default:
+
+```yaml
+# AI-generated — not idempotent
+- name: Create user
+  command: useradd -m -s /bin/bash appuser
+
+# Correct — idempotent
+- name: Create user
+  ansible.builtin.user:
+    name: appuser
+    shell: /bin/bash
+    create_home: yes
+```
+
+## The Validation Pipeline
+
+Never deploy AI-generated playbooks without this pipeline:
+
+```yaml
+# .gitlab-ci.yml
+stages:
+  - lint
+  - test
+  - deploy
+
+ansible-lint:
+  stage: lint
+  image: cytopia/ansible-lint:latest
+  script:
+    - ansible-lint playbook.yml --strict
+    - yamllint playbook.yml
+
+molecule-test:
+  stage: test
+  image: molecule-docker:latest
+  script:
+    - cd roles/my-role
+    - molecule test
+
+check-mode:
+  stage: test
+  script:
+    - ansible-playbook playbook.yml --check --diff
+  environment:
+    name: staging
+```
+
+### Custom Validation Rules
+
+```python
+# custom_rules/no_plaintext_secrets.py
+from ansiblelint.rules import AnsibleLintRule
+
+class NoPlaintextSecrets(AnsibleLintRule):
+    id = "custom-001"
+    shortdesc = "No plaintext secrets in playbooks"
+    description = "Passwords and tokens must use ansible-vault or lookup"
+
+    def matchtask(self, task):
+        for key in ['password', 'token', 'secret', 'api_key']:
+            value = str(task.get('action', {}).get(key, ''))
+            if value and not value.startswith('{{'):
+                return True
+        return False
+```
+
+## My AI-Assisted Ansible Workflow
+
+```
+1. Describe what I need to the LLM
+2. Use Context7 to feed current Ansible docs (avoids deprecated modules)
+3. AI generates the playbook/role
+4. I review for security issues and idempotency
+5. ansible-lint catches syntax and best practice issues
+6. Molecule tests verify actual behavior
+7. --check --diff on staging shows what would change
+8. Deploy to production with confidence
+```
+
+The AI saves me 50% of the writing time. The validation pipeline ensures the other 50% — correctness — is guaranteed.
+
+## Red Hat Ansible Lightspeed
+
+Red Hat's official AI for Ansible, powered by IBM watsonx. After using it for a year:
+
+**Pros:**
+- Trained specifically on Ansible, fewer deprecated module suggestions
+- VS Code integration is smooth
+- Understands role structure and generates complete tasks
+
+**Cons:**
+- Suggestions are conservative (safer, but less creative)
+- Doesn't know your custom roles/collections
+- Still needs review — it's a copilot, not an autopilot
+
+## The Bottom Line
+
+AI makes Ansible development faster, not easier. You still need to understand what the playbook does, why each task exists, and what could go wrong. The difference: instead of writing 200 lines from scratch, you review and refine 200 AI-generated lines.
+
+For Ansible best practices, patterns, and deep-dive tutorials, see [Ansible Pilot](https://www.ansiblepilot.com/) and [Ansible by Example](https://www.ansiblebyexample.com/). Learn the fundamentals first — AI amplifies your knowledge, it doesn't replace it.

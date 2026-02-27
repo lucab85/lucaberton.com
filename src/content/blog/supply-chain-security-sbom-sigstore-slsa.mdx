@@ -1,0 +1,170 @@
+---
+draft: false
+title: "Supply Chain Security: SBOMs, Sigstore, and SLSA in Practice"
+snippet: "Software supply chain attacks are surging. Here's how to implement SBOMs, container signing with Sigstore, and SLSA compliance in your CI/CD pipeline."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Supply chain security SBOM Sigstore" }
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - supply-chain-security
+  - sbom
+  - sigstore
+  - slsa
+  - cicd
+  - security
+---
+
+## The Attack Surface You're Ignoring
+
+SolarWinds. Log4Shell. Codecov. The xz backdoor. Supply chain attacks aren't theoretical — they're the #1 vector for sophisticated attackers. You audit your code but trust 400 npm packages blindly.
+
+Time to fix that.
+
+## Layer 1: SBOMs (Know What You're Running)
+
+A Software Bill of Materials lists every component in your software. The [EU Cyber Resilience Act](https://lucaberton.com/blog/eu-cra-sbom-requirements-compliance/) makes SBOMs mandatory for products sold in the EU.
+
+### Generate SBOMs in CI
+
+```yaml
+# GitLab CI
+generate-sbom:
+  stage: security
+  image: anchore/syft:latest
+  script:
+    # Source code SBOM
+    - syft dir:. -o spdx-json > sbom-source.spdx.json
+
+    # Container image SBOM
+    - syft $DOCKER_REGISTRY:$CI_COMMIT_SHA -o cyclonedx-json > sbom-container.cdx.json
+
+    # Upload as artifacts
+  artifacts:
+    paths:
+      - sbom-source.spdx.json
+      - sbom-container.cdx.json
+```
+
+### Scan SBOMs for Vulnerabilities
+
+```bash
+# Grype scans SBOMs, not just images
+grype sbom:sbom-container.cdx.json --fail-on high
+```
+
+## Layer 2: Container Signing with Sigstore
+
+Sign your container images so consumers can verify they came from your pipeline, not an attacker:
+
+```yaml
+# GitLab CI - sign with cosign (Sigstore)
+sign-image:
+  stage: security
+  image: gcr.io/projectsigstore/cosign:v2
+  script:
+    # Keyless signing (uses OIDC identity from CI)
+    - cosign sign --yes $DOCKER_REGISTRY:$CI_COMMIT_SHA
+
+    # Attach SBOM as attestation
+    - cosign attest --yes
+        --predicate sbom-container.cdx.json
+        --type cyclonedx
+        $DOCKER_REGISTRY:$CI_COMMIT_SHA
+```
+
+Verify before deploying:
+
+```bash
+# In your Kubernetes admission controller
+cosign verify $DOCKER_REGISTRY:$CI_COMMIT_SHA \
+  --certificate-identity-regexp=".*@yourcompany.com" \
+  --certificate-oidc-issuer="https://gitlab.com"
+```
+
+### Kubernetes Policy Enforcement
+
+```yaml
+# Kyverno policy: only allow signed images
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-signed-images
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: verify-signature
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+      verifyImages:
+        - imageReferences: ["registry.yourcompany.com/*"]
+          attestors:
+            - entries:
+                - keyless:
+                    subject: "*@yourcompany.com"
+                    issuer: "https://gitlab.com"
+```
+
+I detail Kubernetes admission control patterns at [Kubernetes Recipes](https://kubernetes.recipes/).
+
+## Layer 3: SLSA (Provenance)
+
+SLSA (Supply-chain Levels for Software Artifacts) provides provenance — a cryptographic record of how an artifact was built:
+
+```
+SLSA Level 1: Documentation of the build process
+SLSA Level 2: Tamper-resistant build service
+SLSA Level 3: Hardened build platform
+SLSA Level 4: Two-person review + hermetic builds
+```
+
+Most organizations should target SLSA Level 2-3:
+
+```yaml
+# Generate SLSA provenance in GitLab CI
+provenance:
+  stage: security
+  image: slsa-framework/slsa-github-generator
+  script:
+    - slsa-provenance generate
+        --artifact $DOCKER_REGISTRY:$CI_COMMIT_SHA
+        --output provenance.jsonl
+    - cosign attest --yes
+        --predicate provenance.jsonl
+        --type slsaprovenance
+        $DOCKER_REGISTRY:$CI_COMMIT_SHA
+```
+
+## Automating Across the Fleet
+
+For organizations with dozens of repositories, I use Ansible to standardize CI templates and security tooling:
+
+```yaml
+# Ansible playbook to roll out supply chain security
+- name: Enable supply chain security across repos
+  hosts: gitlab_runners
+  roles:
+    - role: cosign-setup
+    - role: syft-install
+    - role: grype-install
+  tasks:
+    - name: Deploy CI template with SBOM + signing
+      template:
+        src: secure-ci-template.yml.j2
+        dest: /etc/gitlab-runner/templates/secure-pipeline.yml
+```
+
+I cover the Ansible automation patterns at [Ansible Pilot](https://www.ansiblepilot.com/) and the Terraform-based infrastructure for signing services at [Terraform Pilot](https://www.terraformpilot.com/).
+
+## The Minimum Viable Supply Chain Security
+
+Start here:
+1. **Generate SBOMs** for every build (1 hour to add)
+2. **Scan dependencies** with Grype/Trivy in CI (30 minutes)
+3. **Sign container images** with Cosign keyless (2 hours)
+4. **Enforce signatures** in Kubernetes with Kyverno (half a day)
+
+Total effort: 1-2 days. The alternative — explaining to regulators why you didn't know about a compromised dependency — costs significantly more.

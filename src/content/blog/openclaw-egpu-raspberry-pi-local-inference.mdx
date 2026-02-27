@@ -1,0 +1,120 @@
+---
+draft: false
+title: "External GPU on Raspberry Pi 5 for Local LLM Inference with OpenClaw"
+snippet: "I attached an AMD GPU to a Raspberry Pi 5 via PCIe and ran local LLM inference for OpenClaw. Here's what worked, what didn't, and whether it's worth it."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "External GPU on Raspberry Pi 5 for Local LLM Inference with OpenClaw" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - openclaw
+  - egpu
+  - raspberry-pi
+  - amd
+  - local-inference
+  - pcie
+---
+
+## The Dream: GPU-Accelerated AI on a Pi
+
+Jeff Geerling proved that external GPUs work on Raspberry Pi 5 via the PCIe slot. AMD cards, Intel Arc, even NVIDIA (with effort). But can you actually run LLM inference on a Pi-attached GPU? I tested it with OpenClaw.
+
+## Hardware
+
+```
+- Raspberry Pi 5 (8GB)
+- PCIe to x16 adapter (via M.2 HAT)
+- AMD Radeon RX 6400 (4GB VRAM)
+- Powered PCIe riser + ATX PSU
+- Total cost: ~$200 (Pi + GPU + adapters)
+```
+
+## Getting the GPU Working
+
+Follow Jeff's guide for AMD GPU setup on Pi OS:
+
+```bash
+# Enable PCIe Gen 3
+echo "dtparam=pciex1_gen=3" | sudo tee -a /boot/firmware/config.txt
+sudo reboot
+
+# Verify GPU is detected
+lspci | grep -i vga
+# 01:00.0 VGA compatible controller: AMD/ATI Navi 24 [Radeon RX 6400]
+
+# Install ROCm (AMD's GPU compute stack)
+# Note: ARM64 ROCm support is experimental
+wget https://repo.radeon.com/rocm/apt/latest/pool/main/r/rocm-hip-runtime/...
+```
+
+## The Challenge: ROCm on ARM64
+
+Here's where reality hits. ROCm's ARM64 support is limited. llama.cpp's ROCm backend expects x86_64. You need to compile from source with the right flags:
+
+```bash
+git clone https://github.com/ggerganov/llama.cpp
+cd llama.cpp
+cmake -B build -DGGML_HIPBLAS=ON -DCMAKE_C_COMPILER=hipcc
+cmake --build build --config Release
+```
+
+This may or may not work depending on your ROCm version and the GPU generation. The RX 6400 is gfx1032 — not always officially supported.
+
+## What Actually Worked
+
+After significant effort, I got llama.cpp running with partial GPU offload:
+
+```bash
+./build/bin/llama-server \
+  -m models/phi-3-mini-4k-instruct-q4_0.gguf \
+  -ngl 20 \  # Offload 20 layers to GPU
+  -c 2048 \
+  --port 8080
+```
+
+Performance with 4GB VRAM RX 6400:
+```
+Phi-3 3.8B (Q4_0):
+  CPU only (Pi 5):    4.5 tok/s
+  GPU offload (20L):  7.2 tok/s  (+60%)
+  Full GPU:           Not possible (4GB VRAM too small)
+
+Mistral 7B (Q4_0):
+  CPU only:           2.1 tok/s
+  GPU offload (15L):  3.8 tok/s  (+80%)
+```
+
+## Connecting to OpenClaw
+
+```yaml
+# openclaw.yaml
+providers:
+  local-gpu:
+    type: openai-compatible
+    baseUrl: http://localhost:8080/v1
+
+models:
+  default: github-copilot/gpt-5-mini
+  local: local-gpu/phi-3-mini
+```
+
+## Is It Worth It?
+
+**Honestly? No.** Here's why:
+
+1. **$200 for 7 tok/s** — GPT-5-mini gives 50+ tok/s for $10/month
+2. **Power draw** — the GPU alone uses 50W. The Pi uses 5W
+3. **Complexity** — ROCm on ARM64 is fragile, updates break things
+4. **Quality** — Phi-3 at Q4 can't match GPT-5-mini for tool calling
+
+**But it's cool as hell.** And when AMD releases a 16GB card in the $150 range, and ROCm ARM64 matures, this setup will actually be practical.
+
+## The Better Option (Today)
+
+For the same $200:
+- Raspberry Pi 5 (8GB): $80
+- 2 years of Copilot Pro: $120
+- Result: 50+ tok/s, state-of-the-art quality, zero maintenance
+
+The eGPU-on-Pi experiment is a glimpse of the future. But the future isn't quite here yet.

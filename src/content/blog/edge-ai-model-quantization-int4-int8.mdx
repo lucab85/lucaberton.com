@@ -1,0 +1,161 @@
+---
+draft: false
+title: "Model Quantization for Edge AI: INT4, INT8, and When Accuracy Actually Drops"
+snippet: "Quantizing models for edge deployment isn't free. Here's when INT4 and INT8 quantization works, when it doesn't, and how to measure the accuracy trade-off."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Model quantization edge AI" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - edge-ai
+  - quantization
+  - model-optimization
+  - int8
+  - int4
+  - deployment
+---
+
+## The Quantization Promise
+
+"Just quantize your model to INT8 and deploy it on edge hardware." I hear this weekly. And it's true — mostly. But "mostly" can mean a 2% accuracy drop that costs a manufacturing client $50K/month in missed defects.
+
+Let's talk about when quantization works, when it breaks, and how to know the difference.
+
+## What Quantization Does
+
+Neural network weights are stored as 32-bit floating point numbers (FP32). Quantization reduces precision:
+
+```
+FP32  → 32 bits per weight → Baseline accuracy
+FP16  → 16 bits per weight → ~0% accuracy loss, 2× smaller
+INT8  → 8 bits per weight  → 0-2% accuracy loss, 4× smaller
+INT4  → 4 bits per weight  → 1-5% accuracy loss, 8× smaller
+```
+
+Smaller models = faster inference + less memory + lower power. The question is always: how much accuracy do you lose?
+
+## Post-Training Quantization (PTQ)
+
+The simplest approach. Take a trained FP32 model, convert weights to INT8:
+
+```python
+import torch
+from torch.quantization import quantize_dynamic
+
+# Load your FP32 model
+model = torch.load('model_fp32.pth')
+
+# Dynamic quantization (CPU inference)
+quantized_model = quantize_dynamic(
+    model,
+    {torch.nn.Linear},  # Which layers to quantize
+    dtype=torch.qint8
+)
+
+# Save — 4x smaller
+torch.save(quantized_model.state_dict(), 'model_int8.pth')
+```
+
+For ONNX models (recommended for edge):
+
+```python
+from onnxruntime.quantization import quantize_dynamic, QuantType
+
+quantize_dynamic(
+    'model.onnx',
+    'model_int8.onnx',
+    weight_type=QuantType.QInt8
+)
+```
+
+### When PTQ Works Well
+- Classification models (ResNet, EfficientNet)
+- Object detection (YOLO, SSD)
+- Simple NLP (sentiment analysis, classification)
+- Models with >10M parameters
+
+### When PTQ Breaks
+- Small models (<1M parameters) — not enough redundancy
+- Regression tasks — subtle numerical precision matters
+- Models with outlier weights — a few extreme values distort the quantization range
+
+## Quantization-Aware Training (QAT)
+
+When PTQ accuracy drops too much, train with quantization in the loop:
+
+```python
+import torch.quantization as quant
+
+# Prepare model for QAT
+model.train()
+model.qconfig = quant.get_default_qat_qconfig('fbgemm')
+quant.prepare_qat(model, inplace=True)
+
+# Fine-tune for a few epochs with quantization simulation
+for epoch in range(5):
+    for batch in train_loader:
+        output = model(batch)
+        loss = criterion(output, labels)
+        loss.backward()
+        optimizer.step()
+
+# Convert to actual quantized model
+model.eval()
+quantized_model = quant.convert(model)
+```
+
+QAT recovers 50-80% of the accuracy lost by PTQ. It's more work but essential for precision-critical edge deployments.
+
+## INT4: The Frontier
+
+INT4 quantization is aggressive. Each weight gets only 16 possible values. For LLMs, it's surprisingly effective:
+
+```
+Llama 3.2 3B:
+  FP16:  5.9 perplexity,  6.0 GB
+  INT8:  6.0 perplexity,  3.0 GB  (+0.1 perplexity)
+  INT4:  6.4 perplexity,  1.8 GB  (+0.5 perplexity)
+```
+
+For vision models, INT4 is riskier:
+
+```
+YOLOv8-medium (COCO mAP):
+  FP16:  50.2 mAP
+  INT8:  49.8 mAP  (-0.4)
+  INT4:  47.1 mAP  (-3.1)  ← noticeable in production
+```
+
+## My Quantization Decision Framework
+
+```
+Start with INT8 PTQ
+  ↓
+Measure accuracy on YOUR validation set (not public benchmarks)
+  ↓
+Accuracy drop < 1%? → Ship it
+  ↓
+Accuracy drop 1-3%? → Try QAT, then re-measure
+  ↓
+Accuracy drop > 3%? → Stay at FP16, get bigger hardware
+  ↓
+Need INT4? → Only for LLMs. For vision, use INT8 + pruning instead
+```
+
+## The Validation Trap
+
+Public benchmark accuracy ≠ your production accuracy. I've seen models that lose 0.5% on ImageNet lose 4% on the client's specific product images. Always validate on production-representative data.
+
+Build a validation pipeline:
+
+```bash
+# Run inference on 1000 production images with both models
+python validate.py --model model_fp16.onnx --data prod_val/ > fp16_results.json
+python validate.py --model model_int8.onnx --data prod_val/ > int8_results.json
+python compare.py fp16_results.json int8_results.json
+```
+
+If the accuracy delta is acceptable, ship the quantized model. If not, you have the data to explain why you need better hardware.
+
+Quantization is a tool, not a magic wand. Use it wisely.

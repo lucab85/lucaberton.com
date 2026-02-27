@@ -1,0 +1,235 @@
+---
+draft: false
+title: "Event-Driven Ansible for Automated Incident Response"
+snippet: "Stop waking humans for alerts that can be auto-remediated. Event-Driven Ansible (EDA) watches for events and triggers playbooks automatically — here's how to set it up."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Event-Driven Ansible EDA" }
+category: "Automation"
+author: "Luca Berton"
+tags:
+  - ansible
+  - eda
+  - event-driven
+  - incident-response
+  - automation
+  - sre
+---
+
+## The 3 AM Alert Problem
+
+PagerDuty fires. Disk usage on prod-db-01 hit 90%. An SRE wakes up, SSHs in, cleans up old logs, and goes back to sleep. The exact same alert, the exact same fix, for the third time this month.
+
+Event-Driven Ansible (EDA) eliminates this. The event fires, EDA catches it, runs the remediation playbook, and the SRE sleeps through the night.
+
+## How EDA Works
+
+```
+Event Source → EDA Controller → Rule Match → Action (Playbook)
+
+Examples:
+  Prometheus alert → EDA → disk_cleanup.yml
+  Kafka message   → EDA → scale_deployment.yml
+  Webhook         → EDA → security_response.yml
+```
+
+## Setting Up EDA
+
+### Install
+
+```bash
+pip install ansible-rulebook ansible-runner
+
+# Or via container
+podman run -it --rm \
+  -v ./rulebooks:/rulebooks \
+  -v ./playbooks:/playbooks \
+  quay.io/ansible/ansible-rulebook:latest
+```
+
+### Your First Rulebook
+
+```yaml
+# rulebooks/disk-cleanup.yml
+---
+- name: Auto-remediate disk space alerts
+  hosts: all
+  sources:
+    - ansible.eda.alertmanager:
+        host: 0.0.0.0
+        port: 5000
+
+  rules:
+    - name: Disk space critical
+      condition: event.alerts[0].labels.alertname == "DiskSpaceCritical"
+      action:
+        run_playbook:
+          name: playbooks/disk-cleanup.yml
+          extra_vars:
+            target_host: "{{ event.alerts[0].labels.instance }}"
+            mount_point: "{{ event.alerts[0].labels.mountpoint }}"
+
+    - name: Pod CrashLoopBackOff
+      condition: event.alerts[0].labels.alertname == "PodCrashLooping"
+      action:
+        run_playbook:
+          name: playbooks/pod-restart.yml
+          extra_vars:
+            namespace: "{{ event.alerts[0].labels.namespace }}"
+            pod: "{{ event.alerts[0].labels.pod }}"
+```
+
+### The Remediation Playbook
+
+```yaml
+# playbooks/disk-cleanup.yml
+---
+- name: Clean up disk space
+  hosts: "{{ target_host }}"
+  become: yes
+  tasks:
+    - name: Get current disk usage
+      command: df -h {{ mount_point }}
+      register: disk_before
+
+    - name: Clean old logs (>7 days)
+      find:
+        paths: /var/log
+        age: 7d
+        recurse: yes
+        file_type: file
+      register: old_logs
+
+    - name: Remove old logs
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_logs.files }}"
+      when: old_logs.files | length > 0
+
+    - name: Clean package cache
+      apt:
+        autoclean: yes
+        autoremove: yes
+
+    - name: Clean old journal logs
+      command: journalctl --vacuum-time=3d
+
+    - name: Get disk usage after cleanup
+      command: df -h {{ mount_point }}
+      register: disk_after
+
+    - name: Notify Slack
+      uri:
+        url: "{{ slack_webhook }}"
+        method: POST
+        body_format: json
+        body:
+          text: |
+            ✅ Auto-remediated disk space on {{ target_host }}
+            Before: {{ disk_before.stdout_lines[1] }}
+            After: {{ disk_after.stdout_lines[1] }}
+            Cleaned: {{ old_logs.files | length }} old log files
+```
+
+## Common Auto-Remediation Patterns
+
+### SSL Certificate Renewal
+
+```yaml
+- name: Certificate expiring
+  condition: event.alerts[0].labels.alertname == "SSLCertExpiring"
+  action:
+    run_playbook:
+      name: playbooks/renew-cert.yml
+```
+
+### Kubernetes Node Not Ready
+
+```yaml
+- name: Node NotReady
+  condition: event.alerts[0].labels.alertname == "KubeNodeNotReady"
+  action:
+    run_playbook:
+      name: playbooks/node-recovery.yml
+```
+
+### Security: Suspicious Login
+
+```yaml
+- name: Brute force detected
+  condition: event.alerts[0].labels.alertname == "SSHBruteForce"
+  action:
+    run_playbook:
+      name: playbooks/block-ip.yml
+      extra_vars:
+        source_ip: "{{ event.alerts[0].labels.source_ip }}"
+```
+
+## Safety Guardrails
+
+Auto-remediation without guardrails is dangerous. Always include:
+
+```yaml
+# In every remediation playbook
+- name: Safety checks
+  block:
+    - name: Check this host isn't in maintenance
+      uri:
+        url: "{{ cmdb_api }}/hosts/{{ inventory_hostname }}/status"
+      register: host_status
+      failed_when: host_status.json.status == "maintenance"
+
+    - name: Check remediation hasn't run in last hour
+      stat:
+        path: "/tmp/eda-lock-{{ ansible_play_name }}"
+      register: lock_file
+
+    - name: Skip if recently remediated
+      fail:
+        msg: "Remediation already ran recently — escalating to human"
+      when: lock_file.stat.exists and (ansible_date_time.epoch | int - lock_file.stat.mtime | int) < 3600
+
+    - name: Create lock file
+      file:
+        path: "/tmp/eda-lock-{{ ansible_play_name }}"
+        state: touch
+```
+
+## Integration with Kubernetes Monitoring
+
+EDA pairs perfectly with the Prometheus/Alertmanager stack I detail at [Kubernetes Recipes](https://kubernetes.recipes/):
+
+```yaml
+# Alertmanager config — route alerts to EDA
+route:
+  receiver: eda
+  routes:
+    - match:
+        auto_remediate: "true"
+      receiver: eda
+
+receivers:
+  - name: eda
+    webhook_configs:
+      - url: http://eda-controller:5000/endpoint
+```
+
+Only alerts tagged `auto_remediate: "true"` go to EDA. Everything else goes to PagerDuty as usual. Start small, prove value, expand gradually.
+
+For comprehensive Ansible automation patterns, see [Ansible Pilot](https://www.ansiblepilot.com/) and step-by-step examples at [Ansible by Example](https://www.ansiblebyexample.com/).
+
+## The ROI
+
+```
+Before EDA:
+  15 auto-remediable alerts/week × 30 min/alert × $80/hr = $600/week
+
+After EDA:
+  15 alerts auto-resolved in seconds = $0/week
+  Setup cost: 2 days of engineering
+
+Payback period: 5 days
+```
+
+Let humans handle novel problems. Let EDA handle the repeatable ones.

@@ -1,0 +1,252 @@
+---
+draft: false
+title: "Network Automation with Ansible for 5G Infrastructure"
+snippet: "5G networks are software-defined and API-driven — perfect for Ansible automation. How to manage network functions, slicing, and infrastructure at telecom scale."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Network automation Ansible 5G" }
+category: "Automation"
+author: "Luca Berton"
+tags:
+  - ansible
+  - network-automation
+  - "5g"
+  - telecom
+  - nfv
+  - infrastructure
+---
+
+## 5G Is Software — Automate It Like Software
+
+5G disaggregated the network. What was once proprietary hardware is now software running on commodity servers. Core network functions (AMF, SMF, UPF) are containers on Kubernetes. RAN is increasingly virtualized.
+
+This means Ansible can manage your 5G infrastructure the same way it manages your cloud workloads.
+
+## The 5G Stack
+
+```
+Radio Access Network (RAN)
+  ├── O-RAN components (CU, DU, RU)
+  └── Near-RT RIC (control apps)
+
+Core Network (5GC)
+  ├── AMF (Access and Mobility)
+  ├── SMF (Session Management)
+  ├── UPF (User Plane Function)
+  ├── NRF (Network Repository)
+  └── NSSF (Network Slice Selection)
+
+Transport
+  ├── Fronthaul (RU ↔ DU)
+  ├── Midhaul (DU ↔ CU)
+  └── Backhaul (CU ↔ Core)
+
+MEC (Multi-access Edge Computing)
+  └── Edge applications (AI inference, caching)
+```
+
+All of these are configurable via APIs, CLIs, or Kubernetes manifests — all automatable with Ansible.
+
+## Automating Network Function Deployment
+
+### Core Network on Kubernetes
+
+```yaml
+- name: Deploy 5G Core Network Functions
+  hosts: k8s_core_clusters
+  vars:
+    core_version: "2.1.0"
+    namespace: 5gc-production
+
+  tasks:
+    - name: Create 5GC namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ namespace }}"
+            labels:
+              network-function: "true"
+              slice: default
+
+    - name: Deploy AMF
+      kubernetes.core.helm:
+        name: amf
+        chart_ref: oci://registry.internal/5gc/amf
+        chart_version: "{{ core_version }}"
+        release_namespace: "{{ namespace }}"
+        values:
+          replicas: 3
+          resources:
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          config:
+            plmn: "20401"
+            tac: "0001"
+            sst: 1
+
+    - name: Deploy SMF
+      kubernetes.core.helm:
+        name: smf
+        chart_ref: oci://registry.internal/5gc/smf
+        chart_version: "{{ core_version }}"
+        release_namespace: "{{ namespace }}"
+        values:
+          upf_endpoints:
+            - name: upf-central
+              address: "10.100.1.10"
+            - name: upf-edge-ams
+              address: "10.100.2.10"
+
+    - name: Deploy UPF (central)
+      kubernetes.core.helm:
+        name: upf-central
+        chart_ref: oci://registry.internal/5gc/upf
+        chart_version: "{{ core_version }}"
+        release_namespace: "{{ namespace }}"
+        values:
+          dataplane:
+            driver: dpdk
+            interfaces:
+              n3: "ens1f0"
+              n6: "ens1f1"
+```
+
+### Network Slice Provisioning
+
+```yaml
+- name: Provision network slice
+  hosts: nssf_servers
+  vars:
+    slice:
+      name: "enterprise-iot"
+      sst: 1    # eMBB
+      sd: "010203"
+      max_devices: 10000
+      guaranteed_bandwidth_mbps: 100
+      max_latency_ms: 20
+
+  tasks:
+    - name: Configure slice in NSSF
+      uri:
+        url: "https://{{ nssf_host }}/nnssf-nsselection/v1/slices"
+        method: POST
+        body_format: json
+        body:
+          snssai:
+            sst: "{{ slice.sst }}"
+            sd: "{{ slice.sd }}"
+          nsiId: "{{ slice.name }}"
+          qos:
+            guaranteedBandwidth: "{{ slice.guaranteed_bandwidth_mbps }}"
+            maxLatency: "{{ slice.max_latency_ms }}"
+        headers:
+          Authorization: "Bearer {{ nssf_token }}"
+      register: slice_result
+
+    - name: Configure UPF for new slice
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: "upf-slice-{{ slice.name }}"
+            namespace: 5gc-production
+          data:
+            slice.json: |
+              {
+                "sst": {{ slice.sst }},
+                "sd": "{{ slice.sd }}",
+                "qfi": 9,
+                "qos_profile": {
+                  "5qi": 8,
+                  "arp": {"priority": 1}
+                }
+              }
+      notify: restart upf
+```
+
+## RAN Automation
+
+```yaml
+- name: Configure O-RAN Distributed Units
+  hosts: du_servers
+  tasks:
+    - name: Deploy DU container
+      containers.podman.podman_container:
+        name: oran-du
+        image: registry.internal/oran/du:{{ ran_version }}
+        state: started
+        network: host
+        privileged: true  # Required for DPDK/real-time
+        cpuset_cpus: "4-11"  # Isolated cores for real-time
+        env:
+          DU_CONFIG: "/config/du-config.json"
+          FRONTHAUL_INTERFACE: "{{ fronthaul_nic }}"
+        volumes:
+          - "/etc/oran/du-config.json:/config/du-config.json:ro"
+          - "/dev/hugepages:/dev/hugepages"
+
+    - name: Verify DU registration with CU
+      uri:
+        url: "https://{{ cu_host }}/o-ran/v1/du-status/{{ du_id }}"
+      register: du_status
+      retries: 10
+      delay: 30
+      until: du_status.json.state == "CONNECTED"
+```
+
+## Fleet Management at Telecom Scale
+
+Telecom networks have thousands of nodes. Ansible's inventory and grouping shine here:
+
+```ini
+# inventory/telecom.ini
+[core:children]
+core_amsterdam
+core_frankfurt
+
+[core_amsterdam]
+core-ams-01 role=amf
+core-ams-02 role=smf
+core-ams-03 role=upf
+
+[edge:children]
+edge_amsterdam
+edge_rotterdam
+edge_berlin
+
+[edge_amsterdam]
+edge-ams-01 site_id=AMS001 du_count=3
+edge-ams-02 site_id=AMS002 du_count=5
+
+[du:children]
+du_amsterdam
+du_rotterdam
+
+[du_amsterdam]
+du-ams-001 through du-ams-050
+
+[all:vars]
+ansible_user=netops
+ran_version=3.2.0
+core_version=2.1.0
+```
+
+For the Kubernetes infrastructure underlying 5G core, see [Kubernetes Recipes](https://kubernetes.recipes/). For Terraform-managed cloud and edge infrastructure at [Terraform Pilot](https://www.terraformpilot.com/). Comprehensive Ansible patterns at [Ansible Pilot](https://www.ansiblepilot.com/) and [Ansible by Example](https://www.ansiblebyexample.com/).
+
+## The Telecom Automation Maturity Model
+
+```
+Level 0: Manual CLI configuration
+Level 1: Ansible playbooks for common tasks
+Level 2: GitOps — all config in Git, applied via CI/CD
+Level 3: Event-driven — EDA auto-remediates network events
+Level 4: Intent-based — declare desired state, automation figures out how
+```
+
+Most telecoms are at Level 0-1. The opportunity for automation is massive. Ansible is the bridge from manual operations to fully automated network management.

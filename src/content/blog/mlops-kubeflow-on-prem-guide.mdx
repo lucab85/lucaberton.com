@@ -1,0 +1,217 @@
+---
+draft: false
+title: "MLOps Pipelines with Kubeflow On-Prem: A Practical Guide"
+snippet: "Not every ML pipeline belongs in the cloud. Here's how to deploy Kubeflow on-premises for regulated industries that need data sovereignty and cost control."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Kubeflow on-prem MLOps" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - mlops
+  - kubeflow
+  - kubernetes
+  - on-premises
+  - machine-learning
+  - pipelines
+---
+
+## Why On-Prem MLOps?
+
+"Just use SageMaker" doesn't work when:
+- Patient data can't leave the hospital network (HIPAA/GDPR)
+- Defense workloads require air-gapped environments
+- GPU cloud costs at scale exceed hardware ownership
+- Your 50TB training dataset costs $5K/month just for cloud storage egress
+
+Kubeflow on Kubernetes gives you SageMaker-class ML infrastructure on hardware you control.
+
+## Architecture
+
+```
+On-Prem Kubernetes Cluster
+├── Kubeflow Central Dashboard
+├── Kubeflow Pipelines (orchestration)
+├── KServe (model serving)
+├── Katib (hyperparameter tuning)
+├── Training Operator (distributed training)
+├── MinIO (artifact storage)
+├── MySQL (metadata store)
+└── GPU Nodes (NVIDIA A100/H100)
+```
+
+## Installation with Kustomize
+
+```bash
+# Clone Kubeflow manifests
+git clone https://github.com/kubeflow/manifests.git
+cd manifests
+
+# Install everything
+while ! kustomize build example | kubectl apply -f -; do
+  echo "Retrying..."
+  sleep 10
+done
+```
+
+For production, customize the installation:
+
+```yaml
+# kustomization.yaml — production overrides
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - github.com/kubeflow/manifests//common/cert-manager
+  - github.com/kubeflow/manifests//common/istio
+  - github.com/kubeflow/manifests//apps/pipeline
+  - github.com/kubeflow/manifests//apps/kserve
+  - github.com/kubeflow/manifests//apps/training-operator
+  - github.com/kubeflow/manifests//apps/katib
+
+patches:
+  - path: patches/minio-pvc.yaml     # Use real storage, not emptyDir
+  - path: patches/mysql-ha.yaml      # HA MySQL for metadata
+  - path: patches/gpu-nodepool.yaml   # GPU scheduling config
+```
+
+## Building an ML Pipeline
+
+```python
+from kfp import dsl, compiler
+
+@dsl.component(base_image="python:3.12")
+def preprocess_data(input_path: str, output_path: dsl.OutputPath()):
+    import pandas as pd
+    df = pd.read_parquet(input_path)
+    df = df.dropna().reset_index(drop=True)
+    # Feature engineering...
+    df.to_parquet(output_path)
+
+@dsl.component(base_image="pytorch/pytorch:2.5-cuda12.4")
+def train_model(data_path: str, model_path: dsl.OutputPath(), epochs: int = 10):
+    import torch
+    # Training loop...
+    torch.save(model.state_dict(), model_path)
+
+@dsl.component(base_image="python:3.12")
+def evaluate_model(model_path: str, test_data: str) -> float:
+    # Evaluation...
+    return accuracy
+
+@dsl.component
+def deploy_model(model_path: str, accuracy: float):
+    if accuracy > 0.95:
+        # Deploy to KServe
+        pass
+
+@dsl.pipeline(name="training-pipeline")
+def ml_pipeline(data_path: str):
+    preprocess = preprocess_data(input_path=data_path)
+    train = train_model(data_path=preprocess.output, epochs=20)
+    evaluate = evaluate_model(
+        model_path=train.output,
+        test_data=data_path
+    )
+    deploy_model(
+        model_path=train.output,
+        accuracy=evaluate.output
+    )
+
+compiler.Compiler().compile(ml_pipeline, "pipeline.yaml")
+```
+
+## GPU Management
+
+```yaml
+# NVIDIA GPU Operator for Kubernetes
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-training
+spec:
+  containers:
+    - name: trainer
+      image: registry.internal/ml-trainer:v2
+      resources:
+        limits:
+          nvidia.com/gpu: 4  # Request 4 GPUs
+      env:
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0,1,2,3"
+  nodeSelector:
+    nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+```
+
+For multi-GPU distributed training:
+
+```yaml
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: distributed-training
+spec:
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      template:
+        spec:
+          containers:
+            - name: trainer
+              image: registry.internal/trainer:v2
+              resources:
+                limits:
+                  nvidia.com/gpu: 4
+    Worker:
+      replicas: 3
+      template:
+        spec:
+          containers:
+            - name: trainer
+              image: registry.internal/trainer:v2
+              resources:
+                limits:
+                  nvidia.com/gpu: 4
+```
+
+## Infrastructure Automation
+
+I deploy the entire Kubeflow stack with Ansible:
+
+```yaml
+- name: Deploy Kubeflow on-prem
+  hosts: k8s_ml_cluster
+  roles:
+    - role: nvidia-gpu-operator
+    - role: minio-ha
+    - role: mysql-ha
+    - role: kubeflow
+      vars:
+        kubeflow_version: "1.9"
+        storage_class: ceph-block
+        gpu_scheduling: exclusive
+```
+
+Kubernetes cluster provisioning at [Kubernetes Recipes](https://kubernetes.recipes/). Ansible automation at [Ansible Pilot](https://www.ansiblepilot.com/). Infrastructure provisioning with Terraform at [Terraform Pilot](https://www.terraformpilot.com/).
+
+## On-Prem vs Cloud Cost (3-Year TCO)
+
+```
+Workload: 8 GPUs, continuous training + serving
+
+Cloud (AWS p4d.24xlarge):
+  On-demand: $32.77/hr × 8,760h × 3yr = $861,000
+  Reserved: $19.22/hr × 8,760h × 3yr  = $505,000
+
+On-Prem (8× A100 server):
+  Hardware: $250,000
+  Colocation: $2,000/mo × 36mo = $72,000
+  Power: $1,500/mo × 36mo = $54,000
+  Ops (0.5 FTE): $75,000/yr × 3 = $225,000
+  Total: $601,000
+```
+
+On-prem wins at sustained high utilization. Cloud wins for bursty workloads. Hybrid (on-prem base + cloud burst) is often optimal.
+
+## The Regulated Industry Advantage
+
+For healthcare, defense, and financial services, on-prem MLOps isn't just about cost — it's about compliance. Data never leaves your network, model provenance is fully auditable, and you control the entire stack. Kubeflow makes this enterprise-grade without building everything from scratch.

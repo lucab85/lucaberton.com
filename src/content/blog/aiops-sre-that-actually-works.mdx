@@ -1,0 +1,200 @@
+---
+draft: false
+title: "AI-Powered SRE: AIOps That Actually Works in 2026"
+snippet: "Most AIOps tools overpromise. Here's what actually works for SRE teams: intelligent alerting, automated root cause analysis, and AI-assisted incident response."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "AIOps SRE" }
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - aiops
+  - sre
+  - monitoring
+  - incident-response
+  - automation
+  - observability
+---
+
+## The AIOps Hype vs Reality
+
+The AIOps pitch: "AI will detect anomalies, correlate alerts, find root causes, and auto-remediate — all while you sleep." The reality in 2024: expensive tools that generate more noise than signal.
+
+But 2026 is different. LLMs changed what's possible. Here's what actually works now.
+
+## What Works: Intelligent Alert Correlation
+
+The #1 SRE pain point: alert fatigue. A single database slowdown triggers 47 alerts across 12 services. AI can correlate them:
+
+```python
+class AlertCorrelator:
+    def __init__(self):
+        self.llm = LLMClient()
+        self.window = timedelta(minutes=5)
+
+    async def correlate(self, alerts: list[Alert]) -> list[Incident]:
+        # Group temporally related alerts
+        groups = self.temporal_grouping(alerts, self.window)
+
+        incidents = []
+        for group in groups:
+            # Use LLM to find the likely root cause
+            context = self.build_context(group)
+            analysis = await self.llm.generate(
+                system="""You are an SRE analyzing correlated alerts.
+                Identify the most likely root cause and affected service.
+                Output JSON: {"root_cause": "...", "primary_service": "...",
+                "confidence": 0.0-1.0, "summary": "..."}""",
+                user=f"Alerts (last 5 min):\n{context}"
+            )
+
+            incidents.append(Incident(
+                alerts=group,
+                analysis=json.loads(analysis),
+                severity=max(a.severity for a in group)
+            ))
+
+        return incidents
+```
+
+Instead of 47 alerts, the on-call gets one incident: "Database connection pool exhausted on payments-db, causing cascading timeouts in 8 downstream services."
+
+## What Works: AI Root Cause Analysis
+
+When an incident occurs, AI can analyze logs, metrics, and traces to suggest root causes:
+
+```python
+async def analyze_incident(incident):
+    # Gather context
+    metrics = await prometheus.query_range(
+        f'rate(http_errors_total{{service="{incident.service}"}}[5m])',
+        start=incident.start - timedelta(minutes=30),
+        end=incident.start + timedelta(minutes=10)
+    )
+
+    logs = await loki.query(
+        f'{{service="{incident.service}"}} |= "error" | json',
+        start=incident.start - timedelta(minutes=5),
+        limit=100
+    )
+
+    recent_deploys = await argocd.get_recent_syncs(
+        service=incident.service,
+        since=timedelta(hours=2)
+    )
+
+    # AI analysis
+    analysis = await llm.generate(
+        system="""Analyze this production incident. Consider:
+        1. Recent deployments as potential cause
+        2. Error patterns in logs
+        3. Metric anomalies
+        4. Correlation with other services
+        Provide: root cause hypothesis, confidence level, suggested fix.""",
+        user=f"""
+        Service: {incident.service}
+        Error rate spike: {metrics.summary()}
+        Recent deployments: {json.dumps(recent_deploys)}
+        Error logs (sample):
+        {format_logs(logs[:20])}
+        """
+    )
+
+    return analysis
+```
+
+## What Works: Runbook Automation with LLMs
+
+Traditional runbooks are static documents. AI makes them interactive:
+
+```python
+class AIRunbook:
+    def __init__(self, runbook_path):
+        self.steps = load_runbook(runbook_path)
+        self.llm = LLMClient()
+
+    async def execute(self, incident):
+        results = []
+        for step in self.steps:
+            # Execute diagnostic command
+            output = await execute_safely(step.command, incident.context)
+
+            # AI interprets the result
+            interpretation = await self.llm.generate(
+                system="Interpret this diagnostic output. Is this the problem? What should we do next?",
+                user=f"Step: {step.description}\nCommand: {step.command}\nOutput:\n{output}"
+            )
+
+            results.append({
+                'step': step.description,
+                'output': output,
+                'interpretation': interpretation
+            })
+
+            if "root cause found" in interpretation.lower():
+                # AI suggests remediation
+                remediation = await self.suggest_remediation(results)
+                return remediation
+
+        return results
+```
+
+## What Doesn't Work (Yet)
+
+- **Fully autonomous remediation** — AI can suggest fixes, but humans should approve for critical systems
+- **Predicting incidents before they happen** — anomaly detection has too many false positives
+- **Replacing on-call engineers** — AI assists, it doesn't replace judgment
+
+## The Practical AIOps Stack
+
+```
+Data Layer:
+  Prometheus + Loki + Tempo (metrics, logs, traces)
+
+AI Layer:
+  Alert correlator (LLM-based)
+  Root cause analyzer (LLM + context)
+  Interactive runbooks (LLM + safe execution)
+
+Automation Layer:
+  Event-Driven Ansible (auto-remediation for known issues)
+  PagerDuty/Opsgenie (escalation for unknown issues)
+
+Human Layer:
+  On-call engineer (final decision maker)
+  AI assistant in Slack (query metrics, run diagnostics)
+```
+
+For the monitoring infrastructure, see [Kubernetes Recipes](https://kubernetes.recipes/). For Event-Driven Ansible remediation patterns, see [Ansible Pilot](https://www.ansiblepilot.com/).
+
+## Building an AI SRE Assistant
+
+The highest-ROI AIOps investment: a Slack bot that answers questions about your infrastructure:
+
+```
+Engineer: "@sre-bot why is payments-api slow?"
+
+Bot: "Analyzing... payments-api P95 latency increased from 45ms to 
+     890ms at 14:23 UTC. Correlating with:
+     - payments-db CPU spiked to 94% at 14:22
+     - Slow query detected: SELECT * FROM transactions WHERE... 
+       (missing index on created_at)
+     - No recent deployments
+     
+     Root cause: Missing database index causing full table scan.
+     Suggested fix: CREATE INDEX idx_transactions_created_at ON 
+     transactions(created_at);
+     
+     Confidence: 85%. Want me to run this on staging first?"
+```
+
+This is achievable today with OpenTelemetry data + an LLM + proper context engineering. Not science fiction — engineering.
+
+## Start Small
+
+1. **Week 1:** Build alert correlation (group related alerts)
+2. **Week 2:** Add AI root cause suggestions to incident channels
+3. **Week 3:** Create an AI Slack bot for infrastructure queries
+4. **Week 4:** Automate the top 3 most common remediation actions with EDA
+
+The goal isn't to replace SREs. It's to give them superpowers.

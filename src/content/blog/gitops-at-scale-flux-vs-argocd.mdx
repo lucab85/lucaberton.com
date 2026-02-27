@@ -1,0 +1,154 @@
+---
+draft: false
+title: "GitOps at Scale: Flux vs ArgoCD for 50+ Kubernetes Clusters"
+snippet: "Managing GitOps across dozens of clusters gets complicated fast. Comparing Flux and ArgoCD architectures, multi-tenancy patterns, and what breaks at scale."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "GitOps Flux ArgoCD scale" }
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - gitops
+  - flux
+  - argocd
+  - kubernetes
+  - multi-cluster
+  - scale
+---
+
+## GitOps Is Easy. GitOps at Scale Is Hard.
+
+One cluster, one repo, one ArgoCD instance — straightforward. But when you manage 50+ clusters across dev, staging, production, and multiple regions? That's where GitOps tooling gets tested.
+
+I've deployed both Flux and ArgoCD at enterprise scale. Here's the honest comparison.
+
+## Architecture Comparison
+
+### ArgoCD: Hub-and-Spoke
+
+```
+ArgoCD (management cluster)
+  ├── Cluster: prod-eu-west
+  ├── Cluster: prod-us-east
+  ├── Cluster: staging
+  ├── Cluster: dev-1
+  └── ... 50+ clusters
+```
+
+Single ArgoCD instance manages all clusters. Great visibility, single pane of glass. But it's a single point of failure and a scaling bottleneck.
+
+### Flux: Per-Cluster
+
+```
+Flux runs IN each cluster
+  ├── prod-eu-west: Flux → Git repo
+  ├── prod-us-east: Flux → Git repo
+  ├── staging: Flux → Git repo
+  └── dev-1: Flux → Git repo
+```
+
+Each cluster has its own Flux controllers. No central dependency. But no single dashboard out of the box.
+
+## Decision Matrix
+
+```
+Criteria                 ArgoCD           Flux
+UI/Dashboard             Excellent        None (needs Weave GitOps)
+Multi-cluster            Hub-spoke        Per-cluster
+RBAC                     Built-in SSO     Kubernetes native
+Helm support             Via plugin       Native
+Kustomize                Native           Native
+Scalability              ~100 clusters    Unlimited
+Single point of failure  Yes (mgmt)       No
+Resource footprint       Heavy            Lightweight
+Learning curve           Moderate         Steeper
+ApplicationSets          Yes (powerful)   N/A (Kustomization)
+```
+
+## ArgoCD at Scale: ApplicationSets
+
+The killer feature for multi-cluster ArgoCD:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: platform-services
+spec:
+  generators:
+    - clusters:
+        selector:
+          matchLabels:
+            env: production
+  template:
+    metadata:
+      name: '{{name}}-platform'
+    spec:
+      project: platform
+      source:
+        repoURL: https://gitlab.com/platform/manifests
+        targetRevision: main
+        path: 'clusters/{{name}}'
+      destination:
+        server: '{{server}}'
+        namespace: platform
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: true
+```
+
+One ApplicationSet generates an Application for every production cluster. Add a new cluster, label it `env: production`, and it automatically gets all platform services.
+
+## Flux at Scale: Kustomization Hierarchy
+
+```yaml
+# fleet-repo/clusters/prod-eu-west/kustomization.yaml
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: platform
+  namespace: flux-system
+spec:
+  interval: 10m
+  sourceRef:
+    kind: GitRepository
+    name: fleet-repo
+  path: ./platform/production
+  prune: true
+  patches:
+    - patch: |
+        apiVersion: v1
+        kind: ConfigMap
+        metadata:
+          name: cluster-config
+        data:
+          region: eu-west-1
+          cluster: prod-eu-west
+```
+
+## What Breaks at Scale
+
+### ArgoCD Pain Points
+- **Memory**: ArgoCD Application Controller consumes ~100MB per managed cluster. 50 clusters = 5GB+ RAM
+- **Rate limiting**: Git polling from one location hits API rate limits
+- **Recovery time**: If the management cluster goes down, all clusters lose sync visibility
+
+### Flux Pain Points
+- **No central view**: You need Weave GitOps or custom dashboards
+- **Consistency**: Ensuring all clusters run the same Flux version requires automation
+- **Drift detection**: Per-cluster Flux means per-cluster monitoring
+
+## My Recommendation
+
+```
+1-10 clusters:   ArgoCD (better UX, single pane of glass)
+10-50 clusters:  ArgoCD with sharding or Flux
+50+ clusters:    Flux (per-cluster independence scales better)
+```
+
+For the Kubernetes infrastructure underlying GitOps — cluster provisioning, networking, monitoring — see [Kubernetes Recipes](https://kubernetes.recipes/). I automate the Flux/ArgoCD deployment itself with Ansible at [Ansible Pilot](https://www.ansiblepilot.com/), and the cluster infrastructure with Terraform at [Terraform Pilot](https://www.terraformpilot.com/).
+
+## The Real Lesson
+
+The tool matters less than the repo structure. Get your Git repository layout right — environment separation, shared base configs, per-cluster overrides — and either tool works. Get the repo structure wrong, and no tool will save you.

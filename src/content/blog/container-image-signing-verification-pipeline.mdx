@@ -1,0 +1,192 @@
+---
+draft: false
+title: "Container Image Signing and Verification Pipelines"
+snippet: "Build a complete container signing pipeline with Cosign, Kyverno, and GitLab CI. Ensure only verified images run in your Kubernetes clusters."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Container image signing" }
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - container-security
+  - cosign
+  - kyverno
+  - image-signing
+  - cicd
+  - kubernetes
+---
+
+## Why Sign Container Images
+
+You `docker pull nginx:latest`. But is that image really from the Nginx team? Or did someone compromise the registry and push a modified image with a cryptocurrency miner?
+
+Image signing proves provenance — that the image was built by your CI pipeline, from your source code, and hasn't been tampered with.
+
+## The Pipeline
+
+```
+Source Code → Build → Sign → Push → Verify → Deploy
+                ↓
+            SBOM + Provenance
+            (attached as attestations)
+```
+
+## Step 1: Build and Sign in CI
+
+```yaml
+# .gitlab-ci.yml
+stages:
+  - build
+  - sign
+  - deploy
+
+build:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  script:
+    - docker build -t $REGISTRY/$IMAGE:$CI_COMMIT_SHA .
+    - docker push $REGISTRY/$IMAGE:$CI_COMMIT_SHA
+    # Get the digest for signing
+    - |
+      DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $REGISTRY/$IMAGE:$CI_COMMIT_SHA)
+      echo "DIGEST=$DIGEST" >> build.env
+  artifacts:
+    reports:
+      dotenv: build.env
+
+sign:
+  stage: sign
+  image: gcr.io/projectsigstore/cosign:v2
+  needs: [build]
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  script:
+    # Keyless signing — identity from GitLab OIDC
+    - cosign sign --yes $DIGEST
+
+    # Generate and attach SBOM
+    - syft $DIGEST -o cyclonedx-json > sbom.cdx.json
+    - cosign attest --yes
+        --predicate sbom.cdx.json
+        --type cyclonedx
+        $DIGEST
+
+    # Attach vulnerability scan results
+    - trivy image $DIGEST --format cosign-vuln > vuln.json
+    - cosign attest --yes
+        --predicate vuln.json
+        --type vuln
+        $DIGEST
+```
+
+## Step 2: Verify Before Deployment
+
+### With Cosign CLI
+
+```bash
+cosign verify $DIGEST \
+  --certificate-identity-regexp="https://gitlab.com/myorg/.*" \
+  --certificate-oidc-issuer="https://gitlab.com"
+
+# Verify SBOM attestation
+cosign verify-attestation $DIGEST \
+  --type cyclonedx \
+  --certificate-identity-regexp="https://gitlab.com/myorg/.*" \
+  --certificate-oidc-issuer="https://gitlab.com"
+```
+
+### With Kyverno (Kubernetes Admission Controller)
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+spec:
+  validationFailureAction: Enforce
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: verify-signature
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+      verifyImages:
+        - imageReferences:
+            - "registry.company.com/*"
+          attestors:
+            - entries:
+                - keyless:
+                    subject: "https://gitlab.com/myorg/*"
+                    issuer: "https://gitlab.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev
+
+    - name: require-sbom
+      match:
+        any:
+          - resources:
+              kinds: ["Pod"]
+      verifyImages:
+        - imageReferences:
+            - "registry.company.com/*"
+          attestations:
+            - type: https://cyclonedx.org/bom
+              conditions:
+                - all:
+                    - key: "{{ components[].name }}"
+                      operator: AllNotIn
+                      value: ["banned-package"]
+```
+
+Now **no unsigned image can run in your cluster.** Period.
+
+## Step 3: Monitoring and Audit
+
+```yaml
+# Prometheus alert for policy violations
+- alert: ImageVerificationFailed
+  expr: increase(kyverno_policy_results_total{rule_result="fail", policy="verify-image-signatures"}[5m]) > 0
+  labels:
+    severity: critical
+  annotations:
+    summary: "Unsigned image deployment attempted"
+```
+
+## Multi-Cluster Rollout
+
+For organizations running multiple clusters, I automate the policy deployment with Ansible:
+
+```yaml
+- name: Deploy image signing policies
+  hosts: k8s_clusters
+  tasks:
+    - name: Install Kyverno
+      helm:
+        name: kyverno
+        chart_ref: kyverno/kyverno
+        release_namespace: kyverno
+        create_namespace: true
+
+    - name: Apply signing policies
+      kubernetes.core.k8s:
+        state: present
+        src: "{{ item }}"
+      loop:
+        - policies/verify-signatures.yml
+        - policies/require-sbom.yml
+        - policies/require-provenance.yml
+```
+
+Ansible automation patterns at [Ansible Pilot](https://www.ansiblepilot.com/). Kubernetes policy patterns at [Kubernetes Recipes](https://kubernetes.recipes/).
+
+## The Trust Chain
+
+```
+GitLab OIDC → Fulcio (certificate) → Cosign (signature) → Rekor (transparency log) → Kyverno (enforcement)
+```
+
+Every link is verifiable, auditable, and tamper-proof. This is the supply chain security the [EU Cyber Resilience Act](https://lucaberton.com/blog/eu-cra-sbom-requirements-compliance/) expects. Build it now, before compliance deadlines hit.

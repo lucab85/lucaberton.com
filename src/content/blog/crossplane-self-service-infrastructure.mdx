@@ -1,0 +1,222 @@
+---
+draft: false
+title: "Self-Service Infrastructure with Crossplane: Kubernetes-Native Cloud Management"
+snippet: "Crossplane lets developers provision cloud infrastructure through Kubernetes manifests. Here's how to build a self-service platform that eliminates infra tickets."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Crossplane self-service infrastructure" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - crossplane
+  - kubernetes
+  - self-service
+  - infrastructure
+  - platform-engineering
+  - iac
+---
+
+## The Promise: Infrastructure as Kubernetes Resources
+
+What if developers could create a PostgreSQL database the same way they create a Kubernetes deployment? No Terraform, no tickets, no waiting. Just `kubectl apply`:
+
+```yaml
+apiVersion: database.example.com/v1alpha1
+kind: PostgreSQLInstance
+metadata:
+  name: my-service-db
+  namespace: team-payments
+spec:
+  version: "16"
+  storageGB: 50
+  region: eu-west-1
+  backups:
+    enabled: true
+    retentionDays: 30
+```
+
+That's Crossplane. It extends Kubernetes to manage cloud resources using the same API, RBAC, and GitOps workflows your team already knows.
+
+## How Crossplane Works
+
+```
+Developer (kubectl apply)
+    ↓
+Kubernetes API Server
+    ↓
+Crossplane Controller
+    ↓
+Cloud Provider API (AWS/GCP/Azure)
+    ↓
+Actual cloud resource provisioned
+```
+
+Crossplane has three layers:
+
+1. **Providers** — plugins for each cloud (AWS, GCP, Azure, etc.)
+2. **Managed Resources** — 1:1 mappings to cloud resources
+3. **Compositions** — platform team's abstractions over managed resources
+
+## Building the Platform Layer
+
+### Step 1: Install Crossplane
+
+```bash
+helm repo add crossplane-stable https://charts.crossplane.io/stable
+helm install crossplane crossplane-stable/crossplane \
+  --namespace crossplane-system \
+  --create-namespace
+```
+
+### Step 2: Install a Provider
+
+```yaml
+apiVersion: pkg.crossplane.io/v1
+kind: Provider
+metadata:
+  name: provider-aws
+spec:
+  package: xpkg.upbound.io/upbound/provider-family-aws:v1.15.0
+```
+
+### Step 3: Create a Composition (the abstraction)
+
+This is where the platform team adds value — hiding cloud complexity behind simple interfaces:
+
+```yaml
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: postgresql-production
+spec:
+  compositeTypeRef:
+    apiVersion: database.example.com/v1alpha1
+    kind: PostgreSQLInstance
+  resources:
+    - name: rds-instance
+      base:
+        apiVersion: rds.aws.upbound.io/v1beta1
+        kind: Instance
+        spec:
+          forProvider:
+            engine: postgres
+            engineVersion: "16"
+            instanceClass: db.t4g.medium
+            allocatedStorage: 50
+            storageEncrypted: true
+            multiAz: true
+            backupRetentionPeriod: 30
+            vpcSecurityGroupIdSelector:
+              matchLabels:
+                type: database
+            dbSubnetGroupNameSelector:
+              matchLabels:
+                type: private
+          providerConfigRef:
+            name: aws-production
+      patches:
+        - fromFieldPath: spec.storageGB
+          toFieldPath: spec.forProvider.allocatedStorage
+        - fromFieldPath: spec.version
+          toFieldPath: spec.forProvider.engineVersion
+
+    - name: secret
+      base:
+        apiVersion: kubernetes.crossplane.io/v1alpha2
+        kind: Object
+        spec:
+          forProvider:
+            manifest:
+              apiVersion: v1
+              kind: Secret
+              metadata:
+                namespace: "" # patched
+              type: Opaque
+      patches:
+        - fromFieldPath: metadata.namespace
+          toFieldPath: spec.forProvider.manifest.metadata.namespace
+```
+
+Now developers get a production-grade RDS instance with encryption, multi-AZ, backups, and proper networking — all from a 10-line YAML.
+
+## Crossplane vs Terraform
+
+| Aspect | Crossplane | Terraform |
+|--------|-----------|-----------|
+| Interface | Kubernetes API (kubectl) | CLI + HCL |
+| State | Kubernetes etcd | Terraform state file |
+| Drift detection | Continuous (reconciliation loop) | On `terraform plan` |
+| Self-service | Native (RBAC, namespaces) | Requires wrapper (Atlantis, Spacelift) |
+| GitOps | Native (ArgoCD/Flux) | Requires additional tooling |
+| Learning curve | K8s required | HCL required |
+
+Crossplane isn't replacing Terraform — I still use Terraform for foundational infrastructure (VPCs, accounts, IAM). See [Terraform Pilot](https://www.terraformpilot.com/) for those patterns. Crossplane handles the layer above: application-level resources that developers provision themselves.
+
+## RBAC: Who Can Create What
+
+```yaml
+# Developers can create databases in their namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: team-payments
+  name: infra-consumer
+rules:
+  - apiGroups: ["database.example.com"]
+    resources: ["postgresqlinstances"]
+    verbs: ["get", "list", "create", "delete"]
+  - apiGroups: ["cache.example.com"]
+    resources: ["redisinstances"]
+    verbs: ["get", "list", "create", "delete"]
+  # No access to raw cloud resources
+```
+
+Developers can create databases but can't modify VPCs, security groups, or IAM roles. The composition handles those details.
+
+## GitOps Integration
+
+Crossplane + ArgoCD = fully declarative, auditable infrastructure:
+
+```yaml
+# ArgoCD Application for team infrastructure
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: team-payments-infra
+spec:
+  source:
+    repoURL: https://gitlab.com/teams/payments/infrastructure
+    path: crossplane/
+    targetRevision: main
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: team-payments
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+```
+
+Infrastructure changes go through PRs, get reviewed, and sync automatically. Full audit trail in Git.
+
+## Monitoring Crossplane Resources
+
+Use the same Kubernetes monitoring stack — Prometheus + Grafana. I detail the setup at [Kubernetes Recipes](https://kubernetes.recipes/):
+
+```yaml
+# Alert on failed resource provisioning
+- alert: CrossplaneResourceNotReady
+  expr: |
+    kube_customresource_status_condition{
+      group=~".*example.com",
+      status="False",
+      condition="Ready"
+    } == 1
+  for: 10m
+  labels:
+    severity: warning
+```
+
+## The Self-Service Vision
+
+The end state: developers ship infrastructure alongside their code. No tickets, no waiting, no context switching between "writing code" and "requesting infrastructure." The platform team maintains the compositions, guardrails, and golden paths. Everyone moves faster.

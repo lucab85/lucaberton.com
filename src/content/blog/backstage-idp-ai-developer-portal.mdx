@@ -1,0 +1,155 @@
+---
+draft: false
+title: "Internal Developer Portals with Backstage and AI: The 2026 Playbook"
+snippet: "Backstage is the de facto IDP. Adding AI makes it transformative — auto-generated docs, intelligent search, and self-service infrastructure. Here's the architecture."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Backstage IDP with AI" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - backstage
+  - idp
+  - platform-engineering
+  - developer-portal
+  - ai
+---
+
+## Why Backstage Won
+
+Spotify's Backstage became the default Internal Developer Portal (IDP) because it solved the real problem: developers can't find anything. Where's the API docs? Who owns that service? How do I deploy to staging?
+
+In 2026, Backstage is table stakes. The differentiator is what you build on top of it — and increasingly, that's AI.
+
+## The AI-Enhanced IDP
+
+### 1. Intelligent Service Search
+
+Instead of browsing a catalog, developers ask questions:
+
+```typescript
+// Backstage AI Search Plugin
+app.use(
+  createPlugin({
+    id: 'ai-search',
+    routes: {
+      root: aiSearchPage,
+    },
+    apis: [
+      createApiFactory({
+        api: aiSearchApiRef,
+        deps: { catalogApi: catalogApiRef },
+        factory: ({ catalogApi }) => new AISearchApi({
+          catalogApi,
+          llmEndpoint: 'http://ai-service:8080/search',
+        }),
+      }),
+    ],
+  })
+);
+```
+
+Developer asks: "Which service handles payment webhooks?" — AI searches the catalog, README files, and API specs to give a direct answer with links.
+
+### 2. Auto-Generated Documentation
+
+The biggest IDP problem: stale docs. AI generates and updates them:
+
+```python
+async def generate_service_docs(service):
+    """Generate docs from source code, API specs, and infra config."""
+    context = {
+        'readme': await fetch_readme(service.repo),
+        'openapi': await fetch_openapi_spec(service.api_url),
+        'terraform': await fetch_infra_config(service.tf_module),
+        'dependencies': await fetch_deps(service.repo),
+    }
+
+    docs = await llm.generate(
+        system="Generate concise service documentation. Include: purpose, API endpoints, dependencies, deployment, and runbook.",
+        user=f"Service: {service.name}\n\n{json.dumps(context)}"
+    )
+
+    await backstage.update_techdocs(service.name, docs)
+```
+
+### 3. Self-Service Infrastructure
+
+Developers describe what they need in natural language:
+
+```
+Developer: "I need a PostgreSQL database for my new service, 
+            production-grade, EU region, 100GB"
+
+AI Assistant: "I'll create a Terraform module for you:
+              - Cloud SQL PostgreSQL 16
+              - europe-west4 region
+              - 100GB SSD, automated backups
+              - Private VPC connection
+              Here's the PR: [link]
+              Estimated cost: €180/month"
+```
+
+This bridges the gap between "I need infrastructure" and "I need to learn Terraform." The platform team maintains the golden paths (more on that in my [Terraform Pilot](https://www.terraformpilot.com/) content), and AI makes them accessible.
+
+## Golden Paths in Backstage
+
+Software templates are Backstage's killer feature. Define opinionated paths for common tasks:
+
+```yaml
+# template: create-microservice
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: create-microservice
+  title: Create a Microservice
+spec:
+  type: service
+  parameters:
+    - title: Service Details
+      properties:
+        name:
+          type: string
+        language:
+          type: string
+          enum: [go, python, typescript]
+        needsDatabase:
+          type: boolean
+  steps:
+    - id: scaffold
+      name: Generate from template
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values:
+          name: ${{ parameters.name }}
+
+    - id: create-repo
+      name: Create GitLab repository
+      action: publish:gitlab
+      input:
+        repoUrl: gitlab.com?owner=platform&repo=${{ parameters.name }}
+
+    - id: register
+      name: Register in catalog
+      action: catalog:register
+```
+
+I cover the Kubernetes side of this — the namespaces, RBAC, and resource quotas that back these templates — at [Kubernetes Recipes](https://kubernetes.recipes/).
+
+## Implementation Roadmap
+
+**Month 1:** Deploy Backstage, import service catalog from GitLab/GitHub
+**Month 2:** Add TechDocs, integrate CI/CD status
+**Month 3:** Build 3-5 software templates for common tasks
+**Month 4:** Add AI search and documentation generation
+**Month 5:** Self-service infrastructure via AI + Terraform templates
+**Month 6:** Measure developer satisfaction and iterate
+
+The automation foundation for deploying and maintaining Backstage itself? Ansible. I manage Backstage infrastructure-as-code using the patterns at [Ansible Pilot](https://www.ansiblepilot.com/) — PostgreSQL setup, Redis cache, plugin configuration, all automated.
+
+## The Platform Team's Role
+
+An IDP doesn't eliminate the platform team — it amplifies them. Instead of being a ticket queue ("please create me a database"), they become product owners building self-service experiences.
+
+That's platform engineering done right. Not more tools — better abstractions.

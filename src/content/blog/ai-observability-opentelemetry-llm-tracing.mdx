@@ -1,0 +1,203 @@
+---
+draft: false
+title: "AI Observability: Tracing LLM Calls with OpenTelemetry"
+snippet: "You can't debug what you can't see. How to instrument AI applications with OpenTelemetry for full observability — traces, costs, latency, and token usage across LLM providers."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "AI observability OpenTelemetry" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - ai-observability
+  - opentelemetry
+  - llm
+  - tracing
+  - monitoring
+  - devops
+---
+
+## The Black Box Problem
+
+Your AI feature is slow. Users complain about wrong answers. Costs spiked 3x last week. But you can't explain why because LLM calls are opaque — you know the input and output but nothing about what happened in between.
+
+This is the observability gap that kills AI products.
+
+## OpenTelemetry for LLMs
+
+OpenTelemetry (OTel) is the standard for distributed tracing. It works for LLM applications too — with some AI-specific instrumentation.
+
+### Basic LLM Tracing
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+
+# Setup
+provider = TracerProvider()
+provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter()))
+trace.set_tracer_provider(provider)
+tracer = trace.get_tracer("ai-service")
+
+class TracedLLMClient:
+    def __init__(self, client):
+        self.client = client
+
+    async def generate(self, messages, model="gpt-4o"):
+        with tracer.start_as_current_span("llm.generate") as span:
+            span.set_attribute("llm.model", model)
+            span.set_attribute("llm.provider", "openai")
+            span.set_attribute("llm.input_tokens", self._estimate_tokens(messages))
+
+            start = time.monotonic()
+            response = await self.client.chat.completions.create(
+                model=model,
+                messages=messages
+            )
+            latency = time.monotonic() - start
+
+            # Record metrics
+            span.set_attribute("llm.output_tokens", response.usage.completion_tokens)
+            span.set_attribute("llm.total_tokens", response.usage.total_tokens)
+            span.set_attribute("llm.latency_ms", int(latency * 1000))
+            span.set_attribute("llm.cost_usd", self._calculate_cost(model, response.usage))
+            span.set_attribute("llm.finish_reason", response.choices[0].finish_reason)
+
+            return response
+```
+
+### Agent Workflow Tracing
+
+For multi-step agent workflows, nest spans to see the full execution tree:
+
+```python
+async def agent_workflow(self, user_query):
+    with tracer.start_as_current_span("agent.workflow") as root:
+        root.set_attribute("user.query", user_query[:200])
+
+        # Step 1: Planning
+        with tracer.start_as_current_span("agent.plan"):
+            plan = await self.planner.create_plan(user_query)
+
+        # Step 2: Execute steps
+        for i, step in enumerate(plan.steps):
+            with tracer.start_as_current_span(f"agent.step.{i}") as step_span:
+                step_span.set_attribute("step.type", step.type)
+                step_span.set_attribute("step.tool", step.tool_name)
+
+                if step.type == "llm_call":
+                    result = await self.traced_llm.generate(step.messages)
+                elif step.type == "tool_call":
+                    with tracer.start_as_current_span("tool.execute"):
+                        result = await self.tools.execute(step.tool_name, step.params)
+
+        # Step 3: Synthesize
+        with tracer.start_as_current_span("agent.synthesize"):
+            final = await self.synthesize(results)
+            root.set_attribute("agent.total_steps", len(plan.steps))
+            root.set_attribute("agent.total_cost", self.accumulated_cost)
+
+        return final
+```
+
+In Jaeger or Grafana Tempo, this renders as a trace tree showing exactly where time and tokens were spent.
+
+## Key Metrics to Track
+
+### Cost Tracking
+
+```python
+# Cost per model (as of 2026, update regularly)
+COST_PER_1K_TOKENS = {
+    "gpt-4o": {"input": 0.0025, "output": 0.01},
+    "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
+    "claude-opus-4": {"input": 0.015, "output": 0.075},
+    "claude-sonnet-4": {"input": 0.003, "output": 0.015},
+}
+
+def calculate_cost(model, usage):
+    rates = COST_PER_1K_TOKENS.get(model, {"input": 0, "output": 0})
+    input_cost = (usage.prompt_tokens / 1000) * rates["input"]
+    output_cost = (usage.completion_tokens / 1000) * rates["output"]
+    return round(input_cost + output_cost, 6)
+```
+
+### Quality Signals
+
+```python
+# Track response quality indicators
+span.set_attribute("quality.has_code", bool(re.search(r'```', response_text)))
+span.set_attribute("quality.response_length", len(response_text))
+span.set_attribute("quality.contains_apology", 'sorry' in response_text.lower())
+span.set_attribute("quality.finish_reason", finish_reason)  # 'stop' vs 'length' (truncated)
+```
+
+## Grafana Dashboard
+
+For the monitoring stack setup, I use the same Prometheus + Grafana patterns I detail at [Kubernetes Recipes](https://kubernetes.recipes/). Key panels:
+
+```
+Row 1: Overview
+  - Total LLM calls/min
+  - Total cost (rolling 24h)
+  - P95 latency
+  - Error rate
+
+Row 2: Cost Breakdown
+  - Cost by model (pie chart)
+  - Cost by feature (bar chart)
+  - Cost trend (7-day line)
+  - Projected monthly cost
+
+Row 3: Performance
+  - Latency by model (heatmap)
+  - Token usage distribution
+  - Cache hit rate
+  - Rate limit events
+
+Row 4: Quality
+  - Finish reason distribution
+  - Average response length trend
+  - User feedback scores
+  - Retry rate
+```
+
+## Automating with Ansible
+
+For teams deploying the OTel collector across multiple environments, I use Ansible playbooks to standardize the setup. The infrastructure-as-code approach I teach at [Ansible Pilot](https://www.ansiblepilot.com/) applies directly — treat your observability stack like any other managed service:
+
+```yaml
+- name: Deploy OTel collector for AI services
+  hosts: ai_services
+  roles:
+    - role: otel-collector
+      vars:
+        exporters:
+          - type: otlp
+            endpoint: tempo.monitoring:4317
+          - type: prometheus
+            endpoint: "0.0.0.0:8889"
+        processors:
+          - type: batch
+            timeout: 5s
+          - type: attributes
+            actions:
+              - key: environment
+                value: production
+                action: upsert
+```
+
+## The ROI of AI Observability
+
+Without observability:
+- Debugging a bad AI response: 2-4 hours (reproduce, guess, retry)
+- Finding cost spikes: manual bill review, days later
+- Explaining AI behavior to stakeholders: impossible
+
+With observability:
+- Debugging: 5 minutes (trace the exact request)
+- Cost spikes: real-time alerts
+- Explainability: "here's the trace showing every step the AI took"
+
+Instrument from day one. The cost of adding observability later is 10x the cost of building it in.

@@ -1,0 +1,169 @@
+---
+draft: false
+title: "AI Agents in Production: Architecture Patterns That Actually Work"
+snippet: "Most AI agent demos fail in production. Here are the orchestration patterns, failure handling strategies, and architecture decisions that make agents reliable at enterprise scale."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "AI agents production architecture" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - ai-agents
+  - production
+  - architecture
+  - orchestration
+  - reliability
+---
+
+## The Demo-to-Production Gap
+
+Every AI agent demo looks magical. The agent plans, reasons, uses tools, and delivers perfect results in 30 seconds. Then you deploy it to production and it hallucinates API calls, loops infinitely, and costs $47 per request.
+
+I've helped multiple clients cross this gap. Here's what works.
+
+## Pattern 1: Supervisor Architecture
+
+The most reliable pattern for production agents. A supervisor LLM orchestrates specialized workers:
+
+```python
+class SupervisorAgent:
+    def __init__(self):
+        self.workers = {
+            'research': ResearchWorker(),
+            'code': CodeWorker(),
+            'review': ReviewWorker(),
+        }
+        self.max_steps = 10
+        self.budget_limit = 0.50  # Max cost per request
+
+    async def execute(self, task: str):
+        plan = await self.plan(task)
+        results = []
+        cost = 0.0
+
+        for step in plan.steps[:self.max_steps]:
+            if cost > self.budget_limit:
+                return self.graceful_degradation(results)
+
+            worker = self.workers[step.worker]
+            result = await worker.execute(step.instruction)
+            cost += result.cost
+            results.append(result)
+
+            # Supervisor evaluates: continue, retry, or stop?
+            evaluation = await self.evaluate(step, result)
+            if evaluation.action == 'stop':
+                break
+            elif evaluation.action == 'retry':
+                result = await worker.execute(step.instruction, feedback=evaluation.feedback)
+
+        return self.synthesize(results)
+```
+
+Key decisions:
+- **Hard step limit** — agents that can loop forever, will
+- **Cost budget** — prevent runaway API charges
+- **Graceful degradation** — return partial results when budget is exceeded
+- **Evaluation after each step** — catch errors early
+
+## Pattern 2: Human-in-the-Loop Checkpoints
+
+For high-stakes workflows (financial decisions, infrastructure changes), insert human approval gates:
+
+```python
+class ApprovalGate:
+    async def check(self, action, context):
+        risk = self.assess_risk(action)
+
+        if risk == 'low':
+            return True  # Auto-approve
+        elif risk == 'medium':
+            # Async approval — Slack/email notification
+            approval = await self.request_approval(
+                channel='#ai-actions',
+                message=f"Agent wants to: {action.description}\nContext: {context}",
+                timeout_minutes=30
+            )
+            return approval.approved
+        else:
+            # High risk — always require human
+            return await self.require_human_takeover(action, context)
+```
+
+I wrote more about human oversight patterns in the context of the [EU AI Act compliance](https://lucaberton.com/blog/edge-ai-eu-ai-act-compliance/) — the principles apply to any production agent.
+
+## Pattern 3: Tool Sandboxing
+
+Never let an agent execute tools with production credentials directly:
+
+```python
+class SandboxedToolExecutor:
+    def __init__(self):
+        self.allowed_tools = {'search', 'read_file', 'calculate'}
+        self.blocked_patterns = [
+            r'rm\s+-rf',
+            r'DROP\s+TABLE',
+            r'DELETE\s+FROM',
+        ]
+
+    async def execute(self, tool_name, params):
+        if tool_name not in self.allowed_tools:
+            raise ToolNotAllowed(f"{tool_name} is not permitted")
+
+        # Check for dangerous patterns in params
+        for pattern in self.blocked_patterns:
+            if re.search(pattern, str(params), re.IGNORECASE):
+                raise DangerousOperation(f"Blocked pattern: {pattern}")
+
+        # Execute in isolated environment
+        result = await self.sandbox.run(tool_name, params, timeout=30)
+        return result
+```
+
+## Pattern 4: Observability First
+
+You can't debug agents without traces. Use OpenTelemetry to trace every LLM call, tool invocation, and decision:
+
+```python
+from opentelemetry import trace
+
+tracer = trace.get_tracer("ai-agent")
+
+async def agent_step(self, instruction):
+    with tracer.start_as_current_span("agent_step") as span:
+        span.set_attribute("instruction", instruction)
+
+        # LLM call
+        with tracer.start_as_current_span("llm_call"):
+            response = await self.llm.generate(instruction)
+            span.set_attribute("tokens_used", response.usage.total)
+            span.set_attribute("cost", response.cost)
+
+        # Tool execution
+        if response.tool_calls:
+            with tracer.start_as_current_span("tool_execution"):
+                for tool_call in response.tool_calls:
+                    result = await self.execute_tool(tool_call)
+                    span.set_attribute(f"tool.{tool_call.name}.result", str(result)[:500])
+
+        return response
+```
+
+For Kubernetes-based deployments, I cover the monitoring stack in detail at [Kubernetes Recipes](https://kubernetes.recipes/) — the same Prometheus + Grafana patterns work for agent observability.
+
+## The Reliability Checklist
+
+Before deploying any AI agent to production:
+
+1. ☐ Step limit (max iterations before forced stop)
+2. ☐ Cost budget (max spend per request)
+3. ☐ Timeout per tool call (30s default)
+4. ☐ Human approval gates for high-risk actions
+5. ☐ Tool sandboxing (allowlist, not blocklist)
+6. ☐ Full observability (traces, costs, latency)
+7. ☐ Graceful degradation (partial results > errors)
+8. ☐ Rate limiting (per user and global)
+9. ☐ Fallback to simpler logic when agent fails
+10. ☐ Automated testing with deterministic scenarios
+
+AI agents in production are 20% prompt engineering and 80% systems engineering. Treat them like any other distributed system — with circuit breakers, retries, and monitoring.

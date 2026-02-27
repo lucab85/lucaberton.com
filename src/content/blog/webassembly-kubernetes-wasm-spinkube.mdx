@@ -1,0 +1,135 @@
+---
+draft: false
+title: "WebAssembly on Kubernetes: The Container Alternative Nobody Expected"
+snippet: "Wasm workloads start in milliseconds, use 10x less memory, and run anywhere. Here's how to run WebAssembly alongside containers on Kubernetes with SpinKube."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "WebAssembly Kubernetes" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - webassembly
+  - wasm
+  - kubernetes
+  - spinkube
+  - containers
+  - cloud-native
+---
+
+## "If WASM+WASI existed in 2008, we wouldn't have needed Docker"
+
+Solomon Hykes (Docker co-founder) said this in 2019. In 2026, it's becoming reality. WebAssembly workloads on Kubernetes start in <10ms, use a fraction of container memory, and provide stronger sandboxing.
+
+## What Wasm Brings to Kubernetes
+
+```
+Comparison          Containers    Wasm
+Cold start          ~500ms        ~1ms
+Image size          100-500MB     1-10MB
+Memory overhead     ~50MB base    ~1MB base
+Sandboxing          Linux cgroups Capability-based (stronger)
+Language support    Any           Rust, Go, JS, Python, C/C++
+OCI compatible      Yes           Yes (OCI artifacts)
+```
+
+## Running Wasm on Kubernetes with SpinKube
+
+SpinKube brings Fermyon Spin (Wasm runtime) to Kubernetes:
+
+```bash
+# Install SpinKube operator
+kubectl apply -f https://github.com/spinkube/spin-operator/releases/download/v0.4.0/spin-operator.crds.yaml
+kubectl apply -f https://github.com/spinkube/spin-operator/releases/download/v0.4.0/spin-operator.runtime-class.yaml
+kubectl apply -f https://github.com/spinkube/spin-operator/releases/download/v0.4.0/spin-operator.shim-executor.yaml
+helm install spin-operator oci://ghcr.io/spinkube/charts/spin-operator
+```
+
+Deploy a Wasm app:
+
+```yaml
+apiVersion: core.spinoperator.dev/v1alpha1
+kind: SpinApp
+metadata:
+  name: hello-wasm
+spec:
+  image: ghcr.io/myorg/hello-world:v1
+  replicas: 3
+  executor: containerd-shim-spin
+```
+
+That's it. Three replicas of a Wasm app, running on your existing Kubernetes cluster alongside traditional containers.
+
+## Building a Wasm Microservice
+
+```rust
+use spin_sdk::http::{IntoResponse, Request, Response};
+use spin_sdk::http_component;
+
+#[http_component]
+fn handle_request(req: Request) -> anyhow::Result<impl IntoResponse> {
+    let body = format!("Hello from Wasm! Path: {}", req.uri());
+    Ok(Response::builder()
+        .status(200)
+        .header("content-type", "text/plain")
+        .body(body)
+        .build())
+}
+```
+
+Build and push as an OCI artifact:
+
+```bash
+spin build
+spin registry push ghcr.io/myorg/hello-world:v1
+```
+
+## When Wasm Makes Sense
+
+**Use Wasm for:**
+- Serverless functions / FaaS (instant cold starts)
+- API gateways and middleware (low overhead)
+- Edge computing (tiny footprint)
+- Plugin systems (secure sandboxing)
+- Multi-tenant workloads (isolation without VM overhead)
+
+**Keep containers for:**
+- Stateful services (databases, message queues)
+- Legacy applications
+- Workloads needing full OS access
+- GPU workloads (Wasm GPU support is experimental)
+
+## The Hybrid Architecture
+
+The future isn't Wasm replacing containers — it's both running side by side:
+
+```yaml
+# Same namespace: containers + Wasm
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-gateway       # Traditional container
+spec:
+  template:
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:latest
+---
+apiVersion: core.spinoperator.dev/v1alpha1
+kind: SpinApp
+metadata:
+  name: auth-middleware    # Wasm — instant cold start
+spec:
+  image: ghcr.io/myorg/auth:v1
+  executor: containerd-shim-spin
+```
+
+For more Kubernetes deployment patterns, including Wasm+container hybrid architectures, see [Kubernetes Recipes](https://kubernetes.recipes/).
+
+## The Platform Engineering Angle
+
+Platform teams should offer Wasm as a golden path option for appropriate workloads. The developer experience is simpler — no Dockerfile, no base image patching, no container security scanning. The Wasm sandbox provides security by default.
+
+I automate the SpinKube operator deployment across clusters with Ansible — patterns at [Ansible Pilot](https://www.ansiblepilot.com/).
+
+WebAssembly on Kubernetes isn't mainstream yet, but it's production-ready. If you're running serverless workloads or need sub-millisecond cold starts, it's time to experiment.

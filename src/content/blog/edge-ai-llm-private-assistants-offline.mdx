@@ -1,0 +1,157 @@
+---
+draft: false
+title: "Running LLMs at the Edge: Private AI Assistants Without Cloud Dependencies"
+snippet: "Deploy language models on edge hardware for private, offline AI assistants. From model selection to optimization to real-world use cases where cloud APIs aren't an option."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Edge LLM deployment" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - edge-ai
+  - llm
+  - private-ai
+  - ollama
+  - inference
+  - privacy
+---
+
+## When Cloud APIs Aren't an Option
+
+A defense contractor can't send classified documents to OpenAI. A hospital can't route patient records through Claude. A law firm in Germany can't process client data outside the EU.
+
+These aren't edge cases — they're entire industries that need AI but can't use cloud APIs. The answer: run the LLM locally, at the edge.
+
+## What's Feasible in 2026
+
+The LLM landscape has shifted dramatically. You don't need a data center anymore:
+
+```
+Model                    RAM Needed    Edge Hardware         Tokens/sec
+Llama 3.2 1B (INT4)      1.5 GB       Raspberry Pi 5        8
+Llama 3.2 3B (INT4)      2.5 GB       Jetson Orin Nano      18
+Phi-4 Mini (INT4)        4.0 GB       Intel NUC (NPU)       25
+Llama 3.3 8B (INT4)      5.5 GB       Mac Mini M4 (16GB)    40
+Mistral Small (INT4)     8.0 GB       Mac Mini M4 (24GB)    32
+Llama 3.3 70B (INT4)     42 GB        Mac Studio M4 (64GB)  15
+```
+
+For most edge use cases — document Q&A, summarization, classification — a 3B-8B model is sufficient.
+
+## Deployment with Ollama
+
+The fastest path to edge LLMs:
+
+```bash
+# Install on edge device
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull a model optimized for your hardware
+ollama pull llama3.2:3b
+
+# Run as a service
+sudo systemctl enable ollama
+sudo systemctl start ollama
+
+# API endpoint ready
+curl http://localhost:11434/api/generate \
+  -d '{"model": "llama3.2:3b", "prompt": "Summarize this document..."}'
+```
+
+For production, wrap it in a container:
+
+```dockerfile
+FROM ollama/ollama:latest
+ENV OLLAMA_MODELS=/models
+COPY models/ /models/
+EXPOSE 11434
+```
+
+## Use Cases That Work
+
+### 1. Document Processing in Regulated Industries
+
+```python
+import requests
+
+def classify_document(text):
+    """Classify documents on-premise — no data leaves the building."""
+    response = requests.post('http://localhost:11434/api/generate', json={
+        'model': 'llama3.2:3b',
+        'prompt': f'Classify this document as one of: invoice, contract, report, correspondence.\n\nDocument: {text[:2000]}\n\nClassification:',
+        'stream': False
+    })
+    return response.json()['response'].strip()
+```
+
+### 2. Private Code Assistant
+
+Developers in air-gapped environments need AI coding help too:
+
+```bash
+# Continue autocomplete server running locally
+ollama run codellama:7b --keepalive 24h
+
+# VS Code extension points to local endpoint
+# No code ever leaves the secure network
+```
+
+### 3. Customer-Facing Kiosks
+
+Retail, hotel, or hospital kiosks with AI assistants that work without internet:
+
+```python
+# Kiosk AI that works offline
+SYSTEM_PROMPT = """You are a helpful hospital reception assistant.
+You can help with: directions, appointment check-in, general questions.
+You cannot: access medical records, make diagnoses, or schedule appointments.
+Always suggest speaking to reception staff for complex requests."""
+
+def kiosk_chat(user_message):
+    response = requests.post('http://localhost:11434/api/chat', json={
+        'model': 'phi4-mini',
+        'messages': [
+            {'role': 'system', 'content': SYSTEM_PROMPT},
+            {'role': 'user', 'content': user_message}
+        ]
+    })
+    return response.json()['message']['content']
+```
+
+## Optimization Tips
+
+**1. Use the right quantization for your hardware:**
+- Apple Silicon: Use MLX format (native Metal acceleration)
+- NVIDIA Jetson: Use GGUF with CUDA layers
+- Intel NPU: Use OpenVINO IR format
+- CPU-only: GGUF with Q4_K_M quantization
+
+**2. Context window management:**
+Edge devices have limited RAM. Keep context windows small:
+
+```python
+# Sliding window — keep last 2048 tokens
+MAX_CONTEXT = 2048
+
+def manage_context(messages):
+    total_tokens = sum(len(m['content'].split()) * 1.3 for m in messages)
+    while total_tokens > MAX_CONTEXT and len(messages) > 2:
+        messages.pop(1)  # Keep system prompt, remove oldest
+        total_tokens = sum(len(m['content'].split()) * 1.3 for m in messages)
+    return messages
+```
+
+**3. Model preloading:**
+First-token latency is dominated by model loading. Keep the model warm:
+
+```bash
+# Ollama keeps model in memory for 5 minutes by default
+# Extend for always-on kiosks
+ollama run llama3.2:3b --keepalive 0  # Never unload
+```
+
+## The Privacy Argument
+
+When I present edge LLM options to CISOs, the conversation shifts from "we can't use AI" to "we can use AI responsibly." That unlocks entire categories of productivity gains that were previously blocked by data governance.
+
+Private edge LLMs aren't a compromise — for regulated industries, they're the only responsible choice.

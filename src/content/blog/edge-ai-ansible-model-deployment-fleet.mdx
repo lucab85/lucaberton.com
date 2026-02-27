@@ -1,0 +1,228 @@
+---
+draft: false
+title: "Edge AI with Ansible: Automating Model Deployment Across Hundreds of Devices"
+snippet: "Use Ansible to manage edge AI fleets — push model updates, configure hardware, monitor health, and handle rollbacks across hundreds of devices."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Ansible edge AI automation" }
+category: "Automation"
+author: "Luca Berton"
+tags:
+  - edge-ai
+  - ansible
+  - automation
+  - fleet-management
+  - devops
+  - deployment
+---
+
+## The Fleet Management Problem
+
+You have 200 Jetson Orin devices running quality inspection across 15 factories. A new model version is ready. How do you deploy it?
+
+SSH into 200 devices? No. Kubernetes? Maybe, but many edge environments don't have it. The answer for most edge fleets: Ansible.
+
+## Inventory: Organizing Your Edge Fleet
+
+```ini
+# inventory/edge_devices.ini
+
+[factory_amsterdam]
+edge-ams-01 ansible_host=10.1.1.10 gpu_type=orin_nano
+edge-ams-02 ansible_host=10.1.1.11 gpu_type=orin_nano
+edge-ams-03 ansible_host=10.1.1.12 gpu_type=orin_nano
+
+[factory_berlin]
+edge-ber-01 ansible_host=10.2.1.10 gpu_type=orin_nano
+edge-ber-02 ansible_host=10.2.1.11 gpu_type=orin_nano
+
+[factory_paris]
+edge-par-01 ansible_host=10.3.1.10 gpu_type=orin_nx
+edge-par-02 ansible_host=10.3.1.11 gpu_type=orin_nx
+
+[all:vars]
+ansible_user=edge-admin
+ansible_ssh_private_key_file=~/.ssh/edge_fleet_key
+model_registry=registry.internal:5000
+```
+
+## Playbook: Model Deployment with Canary
+
+```yaml
+---
+# deploy_model.yml - Rolling model update with canary
+- name: Deploy AI model to edge fleet
+  hosts: all
+  serial: "10%"  # Canary: 10% of devices at a time
+  max_fail_percentage: 5
+  vars:
+    model_name: defect-detection
+    model_version: "3.2"
+    model_file: "{{ model_name }}-v{{ model_version }}-int8.onnx"
+    rollback_version: "3.1"
+
+  pre_tasks:
+    - name: Check device health before update
+      uri:
+        url: "http://localhost:8080/health"
+        return_content: yes
+      register: health_check
+      failed_when: health_check.json.status != 'healthy'
+
+    - name: Record current model version for rollback
+      shell: cat /opt/models/current_version
+      register: current_version
+
+  tasks:
+    - name: Download new model from registry
+      get_url:
+        url: "{{ model_registry }}/models/{{ model_file }}"
+        dest: "/opt/models/{{ model_file }}"
+        checksum: "sha256:{{ model_checksums[model_version] }}"
+
+    - name: Stop inference service
+      systemd:
+        name: inference-engine
+        state: stopped
+
+    - name: Update model symlink
+      file:
+        src: "/opt/models/{{ model_file }}"
+        dest: /opt/models/active_model.onnx
+        state: link
+
+    - name: Update version tracker
+      copy:
+        content: "{{ model_version }}"
+        dest: /opt/models/current_version
+
+    - name: Start inference service
+      systemd:
+        name: inference-engine
+        state: started
+
+    - name: Wait for model to load
+      uri:
+        url: "http://localhost:8080/health"
+        return_content: yes
+      register: post_health
+      retries: 12
+      delay: 5
+      until: post_health.json.model_loaded == true
+
+    - name: Run validation inference
+      uri:
+        url: "http://localhost:8080/validate"
+        method: POST
+        body_format: json
+        body:
+          test_image: "/opt/test-data/reference.jpg"
+          expected_class: "no_defect"
+          min_confidence: 0.85
+      register: validation
+      failed_when: validation.json.passed != true
+
+  handlers:
+    - name: Rollback model
+      block:
+        - file:
+            src: "/opt/models/{{ model_name }}-v{{ rollback_version }}-int8.onnx"
+            dest: /opt/models/active_model.onnx
+            state: link
+        - systemd:
+            name: inference-engine
+            state: restarted
+```
+
+The `serial: "10%"` is critical — it deploys to 10% of devices, validates, then continues. If validation fails, the remaining 90% keep running the old model.
+
+## Role: Edge Device Setup
+
+```yaml
+# roles/edge-ai-node/tasks/main.yml
+---
+- name: Install NVIDIA JetPack components
+  apt:
+    name:
+      - nvidia-jetpack
+      - nvidia-tensorrt
+      - nvidia-cuda-toolkit
+    state: present
+  when: gpu_type is match("orin.*")
+
+- name: Create model directory
+  file:
+    path: /opt/models
+    state: directory
+    owner: inference
+    group: inference
+    mode: '0755'
+
+- name: Deploy inference engine service
+  template:
+    src: inference-engine.service.j2
+    dest: /etc/systemd/system/inference-engine.service
+  notify: reload systemd
+
+- name: Configure log rotation
+  template:
+    src: inference-logrotate.j2
+    dest: /etc/logrotate.d/inference-engine
+
+- name: Set up health monitoring
+  template:
+    src: node-exporter-textfile.sh.j2
+    dest: /opt/monitoring/collect-metrics.sh
+    mode: '0755'
+
+- name: Schedule metrics collection
+  cron:
+    name: "collect inference metrics"
+    minute: "*/1"
+    job: "/opt/monitoring/collect-metrics.sh"
+```
+
+## Monitoring Playbook
+
+```yaml
+---
+# check_fleet.yml - Quick fleet health check
+- name: Check edge AI fleet health
+  hosts: all
+  gather_facts: no
+
+  tasks:
+    - name: Get device status
+      uri:
+        url: "http://localhost:8080/status"
+        return_content: yes
+      register: status
+      ignore_errors: yes
+
+    - name: Report unhealthy devices
+      debug:
+        msg: |
+          ALERT: {{ inventory_hostname }}
+          Status: {{ status.json.status | default('UNREACHABLE') }}
+          Model: {{ status.json.model_version | default('unknown') }}
+          GPU Temp: {{ status.json.gpu_temp | default('N/A') }}°C
+          Uptime: {{ status.json.uptime_hours | default('N/A') }}h
+      when: status.failed or status.json.status != 'healthy'
+```
+
+Run it every 15 minutes from a cron job:
+
+```bash
+*/15 * * * * ansible-playbook -i inventory/edge_devices.ini check_fleet.yml --quiet 2>&1 | grep ALERT | mail -s "Edge AI Fleet Alert" ops@company.com
+```
+
+## Why Ansible Beats Custom Solutions
+
+I've seen teams build custom fleet management tools in Python. They always underestimate:
+- SSH key management
+- Parallel execution with rate limiting
+- Idempotent operations (what if it fails halfway?)
+- Inventory management as devices come and go
+- Rollback logic
+
+Ansible handles all of this out of the box. It's not the sexiest tool, but for edge fleet management, it's the most reliable.

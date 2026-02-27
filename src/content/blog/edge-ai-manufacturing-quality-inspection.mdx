@@ -1,0 +1,152 @@
+---
+draft: false
+title: "Edge AI for Manufacturing: Real-Time Quality Inspection with Computer Vision"
+snippet: "How to deploy computer vision on the factory floor for defect detection. From model selection to camera placement to production deployment with NVIDIA Jetson."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Edge AI manufacturing" }
+category: "AI"
+author: "Luca Berton"
+tags:
+  - edge-ai
+  - manufacturing
+  - computer-vision
+  - quality-inspection
+  - nvidia-jetson
+  - defect-detection
+---
+
+## The $3.1 Trillion Problem
+
+Manufacturing defects cost the global economy $3.1 trillion annually. Traditional quality inspection — human eyes on a production line — catches 80% of defects on a good day. On the night shift? 60%.
+
+Edge AI pushes that to 98%+, running 24/7 without fatigue.
+
+## The Architecture
+
+Here's what a real manufacturing edge AI deployment looks like:
+
+```
+Production Line
+    │
+    ├── Camera 1 (GigE Vision, 5MP) ──→ Jetson Orin #1
+    │                                      ├── Defect detection (YOLOv8)
+    │                                      ├── Classification (EfficientNet)
+    │                                      └── Result → PLC (reject/pass)
+    │
+    ├── Camera 2 (GigE Vision, 5MP) ──→ Jetson Orin #2
+    │                                      └── Same pipeline
+    │
+    └── Camera 3 (thermal, FLIR)    ──→ Jetson Orin #3
+                                           └── Thermal anomaly detection
+
+All Jetsons → Local K3s cluster → Cloud dashboard (non-critical path)
+```
+
+Key principle: **the reject/pass decision never touches the network.** The Jetson communicates directly with the PLC via GPIO or Modbus. Cloud connectivity is for dashboards and model updates only.
+
+## Camera Selection
+
+The camera matters more than the AI model. Bad images in, bad predictions out.
+
+```
+Use case                     Camera type          Resolution
+Surface scratches            Area scan, GigE      5-12 MP
+Dimensional accuracy         Line scan            4K-8K
+Thermal defects              FLIR/thermal         640×480
+Assembly verification        Area scan, USB3      2-5 MP
+Label/text inspection        Area scan, GigE      5 MP + macro lens
+```
+
+**Lighting is 80% of the problem.** Invest in proper industrial lighting:
+- **Backlight** for silhouette/dimensional checks
+- **Dark field** for surface defects (scratches, dents)
+- **Bright field** for color/texture inspection
+- **Structured light** for 3D surface profiling
+
+## Model Pipeline
+
+A single model rarely works. Production deployments use a pipeline:
+
+```python
+class InspectionPipeline:
+    def __init__(self):
+        self.detector = YOLOv8('defect_detector_int8.engine')
+        self.classifier = EfficientNet('defect_classifier_int8.engine')
+
+    def inspect(self, image):
+        # Stage 1: Detect regions of interest
+        detections = self.detector.predict(image)
+
+        results = []
+        for det in detections:
+            # Stage 2: Classify each detection
+            crop = image[det.y1:det.y2, det.x1:det.x2]
+            defect_type = self.classifier.predict(crop)
+
+            results.append({
+                'type': defect_type.label,
+                'confidence': defect_type.confidence,
+                'location': det.bbox,
+                'action': 'reject' if defect_type.confidence > 0.90 else 'review'
+            })
+
+        return results
+```
+
+## Latency Budget
+
+On a line producing 10 parts per second:
+
+```
+Available time per part:     100ms
+Image capture:                5ms
+Image transfer (GigE):       10ms
+Preprocessing:                5ms
+Detection inference:         12ms
+Classification inference:     8ms
+PLC communication:            2ms
+─────────────────────────────────
+Total:                       42ms
+Margin:                      58ms  ✓
+```
+
+Always design for 50% margin. The line will speed up. Models will get larger. You need headroom.
+
+## Training Data Strategy
+
+The hardest part of manufacturing AI isn't the model — it's the data.
+
+- **Defects are rare** — you might get 50 defective parts per 10,000. You need every one photographed.
+- **Synthetic data helps** — use Blender or DALL-E to generate defect variations for augmentation
+- **Active learning** — deploy the model, have operators verify low-confidence predictions, retrain monthly
+
+```python
+# Active learning loop
+if 0.5 < prediction.confidence < 0.9:
+    # Model is uncertain — save for human review
+    save_for_review(image, prediction)
+    # Human labels it → goes into next training batch
+```
+
+## ROI That Gets Budget Approval
+
+The business case writes itself:
+
+```
+Current state (manual inspection):
+  2 inspectors × 3 shifts × $25/hr × 365 days = $438,000/year
+  Defect escape rate: 2% → warranty costs: $200,000/year
+  Total: $638,000/year
+
+Edge AI deployment:
+  6 Jetson Orin devices: $3,000
+  6 industrial cameras: $12,000
+  Integration & setup: $50,000
+  Annual maintenance: $15,000
+  Defect escape rate: 0.1% → warranty costs: $10,000/year
+  Year 1 total: $90,000
+  Year 2+ total: $25,000/year
+```
+
+Payback period: 2 months. I've never had a client say no to these numbers.

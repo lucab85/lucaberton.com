@@ -1,0 +1,166 @@
+---
+draft: false
+title: "Kubernetes at the Edge: Running AI Workloads with KubeEdge and K3s"
+snippet: "How to orchestrate AI inference across hundreds of edge nodes using KubeEdge and K3s. Real-world patterns from manufacturing and retail deployments."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Kubernetes edge AI" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - edge-ai
+  - kubernetes
+  - kubeedge
+  - k3s
+  - orchestration
+  - platform-engineering
+---
+
+## The Orchestration Problem
+
+You've got 200 edge devices running AI models. How do you update models, monitor health, handle failures, and scale? If your answer is "SSH into each one," you're going to have a bad time.
+
+Kubernetes solves this at the edge — but not vanilla Kubernetes. You need lightweight, edge-aware distributions.
+
+## K3s: Kubernetes for Constrained Devices
+
+K3s strips Kubernetes down to a 70MB binary. It runs on ARM64, needs 512MB RAM, and supports air-gapped installations. For edge AI, this matters:
+
+```bash
+# Install K3s on an edge device
+curl -sfL https://get.k3s.io | sh -
+
+# Deploy an AI inference service
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vision-inference
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vision-inference
+  template:
+    metadata:
+      labels:
+        app: vision-inference
+    spec:
+      containers:
+      - name: inference
+        image: registry.internal/vision-model:v2.3
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+        ports:
+        - containerPort: 8080
+EOF
+```
+
+## KubeEdge: Cloud-Edge Coordination
+
+KubeEdge extends Kubernetes to the edge with offline autonomy. The edge node keeps running even when disconnected from the cloud control plane:
+
+```yaml
+# CloudCore (in your central cluster)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cloudcore
+  namespace: kubeedge
+spec:
+  template:
+    spec:
+      containers:
+      - name: cloudcore
+        image: kubeedge/cloudcore:v1.18
+        ports:
+        - containerPort: 10000  # WebSocket
+        - containerPort: 10002  # QUIC
+```
+
+The killer feature: **EdgeMesh** handles service discovery across edge nodes without requiring each node to have a public IP.
+
+## Real-World Architecture
+
+Here's the pattern I deploy for manufacturing clients:
+
+```
+┌─────────────────────────────────┐
+│  Central Cloud Cluster (AKS)    │
+│  - Model registry               │
+│  - Training pipelines            │
+│  - Fleet management dashboard    │
+│  - KubeEdge CloudCore           │
+└──────────┬──────────────────────┘
+           │ WebSocket/QUIC
+    ┌──────┴──────┐
+    │   Factory    │   × 12 locations
+    │  ┌────────┐  │
+    │  │ K3s    │  │
+    │  │ Node 1 │──┼── Camera line A (YOLOv8)
+    │  │        │  │
+    │  │ Node 2 │──┼── Camera line B (YOLOv8)
+    │  │        │  │
+    │  │ Node 3 │──┼── Sensor fusion (custom model)
+    │  └────────┘  │
+    └──────────────┘
+```
+
+## Model Updates Without Downtime
+
+The biggest edge AI challenge isn't inference — it's updates. Here's my rolling update strategy:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: defect-detection
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    spec:
+      containers:
+      - name: model
+        image: registry.internal/defect-v3.1:int8
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30  # Model loading time
+```
+
+Key: `maxUnavailable: 0` ensures no gap in inference during updates. The readiness probe waits for the model to load before routing traffic.
+
+## Monitoring Edge AI Fleet
+
+Prometheus + Grafana works at the edge, but bandwidth matters. Use edge-side aggregation:
+
+```yaml
+# Only send summaries to central Prometheus, not raw metrics
+- job_name: 'edge-inference'
+  scrape_interval: 60s
+  metrics_path: /metrics/summary
+  static_configs:
+  - targets: ['inference:8080']
+```
+
+Track these metrics per node:
+- Inference latency (p50, p95, p99)
+- Model accuracy (via periodic validation)
+- GPU/NPU utilization
+- Queue depth (are we keeping up?)
+
+## Lessons Learned
+
+1. **Test offline resilience** — unplug the network cable and verify the edge node keeps running
+2. **Pre-pull container images** — don't rely on pulling 2GB images over factory Wi-Fi
+3. **Hardware watchdogs** — edge devices crash. Automatic reboot and recovery is non-negotiable
+4. **Canary deployments** — update 5% of nodes first, verify accuracy, then roll out fleet-wide
+
+Kubernetes at the edge isn't a stretch — it's the natural evolution. If you're managing more than 10 edge AI devices, you need orchestration. K3s and KubeEdge give you that without the overhead.

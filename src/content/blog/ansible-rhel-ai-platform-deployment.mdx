@@ -17,3 +17,249 @@ image:
   alt: "RHEL AI deployment with Ansible"
 ---
 
+## Deploying RHEL AI with Ansible: From Bare Metal to Production
+
+Red Hat Enterprise Linux AI (RHEL AI) brings InstructLab, Granite models, and optimized inference to the enterprise. But deploying it at scale — across multiple nodes, with proper GPU configuration, model management, and monitoring — requires automation.
+
+I've been deploying RHEL AI platforms for enterprise clients through [Open Empower](https://www.openempower.com/), and Ansible is the backbone of every deployment.
+
+## What is RHEL AI?
+
+RHEL AI is a foundation model platform built on RHEL that includes:
+- **InstructLab**: fine-tuning framework for customizing Granite models
+- **vLLM**: high-performance inference server
+- **Granite models**: IBM's open-source LLMs optimized for enterprise
+- **bootc**: image-based OS for immutable infrastructure
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│              Ansible Automation Platform         │
+│         (Orchestration & Configuration)          │
+├─────────────────────────────────────────────────┤
+│                                                 │
+│  ┌──────────────┐  ┌──────────────────────────┐ │
+│  │  RHEL AI     │  │  RHEL AI                 │ │
+│  │  Node 1      │  │  Node 2                  │ │
+│  │  ┌────────┐  │  │  ┌────────┐              │ │
+│  │  │ vLLM   │  │  │  │InstructLab            │ │
+│  │  │Granite │  │  │  │Fine-tuning            │ │
+│  │  │ 3.1 8B │  │  │  │Granite 3.1            │ │
+│  │  │ H100×4 │  │  │  │ A100×8               │ │
+│  │  └────────┘  │  │  └────────┘              │ │
+│  └──────────────┘  └──────────────────────────┘ │
+└─────────────────────────────────────────────────┘
+```
+
+## Prerequisite: GPU Setup
+
+First, provision the GPU infrastructure — I covered this in detail in my [GPU cluster provisioning guide](https://lucaberton.com/blog/ansible-gpu-cluster-provisioning/). Ensure NVIDIA drivers and container toolkit are installed.
+
+## RHEL AI Base Deployment
+
+```yaml
+# playbooks/deploy_rhel_ai.yml
+---
+- name: Deploy RHEL AI Platform
+  hosts: rhel_ai_nodes
+  become: true
+  vars:
+    rhel_ai_version: "1.4"
+    model_name: "granite-3.1-8b-instruct"
+    vllm_port: 8000
+    gpu_count: 4
+
+  tasks:
+    - name: Register system with Red Hat Subscription
+      community.general.redhat_subscription:
+        state: present
+        username: "{{ rhsm_user }}"
+        password: "{{ rhsm_password }}"
+        pool_ids: "{{ rhel_ai_pool_id }}"
+
+    - name: Install RHEL AI packages
+      ansible.builtin.dnf:
+        name:
+          - instructlab
+          - vllm
+          - python3.11-vllm
+        state: present
+
+    - name: Download Granite model
+      ansible.builtin.command: >
+        ilab model download
+        --repository instructlab/granite-3.1-8b-instruct
+        --release v3.1
+      args:
+        creates: "/var/lib/instructlab/models/granite-3.1-8b-instruct"
+      environment:
+        HF_TOKEN: "{{ huggingface_token }}"
+
+    - name: Configure vLLM serving
+      ansible.builtin.template:
+        src: vllm-config.yml.j2
+        dest: /etc/vllm/config.yml
+        mode: '0644'
+      notify: Restart vLLM service
+
+    - name: Deploy vLLM systemd service
+      ansible.builtin.template:
+        src: vllm.service.j2
+        dest: /etc/systemd/system/vllm.service
+        mode: '0644'
+      notify:
+        - Reload systemd
+        - Restart vLLM service
+
+    - name: Enable and start vLLM
+      ansible.builtin.systemd:
+        name: vllm
+        enabled: true
+        state: started
+```
+
+## vLLM Service Template
+
+```ini
+# templates/vllm.service.j2
+[Unit]
+Description=vLLM Inference Server
+After=network.target nvidia-fabricmanager.service
+
+[Service]
+Type=simple
+User=vllm
+Group=vllm
+Environment=CUDA_VISIBLE_DEVICES=0,1,2,3
+ExecStart=/usr/bin/python3.11 -m vllm.entrypoints.openai.api_server     --model /var/lib/instructlab/models/{{ model_name }}     --tensor-parallel-size {{ gpu_count }}     --port {{ vllm_port }}     --max-model-len 8192     --gpu-memory-utilization 0.9
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## InstructLab Fine-Tuning Automation
+
+```yaml
+# playbooks/finetune_model.yml
+---
+- name: Fine-tune Granite Model with InstructLab
+  hosts: training_nodes
+  become: true
+  vars:
+    taxonomy_repo: "https://gitlab.internal.acme.com/ai/custom-taxonomy.git"
+    base_model: "granite-3.1-8b-instruct"
+    output_model: "granite-3.1-8b-acme-v1"
+
+  tasks:
+    - name: Clone custom taxonomy
+      ansible.builtin.git:
+        repo: "{{ taxonomy_repo }}"
+        dest: /var/lib/instructlab/taxonomy
+        version: main
+
+    - name: Initialize InstructLab
+      ansible.builtin.command: ilab config init
+      args:
+        creates: /var/lib/instructlab/config.yaml
+
+    - name: Generate synthetic training data
+      ansible.builtin.command: >
+        ilab data generate
+        --model {{ base_model }}
+        --taxonomy-path /var/lib/instructlab/taxonomy
+        --output-dir /var/lib/instructlab/datasets/{{ output_model }}
+        --num-instructions 500
+      environment:
+        CUDA_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      async: 7200  # 2 hour timeout for data generation
+      poll: 60
+
+    - name: Train model
+      ansible.builtin.command: >
+        ilab model train
+        --input-dir /var/lib/instructlab/datasets/{{ output_model }}
+        --model-path /var/lib/instructlab/models/{{ base_model }}
+        --output-dir /var/lib/instructlab/models/{{ output_model }}
+        --device cuda
+        --num-epochs 3
+      environment:
+        CUDA_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+      async: 14400  # 4 hour timeout for training
+      poll: 120
+
+    - name: Evaluate fine-tuned model
+      ansible.builtin.command: >
+        ilab model evaluate
+        --model /var/lib/instructlab/models/{{ output_model }}
+        --benchmark mmlu
+      register: eval_result
+
+    - name: Display evaluation results
+      ansible.builtin.debug:
+        var: eval_result.stdout_lines
+```
+
+## Health Checks and Monitoring
+
+```yaml
+# roles/rhel_ai_monitoring/tasks/main.yml
+---
+- name: Deploy inference health check script
+  ansible.builtin.copy:
+    dest: /usr/local/bin/vllm-healthcheck.sh
+    mode: '0755'
+    content: |
+      #!/bin/bash
+      curl -sf http://localhost:{{ vllm_port }}/health || exit 1
+      # Check GPU memory usage
+      GPU_MEM=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '{s+=$1} END {print s}')
+      if [ "$GPU_MEM" -gt "{{ gpu_memory_threshold }}" ]; then
+        echo "WARNING: GPU memory usage high: ${GPU_MEM}MB"
+      fi
+
+- name: Configure Prometheus metrics endpoint
+  ansible.builtin.template:
+    src: vllm-metrics.yml.j2
+    dest: /etc/prometheus/targets.d/vllm.yml
+    mode: '0644'
+
+- name: Test inference endpoint
+  ansible.builtin.uri:
+    url: "http://localhost:{{ vllm_port }}/v1/chat/completions"
+    method: POST
+    body_format: json
+    body:
+      model: "{{ model_name }}"
+      messages:
+        - role: user
+          content: "Hello, are you operational?"
+      max_tokens: 50
+    status_code: 200
+  register: inference_test
+  retries: 3
+  delay: 5
+```
+
+## Production Deployment Checklist
+
+Here's what I verify on every RHEL AI deployment:
+
+1. **GPU verification** — `nvidia-smi` shows all expected GPUs with correct driver version
+2. **Model integrity** — checksums match the published hashes
+3. **Inference latency** — first token latency under SLA (typically under 500ms for 8B models)
+4. **Memory headroom** — at least 10% GPU memory free under load
+5. **TLS termination** — never expose vLLM directly; always behind a reverse proxy with mTLS
+6. **Rate limiting** — prevent single tenants from monopolizing inference capacity
+7. **Logging** — request/response logging for compliance (with PII redaction)
+
+I presented the full multi-tenant GPU orchestration story at [Red Hat Summit 2026](https://lucaberton.com/blog/red-hat-summit-2026/) and [KubeCon EU 2026](https://lucaberton.com/blog/kubecon-europe-2026/) — the production patterns for RHEL AI scale directly from these Ansible foundations.
+
+## Resources
+
+- [Ansible Pilot](https://www.ansiblepilot.com/) — step-by-step RHEL AI deployment tutorials
+- [Ansible by Example](https://www.ansiblebyexample.com/) — role development patterns used in these playbooks
+- [Kubernetes Recipes](https://kubernetes.recipes/) — for deploying vLLM on OpenShift with GPU operators
+- [Open Empower](https://www.openempower.com/) — consulting services for enterprise RHEL AI deployments

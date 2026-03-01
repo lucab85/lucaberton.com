@@ -17,3 +17,184 @@ image:
   alt: "Ansible Collections best practices"
 ---
 
+## Why Collections Changed Everything
+
+When Ansible 2.10 split the monolithic package into collections, it was the biggest architectural shift in Ansible's history. Suddenly, content was modular, versioned, and independently maintainable. But two years later, most teams are still writing collections that nobody reuses.
+
+I've built and published over 20 collections on [Ansible Galaxy](https://galaxy.ansible.com/) and maintained content across [Ansible Pilot](https://www.ansiblepilot.com/) — here's what actually works.
+
+## Collection Structure That Scales
+
+```
+my_company.platform/
+├── galaxy.yml
+├── README.md
+├── CHANGELOG.md
+├── meta/
+│   └── runtime.yml
+├── plugins/
+│   ├── modules/
+│   ├── module_utils/
+│   ├── filter/
+│   └── lookup/
+├── roles/
+│   ├── common/
+│   └── deploy/
+├── playbooks/
+├── tests/
+│   ├── integration/
+│   └── unit/
+└── docs/
+```
+
+The key insight: **treat collections as products, not dumping grounds**. Each collection should have a clear scope — one domain, one team, one purpose.
+
+## Naming Conventions That Prevent Chaos
+
+```yaml
+# galaxy.yml
+namespace: acme_corp
+name: cloud_platform
+version: 2.1.0
+description: Cloud infrastructure provisioning for ACME Corp
+authors:
+  - Platform Engineering Team
+dependencies:
+  amazon.aws: ">=6.0.0"
+  community.general: ">=7.0.0"
+```
+
+Follow these rules:
+- **Namespace**: company or team name (lowercase, underscores)
+- **Collection name**: domain-specific (not `utils` or `common`)
+- **Semantic versioning**: breaking changes = major bump, always
+
+## Testing Collections Properly
+
+Most collection testing I see is nonexistent. Here's the minimum viable testing setup with Molecule:
+
+```yaml
+# molecule/default/molecule.yml
+dependency:
+  name: galaxy
+driver:
+  name: docker
+platforms:
+  - name: rhel9
+    image: registry.access.redhat.com/ubi9/ubi
+    pre_build_image: true
+provisioner:
+  name: ansible
+verifier:
+  name: ansible
+```
+
+```yaml
+# molecule/default/converge.yml
+- name: Converge
+  hosts: all
+  collections:
+    - acme_corp.cloud_platform
+  roles:
+    - role: acme_corp.cloud_platform.deploy
+      vars:
+        deploy_env: staging
+        deploy_version: "1.2.3"
+```
+
+Integration tests should cover:
+- **Idempotency**: run twice, second run shows zero changes
+- **Check mode**: `--check` produces accurate diff
+- **Error handling**: invalid inputs fail gracefully with clear messages
+
+For deeper testing patterns, check my [Ansible by Example](https://www.ansiblebyexample.com/) guides — I cover Molecule testing extensively there.
+
+## Versioning and Changelog Strategy
+
+```bash
+# Use antsibull-changelog for consistent changelogs
+pip install antsibull-changelog
+antsibull-changelog init
+antsibull-changelog release --version 2.1.0
+```
+
+```yaml
+# changelogs/fragments/add-rds-module.yml
+minor_changes:
+  - rds_instance - add support for Aurora Serverless v2 provisioning
+bugfixes:
+  - ec2_security_group - fix idempotency when rules contain IPv6 CIDR blocks
+```
+
+## Publishing to Galaxy and Private Automation Hub
+
+```bash
+# Build the collection artifact
+ansible-galaxy collection build
+
+# Publish to Galaxy
+ansible-galaxy collection publish   acme_corp-cloud_platform-2.1.0.tar.gz   --api-key $GALAXY_API_KEY
+
+# Or publish to Private Automation Hub
+ansible-galaxy collection publish   acme_corp-cloud_platform-2.1.0.tar.gz   --server https://hub.internal.acme.com/api/galaxy/
+```
+
+For enterprise teams using Red Hat Ansible Automation Platform, Private Automation Hub is the way to go — it gives you curated, approved content without exposing anything to the public internet.
+
+## Cross-Collection Dependencies Done Right
+
+```yaml
+# galaxy.yml — pin to ranges, not exact versions
+dependencies:
+  ansible.netcommon: ">=5.0.0,<7.0.0"
+  ansible.utils: ">=2.0.0"
+```
+
+Never pin exact versions unless you have a specific compatibility issue. Range pins let downstream users resolve conflicts.
+
+## CI/CD Pipeline for Collections
+
+```yaml
+# .gitlab-ci.yml
+stages:
+  - lint
+  - test
+  - publish
+
+lint:
+  image: python:3.11
+  script:
+    - pip install ansible-lint
+    - ansible-lint
+
+test:
+  image: quay.io/ansible/creator-ee:latest
+  script:
+    - ansible-test sanity --color
+    - ansible-test units --color
+    - ansible-test integration --color
+
+publish:
+  stage: publish
+  only:
+    - tags
+  script:
+    - ansible-galaxy collection build
+    - ansible-galaxy collection publish *.tar.gz --api-key $GALAXY_TOKEN
+```
+
+I walk through this entire CI pipeline setup in my [Terraform Pilot](https://www.terraformpilot.com/) infrastructure-as-code guides, where the same GitLab CI patterns apply.
+
+## What I've Learned After 772+ Tutorials
+
+After creating over 772 Ansible tutorials on [Ansible Pilot](https://www.ansiblepilot.com/), here are the patterns that separate good collections from great ones:
+
+1. **Documentation is not optional** — every module needs examples that copy-paste and work
+2. **Defaults should be sane** — a role with zero vars should do something useful
+3. **Idempotency is non-negotiable** — if it's not idempotent, it's a script, not automation
+4. **Test on multiple platforms** — RHEL, Ubuntu, and at minimum one more
+5. **Keep changelogs human-readable** — "fixed stuff" is not a changelog entry
+
+## Next Steps
+
+If you're starting your collections journey, begin with the [Ansible by Example](https://www.ansiblebyexample.com/) book series for foundational patterns, then graduate to building your own reusable content. The investment in proper collection architecture pays dividends every time a teammate reuses your work instead of reinventing it.

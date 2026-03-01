@@ -17,3 +17,244 @@ image:
   alt: "GPU cluster provisioning with Ansible"
 ---
 
+## The GPU Provisioning Challenge
+
+Setting up a GPU cluster manually is painful. NVIDIA drivers, CUDA toolkit, container runtime configuration, GPU operator deployment, MIG partitioning — miss one step and your data scientists are staring at "CUDA out of memory" errors instead of training models.
+
+I've automated GPU cluster provisioning across bare-metal, VMware, and cloud environments using Ansible, and the patterns I've developed save days of manual work per cluster.
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────┐
+│           Ansible Controller            │
+│    (AAP / AWX / Command Line)           │
+├─────────────────────────────────────────┤
+│                                         │
+│  ┌──────────┐  ┌──────────┐  ┌────────┐│
+│  │ Inventory │  │Playbooks │  │ Roles  ││
+│  │ (dynamic) │  │          │  │        ││
+│  └──────────┘  └──────────┘  └────────┘│
+│                                         │
+├─────────────────────────────────────────┤
+│     GPU Worker Nodes (bare metal)       │
+│  ┌─────┐ ┌─────┐ ┌─────┐ ┌─────┐      │
+│  │ H100│ │ H100│ │A100 │ │A100 │      │
+│  │ ×8  │ │ ×8  │ │ ×4  │ │ ×4  │      │
+│  └─────┘ └─────┘ └─────┘ └─────┘      │
+└─────────────────────────────────────────┘
+```
+
+## Base OS Preparation
+
+```yaml
+# roles/gpu_base/tasks/main.yml
+---
+- name: Ensure kernel headers match running kernel
+  ansible.builtin.dnf:
+    name:
+      - "kernel-devel-{{ ansible_kernel }}"
+      - "kernel-headers-{{ ansible_kernel }}"
+      - dkms
+      - gcc
+      - make
+    state: present
+
+- name: Disable nouveau driver
+  ansible.builtin.copy:
+    dest: /etc/modprobe.d/blacklist-nouveau.conf
+    content: |
+      blacklist nouveau
+      options nouveau modeset=0
+    mode: '0644'
+  register: nouveau_blacklist
+
+- name: Rebuild initramfs if nouveau was blacklisted
+  ansible.builtin.command: dracut --force
+  when: nouveau_blacklist.changed
+
+- name: Configure IOMMU for GPU passthrough
+  ansible.builtin.lineinfile:
+    path: /etc/default/grub
+    regexp: '^GRUB_CMDLINE_LINUX='
+    line: 'GRUB_CMDLINE_LINUX="crashkernel=auto intel_iommu=on iommu=pt rd.driver.blacklist=nouveau"'
+  register: grub_config
+
+- name: Rebuild GRUB config
+  ansible.builtin.command: grub2-mkconfig -o /boot/grub2/grub.cfg
+  when: grub_config.changed
+```
+
+## NVIDIA Driver Installation
+
+```yaml
+# roles/nvidia_driver/tasks/main.yml
+---
+- name: Add NVIDIA CUDA repository
+  ansible.builtin.dnf:
+    name: "https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-repo-rhel9-12-6-local-12.6.0_560.28.03-1.x86_64.rpm"
+    state: present
+    disable_gpg_check: true
+
+- name: Install NVIDIA driver and CUDA toolkit
+  ansible.builtin.dnf:
+    name:
+      - nvidia-driver-latest
+      - cuda-toolkit-12-6
+      - nvidia-fabric-manager
+    state: present
+
+- name: Enable and start nvidia-fabricmanager
+  ansible.builtin.systemd:
+    name: nvidia-fabricmanager
+    enabled: true
+    state: started
+
+- name: Verify GPU detection
+  ansible.builtin.command: nvidia-smi
+  register: nvidia_smi_output
+  changed_when: false
+
+- name: Display GPU information
+  ansible.builtin.debug:
+    var: nvidia_smi_output.stdout_lines
+```
+
+## Container Runtime Configuration
+
+```yaml
+# roles/gpu_container_runtime/tasks/main.yml
+---
+- name: Install NVIDIA Container Toolkit
+  ansible.builtin.dnf:
+    name: nvidia-container-toolkit
+    state: present
+
+- name: Configure containerd for NVIDIA runtime
+  ansible.builtin.template:
+    src: containerd-config.toml.j2
+    dest: /etc/containerd/config.toml
+    mode: '0644'
+  notify: Restart containerd
+
+- name: Verify NVIDIA container runtime
+  ansible.builtin.command: >
+    ctr run --rm --gpus 0
+    docker.io/nvidia/cuda:12.6.0-base-ubi9
+    gpu-test nvidia-smi
+  register: container_gpu_test
+  changed_when: false
+```
+
+## MIG Partitioning for Multi-Tenancy
+
+```yaml
+# roles/nvidia_mig/tasks/main.yml
+---
+- name: Enable MIG mode on A100/H100 GPUs
+  ansible.builtin.command: "nvidia-smi -i {{ item }} -mig 1"
+  loop: "{{ gpu_indices }}"
+  register: mig_enable
+  changed_when: "'Enabled' in mig_enable.stdout"
+
+- name: Create MIG GPU instances
+  ansible.builtin.command: >
+    nvidia-smi mig -i {{ item.gpu }}
+    -cgi {{ item.profile }}
+    -C
+  loop: "{{ mig_profiles }}"
+  when: mig_enable.changed
+
+# defaults/main.yml
+# gpu_indices: [0, 1, 2, 3]
+# mig_profiles:
+#   - { gpu: 0, profile: "9,9,9" }   # 3x 3g.20gb slices on GPU 0
+#   - { gpu: 1, profile: "14" }       # 1x 7g.40gb full profile on GPU 1
+```
+
+I covered the multi-tenant GPU orchestration patterns extensively at [KubeCon EU 2026](https://lucaberton.com/blog/kubecon-europe-2026/) — the MIG partitioning decisions have real-world cost implications that most teams underestimate.
+
+## Full Cluster Playbook
+
+```yaml
+# playbooks/provision_gpu_cluster.yml
+---
+- name: Provision GPU Compute Cluster
+  hosts: gpu_workers
+  become: true
+  vars:
+    cuda_version: "12.6"
+    driver_branch: "560"
+    mig_enabled: true
+
+  roles:
+    - role: gpu_base
+    - role: nvidia_driver
+    - role: gpu_container_runtime
+    - role: nvidia_mig
+      when: mig_enabled
+    - role: gpu_monitoring
+
+  post_tasks:
+    - name: Run GPU validation suite
+      ansible.builtin.include_role:
+        name: gpu_validation
+```
+
+## Dynamic Inventory for GPU Nodes
+
+```python
+#!/usr/bin/env python3
+# inventory/gpu_inventory.py
+import json
+import subprocess
+
+def get_gpu_hosts():
+    # Query DCIM/CMDB for hosts with GPU hardware
+    hosts = query_netbox_gpu_hosts()
+    
+    inventory = {"gpu_workers": {"hosts": {}}}
+    
+    for host in hosts:
+        inventory["gpu_workers"]["hosts"][host["name"]] = {
+            "ansible_host": host["ip"],
+            "gpu_count": host["gpu_count"],
+            "gpu_model": host["gpu_model"],
+            "gpu_indices": list(range(host["gpu_count"])),
+        }
+    
+    return inventory
+```
+
+## Monitoring and Validation
+
+```yaml
+# roles/gpu_monitoring/tasks/main.yml
+---
+- name: Deploy DCGM Exporter for Prometheus
+  ansible.builtin.command: >
+    ctr run -d --gpus 0
+    --net-host
+    nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.1-ubuntu22.04
+    dcgm-exporter
+
+- name: Configure Prometheus scrape target
+  ansible.builtin.template:
+    src: prometheus-gpu-target.yml.j2
+    dest: /etc/prometheus/targets.d/gpu-nodes.yml
+    mode: '0644'
+```
+
+For the observability stack integration, I detail Prometheus + Grafana patterns on [Kubernetes Recipes](https://kubernetes.recipes/) — the same dashboards work for GPU metrics.
+
+## Lessons from Production
+
+After provisioning GPU clusters across multiple enterprise environments, here's what I wish I'd known earlier:
+
+1. **Fabric Manager is critical** for multi-GPU NVLink communication — without it, your H100s run at PCIe speeds
+2. **MIG profiles are a business decision**, not a technical one — talk to your ML teams first
+3. **Driver upgrades require coordination** — never auto-update GPU drivers in production
+4. **Power and cooling are the real bottleneck** — 8× H100 pulls 5.6kW, plan your rack power accordingly
+5. **Test with real workloads**, not just `nvidia-smi` — a passing health check doesn't mean training will work
+
+The complete Ansible roles for GPU cluster provisioning are available in my [Ansible Pilot](https://www.ansiblepilot.com/) tutorials, where I walk through each component step by step.

@@ -1,0 +1,215 @@
+---
+draft: false
+title: "Digital Twins for Infrastructure: Simulating Your Kubernetes Fleet Before You Break It"
+snippet: "Use digital twin technology to model, simulate, and predict behavior of your Kubernetes clusters before applying changes in production."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - "digital-twins"
+  - "kubernetes"
+  - "simulation"
+  - "infrastructure"
+  - "platform-engineering"
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Digital Twins for Infrastructure: Simulating Your Kubernetes Fleet Before You Break It"
+---
+
+## Why Digital Twins for Infrastructure?
+
+In manufacturing, digital twins are standard — you simulate a jet engine before building it. In infrastructure, we still YOLO changes into production and hope for the best. That's insane.
+
+A digital twin of your Kubernetes fleet lets you:
+- **Test upgrades** against a model before touching production
+- **Predict capacity** needs before hitting limits
+- **Simulate failures** without causing outages
+- **Train SREs** on realistic incidents without risk
+
+## Architecture
+
+```
+┌──────────────────────────────────────┐
+│        Digital Twin Platform         │
+│                                      │
+│  ┌────────────┐  ┌────────────────┐  │
+│  │ State Sync │  │  Simulation    │  │
+│  │ (real-time │  │  Engine        │  │
+│  │  metrics)  │  │  (what-if)     │  │
+│  └─────┬──────┘  └───────┬────────┘  │
+│        │                 │           │
+│  ┌─────┴─────────────────┴────────┐  │
+│  │     Digital Twin Model          │  │
+│  │  (topology + state + behavior)  │  │
+│  └─────────────────────────────────┘  │
+│        ▲                             │
+│        │ Continuous sync             │
+└────────┼─────────────────────────────┘
+         │
+┌────────┴─────────────────────────────┐
+│     Production Kubernetes Fleet      │
+│  ┌─────────┐ ┌─────────┐ ┌────────┐ │
+│  │Cluster 1│ │Cluster 2│ │Cluster3│ │
+│  └─────────┘ └─────────┘ └────────┘ │
+└──────────────────────────────────────┘
+```
+
+## Building the Model
+
+The twin needs three layers:
+
+### 1. Topology Layer — What exists
+
+```yaml
+# Sync cluster topology with Ansible
+- name: Capture cluster state for digital twin
+  hosts: k8s_clusters
+  tasks:
+    - name: Export cluster topology
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Node
+      register: nodes
+
+    - name: Export workload topology
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: apps/v1
+        kind: Deployment
+        namespace: ""  # All namespaces
+      register: deployments
+
+    - name: Push to twin model
+      ansible.builtin.uri:
+        url: "{{ twin_api }}/api/v1/sync/topology"
+        method: POST
+        body_format: json
+        body:
+          cluster: "{{ inventory_hostname }}"
+          nodes: "{{ nodes.resources }}"
+          deployments: "{{ deployments.resources }}"
+```
+
+### 2. Metrics Layer — Current behavior
+
+```python
+# Continuous metrics sync from Prometheus
+import requests
+from datetime import datetime, timedelta
+
+def sync_metrics_to_twin(prom_url, twin_api, cluster_name):
+    queries = {
+        "cpu_usage": 'sum(rate(container_cpu_usage_seconds_total[5m])) by (namespace)',
+        "memory_usage": 'sum(container_memory_working_set_bytes) by (namespace)',
+        "network_io": 'sum(rate(container_network_transmit_bytes_total[5m])) by (namespace)',
+        "pod_restart_rate": 'sum(increase(kube_pod_container_status_restarts_total[1h])) by (namespace)',
+    }
+    
+    for metric_name, query in queries.items():
+        result = requests.get(f"{prom_url}/api/v1/query", params={"query": query})
+        requests.post(f"{twin_api}/api/v1/sync/metrics", json={
+            "cluster": cluster_name,
+            "metric": metric_name,
+            "data": result.json()["data"]["result"],
+            "timestamp": datetime.utcnow().isoformat()
+        })
+```
+
+### 3. Behavioral Layer — How things respond
+
+This is the hard part. You need to model:
+- Pod scheduling decisions under resource constraints
+- HPA scaling behavior at different load levels
+- Network latency between services under congestion
+- Failure cascading when a node goes down
+
+## What-If Simulations
+
+Here's where it gets powerful:
+
+```python
+# Simulate: "What happens if we upgrade from K8s 1.31 to 1.32?"
+simulation = twin.create_simulation(
+    name="k8s-upgrade-1.32",
+    scenario={
+        "action": "version_upgrade",
+        "from_version": "1.31.4",
+        "to_version": "1.32.0",
+        "strategy": "rolling",
+        "clusters": ["prod-eu-west", "prod-us-east"]
+    }
+)
+
+results = simulation.run()
+# Results include:
+# - Predicted downtime per namespace
+# - API deprecations that would break workloads
+# - Resource requirement changes
+# - Estimated rollback time if needed
+```
+
+```python
+# Simulate: "What happens if node gpu-worker-03 fails?"
+failure_sim = twin.create_simulation(
+    name="gpu-node-failure",
+    scenario={
+        "action": "node_failure",
+        "target": "gpu-worker-03",
+        "duration": "30m",
+        "cascade": True
+    }
+)
+
+results = failure_sim.run()
+# Shows which pods would be evicted,
+# whether PDBs would block rescheduling,
+# and if GPU capacity is sufficient for failover
+```
+
+For the Kubernetes scheduling and capacity planning fundamentals, [Kubernetes Recipes](https://kubernetes.recipes/) covers the resource management patterns that feed into these simulations.
+
+## Tools in the Ecosystem
+
+- **Kubemark**: Kubernetes-native cluster simulation (hollow nodes)
+- **KWOK**: Kubernetes Without Kubelet — simulates nodes at massive scale
+- **Steadybit**: Chaos engineering with simulation capabilities
+- **Dynatrace/Datadog**: Commercial platforms with digital twin features
+
+## Integrating with GitOps
+
+```yaml
+# Before merging a GitOps change, simulate it:
+# .gitlab-ci.yml
+simulate:
+  stage: validate
+  script:
+    - |
+      # Extract Kubernetes manifests from the PR
+      kubectl diff -R -f manifests/ > /tmp/changes.diff
+      
+      # Submit to digital twin for impact analysis
+      curl -X POST $TWIN_API/api/v1/simulate         -H "Content-Type: application/json"         -d "{"diff": "$(cat /tmp/changes.diff | base64)",
+             "cluster": "prod-eu-west"}"
+      
+      # Fail pipeline if simulation shows issues
+      RESULT=$(curl -s $TWIN_API/api/v1/simulate/latest/status)
+      if [ "$RESULT" != "pass" ]; then
+        echo "Simulation detected potential issues"
+        exit 1
+      fi
+```
+
+This pairs well with [GitOps at scale](https://lucaberton.com/blog/gitops-at-scale-flux-argocd/) patterns — simulation becomes another gate in the progressive delivery pipeline.
+
+## Practical Starting Point
+
+Don't build a full digital twin on day one. Start with:
+
+1. **KWOK for capacity testing** — simulate 1000-node clusters on your laptop
+2. **Kubemark for upgrade testing** — validate API deprecations before upgrading
+3. **Prometheus recording rules** — build the behavioral model from historical data
+4. **Ansible for state capture** — automate topology snapshots
+
+The full digital twin comes later. Start by simulating the thing that burned you last quarter.

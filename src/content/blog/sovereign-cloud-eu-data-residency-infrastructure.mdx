@@ -1,0 +1,270 @@
+---
+draft: false
+title: "Sovereign Cloud: Building EU-Compliant Infrastructure That Actually Works"
+snippet: "EU data sovereignty requirements are reshaping cloud architecture. Practical patterns for multi-region deployments, data residency, and regulatory compliance."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "sovereign-cloud"
+  - "eu-compliance"
+  - "data-residency"
+  - "cloud-infrastructure"
+  - "gdpr"
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Sovereign Cloud: Building EU-Compliant Infrastructure That Actually Works"
+---
+
+## The Sovereignty Mandate
+
+"Just use AWS/Azure/GCP" doesn't work anymore for a growing number of European organizations. Between GDPR, Schrems II, the EU Data Act, and the [Cyber Resilience Act](https://lucaberton.com/blog/cra-what-is-cyber-resilience-act/), the requirements are clear: certain data must stay within EU jurisdiction, processed by EU-controlled infrastructure, with no possibility of foreign government access.
+
+This isn't theoretical. Banks, healthcare providers, government agencies, and defense contractors are rebuilding their cloud architectures right now.
+
+## What "Sovereign" Actually Means
+
+Sovereign cloud has three layers:
+
+1. **Data sovereignty**: Data physically stays within defined borders
+2. **Operational sovereignty**: EU entities operate the infrastructure
+3. **Software sovereignty**: No foreign government can compel access via legal mechanisms (looking at you, CLOUD Act)
+
+Most hyperscalers offer regions in Europe, but that only covers layer 1. Layers 2 and 3 are why sovereign cloud providers exist.
+
+## Architecture Patterns
+
+### Pattern 1: Sovereign-First with Hyperscaler Burst
+
+```
+┌─────────────────────────────────────────┐
+│          Sovereign Cloud (Primary)      │
+│     (Ionos, OVHcloud, Scaleway)         │
+│                                         │
+│  ┌─────────────┐  ┌─────────────┐      │
+│  │ Regulated   │  │ Core        │      │
+│  │ Workloads   │  │ Platform    │      │
+│  │ (PII, GDPR) │  │ Services    │      │
+│  └─────────────┘  └─────────────┘      │
+│                                         │
+├──── Encrypted Transit (WireGuard) ──────┤
+│                                         │
+│  ┌─────────────────────────────────┐    │
+│  │   Hyperscaler (Burst/Overflow)  │    │
+│  │   Non-regulated workloads only  │    │
+│  └─────────────────────────────────┘    │
+└─────────────────────────────────────────┘
+```
+
+### Pattern 2: Multi-Region Data Mesh
+
+```yaml
+# terraform/sovereign-regions.tf
+module "eu_west" {
+  source    = "./modules/sovereign-region"
+  provider  = ionos
+  region    = "de/fra"
+  
+  data_classification = "restricted"
+  encryption_key_hsm  = module.eu_hsm.key_arn
+  
+  allowed_egress = [
+    "eu-central",    # Frankfurt ↔ Amsterdam OK
+    "eu-south",      # Frankfurt ↔ Milan OK
+  ]
+  # No transatlantic egress allowed
+}
+
+module "analytics" {
+  source    = "./modules/sovereign-region"
+  provider  = ovhcloud
+  region    = "GRA"  # Gravelines, France
+  
+  data_classification = "internal"
+  # Analytics can process aggregated, anonymized data
+}
+```
+
+For the Terraform patterns behind multi-region sovereign deployments, [Terraform Pilot](https://www.terraformpilot.com/) has a dedicated module library.
+
+## Data Residency Enforcement
+
+Technical controls that actually enforce residency:
+
+```yaml
+# Ansible role for data residency controls
+# roles/data_residency/tasks/main.yml
+---
+- name: Configure DNS to resolve only to EU endpoints
+  ansible.builtin.template:
+    src: coredns-sovereign.conf.j2
+    dest: /etc/coredns/sovereign.conf
+  notify: Restart CoreDNS
+
+- name: Deploy Cilium network policies for geo-fencing
+  kubernetes.core.k8s:
+    kubeconfig: "{{ kubeconfig }}"
+    state: present
+    definition:
+      apiVersion: cilium.io/v2
+      kind: CiliumNetworkPolicy
+      metadata:
+        name: eu-only-egress
+        namespace: "{{ item }}"
+      spec:
+        endpointSelector: {}
+        egress:
+          - toCIDR:
+              # EU IP ranges only
+              - 2.16.0.0/13      # DE
+              - 5.39.0.0/17      # FR (OVH)
+              - 31.3.0.0/16      # NL
+              - 37.48.0.0/13     # NL
+          - toCIDRSet:
+              - cidr: 0.0.0.0/0
+                except:
+                  - 0.0.0.0/8
+            toPorts:
+              - ports:
+                  - port: "53"
+                    protocol: UDP
+  loop: "{{ regulated_namespaces }}"
+
+- name: Verify no non-EU DNS resolution
+  ansible.builtin.command: >
+    dig +short {{ item }} @8.8.8.8
+  register: dns_check
+  changed_when: false
+  loop:
+    - "api.internal.{{ domain }}"
+    - "db.internal.{{ domain }}"
+```
+
+## Encryption Architecture
+
+Data at rest, in transit, and in use — with keys managed within EU:
+
+```yaml
+# Key management — EU HSM only
+- name: Initialize EU-sovereign HSM
+  community.general.keycloak_realm:
+    auth_keycloak_url: "{{ vault_url }}"
+    realm: sovereign-eu
+    state: present
+
+- name: Configure Vault auto-unseal with EU HSM
+  ansible.builtin.template:
+    src: vault-config.hcl.j2
+    dest: /etc/vault.d/config.hcl
+  vars:
+    seal_type: "pkcs11"
+    hsm_endpoint: "{{ eu_hsm_endpoint }}"
+    # HSM physically located in Frankfurt data center
+    # Keys never leave the HSM boundary
+```
+
+```hcl
+# templates/vault-config.hcl.j2
+seal "pkcs11" {
+  lib            = "/usr/lib/softhsm/libsofthsm2.so"
+  slot           = "0"
+  pin            = "{{ vault_hsm_pin }}"
+  key_label      = "vault-sovereign-key"
+  hmac_key_label = "vault-sovereign-hmac"
+}
+
+storage "raft" {
+  path = "/opt/vault/data"
+}
+
+listener "tcp" {
+  address     = "0.0.0.0:8200"
+  tls_cert_file = "/etc/vault.d/tls/vault.crt"
+  tls_key_file  = "/etc/vault.d/tls/vault.key"
+}
+```
+
+## Compliance Automation
+
+Map regulatory requirements to technical controls and verify continuously:
+
+```yaml
+# playbooks/sovereign_compliance_check.yml
+---
+- name: Sovereign Cloud Compliance Audit
+  hosts: all
+  gather_facts: true
+
+  tasks:
+    - name: Verify data center location
+      ansible.builtin.assert:
+        that:
+          - "'eu-' in cloud_region or cloud_provider in sovereign_providers"
+        fail_msg: "Workload running outside EU sovereign infrastructure"
+
+    - name: Check encryption at rest
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Secret
+        namespace: kube-system
+        name: encryption-config
+      register: encryption_config
+      failed_when: encryption_config.resources | length == 0
+
+    - name: Verify no CLOUD Act exposure
+      ansible.builtin.assert:
+        that:
+          - cloud_provider not in ['aws', 'azure', 'gcp']
+            or cloud_provider_sovereign_mode == true
+        fail_msg: "Hyperscaler without sovereign operating model detected"
+
+    - name: Check network egress controls
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: cilium.io/v2
+        kind: CiliumNetworkPolicy
+        namespace: "{{ item }}"
+        name: eu-only-egress
+      loop: "{{ regulated_namespaces }}"
+      register: egress_policies
+      failed_when: egress_policies.resources | length == 0
+
+    - name: Generate compliance report
+      ansible.builtin.template:
+        src: sovereign-compliance-report.md.j2
+        dest: "reports/sovereign-{{ inventory_hostname }}-{{ ansible_date_time.date }}.md"
+      delegate_to: localhost
+```
+
+## EU Sovereign Cloud Providers
+
+| Provider | HQ | Certifications | K8s Service |
+|----------|-----|----------------|-------------|
+| Ionos (1&1) | DE | ISO 27001, C5 | Managed K8s |
+| OVHcloud | FR | SecNumCloud, HDS | Managed K8s |
+| Scaleway | FR | ISO 27001, HDS | Kapsule |
+| Hetzner | DE | ISO 27001 | — (self-managed) |
+| Open Telekom Cloud | DE | C5, ISO 27001 | CCE |
+| Stackit | DE | C5, ISO 27001 | SKE |
+
+For building on these platforms with infrastructure-as-code, I cover provider-specific Terraform patterns on [Terraform Pilot](https://www.terraformpilot.com/) and Kubernetes deployment recipes on [Kubernetes Recipes](https://kubernetes.recipes/).
+
+## The Cost Reality
+
+Sovereign cloud costs 20-40% more than hyperscaler equivalents. But:
+- GDPR fines can reach 4% of global revenue
+- A single data breach costs average €4.3M
+- Regulatory non-compliance can mean market exclusion
+
+The math works. Especially when you automate the compliance layer with [Ansible](https://www.ansiblepilot.com/) instead of hiring a team of manual auditors.
+
+## Getting Started
+
+1. **Classify your data** — what actually needs sovereignty vs what doesn't
+2. **Start with one workload** — pick a regulated application, not your entire estate
+3. **Automate from day one** — sovereign infrastructure without automation is a staffing nightmare
+4. **Plan for multi-cloud** — sovereign providers have smaller feature sets; you'll need hybrid patterns
+
+For consulting on sovereign cloud architecture and implementation, reach out through [Open Empower](https://www.openempower.com/) — we specialize in EU-compliant infrastructure for regulated enterprises, which you can also learn more about at [lucaberton.com](https://lucaberton.com/).

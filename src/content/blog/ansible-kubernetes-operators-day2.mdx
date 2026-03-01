@@ -17,3 +17,252 @@ image:
   alt: "Ansible Kubernetes Operators"
 ---
 
+## Beyond kubectl: Ansible for Day-2 Kubernetes Operations
+
+Day-1 is exciting — you deploy the cluster, install your apps, everything works. Day-2 is where it gets real. Certificate rotations, etcd backups, node drains, version upgrades, RBAC audits — the unglamorous work that keeps production running.
+
+I've been using Ansible for Kubernetes day-2 operations across dozens of clusters, and it consistently outperforms shell scripts and manual runbooks.
+
+## Why Ansible for Kubernetes Day-2?
+
+"But we have Operators for that!" — Yes, and Operators handle some things well. But Operators operate on a single cluster. When you manage 10, 50, or 200 clusters across environments, you need orchestration that works **across** clusters. That's where Ansible shines.
+
+```yaml
+# inventory/clusters.yml
+all:
+  children:
+    production:
+      hosts:
+        prod-eu-west:
+          kubeconfig: ~/.kube/prod-eu-west
+          cluster_version: "1.31"
+        prod-us-east:
+          kubeconfig: ~/.kube/prod-us-east
+          cluster_version: "1.31"
+    staging:
+      hosts:
+        staging-eu:
+          kubeconfig: ~/.kube/staging-eu
+          cluster_version: "1.32"
+```
+
+## Certificate Rotation Playbook
+
+```yaml
+# playbooks/rotate_certificates.yml
+---
+- name: Rotate Kubernetes Certificates
+  hosts: all
+  gather_facts: false
+  vars:
+    cert_warning_days: 30
+
+  tasks:
+    - name: Check certificate expiration
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Secret
+        namespace: kube-system
+        label_selectors:
+          - "component=kube-apiserver"
+      register: cert_secrets
+
+    - name: Identify expiring certificates
+      ansible.builtin.set_fact:
+        expiring_certs: "{{ cert_secrets.resources | selectattr('data', 'defined') | list }}"
+
+    - name: Trigger certificate renewal
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: cert-renewal-trigger
+            namespace: kube-system
+            annotations:
+              renewal-requested: "{{ ansible_date_time.iso8601 }}"
+      when: expiring_certs | length > 0
+
+    - name: Verify API server health after rotation
+      ansible.builtin.uri:
+        url: "https://{{ ansible_host }}:6443/healthz"
+        validate_certs: false
+      register: health_check
+      retries: 5
+      delay: 10
+```
+
+## Automated etcd Backup
+
+```yaml
+# playbooks/etcd_backup.yml
+---
+- name: Backup etcd Across All Clusters
+  hosts: production
+  gather_facts: false
+
+  tasks:
+    - name: Create etcd snapshot
+      kubernetes.core.k8s_exec:
+        kubeconfig: "{{ kubeconfig }}"
+        namespace: kube-system
+        pod: "{{ etcd_pod }}"
+        command: >
+          etcdctl snapshot save /var/lib/etcd/backup/snapshot-{{ ansible_date_time.date }}.db
+          --cacert /etc/kubernetes/pki/etcd/ca.crt
+          --cert /etc/kubernetes/pki/etcd/server.crt
+          --key /etc/kubernetes/pki/etcd/server.key
+      register: backup_result
+
+    - name: Copy snapshot to backup storage
+      ansible.builtin.fetch:
+        src: "/var/lib/etcd/backup/snapshot-{{ ansible_date_time.date }}.db"
+        dest: "backups/{{ inventory_hostname }}/"
+        flat: true
+      delegate_to: "{{ etcd_host }}"
+
+    - name: Verify backup integrity
+      ansible.builtin.command: >
+        etcdutl snapshot status
+        backups/{{ inventory_hostname }}/snapshot-{{ ansible_date_time.date }}.db
+        --write-out=json
+      register: verify_result
+      delegate_to: localhost
+      changed_when: false
+
+    - name: Alert on backup failure
+      ansible.builtin.uri:
+        url: "{{ slack_webhook }}"
+        method: POST
+        body_format: json
+        body:
+          text: "etcd backup failed for {{ inventory_hostname }}: {{ backup_result.stderr }}"
+      when: backup_result.failed
+```
+
+## Rolling Node Drain and Upgrade
+
+```yaml
+# playbooks/node_upgrade.yml
+---
+- name: Rolling Node Upgrade
+  hosts: "{{ target_cluster }}"
+  gather_facts: false
+  serial: 1  # One node at a time
+
+  tasks:
+    - name: Get worker nodes
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Node
+        label_selectors:
+          - "node-role.kubernetes.io/worker="
+      register: worker_nodes
+
+    - name: Cordon node
+      kubernetes.core.k8s_drain:
+        kubeconfig: "{{ kubeconfig }}"
+        name: "{{ item.metadata.name }}"
+        state: cordon
+      loop: "{{ worker_nodes.resources }}"
+
+    - name: Drain workloads with PDB awareness
+      kubernetes.core.k8s_drain:
+        kubeconfig: "{{ kubeconfig }}"
+        name: "{{ item.metadata.name }}"
+        state: drain
+        delete_options:
+          ignore_daemonsets: true
+          force: false
+          grace_period: 60
+          timeout: 300
+      loop: "{{ worker_nodes.resources }}"
+
+    - name: Perform OS and kubelet upgrade
+      ansible.builtin.dnf:
+        name:
+          - "kubelet-{{ target_k8s_version }}"
+          - "kubectl-{{ target_k8s_version }}"
+        state: present
+      delegate_to: "{{ item.metadata.name }}"
+      loop: "{{ worker_nodes.resources }}"
+
+    - name: Uncordon node
+      kubernetes.core.k8s_drain:
+        kubeconfig: "{{ kubeconfig }}"
+        name: "{{ item.metadata.name }}"
+        state: uncordon
+      loop: "{{ worker_nodes.resources }}"
+
+    - name: Wait for node ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: v1
+        kind: Node
+        name: "{{ item.metadata.name }}"
+      register: node_status
+      until: node_status.resources[0].status.conditions | selectattr('type', 'equalto', 'Ready') | selectattr('status', 'equalto', 'True') | list | length > 0
+      retries: 30
+      delay: 10
+      loop: "{{ worker_nodes.resources }}"
+```
+
+## RBAC Audit Playbook
+
+```yaml
+# playbooks/rbac_audit.yml
+---
+- name: Kubernetes RBAC Audit
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: List cluster-admin bindings
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: rbac.authorization.k8s.io/v1
+        kind: ClusterRoleBinding
+      register: all_bindings
+
+    - name: Identify overprivileged bindings
+      ansible.builtin.set_fact:
+        admin_bindings: >-
+          {{ all_bindings.resources
+             | selectattr('roleRef.name', 'equalto', 'cluster-admin')
+             | rejectattr('metadata.name', 'match', 'system:.*')
+             | list }}
+
+    - name: Generate RBAC audit report
+      ansible.builtin.template:
+        src: rbac-report.md.j2
+        dest: "reports/rbac-{{ inventory_hostname }}-{{ ansible_date_time.date }}.md"
+      delegate_to: localhost
+```
+
+For more RBAC and Kubernetes security patterns, [Kubernetes Recipes](https://kubernetes.recipes/) has a dedicated chapter on access control that pairs well with these automation playbooks.
+
+## Scheduling Day-2 Operations
+
+```yaml
+# In Ansible Automation Platform / AWX:
+# Schedule etcd backups: daily at 02:00
+# Schedule cert checks: weekly Monday 08:00
+# Schedule RBAC audits: monthly 1st at 09:00
+# Schedule node patching: maintenance window only
+```
+
+The scheduling and approval workflows in AAP are what make this enterprise-grade. Manual approvals for node drains, automatic execution for backups — it's the balance between automation and human oversight.
+
+## Key Takeaways
+
+1. **Operators handle single-cluster, Ansible handles fleet** — they're complementary
+2. **Always test day-2 playbooks in staging** with realistic data
+3. **Serial execution with health checks** prevents cascading failures
+4. **RBAC audits catch drift** before it becomes a security incident
+5. **etcd backups are worthless if you don't test restores** — automate restore testing too
+
+I cover these Kubernetes automation patterns in depth at [Ansible Pilot](https://www.ansiblepilot.com/) and in my [Ansible by Example](https://www.ansiblebyexample.com/) book series. The day-2 operations chapter alone has saved teams hundreds of hours.

@@ -1,0 +1,288 @@
+---
+draft: false
+title: "AI Agents for Infrastructure: From Runbooks to Autonomous Operations"
+snippet: "How AI agents are evolving from chatbot assistants to autonomous infrastructure managers. Architecture patterns, safety guardrails, and real-world implementations."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "ai-agents"
+  - "infrastructure"
+  - "autonomous"
+  - "sre"
+  - "automation"
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "AI Agents for Infrastructure: From Runbooks to Autonomous Operations"
+---
+
+## From Chatbots to Autonomous Operators
+
+We've gone through three generations of AI in infrastructure:
+
+1. **ChatOps** (2020-2023): Ask a bot to run kubectl commands
+2. **AI-Assisted** (2023-2025): Copilot suggests terraform changes, you review and apply
+3. **Autonomous Agents** (2025-now): Agents detect issues, diagnose root cause, implement fixes, verify results — with human approval gates
+
+The third generation is where things get interesting and dangerous in equal measure.
+
+## Agent Architecture for Infrastructure
+
+```
+┌─────────────────────────────────────────────┐
+│              Agent Orchestrator             │
+│  (Planning, Memory, Tool Selection)         │
+├─────────────────────────────────────────────┤
+│                                             │
+│  ┌──────────┐  ┌──────────┐  ┌───────────┐ │
+│  │ Observe  │  │ Diagnose │  │ Remediate │ │
+│  │          │  │          │  │           │ │
+│  │ Metrics  │  │ Root     │  │ Execute   │ │
+│  │ Logs     │  │ Cause    │  │ Playbooks │ │
+│  │ Alerts   │  │ Analysis │  │ Verify    │ │
+│  └──────────┘  └──────────┘  └───────────┘ │
+│                                             │
+├──────── Human Approval Gate ────────────────┤
+│                                             │
+│  ┌──────────────────────────────────────┐   │
+│  │        Infrastructure Tools          │   │
+│  │  kubectl  ansible  terraform  helm   │   │
+│  └──────────────────────────────────────┘   │
+└─────────────────────────────────────────────┘
+```
+
+## A Real-World Autonomous Remediation Flow
+
+Here's what a production-grade infrastructure agent actually does:
+
+```python
+class InfrastructureAgent:
+    def __init__(self):
+        self.observe = ObservationLayer()
+        self.diagnose = DiagnosisEngine()
+        self.remediate = RemediationEngine()
+        self.approve = ApprovalGate()
+        self.memory = AgentMemory()
+    
+    async def handle_alert(self, alert):
+        # Step 1: Gather context
+        context = await self.observe.gather(
+            alert=alert,
+            metrics=await self.observe.query_prometheus(alert.labels),
+            logs=await self.observe.query_loki(alert.labels, window="30m"),
+            recent_changes=await self.observe.query_gitops_history(window="2h"),
+            past_incidents=self.memory.search_similar(alert)
+        )
+        
+        # Step 2: Diagnose root cause
+        diagnosis = await self.diagnose.analyze(context)
+        # Returns: probable cause, confidence score, affected components
+        
+        # Step 3: Generate remediation plan
+        plan = await self.remediate.plan(diagnosis)
+        # Returns: ordered list of actions with rollback steps
+        
+        # Step 4: Human approval (for destructive actions)
+        if plan.risk_level > "low":
+            approved = await self.approve.request(
+                channel="slack",
+                plan=plan,
+                timeout_minutes=15
+            )
+            if not approved:
+                self.memory.store("rejected", plan)
+                return
+        
+        # Step 5: Execute with verification
+        for action in plan.actions:
+            result = await self.remediate.execute(action)
+            if not result.success:
+                await self.remediate.rollback(plan)
+                break
+            
+            # Verify the fix actually worked
+            await asyncio.sleep(60)
+            health = await self.observe.check_health(alert.labels)
+            if not health.resolved:
+                await self.remediate.rollback(plan)
+                break
+        
+        # Step 6: Learn from the incident
+        self.memory.store("resolved", {
+            "alert": alert,
+            "diagnosis": diagnosis,
+            "plan": plan,
+            "outcome": "success"
+        })
+```
+
+## Safety Guardrails Are Non-Negotiable
+
+The number one question I get at consulting engagements with [Open Empower](https://www.openempower.com/): "How do we prevent the AI from taking down production?"
+
+```yaml
+# agent-guardrails.yml
+safety_rules:
+  # Never auto-approve these actions
+  require_human_approval:
+    - node_drain
+    - cluster_upgrade
+    - database_failover
+    - security_group_modification
+    - certificate_rotation
+    - namespace_deletion
+
+  # Rate limits
+  max_actions_per_hour: 10
+  max_rollbacks_per_day: 3
+  
+  # Blast radius limits
+  max_pods_affected: 50
+  max_nodes_affected: 2
+  
+  # Time restrictions
+  blocked_hours:
+    - "22:00-06:00"  # No changes overnight
+  blocked_days:
+    - friday  # No Friday deploys, ever
+  
+  # Confidence thresholds
+  min_diagnosis_confidence: 0.85
+  min_remediation_confidence: 0.90
+  
+  # Always require second opinion
+  dual_approval_threshold: "high"  # high-risk actions need 2 approvers
+```
+
+## Integrating with Ansible for Remediation
+
+The agent diagnoses; Ansible executes. This separation is crucial — you get AI intelligence with Ansible's proven, idempotent execution:
+
+```yaml
+# playbooks/agent_remediation.yml
+---
+- name: Agent-Triggered Remediation
+  hosts: "{{ target_hosts }}"
+  become: true
+  vars:
+    action: "{{ agent_action }}"
+    incident_id: "{{ agent_incident_id }}"
+
+  tasks:
+    - name: Log remediation start
+      ansible.builtin.debug:
+        msg: "Starting {{ action }} for incident {{ incident_id }}"
+
+    - name: Execute pod restart remediation
+      when: action == "restart_pods"
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: absent
+        api_version: v1
+        kind: Pod
+        namespace: "{{ target_namespace }}"
+        label_selectors: "{{ target_labels }}"
+
+    - name: Execute scaling remediation
+      when: action == "scale_deployment"
+      kubernetes.core.k8s_scale:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ target_deployment }}"
+        namespace: "{{ target_namespace }}"
+        replicas: "{{ target_replicas }}"
+
+    - name: Execute node cordon
+      when: action == "cordon_node"
+      kubernetes.core.k8s_drain:
+        kubeconfig: "{{ kubeconfig }}"
+        name: "{{ target_node }}"
+        state: cordon
+
+    - name: Verify remediation
+      ansible.builtin.uri:
+        url: "{{ health_check_url }}"
+        status_code: 200
+      retries: 5
+      delay: 30
+      register: health_result
+
+    - name: Report result to agent
+      ansible.builtin.uri:
+        url: "{{ agent_callback_url }}"
+        method: POST
+        body_format: json
+        body:
+          incident_id: "{{ incident_id }}"
+          action: "{{ action }}"
+          success: "{{ health_result.status == 200 }}"
+```
+
+## The Multi-Agent Pattern
+
+For complex environments, single agents aren't enough. You need specialized agents that collaborate:
+
+```
+┌──────────────────────────────────────┐
+│         Orchestrator Agent           │
+│    (Coordination & Prioritization)   │
+├──────────┬───────────┬───────────────┤
+│          │           │               │
+│  Network │ Compute   │ Application   │
+│  Agent   │ Agent     │ Agent         │
+│          │           │               │
+│  DNS,    │ Nodes,    │ Pods,         │
+│  Ingress,│ GPU,      │ Services,     │
+│  CNI     │ Storage   │ Deployments   │
+└──────────┴───────────┴───────────────┘
+```
+
+I covered multi-agent orchestration patterns in detail in a [dedicated article](https://lucaberton.com/blog/multi-agent-orchestration-patterns/) — the same architectural principles apply whether you're orchestrating AI coding agents or infrastructure operators.
+
+## What's Working in Production Today
+
+Based on what I'm seeing across enterprise clients:
+
+**Working well:**
+- Log-based anomaly detection → automated ticket creation
+- Certificate expiry detection → renewal automation
+- Resource right-sizing recommendations → auto-applied with approval
+- Failed deployment detection → automatic rollback
+
+**Getting there:**
+- Root cause analysis across distributed systems
+- Cross-cluster incident correlation
+- Proactive capacity planning with action execution
+
+**Not ready yet:**
+- Fully autonomous security incident response
+- Cross-cloud migration decisions
+- Architecture-level changes
+
+## The [Event-Driven Ansible](https://lucaberton.com/blog/event-driven-ansible-incident-response/) Connection
+
+EDA is the bridge between AI agents and infrastructure execution. The agent decides what to do; EDA triggers the playbook:
+
+```yaml
+# eda-rulebook.yml
+- name: Agent-triggered remediation
+  hosts: all
+  sources:
+    - ansible.eda.webhook:
+        host: 0.0.0.0
+        port: 5000
+  rules:
+    - name: Execute agent remediation plan
+      condition: event.payload.source == "infrastructure_agent"
+      action:
+        run_playbook:
+          name: playbooks/agent_remediation.yml
+          extra_vars:
+            agent_action: "{{ event.payload.action }}"
+            agent_incident_id: "{{ event.payload.incident_id }}"
+            target_hosts: "{{ event.payload.targets }}"
+```
+
+The future of infrastructure management isn't choosing between AI agents and Ansible — it's using both. AI for intelligence, Ansible for execution, humans for oversight.

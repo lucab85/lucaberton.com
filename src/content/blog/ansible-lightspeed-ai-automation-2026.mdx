@@ -17,3 +17,134 @@ image:
   alt: "Ansible Lightspeed AI-assisted automation"
 ---
 
+## Ansible Lightspeed in 2026: Where We Are
+
+When Red Hat launched Ansible Lightspeed with IBM watsonx Code Assistant in 2023, it was impressive but limited — single-task generation with hit-or-miss accuracy. In 2026, it's a fundamentally different tool. Multi-task generation, context-aware suggestions that understand your existing roles and collections, and integration with Ansible Automation Platform that makes it feel native.
+
+I've been using Lightspeed daily for the past year across consulting engagements. Here's my honest assessment.
+
+## What Actually Works Now
+
+### Multi-Task Generation
+
+```yaml
+# Type a comment describing what you want:
+# Install PostgreSQL 16, create a database called analytics,
+# configure pg_hba.conf for local trust and remote md5,
+# and enable the pg_stat_statements extension
+
+# Lightspeed generates:
+- name: Install PostgreSQL 16
+  ansible.builtin.dnf:
+    name:
+      - postgresql16-server
+      - postgresql16-contrib
+    state: present
+
+- name: Initialize PostgreSQL database
+  ansible.builtin.command: /usr/pgsql-16/bin/postgresql-16-setup initdb
+  args:
+    creates: /var/lib/pgsql/16/data/PG_VERSION
+
+- name: Configure pg_hba.conf
+  ansible.builtin.template:
+    src: pg_hba.conf.j2
+    dest: /var/lib/pgsql/16/data/pg_hba.conf
+    owner: postgres
+    mode: '0600'
+  notify: Restart PostgreSQL
+
+- name: Create analytics database
+  community.postgresql.postgresql_db:
+    name: analytics
+    state: present
+  become_user: postgres
+
+- name: Enable pg_stat_statements extension
+  community.postgresql.postgresql_ext:
+    name: pg_stat_statements
+    db: analytics
+    state: present
+  become_user: postgres
+```
+
+That's generated from a single natural language comment. It knows to use `community.postgresql` collection modules, handles `become_user`, and even includes the `creates` guard for idempotency.
+
+### Context-Aware Suggestions
+
+Lightspeed now reads your project context — existing roles, variable naming conventions, inventory structure. If you consistently use `app_` prefixed variables, it follows suit. If you have a `handlers/main.yml` with a "Restart PostgreSQL" handler, it references it correctly.
+
+## Where It Still Falls Short
+
+**Complex Jinja2 logic**: Anything beyond basic filters gets unreliable. I still write complex `when` conditions and `set_fact` transformations manually.
+
+**Custom modules**: If you've written custom Ansible modules (which I cover in depth on [Ansible Pilot](https://www.ansiblepilot.com/)), Lightspeed doesn't understand their parameters well.
+
+**Vault integration**: It never suggests `ansible.builtin.vault` encrypted values where it should, and sometimes generates plaintext passwords in examples.
+
+## My Workflow: AI-Assisted, Human-Verified
+
+```
+1. Natural language → Lightspeed generates tasks
+2. Review each task for:
+   - Correct module choice
+   - Idempotency (check mode safe?)
+   - Security (no hardcoded secrets)
+   - Platform compatibility
+3. Run ansible-lint
+4. Test with Molecule
+5. Commit
+```
+
+I never accept Lightspeed output blindly. It's a first draft generator, not an automation engineer.
+
+## Integration with Ansible Automation Platform
+
+```yaml
+# In AAP 2.5+, Lightspeed is embedded in the workflow editor
+# You can describe a workflow in natural language:
+
+# "Deploy staging environment: provision VMs with VMware,
+#  configure networking, deploy application stack,
+#  run smoke tests, notify Slack on completion"
+
+# AAP generates the workflow template with job templates
+# for each step, proper error handling, and notification
+```
+
+The AAP integration is where Lightspeed really shines. Describing complex workflows and having them scaffolded with proper error handling saves significant time.
+
+## Comparing Lightspeed to General-Purpose AI
+
+I've tested Ansible generation across Lightspeed, GitHub Copilot, and Claude. Here's my take:
+
+| Feature | Lightspeed | Copilot | Claude |
+|---------|-----------|---------|--------|
+| Module accuracy | Excellent | Good | Good |
+| FQCN usage | Always | Sometimes | Usually |
+| Idempotency awareness | Strong | Weak | Moderate |
+| Collection knowledge | Current | Outdated | Varies |
+| AAP integration | Native | None | None |
+
+Lightspeed wins on Ansible-specific knowledge. General-purpose AI models are catching up, especially with tools like [Context7](https://lucaberton.com/blog/context7-cursor-claude-copilot-guide/) for pulling current documentation, but Lightspeed's deep Ansible training data gives it an edge.
+
+## Cost-Benefit Analysis
+
+Lightspeed requires an Ansible Automation Platform subscription (not cheap). Is it worth it?
+
+For a team of 5 automation engineers writing playbooks daily: **yes, easily**. The time saved on boilerplate generation pays for itself within weeks.
+
+For a solo developer writing occasional playbooks: **probably not**. GitHub Copilot or a general AI assistant covers 80% of the use case at a fraction of the cost.
+
+## Tips for Getting the Best Output
+
+1. **Be specific in comments** — "Install nginx" gives generic output; "Install nginx 1.25 on RHEL 9 with custom worker_processes based on CPU count" gives production-ready code
+2. **Establish patterns first** — write your first role manually, then let Lightspeed follow your style for subsequent roles
+3. **Use collection FQCNs in your comments** — mentioning `community.postgresql` in the description improves module selection
+4. **Review the `when` conditions** — Lightspeed's conditional logic is its weakest area
+
+## The Future: Ansible + AI
+
+The direction is clear: AI won't replace automation engineers, but automation engineers who use AI will replace those who don't. Lightspeed is the beginning — expect deeper integration with [Event-Driven Ansible](https://lucaberton.com/blog/event-driven-ansible-incident-response/) for automated remediation, and eventually AI-generated Molecule tests.
+
+For hands-on tutorials covering both Lightspeed and traditional Ansible development, visit [Ansible Pilot](https://www.ansiblepilot.com/) — I'm publishing a new Lightspeed series covering real-world patterns from my consulting engagements at [Open Empower](https://www.openempower.com/).

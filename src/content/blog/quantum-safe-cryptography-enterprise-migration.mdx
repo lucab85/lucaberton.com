@@ -1,0 +1,176 @@
+---
+draft: false
+title: "Quantum-Safe Cryptography: Your Enterprise Migration Playbook"
+snippet: "NIST post-quantum standards are finalized. Here is a practical guide to inventorying cryptographic assets, planning migration, and automating certificate rotation with Ansible."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "quantum"
+  - "cryptography"
+  - "security"
+  - "post-quantum"
+  - "enterprise"
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Quantum-Safe Cryptography: Your Enterprise Migration Playbook"
+---
+
+## The Quantum Clock Is Ticking
+
+NIST finalized three post-quantum cryptography standards in August 2024: ML-KEM (Kyber), ML-DSA (Dilithium), and SLH-DSA (SPHINCS+). The "harvest now, decrypt later" threat is already real — adversaries are collecting encrypted data today to decrypt with future quantum computers.
+
+If your enterprise handles regulated data, your migration timeline isn't "when quantum computers arrive." It's now.
+
+## Understanding the Standards
+
+| Standard | Purpose | Key Sizes | Performance |
+|----------|---------|-----------|-------------|
+| ML-KEM (FIPS 203) | Key encapsulation | 800–1568 bytes | Fast |
+| ML-DSA (FIPS 204) | Digital signatures | 1312–2592 bytes | Fast |
+| SLH-DSA (FIPS 205) | Stateless signatures | 7856–49856 bytes | Slower |
+
+ML-KEM replaces RSA/ECDH for key exchange. ML-DSA replaces RSA/ECDSA for signatures. SLH-DSA is the conservative backup — larger but based on well-understood hash functions.
+
+## Step 1: Cryptographic Asset Inventory
+
+You can't migrate what you don't know about. Here's an Ansible playbook to inventory cryptographic usage across your infrastructure:
+
+```yaml
+# playbooks/crypto_inventory.yml
+---
+- name: Cryptographic Asset Inventory
+  hosts: all
+  become: true
+  tasks:
+    - name: Find all TLS certificates
+      ansible.builtin.find:
+        paths:
+          - /etc/pki
+          - /etc/ssl
+          - /opt
+          - /var/lib
+        patterns: "*.pem,*.crt,*.cert,*.p12"
+        recurse: true
+      register: cert_files
+
+    - name: Extract certificate details
+      ansible.builtin.command: >
+        openssl x509 -in {{ item.path }} -noout
+        -subject -issuer -dates -sigalg -pubkey
+      loop: "{{ cert_files.files }}"
+      register: cert_details
+      changed_when: false
+      ignore_errors: true
+
+    - name: Identify RSA/ECC algorithms in use
+      ansible.builtin.set_fact:
+        vulnerable_certs: >-
+          {{ cert_details.results
+             | selectattr('stdout', 'search', 'sha256WithRSA|ecdsa-with-SHA')
+             | list }}
+
+    - name: Generate inventory report
+      ansible.builtin.template:
+        src: crypto-inventory.csv.j2
+        dest: "/tmp/crypto-inventory-{{ inventory_hostname }}.csv"
+      delegate_to: localhost
+```
+
+I maintain detailed Ansible automation patterns like this on [Ansible Pilot](https://www.ansiblepilot.com/) — the crypto inventory role is part of my security automation collection.
+
+## Step 2: Hybrid Approach — Transition Safely
+
+Don't rip-and-replace. Use hybrid key exchange that combines classical and post-quantum algorithms:
+
+```yaml
+# Configure nginx with hybrid TLS
+# templates/nginx-hybrid-tls.conf.j2
+ssl_protocols TLSv1.3;
+ssl_conf_command Groups x25519_mlkem768:x25519:secp384r1;
+ssl_conf_command SignatureAlgorithms mldsa65:ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384;
+```
+
+```yaml
+# Ansible task to deploy hybrid TLS configuration
+- name: Deploy quantum-safe TLS configuration
+  ansible.builtin.template:
+    src: nginx-hybrid-tls.conf.j2
+    dest: /etc/nginx/conf.d/tls-params.conf
+    mode: '0644'
+  notify: Reload nginx
+
+- name: Verify hybrid key exchange works
+  ansible.builtin.command: >
+    openssl s_client -connect localhost:443
+    -groups x25519_mlkem768
+  register: tls_test
+  changed_when: false
+  failed_when: "'x25519_mlkem768' not in tls_test.stdout"
+```
+
+## Step 3: Automate Certificate Rotation
+
+```yaml
+# playbooks/pqc_cert_rotation.yml
+---
+- name: Rotate to Post-Quantum Certificates
+  hosts: web_servers
+  become: true
+  serial: "25%"  # Rolling deployment
+
+  tasks:
+    - name: Generate ML-DSA key pair
+      ansible.builtin.command: >
+        oqs-openssl genpkey -algorithm mldsa65
+        -out /etc/pki/tls/private/{{ inventory_hostname }}-pqc.key
+      args:
+        creates: "/etc/pki/tls/private/{{ inventory_hostname }}-pqc.key"
+
+    - name: Create CSR with post-quantum algorithm
+      ansible.builtin.command: >
+        oqs-openssl req -new
+        -key /etc/pki/tls/private/{{ inventory_hostname }}-pqc.key
+        -out /tmp/{{ inventory_hostname }}-pqc.csr
+        -subj "/CN={{ inventory_hostname }}/O=ACME Corp"
+      args:
+        creates: "/tmp/{{ inventory_hostname }}-pqc.csr"
+
+    - name: Submit CSR to internal CA
+      ansible.builtin.uri:
+        url: "{{ internal_ca_url }}/api/v1/sign"
+        method: POST
+        body_format: json
+        body:
+          csr: "{{ lookup('file', '/tmp/' + inventory_hostname + '-pqc.csr') }}"
+          profile: hybrid-pqc
+      register: signed_cert
+
+    - name: Deploy new certificate
+      ansible.builtin.copy:
+        content: "{{ signed_cert.json.certificate }}"
+        dest: "/etc/pki/tls/certs/{{ inventory_hostname }}-pqc.crt"
+        mode: '0644'
+      notify: Reload nginx
+```
+
+## Timeline for Enterprises
+
+- **2024-2025**: Inventory and assessment (you should be here already)
+- **2025-2026**: Hybrid deployments in non-production
+- **2026-2027**: Production hybrid rollout
+- **2028-2030**: Full post-quantum migration
+- **2030+**: Classical algorithms deprecated
+
+The EU [Cyber Resilience Act](https://lucaberton.com/blog/cra-what-is-cyber-resilience-act/) will likely mandate post-quantum readiness for critical digital products — another reason to start now.
+
+## Tools and Resources
+
+- **Open Quantum Safe (OQS)**: Reference implementations of PQC algorithms
+- **Ansible Automation Platform**: Orchestrate fleet-wide certificate rotation
+- **HashiCorp Vault**: PQC-ready certificate authority (experimental)
+
+For the infrastructure automation side, [Terraform Pilot](https://www.terraformpilot.com/) covers the IaC patterns for deploying PQC-ready infrastructure, while [Ansible by Example](https://www.ansiblebyexample.com/) has the certificate management role patterns.
+
+The migration will take years. Start your inventory today.

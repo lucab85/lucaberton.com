@@ -30,70 +30,107 @@ JSON is the default. It works. But for LLM input specifically, a significant chu
 TOON combines two familiar ideas:
 
 - **YAML-style indentation** for nested objects — no braces, no commas
-- **CSV-style tabular layout** for uniform arrays — headers once, data in rows
+- **CSV-style tabular layout** for uniform arrays — headers declared once in curly braces, data as comma-separated rows
 
 The result is a format that represents the exact same data as JSON but uses dramatically fewer tokens. It is not a new data model — it is a translation layer. Your application still works with JSON programmatically; you encode to TOON only when sending data to an LLM.
 
-## JSON vs TOON: Side-by-Side
+The TOON spec is available as an npm package (`toon-lang`) and is at version 3.0.
 
-### Example 1: Array of Objects (TOON Sweet Spot)
+## TOON Syntax at a Glance
 
-Imagine you are sending a list of cloud instances to an LLM for cost analysis.
+TOON has three core constructs:
 
-**JSON (143 tokens):**
+1. **Indented key-value pairs** for objects (like YAML)
+2. **Square brackets with count** for simple arrays: `items[3]: a,b,c`
+3. **Curly braces with headers** for arrays of objects: `items[3]{col1,col2,col3}:` followed by CSV rows
+
+Here is a quick example:
+
+```
+context:
+  task: Our favorite hikes together
+  location: Boulder
+  season: spring_2025
+friends[3]: ana,luis,sam
+hikes[3]{id,name,distanceKm,elevationGain,companion,wasSunny}:
+  1,Blue Lake Trail,7.5,320,ana,true
+  2,Ridge Overlook,9.2,540,luis,false
+  3,Wildflower Loop,5.1,180,sam,true
+```
+
+The equivalent JSON:
+
+```json
+{
+  "context": {
+    "task": "Our favorite hikes together",
+    "location": "Boulder",
+    "season": "spring_2025"
+  },
+  "friends": ["ana", "luis", "sam"],
+  "hikes": [
+    {"id": 1, "name": "Blue Lake Trail", "distanceKm": 7.5, "elevationGain": 320, "companion": "ana", "wasSunny": true},
+    {"id": 2, "name": "Ridge Overlook", "distanceKm": 9.2, "elevationGain": 540, "companion": "luis", "wasSunny": false},
+    {"id": 3, "name": "Wildflower Loop", "distanceKm": 5.1, "elevationGain": 180, "companion": "sam", "wasSunny": true}
+  ]
+}
+```
+
+Count the tokens. The JSON version repeats `"id"`, `"name"`, `"distanceKm"`, `"elevationGain"`, `"companion"`, `"wasSunny"` three times each — 18 repeated key tokens. TOON declares them once in the header.
+
+## JSON vs TOON: AI Workflow Examples
+
+### Example 1: GPU Instance Fleet for Cost Analysis
+
+**JSON:**
 
 ```json
 [
-  {
-    "name": "gpu-worker-01",
-    "type": "g5.xlarge",
-    "gpu": "A10G",
-    "vram_gb": 24,
-    "hourly_cost": 1.006,
-    "status": "running"
-  },
-  {
-    "name": "gpu-worker-02",
-    "type": "g5.2xlarge",
-    "gpu": "A10G",
-    "vram_gb": 24,
-    "hourly_cost": 1.212,
-    "status": "running"
-  },
-  {
-    "name": "gpu-worker-03",
-    "type": "p4d.24xlarge",
-    "gpu": "A100",
-    "vram_gb": 320,
-    "hourly_cost": 32.77,
-    "status": "stopped"
-  },
-  {
-    "name": "inference-01",
-    "type": "g5.xlarge",
-    "gpu": "A10G",
-    "vram_gb": 24,
-    "hourly_cost": 1.006,
-    "status": "running"
-  }
+  {"name": "gpu-worker-01", "type": "g5.xlarge", "gpu": "A10G", "vram_gb": 24, "hourly_cost": 1.006, "status": "running"},
+  {"name": "gpu-worker-02", "type": "g5.2xlarge", "gpu": "A10G", "vram_gb": 24, "hourly_cost": 1.212, "status": "running"},
+  {"name": "gpu-worker-03", "type": "p4d.24xlarge", "gpu": "A100", "vram_gb": 320, "hourly_cost": 32.77, "status": "stopped"},
+  {"name": "inference-01", "type": "g5.xlarge", "gpu": "A10G", "vram_gb": 24, "hourly_cost": 1.006, "status": "running"}
 ]
 ```
 
-Every row repeats `"name"`, `"type"`, `"gpu"`, `"vram_gb"`, `"hourly_cost"`, `"status"`. That is six key names times four rows — 24 repeated tokens that carry no new information after the first occurrence.
-
-**TOON (roughly 70 tokens):**
+**TOON:**
 
 ```
-name          | type          | gpu  | vram_gb | hourly_cost | status
-gpu-worker-01 | g5.xlarge     | A10G | 24      | 1.006       | running
-gpu-worker-02 | g5.2xlarge    | A10G | 24      | 1.212       | running
-gpu-worker-03 | p4d.24xlarge  | A100 | 320     | 32.77       | stopped
-inference-01  | g5.xlarge     | A10G | 24      | 1.006       | running
+instances[4]{name,type,gpu,vram_gb,hourly_cost,status}:
+  gpu-worker-01,g5.xlarge,A10G,24,1.006,running
+  gpu-worker-02,g5.2xlarge,A10G,24,1.212,running
+  gpu-worker-03,p4d.24xlarge,A100,320,32.77,stopped
+  inference-01,g5.xlarge,A10G,24,1.006,running
 ```
 
-Headers appear once. Data is rows. The LLM sees the same information with roughly **50 percent fewer tokens**. For a 20-row dataset, the savings compound further.
+Six field names repeated four times in JSON (24 occurrences) versus declared once in TOON. Roughly **50 percent fewer tokens**.
 
-### Example 2: Nested Configuration
+### Example 2: Training Experiment Results
+
+Feeding 30 experiment runs to an LLM for analysis is a perfect TOON use case.
+
+**JSON (per row: ~45 tokens):**
+
+```json
+[
+  {"run_id": "exp-001", "lr": 2e-5, "batch": 32, "epochs": 3, "loss": 0.342, "accuracy": 0.891, "f1": 0.876},
+  {"run_id": "exp-002", "lr": 5e-5, "batch": 32, "epochs": 3, "loss": 0.298, "accuracy": 0.912, "f1": 0.901},
+  {"run_id": "exp-003", "lr": 2e-5, "batch": 64, "epochs": 5, "loss": 0.267, "accuracy": 0.923, "f1": 0.918}
+]
+```
+
+**TOON (per row: ~15 tokens):**
+
+```
+experiments[3]{run_id,lr,batch,epochs,loss,accuracy,f1}:
+  exp-001,2e-5,32,3,0.342,0.891,0.876
+  exp-002,5e-5,32,3,0.298,0.912,0.901
+  exp-003,2e-5,64,5,0.267,0.923,0.918
+```
+
+At 30 experiments, JSON uses roughly 1,350 tokens. TOON uses roughly 500. That is **63 percent savings** — enough to fit twice as many experiments in the same context window.
+
+### Example 3: Nested Model Configuration
 
 **JSON:**
 
@@ -109,50 +146,34 @@ Headers appear once. Data is rows. The LLM sees the same information with roughl
     "temperature": 0.7,
     "top_p": 0.95,
     "max_tokens": 2048
+  },
+  "lora": {
+    "rank": 16,
+    "alpha": 32,
+    "dropout": 0.05
   }
 }
 ```
 
-**TOON (YAML-style indentation):**
+**TOON:**
 
 ```
-model
+model:
   name: llama-3.1-70b
   backend: vllm
   quantization: awq-4bit
   max_model_len: 8192
-inference
+inference:
   temperature: 0.7
   top_p: 0.95
   max_tokens: 2048
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
 ```
 
-No braces, no commas, no quotation marks around keys. The structure is conveyed by indentation — something LLMs parse reliably since they have seen billions of lines of YAML and Python.
-
-### Example 3: Training Experiment Results
-
-This is where TOON shines brightest — feeding experiment logs to an LLM for analysis.
-
-**JSON (30 experiments, roughly 900 tokens):**
-
-```json
-[
-  {"run_id": "exp-001", "lr": 2e-5, "batch": 32, "epochs": 3, "loss": 0.342, "accuracy": 0.891, "f1": 0.876},
-  {"run_id": "exp-002", "lr": 5e-5, "batch": 32, "epochs": 3, "loss": 0.298, "accuracy": 0.912, "f1": 0.901},
-  {"run_id": "exp-003", "lr": 2e-5, "batch": 64, "epochs": 5, "loss": 0.267, "accuracy": 0.923, "f1": 0.918}
-]
-```
-
-**TOON (roughly 400 tokens):**
-
-```
-run_id  | lr   | batch | epochs | loss  | accuracy | f1
-exp-001 | 2e-5 | 32    | 3      | 0.342 | 0.891    | 0.876
-exp-002 | 5e-5 | 32    | 3      | 0.298 | 0.912    | 0.901
-exp-003 | 2e-5 | 64    | 5      | 0.267 | 0.923    | 0.918
-```
-
-Multiply this by 30 experiments and you save hundreds of tokens — enough to fit more data in the same context window or reduce API costs meaningfully.
+For flat nested objects, savings are more modest (~20-25 percent) since there are no repeated keys. But the readability improvement is still significant — no closing braces, no commas, no quotation marks on keys.
 
 ## When TOON Wins
 
@@ -160,107 +181,102 @@ TOON's sweet spot is **uniform arrays of objects** — the kind of data you enco
 
 - **Training logs** — runs with consistent columns (hyperparameters, metrics)
 - **Evaluation results** — model comparisons with same fields per row
-- **User data for personalization** — profiles with consistent schemas
-- **Inventory/catalog data** — products, instances, resources
-- **Benchmark results** — model name, task, score, latency
+- **Infrastructure inventory** — instances, nodes, GPUs with consistent schemas
+- **Benchmark results** — model name, task, score, latency per row
+- **User/product data** — profiles or catalog entries for personalization
 
-The pattern: multiple items, same structure, many fields per item. CSV compactness with explicit typing.
+The pattern: multiple items, same structure, many fields per item. CSV compactness with explicit typing and structure.
 
 ## When JSON Still Wins
 
 TOON is not universally better. Use JSON when:
 
-- **Data is deeply nested** — three or more levels of nesting gets unwieldy in indentation-based formats
+- **Data is deeply nested** — three or more levels of nesting
 - **Arrays are non-uniform** — items have different fields, no tabular layout possible
 - **The LLM must output structured data** — most LLMs are trained to output JSON, not TOON
-- **Programmatic consumption** — your code reads JSON directly; TOON is a presentation layer for LLMs
-- **Schema validation needed** — JSON Schema is mature; TOON validation tooling is early
+- **Programmatic consumption** — your code reads JSON directly; TOON is a presentation layer
+- **Schema validation needed** — JSON Schema is mature; TOON tooling is early stage
 
 ## Using TOON in Practice
 
 TOON is a translation layer, not a storage format. The workflow:
 
 ```python
-# Install: npm install toon-lang (Node.js)
-# or use the spec to implement encoding in Python
+# npm install toon-lang (Node.js reference implementation)
+# Python: encode JSON to TOON before sending to LLM
 
 import json
 
-def json_to_toon_table(data: list[dict]) -> str:
+def json_array_to_toon(name: str, data: list[dict]) -> str:
     """Convert uniform array of objects to TOON tabular format."""
     if not data:
         return ""
     headers = list(data[0].keys())
-    lines = [" | ".join(headers)]
-    for row in data:
-        lines.append(" | ".join(str(row.get(h, "")) for h in headers))
-    return "\n".join(lines)
+    header_line = f"{name}[{len(data)}]{{{','.join(headers)}}}:"
+    rows = []
+    for item in data:
+        rows.append("  " + ",".join(str(item.get(h, "")) for h in headers))
+    return header_line + "\n" + "\n".join(rows)
 
-# Load your JSON data
+# Your data stays as JSON internally
 with open("experiments.json") as f:
     experiments = json.load(f)
 
-# Convert to TOON for LLM input
-toon_input = json_to_toon_table(experiments)
+# Convert to TOON only for LLM input
+toon_input = json_array_to_toon("experiments", experiments)
 
-# Send to LLM with significantly fewer tokens
-prompt = f"""Analyze these experiment results and recommend the best hyperparameter combination:
+prompt = f"""Analyze these experiment results and recommend the best configuration:
 
 {toon_input}
 
 Which run achieved the best balance of accuracy and training efficiency?"""
 ```
 
-The LLM receives compact tabular data. Your application continues working with JSON internally. No data loss, no ambiguity.
+Your application keeps working with JSON. TOON is only used at the LLM boundary.
 
-## Token Savings at Scale
+## TOON for Infrastructure and Ansible Data
 
-Here are realistic token savings for common AI input patterns:
-
-- **10-row uniform array, 6 fields**: JSON ~350 tokens, TOON ~180 tokens (**49% reduction**)
-- **50-row dataset, 8 fields**: JSON ~2,400 tokens, TOON ~1,100 tokens (**54% reduction**)
-- **Nested config, 3 levels**: JSON ~120 tokens, TOON ~95 tokens (**21% reduction**)
-- **Mixed nested + array**: JSON ~500 tokens, TOON ~320 tokens (**36% reduction**)
-
-The savings scale linearly with row count for tabular data. For a 100-row dataset feeding into GPT-4 or Claude, you could save $0.01-0.05 per request — which adds up at thousands of requests per day.
-
-## TOON and Ansible Automation
-
-For those of us working with [Ansible automation](https://www.ansiblepilot.com/), TOON is particularly interesting for inventory data. Consider sending your infrastructure inventory to an LLM for analysis:
+For those of us working with [Ansible automation](https://www.ansiblepilot.com/) and [cloud infrastructure](https://lucaberton.com/services/), TOON is particularly useful for sending inventory data to an LLM for analysis or troubleshooting:
 
 ```
-hostname       | role       | os          | cpu | ram_gb | datacenter | status
-web-prod-01    | webserver  | rhel-9.3    | 8   | 32     | eu-west-1  | healthy
-web-prod-02    | webserver  | rhel-9.3    | 8   | 32     | eu-west-1  | healthy
-db-prod-01     | database   | rhel-9.3    | 16  | 128    | eu-west-1  | warning
-k8s-worker-01  | kubernetes | rhel-9.4    | 32  | 256    | eu-west-1  | healthy
-k8s-worker-02  | kubernetes | rhel-9.4    | 32  | 256    | eu-central | healthy
+inventory[5]{hostname,role,os,cpu,ram_gb,datacenter,status}:
+  web-prod-01,webserver,rhel-9.3,8,32,eu-west-1,healthy
+  web-prod-02,webserver,rhel-9.3,8,32,eu-west-1,healthy
+  db-prod-01,database,rhel-9.3,16,128,eu-west-1,warning
+  k8s-worker-01,kubernetes,rhel-9.4,32,256,eu-west-1,healthy
+  k8s-worker-02,kubernetes,rhel-9.4,32,256,eu-central,healthy
 ```
 
-This is significantly more token-efficient than the equivalent JSON inventory, and LLMs parse it reliably because the tabular format is unambiguous.
+An LLM can immediately identify the warning status on `db-prod-01` and suggest [Kubernetes-based](https://kubernetes.recipes/) remediation or [Terraform infrastructure](https://terraformpilot.com/) changes — all while consuming half the tokens of the JSON equivalent.
 
 ## LLM Compatibility
 
-A common concern: can LLMs actually parse TOON reliably? The answer is yes, because TOON deliberately uses formats LLMs already understand well:
+Can LLMs actually parse TOON reliably? Yes, because TOON deliberately uses patterns LLMs already understand:
 
-- **Tabular data** — LLMs have seen billions of CSV and markdown table examples in training data
-- **Indentation-based nesting** — YAML and Python make this deeply familiar
-- **Pipe-delimited columns** — markdown tables use the same separator
+- **CSV-style rows** — LLMs have seen billions of CSV examples in training data
+- **YAML-style indentation** — deeply familiar from Python and configuration files
+- **Explicit headers** — the `{field1,field2,field3}` declaration removes all ambiguity
 
-In my testing, GPT-4, Claude, and Llama 3 all parse TOON tabular input correctly without any special prompting. The format is self-describing enough that models infer the structure immediately.
+In practice, GPT-4, Claude, and Llama 3 all parse TOON input correctly without special prompting. The format is self-describing — models infer the structure immediately from the header declaration.
+
+## Token Savings Summary
+
+Realistic token savings for common AI input patterns:
+
+- **10-row uniform array, 6 fields**: JSON ~350 tokens, TOON ~150 tokens (**57% reduction**)
+- **50-row dataset, 8 fields**: JSON ~2,400 tokens, TOON ~900 tokens (**63% reduction**)
+- **Nested config, 2 levels**: JSON ~120 tokens, TOON ~90 tokens (**25% reduction**)
+- **100-row dataset, 10 fields**: JSON ~6,000 tokens, TOON ~2,000 tokens (**67% reduction**)
+
+The savings scale with row count. More rows, more savings — because headers are declared once regardless of data size.
 
 ## The Bottom Line
 
-| Aspect | JSON | TOON |
-|--------|------|------|
-| Token efficiency | Baseline | 30-55% fewer tokens |
-| Human readability | Good | Better for tabular data |
-| LLM parsing | Excellent | Excellent |
-| Tooling maturity | Extensive | Early stage |
-| Best for | Output, APIs, storage | LLM input, tabular data |
-| Nested data | Native | Good for 1-2 levels |
-| Uniform arrays | Verbose | CSV-like compact |
+**Use JSON as your data format. Use TOON as your LLM input format.** They are complementary:
 
-**Use JSON as your data format. Use TOON as your LLM input format.** They are complementary — TOON is a presentation layer that saves tokens without losing information.
+- **JSON** for storage, APIs, inter-service communication, LLM output parsing
+- **TOON** for feeding structured data to LLMs with minimal token overhead
 
-For AI practitioners building pipelines on [cloud infrastructure](https://lucaberton.com/services/) that process thousands of LLM requests daily, the token savings from TOON can reduce costs by 30-50 percent on structured data inputs. That is real money at scale.
+TOON is not trying to replace JSON everywhere. It solves one specific problem — reducing token waste when sending structured data to language models — and it solves it well. For AI practitioners running thousands of LLM requests daily, switching tabular inputs from JSON to TOON can cut costs by 50-65 percent on those specific calls.
+
+The format is stable at spec v3.0 and available via `npm install toon-lang`. It is still evolving, so now is a good time to experiment with it and shape where it goes.

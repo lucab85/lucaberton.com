@@ -1,0 +1,192 @@
+---
+draft: false
+title: "Fix: OpenClaw Gateway "non-loopback control UI requires gateway.controlui.allowedorigins""
+snippet: "Getting the allowedorigins error when starting your OpenClaw gateway? Here is exactly how to fix it, with step-by-step configuration for local network, VPS, and reverse proxy setups."
+publishDate: "2026-03-03"
+lastModified: "2026-03-03"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "openclaw"
+  - "gateway"
+  - "troubleshooting"
+  - "controlui"
+  - "configuration"
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Fix: OpenClaw Gateway "non-loopback control UI requires gateway.controlui.allowedorigins""
+---
+
+## The Error
+
+You start your OpenClaw gateway and hit this:
+
+```
+gateway failed to start: error: non-loopback control ui requires
+gateway.controlui.allowedorigins (set explicit origins), or set
+gateway.controlui.dangerouslyallowhostheaderoriginfallback=true
+to use host-header origin fallback mode
+```
+
+This happens when you're trying to access the OpenClaw Control UI from a different machine than where the gateway is running — a common scenario for VPS deployments, homelab setups, or any time you bind to `0.0.0.0` instead of `127.0.0.1`.
+
+## Why This Happens
+
+OpenClaw's gateway protects the Control UI with origin checks to prevent cross-site request forgery (CSRF). When bound to loopback (`127.0.0.1`), it knows only local connections are possible. When bound to a network interface, it needs you to explicitly declare which origins (browser URLs) are allowed to connect.
+
+## The Fix
+
+### Option 1: Set Explicit Allowed Origins (Recommended)
+
+Edit your `openclaw.json` configuration:
+
+```json
+{
+  "gateway": {
+    "bind": "0.0.0.0:18789",
+    "controlui": {
+      "allowedorigins": [
+        "http://192.168.1.100:18789",
+        "https://openclaw.yourdomain.com"
+      ]
+    }
+  }
+}
+```
+
+Or via the CLI:
+
+```bash
+openclaw configure --set gateway.controlui.allowedorigins='["http://192.168.1.100:18789"]'
+```
+
+Replace `192.168.1.100` with your actual server IP or domain name. The origin must match **exactly** what appears in your browser's address bar — including protocol, hostname, and port.
+
+### Option 2: Allow Host-Header Origin Fallback
+
+If you're behind a reverse proxy that sets the `Host` header correctly, or you're on a trusted network:
+
+```json
+{
+  "gateway": {
+    "controlui": {
+      "dangerouslyallowhostheaderoriginfallback": true
+    }
+  }
+}
+```
+
+```bash
+openclaw configure --set gateway.controlui.dangerouslyallowhostheaderoriginfallback=true
+```
+
+**Warning:** The setting name includes "dangerously" for a reason. Only use this on trusted networks or behind a properly configured reverse proxy. On a public-facing server without a reverse proxy, this weakens CSRF protection.
+
+### Option 3: Keep It on Loopback + SSH Tunnel
+
+If you don't need the UI accessible from the network, keep the gateway bound to loopback and use an SSH tunnel:
+
+```bash
+# From your local machine:
+ssh -L 18789:localhost:18789 user@your-server
+
+# Then open http://localhost:18789 in your browser
+```
+
+This is the most secure option — no origin configuration needed, and the Control UI never touches the network.
+
+## Common Scenarios
+
+### VPS / Cloud Server
+
+```json
+{
+  "gateway": {
+    "bind": "0.0.0.0:18789",
+    "controlui": {
+      "allowedorigins": [
+        "https://openclaw.yourdomain.com"
+      ]
+    }
+  }
+}
+```
+
+Pair this with a reverse proxy (nginx, Caddy) that terminates TLS:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name openclaw.yourdomain.com;
+
+    ssl_certificate /etc/letsencrypt/live/openclaw.yourdomain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/openclaw.yourdomain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:18789;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+### Homelab / Local Network
+
+```json
+{
+  "gateway": {
+    "bind": "0.0.0.0:18789",
+    "controlui": {
+      "allowedorigins": [
+        "http://192.168.1.50:18789",
+        "http://homelab.local:18789"
+      ]
+    }
+  }
+}
+```
+
+### Docker Deployment
+
+```yaml
+# docker-compose.yml
+services:
+  openclaw:
+    image: openclaw/openclaw:latest
+    ports:
+      - "18789:18789"
+    volumes:
+      - ./openclaw.json:/home/node/.openclaw/openclaw.json
+    environment:
+      - OPENCLAW_GATEWAY_BIND=0.0.0.0:18789
+```
+
+Make sure your `openclaw.json` inside the container has the correct `allowedorigins` set to the URL you'll access from your browser.
+
+## After Fixing
+
+Restart the gateway:
+
+```bash
+openclaw gateway restart
+```
+
+Verify it's running:
+
+```bash
+openclaw gateway status
+```
+
+Then open the Control UI in your browser at the origin you configured. If you still see issues, check:
+
+1. **Origin mismatch** — the browser URL must exactly match one of the `allowedorigins` entries (protocol + host + port)
+2. **Firewall** — ensure port 18789 (or your custom port) is open
+3. **Reverse proxy headers** — if using nginx/Caddy, make sure `Host`, `Upgrade`, and `Connection` headers are forwarded
+
+## Related
+
+- [OpenClaw Gateway Documentation](https://docs.openclaw.ai/)
+- For hardware deployment options, see my [OpenClaw hardware guide](https://lucaberton.com/blog/openclaw-hardware-guide-mac-mini-vs-pi-vs-vps/)
+- For cloud deployments, check the [VPS deployment guide](https://lucaberton.com/blog/openclaw-vps-deployment-always-on-ai-agent/)

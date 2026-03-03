@@ -1,0 +1,161 @@
+---
+draft: false
+title: "Fix: OpenClaw "origin not allowed" — Open the Control UI from the Gateway Host or Allow It"
+snippet: "The OpenClaw origin not allowed error means your browser URL does not match the gateway's allowed origins list. Here is how to diagnose and fix it in 60 seconds."
+publishDate: "2026-03-03"
+lastModified: "2026-03-03"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "openclaw"
+  - "gateway"
+  - "troubleshooting"
+  - "origin"
+  - "control-ui"
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Fix: OpenClaw "origin not allowed" — Open the Control UI from the Gateway Host or Allow It"
+---
+
+## The Error
+
+You open the OpenClaw Control UI in your browser and see:
+
+```
+openclaw origin not allowed (open the control ui from the gateway
+host or allow it in gateway.controlui.allowedorigins)
+```
+
+Your gateway is running, but the Control UI refuses to load.
+
+## What's Happening
+
+The gateway is checking the `Origin` header from your browser request against its list of allowed origins. Your browser's URL doesn't match any entry in `gateway.controlui.allowedorigins`.
+
+This is different from the "non-loopback" startup error — here the gateway **did** start, but it's rejecting your specific browser connection.
+
+## Quick Diagnosis
+
+**Step 1:** Check what URL is in your browser's address bar. Example:
+
+```
+http://192.168.1.100:18789
+```
+
+**Step 2:** Check what origins are allowed:
+
+```bash
+openclaw status
+# or
+cat ~/.openclaw/openclaw.json | grep -A5 allowedorigins
+```
+
+**Step 3:** Compare. The origin in your browser must **exactly** match one of the allowed entries. Common mismatches:
+
+| Browser URL | Allowed Origin | Match? |
+|---|---|---|
+| `http://192.168.1.100:18789` | `http://192.168.1.100:18789` | ✅ |
+| `http://192.168.1.100:18789` | `https://192.168.1.100:18789` | ❌ (http vs https) |
+| `http://myserver:18789` | `http://192.168.1.100:18789` | ❌ (hostname vs IP) |
+| `http://192.168.1.100:18789/` | `http://192.168.1.100:18789` | ✅ (trailing slash is stripped) |
+| `http://192.168.1.100` | `http://192.168.1.100:18789` | ❌ (missing port) |
+
+## The Fix
+
+Add your browser's exact URL as an allowed origin:
+
+```bash
+openclaw configure --set gateway.controlui.allowedorigins='["http://192.168.1.100:18789"]'
+openclaw gateway restart
+```
+
+If you access from multiple machines or URLs, add them all:
+
+```json
+{
+  "gateway": {
+    "controlui": {
+      "allowedorigins": [
+        "http://192.168.1.100:18789",
+        "http://homelab.local:18789",
+        "https://openclaw.mydomain.com"
+      ]
+    }
+  }
+}
+```
+
+## Common Causes
+
+### 1. Accessing via IP but configured with hostname (or vice versa)
+
+```bash
+# You configured:
+allowedorigins: ["http://myserver:18789"]
+
+# But you're browsing to:
+http://192.168.1.50:18789
+# → origin mismatch!
+```
+
+Fix: add both the hostname and IP to `allowedorigins`.
+
+### 2. HTTP vs HTTPS mismatch
+
+If you're behind a reverse proxy that terminates TLS:
+
+```bash
+# Browser shows: https://openclaw.example.com
+# But allowedorigins has: http://openclaw.example.com
+```
+
+Fix: use the `https://` version in `allowedorigins`.
+
+### 3. Port mismatch or missing port
+
+```bash
+# Behind a reverse proxy on port 443:
+# Browser shows: https://openclaw.example.com (no port = 443)
+# allowedorigins has: https://openclaw.example.com:18789
+```
+
+Fix: match the port the browser sees, not the gateway's internal port.
+
+### 4. Accessing from localhost vs network
+
+If you configured `allowedorigins` for your network IP but then try `http://localhost:18789` from the server itself — mismatch. Add both:
+
+```json
+"allowedorigins": [
+  "http://localhost:18789",
+  "http://192.168.1.100:18789"
+]
+```
+
+## Still Not Working?
+
+Enable debug logging:
+
+```bash
+OPENCLAW_LOG_LEVEL=debug openclaw gateway restart
+```
+
+Check the gateway logs for the exact origin being rejected:
+
+```bash
+openclaw gateway logs
+```
+
+The log will show something like:
+
+```
+origin rejected: "http://192.168.1.100:18789" not in allowed list
+```
+
+Use that exact string in your `allowedorigins` array.
+
+## Related
+
+- [Gateway allowedorigins configuration guide](https://lucaberton.com/blog/openclaw-gateway-controlui-allowedorigins-fix/)
+- [OpenClaw VPS deployment](https://lucaberton.com/blog/openclaw-vps-deployment-always-on-ai-agent/)
+- [OpenClaw Documentation](https://docs.openclaw.ai/)

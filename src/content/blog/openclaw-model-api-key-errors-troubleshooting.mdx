@@ -1,0 +1,192 @@
+---
+draft: false
+title: "Fix: OpenClaw Model API Key Errors — 401 Unauthorized, Invalid Key, and Rate Limits"
+snippet: "Troubleshoot OpenClaw API key issues across OpenAI, Anthropic, and GitHub Copilot. Covers 401 errors, invalid key formats, rate limits, and model fallback configuration."
+publishDate: "2026-03-03"
+lastModified: "2026-03-03"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "openclaw"
+  - "api-keys"
+  - "troubleshooting"
+  - "openai"
+  - "anthropic"
+  - "copilot"
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Fix: OpenClaw Model API Key Errors — 401 Unauthorized, Invalid Key, and Rate Limits"
+---
+
+## Common API Key Errors
+
+When OpenClaw can't authenticate with your model provider, you'll see errors like:
+
+```
+Error: 401 Unauthorized - Invalid API key
+```
+```
+Error: You exceeded your current quota
+```
+```
+Error: model "gpt-4o" not found or not available for your API key
+```
+
+Here's how to fix each one.
+
+## Error: 401 Unauthorized / Invalid API Key
+
+### Check 1: Is the key set?
+
+```bash
+openclaw status
+```
+
+Look for the model provider section. If it shows "not configured," set your key:
+
+```bash
+# OpenAI
+openclaw configure --set providers.openai.apiKey='sk-...'
+
+# Anthropic
+openclaw configure --set providers.anthropic.apiKey='sk-ant-...'
+
+# Azure OpenAI
+openclaw configure --set providers.azure.apiKey='your-key'
+openclaw configure --set providers.azure.endpoint='https://your-resource.openai.azure.com'
+```
+
+### Check 2: Key format
+
+| Provider | Key prefix | Example |
+|---|---|---|
+| OpenAI | `sk-` or `sk-proj-` | `sk-proj-abc123...` |
+| Anthropic | `sk-ant-` | `sk-ant-api03-...` |
+| Azure OpenAI | (varies) | `a1b2c3d4e5f6...` |
+| GitHub Copilot | (OAuth token) | Configured via `openclaw configure` |
+
+### Check 3: Key hasn't expired or been revoked
+
+```bash
+# Quick test — OpenAI
+curl -s https://api.openai.com/v1/models   -H "Authorization: Bearer sk-your-key" | head -5
+
+# Quick test — Anthropic
+curl -s https://api.anthropic.com/v1/messages   -H "x-api-key: sk-ant-your-key"   -H "anthropic-version: 2023-06-01"   -H "content-type: application/json"   -d '{"model":"claude-sonnet-4-20250514","max_tokens":10,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+If the curl test also fails, regenerate your API key at the provider's dashboard.
+
+## Error: Quota Exceeded / Rate Limited
+
+```
+Error: You exceeded your current quota. Please check your plan and billing details.
+```
+
+This means either:
+1. **Your account has no credit** — add payment method at the provider's billing page
+2. **You hit a rate limit** — temporary, wait and retry
+
+### Rate Limit Handling
+
+OpenClaw handles rate limits automatically with exponential backoff. But if you're consistently hitting limits:
+
+```json
+{
+  "models": {
+    "default": "claude-sonnet-4-20250514",
+    "fallback": "gpt-4o-mini"
+  }
+}
+```
+
+Setting a fallback model means if your primary model rate-limits, OpenClaw can fall through to a cheaper/less-limited model.
+
+### Cost Control
+
+Set spending limits at the provider level:
+- **OpenAI:** Settings → Billing → Usage limits
+- **Anthropic:** Settings → Plans & Billing → Spending limit
+- **Azure:** Set budget alerts in Azure Cost Management
+
+## Error: Model Not Found
+
+```
+Error: model "gpt-4o" not found
+```
+
+Possible causes:
+1. **Your API key doesn't have access to that model** — some models require specific tier access
+2. **Typo in model name** — check the exact model identifier
+3. **Model deprecated** — providers retire old model versions
+
+Common model names (as of 2026):
+
+```
+# OpenAI
+gpt-4o
+gpt-4o-mini
+gpt-5-mini
+o3-mini
+
+# Anthropic
+claude-sonnet-4-20250514
+claude-opus-4-20250514
+claude-haiku-3-20240307
+
+# GitHub Copilot (via OpenClaw)
+github-copilot/gpt-4o
+github-copilot/claude-sonnet-4-20250514
+github-copilot/claude-opus-4-20250514
+```
+
+## GitHub Copilot Pro Setup
+
+GitHub Copilot Pro gives you access to GPT-5-mini and Claude models through OpenClaw without separate API keys. This is the most cost-effective way to run OpenClaw if you already have a Copilot subscription.
+
+```bash
+openclaw configure
+# Follow the GitHub OAuth flow when prompted
+```
+
+For the full GPT-5-mini + Copilot Pro setup, see my detailed guide: [OpenClaw with GPT-5-mini via Copilot Pro](https://lucaberton.com/blog/openclaw-gpt5-mini-copilot-pro-free-sota-models/).
+
+## Multi-Provider Configuration
+
+For reliability, configure multiple providers and set fallback chains:
+
+```json
+{
+  "providers": {
+    "anthropic": {
+      "apiKey": "sk-ant-..."
+    },
+    "openai": {
+      "apiKey": "sk-..."
+    }
+  },
+  "models": {
+    "default": "claude-sonnet-4-20250514",
+    "fallback": "gpt-4o-mini"
+  }
+}
+```
+
+## Debugging
+
+```bash
+# Check current configuration (keys are masked)
+openclaw status
+
+# Test a specific model
+openclaw test-model claude-sonnet-4-20250514
+
+# Check gateway logs for API errors
+openclaw gateway logs | grep -i "error\|401\|403\|429"
+```
+
+## Related
+
+- [OpenClaw GPT-5-mini Copilot Pro guide](https://lucaberton.com/blog/openclaw-gpt5-mini-copilot-pro-free-sota-models/)
+- [Local LLM vs API models comparison](https://lucaberton.com/blog/openclaw-local-llm-vs-api-models-honest-comparison/)
+- [OpenClaw Raspberry Pi budget setup](https://lucaberton.com/blog/openclaw-raspberry-pi-gpt5-mini-budget-setup/)

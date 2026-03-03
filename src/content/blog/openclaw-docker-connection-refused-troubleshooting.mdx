@@ -1,0 +1,223 @@
+---
+draft: false
+title: "Fix: OpenClaw in Docker — Connection Refused, Port Mapping, and Network Issues"
+snippet: "Running OpenClaw in Docker and getting connection refused? Common issues with port mapping, bind addresses, DNS resolution, and WebSocket upgrades explained with fixes."
+publishDate: "2026-03-03"
+lastModified: "2026-03-03"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "openclaw"
+  - "docker"
+  - "troubleshooting"
+  - "networking"
+  - "containers"
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Fix: OpenClaw in Docker — Connection Refused, Port Mapping, and Network Issues"
+---
+
+## The Problem
+
+You deployed OpenClaw in Docker (or Docker Compose), the container is running, but you can't connect to the gateway. Or worse — it starts but messaging channels can't reach it.
+
+This guide covers the most common Docker networking issues with OpenClaw.
+
+## Issue 1: Connection Refused on Gateway Port
+
+**Symptom:** `curl http://localhost:18789` returns "Connection refused"
+
+**Cause:** The gateway is binding to `127.0.0.1` inside the container, but Docker port mapping needs it on `0.0.0.0`.
+
+**Fix:** Set the bind address to `0.0.0.0`:
+
+```json
+{
+  "gateway": {
+    "bind": "0.0.0.0:18789"
+  }
+}
+```
+
+Or via environment variable:
+
+```yaml
+# docker-compose.yml
+services:
+  openclaw:
+    image: openclaw/openclaw:latest
+    ports:
+      - "18789:18789"
+    environment:
+      - OPENCLAW_GATEWAY_BIND=0.0.0.0:18789
+```
+
+**Why:** Inside a Docker container, `127.0.0.1` means "this container only." Port mapping (`-p 18789:18789`) forwards from the host to the container's `0.0.0.0`, not `127.0.0.1`. This is the #1 Docker networking gotcha for any service, not just OpenClaw.
+
+## Issue 2: WebSocket Connection Drops
+
+**Symptom:** The Control UI loads but shows "disconnected" or "reconnecting." Messaging channels connect briefly then drop.
+
+**Cause:** Your reverse proxy isn't forwarding WebSocket upgrade headers.
+
+**Fix for nginx:**
+
+```nginx
+location / {
+    proxy_pass http://openclaw:18789;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 86400s;  # Keep WS connections alive
+    proxy_send_timeout 86400s;
+}
+```
+
+**Fix for Caddy:**
+
+```
+openclaw.example.com {
+    reverse_proxy openclaw:18789
+}
+```
+
+Caddy handles WebSocket upgrades automatically — one reason I recommend it for simple setups.
+
+**Fix for Traefik:**
+
+```yaml
+# docker-compose.yml labels
+labels:
+  - "traefik.http.routers.openclaw.rule=Host(`openclaw.example.com`)"
+  - "traefik.http.services.openclaw.loadbalancer.server.port=18789"
+```
+
+Traefik also handles WebSocket upgrades automatically.
+
+## Issue 3: DNS Resolution Failures
+
+**Symptom:** OpenClaw can't reach external APIs (OpenAI, Anthropic, etc.) from inside the container. Errors like `getaddrinfo ENOTFOUND api.openai.com`.
+
+**Fix:** Check Docker's DNS configuration:
+
+```yaml
+# docker-compose.yml
+services:
+  openclaw:
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+```
+
+Or check if your Docker daemon has DNS configured:
+
+```bash
+docker exec openclaw cat /etc/resolv.conf
+```
+
+If it shows `127.0.0.53` (systemd-resolved), Docker may not be forwarding DNS correctly. Add explicit DNS servers.
+
+## Issue 4: Volume Permissions
+
+**Symptom:** OpenClaw starts but can't write config files, memory files, or workspace data.
+
+**Fix:** Ensure the mounted volume has correct ownership:
+
+```yaml
+# docker-compose.yml
+services:
+  openclaw:
+    image: openclaw/openclaw:latest
+    user: "1000:1000"
+    volumes:
+      - ./openclaw-data:/home/node/.openclaw
+```
+
+```bash
+# Set ownership on the host
+sudo chown -R 1000:1000 ./openclaw-data
+```
+
+## Issue 5: Container Can't Reach Host Services
+
+**Symptom:** OpenClaw needs to reach a service running on the Docker host (like Ollama on `localhost:11434`), but gets "Connection refused."
+
+**Fix:** Use the special Docker DNS name for the host:
+
+```json
+{
+  "models": {
+    "ollama": {
+      "baseUrl": "http://host.docker.internal:11434"
+    }
+  }
+}
+```
+
+On Linux, you may need to add this to your Docker Compose:
+
+```yaml
+services:
+  openclaw:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+```
+
+## Full Working Docker Compose
+
+```yaml
+version: "3.8"
+
+services:
+  openclaw:
+    image: openclaw/openclaw:latest
+    container_name: openclaw
+    restart: unless-stopped
+    ports:
+      - "18789:18789"
+    volumes:
+      - ./openclaw-data:/home/node/.openclaw
+      - ./workspace:/home/node/.openclaw/workspace
+    environment:
+      - OPENCLAW_GATEWAY_BIND=0.0.0.0:18789
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18789/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+```
+
+## Debugging Checklist
+
+```bash
+# 1. Is the container running?
+docker ps | grep openclaw
+
+# 2. Check container logs
+docker logs openclaw --tail 50
+
+# 3. Check gateway status from inside the container
+docker exec openclaw openclaw status
+
+# 4. Test connectivity from inside
+docker exec openclaw curl -s http://localhost:18789/health
+
+# 5. Test from host
+curl -s http://localhost:18789/health
+
+# 6. Check port mapping
+docker port openclaw
+```
+
+## Related
+
+- [OpenClaw VPS deployment guide](https://lucaberton.com/blog/openclaw-vps-deployment-always-on-ai-agent/)
+- [Gateway origin configuration](https://lucaberton.com/blog/openclaw-gateway-controlui-allowedorigins-fix/)
+- [OpenClaw hardware guide](https://lucaberton.com/blog/openclaw-hardware-guide-mac-mini-vs-pi-vs-vps/)

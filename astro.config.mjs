@@ -27,23 +27,40 @@ export default defineConfig({
         if (page.match(/\/categories\/[^/]+\/?$/) && !page.includes('/blog/categories/')) return false;
         if (page.match(/\/tags\/[^/]+\/?$/) && !page.includes('/blog/tags/')) return false;
         
-        // Skip legacy blog posts that redirect (as per _redirects file)
-        const redirectedBlogPosts = [
-          '/blog/complete-guide-fullstack-development',
-          '/blog/how-to-become-frontend-master',
-          '/blog/coursera_google-cloud-platform-fundamentals.it',
-          '/blog/kubernetes.it',
-          '/blog/responsivedesign',
-          '/blog/siteimprovement.it',
-          '/blog/redhat_do280',
-          '/blog/kcs_googletags',
+        // Skip all redirect pages (old lucaberton.it paths and legacy slugs)
+        const redirectPages = [
+          '/blog/ansible-for-kubernetes-by-example-with-apress-book',
+          '/blog/ansible-for-vmware-by-examples-with-apress-book',
+          '/blog/aws_training_and_certification_',
+          '/blog/back-end-infrastructure-servers-secure-apis-and-data',
           '/blog/bitcoin',
+          '/blog/booklist',
+          '/blog/building-blocks-of-the-future',
+          '/blog/coursera_google-',
+          '/blog/githubarcticcodevault',
+          '/blog/googleacademyforads',
+          '/blog/hands-on-ansible-automation-by-bpb-online-book',
+          '/blog/kcs_',
+          '/blog/kubernetes.it',
+          '/blog/languagecert_',
+          '/blog/linuxfoundationlfce',
+          '/blog/localguide',
+          '/blog/mobilewebspecialistnanodegree',
+          '/blog/newsite',
+          '/blog/nexusblod',
+          '/blog/red-hat-ansible-automation-platform-book',
+          '/blog/redhat_',
+          '/blog/responsivedesign',
+          '/blog/rhsb-2021-009',
+          '/blog/root-cause-analysis',
+          '/blog/siteimprovement',
+          '/blog/technical-troubleshooting-diagnostics-networks-customers',
           '/blog/webfundamentals',
-          '/blog/coursera_google-it-support',
-          '/blog/languagecert_international_esol_selt_b1',
-          '/blog/services',
+          '/services/ansible-python-training',
+          '/products/',
+          '/team/',
         ];
-        if (redirectedBlogPosts.some(post => page.includes(post))) return false;
+        if (redirectPages.some(p => page.includes(p))) return false;
         
         // Skip blog-old (legacy content)
         if (page.includes('/blog-old')) return false;

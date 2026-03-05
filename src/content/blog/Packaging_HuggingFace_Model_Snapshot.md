@@ -1,6 +1,6 @@
 ---
 draft: false
-title: "Packaging a Hugging Face Model Snapshot into a Portable .tar.gz"
+title: "Packaging a Hugging Face Model Snapshot"
 snippet: "Learn how to download a Hugging Face model as real files and package it into a portable tarball for offline use, archival, or distribution."
 publishDate: "2026-02-02"
 category: "ai"

@@ -17,3 +17,118 @@ image:
   alt: "Event-driven Ansible automation"
 ---
 
+
+Event-Driven Ansible (EDA) shifts automation from "run when I tell you" to "run when something happens." After years of building scheduled Ansible workflows, I started deploying EDA Controller at client sites in 2025 — and the reduction in manual incident response has been dramatic.
+
+## Why Event-Driven Automation Matters
+
+Traditional automation waits for a human trigger. A monitoring alert fires, an engineer reads it, opens a terminal, and runs a playbook. EDA removes the human from that loop for well-understood scenarios.
+
+The core components:
+
+- **Event sources** — plugins that listen for events (webhooks, Kafka, file changes, Alertmanager)
+- **Rulebooks** — YAML files defining conditions and actions
+- **EDA Controller** — the runtime that evaluates rules and triggers playbooks
+
+## Writing Your First Rulebook
+
+A rulebook connects events to actions through conditions:
+
+```yaml
+---
+- name: Respond to disk pressure alerts
+  hosts: all
+  sources:
+    - ansible.eda.alertmanager:
+        host: 0.0.0.0
+        port: 5000
+  rules:
+    - name: Disk cleanup on warning
+      condition: event.alert.labels.alertname == "DiskPressure"
+      action:
+        run_playbook:
+          name: playbooks/disk-cleanup.yml
+          extra_vars:
+            target_host: "{{ event.alert.labels.instance }}"
+```
+
+This rulebook listens for Prometheus Alertmanager webhooks and triggers a disk cleanup playbook when a `DiskPressure` alert fires. No human needed.
+
+## Event Sources in Practice
+
+EDA ships with several built-in event source plugins. The ones I use most:
+
+**Alertmanager integration** — the most common pattern. Configure Alertmanager to send webhooks to EDA Controller, then write rules for each alert type.
+
+**Kafka consumer** — for organizations already running event buses. EDA consumes messages from topics and triggers automation based on message content.
+
+**Webhook receiver** — generic HTTP endpoint. GitLab CI, ServiceNow, or any system that can POST JSON becomes an event source.
+
+**File watch** — monitors file changes on the controller host. Useful for config drift detection.
+
+```yaml
+- name: React to config changes
+  hosts: all
+  sources:
+    - ansible.eda.file_watch:
+        path: /etc/nginx/
+        recursive: true
+  rules:
+    - name: Validate and reload nginx
+      condition: event.type == "FileModifiedEvent"
+      action:
+        run_playbook:
+          name: playbooks/nginx-validate-reload.yml
+```
+
+## Scaling EDA in Production
+
+For production deployments, I recommend running EDA Controller on Kubernetes using the [EDA operator](https://github.com/ansible/eda-server). Key considerations:
+
+**Rule throttling** — without rate limiting, a flapping alert can trigger hundreds of playbook runs. Add `throttle` to your rules:
+
+```yaml
+rules:
+  - name: Restart service on crash
+    condition: event.alert.labels.alertname == "ServiceDown"
+    throttle:
+      once_within: 300
+      group_by: event.alert.labels.instance
+    action:
+      run_playbook:
+        name: playbooks/service-restart.yml
+```
+
+**Credential management** — EDA Controller integrates with [Ansible Automation Platform](https://ansiblepilot.com/) for credential storage. Never hardcode secrets in rulebooks.
+
+**Audit trail** — every rule activation is logged. Connect EDA Controller to your SIEM for compliance reporting, especially important for [DORA compliance](/blog/dora-compliance-automation-ansible/).
+
+## Real-World Use Cases
+
+The patterns I deploy most frequently:
+
+1. **Auto-remediation** — disk cleanup, service restarts, certificate renewal triggered by monitoring alerts
+2. **Security response** — block IPs, rotate credentials, isolate hosts when [security tools](/blog/shift-left-security-policy-as-code/) detect threats
+3. **GitOps triggers** — run configuration playbooks when Git repos change
+4. **Compliance scanning** — periodic checks triggered by schedule events, with auto-remediation for drift
+
+## EDA vs Other Event Systems
+
+How does EDA compare to alternatives?
+
+| Approach | Best For | Limitation |
+|----------|----------|------------|
+| EDA Controller | Infrastructure automation | Ansible ecosystem only |
+| AWS EventBridge | Cloud-native events | AWS lock-in |
+| Kubernetes Operators | K8s-native workflows | Complex to build |
+| Custom scripts | Simple webhook handlers | No audit trail, fragile |
+
+EDA wins when your automation is already in Ansible. If you're managing [Kubernetes clusters](/blog/ansible-kubernetes-operators-day2/) or [GPU infrastructure](/blog/ansible-gpu-cluster-provisioning/) with Ansible, EDA is the natural extension.
+
+## Getting Started
+
+Install EDA Controller alongside your existing [Ansible Automation Platform](https://ansiblepilot.com/) deployment. Start with one low-risk rulebook — disk cleanup or log rotation — and expand as your team gains confidence.
+
+The documentation at [ansible.readthedocs.io](https://ansible.readthedocs.io) covers installation. For hands-on examples, check the [Ansible by Example](https://ansiblebyexample.com/) collection.
+
+Event-driven automation is not about replacing engineers. It is about letting them sleep through the alerts that have known solutions.

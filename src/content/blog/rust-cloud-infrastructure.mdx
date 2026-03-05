@@ -17,3 +17,120 @@ image:
   alt: "Rust in cloud infrastructure"
 ---
 
+
+Rust is quietly taking over the cloud infrastructure stack. Not through hype — through reliability. The tools platform engineers reach for daily are increasingly written in Rust, and there are good reasons for that shift.
+
+## The Rust Takeover You Didn't Notice
+
+Look at the tools you probably already use:
+
+- **Firecracker** — AWS Lambda's microVM runtime
+- **Bottlerocket** — AWS's container-optimized OS
+- **tikv** — distributed key-value store behind TiDB
+- **Vector** — observability data pipeline (Datadog)
+- **Spin** — WebAssembly application framework for [SpinKube on Kubernetes](/blog/webassembly-kubernetes-wasm-spinkube/)
+- **Turbo** — build system (Vercel)
+- **delta** (delta.io) — lakehouse storage layer
+
+These aren't hobby projects. They're production infrastructure handling billions of requests.
+
+## Why Rust for Infrastructure
+
+Three properties make Rust ideal for infrastructure tooling:
+
+**Memory safety without garbage collection.** Infrastructure tools run for months. Go's garbage collector introduces latency spikes. Java's GC pauses are worse. Rust has neither — zero-cost abstractions mean predictable performance at the 99th percentile.
+
+**Fearless concurrency.** The borrow checker catches data races at compile time. When you're writing a proxy handling 100k concurrent connections, this matters. A data race in a proxy can corrupt traffic from unrelated users.
+
+**Single binary deployment.** Like Go, Rust compiles to a single static binary. No runtime dependencies, no version conflicts. This is critical for [edge deployments](/blog/edge-ai-kubernetes-deployment/) where you can't assume what's installed.
+
+## Building CLI Tools in Rust
+
+The `clap` crate makes building CLI tools straightforward. Here's a pattern I use for infrastructure automation CLIs:
+
+```rust
+use clap::Parser;
+
+#[derive(Parser)]
+#[command(name = "infra-check")]
+#[command(about = "Infrastructure health checker")]
+struct Cli {
+    #[arg(short, long)]
+    target: String,
+
+    #[arg(short, long, default_value = "30")]
+    timeout_secs: u64,
+
+    #[arg(long)]
+    json_output: bool,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let result = check_health(&cli.target, cli.timeout_secs).await?;
+
+    if cli.json_output {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Status: {}", result.status);
+    }
+    Ok(())
+}
+```
+
+Compare this to writing the same tool in Python or Bash. The Rust version starts instantly (no interpreter), handles errors explicitly, and ships as a 3MB binary.
+
+## Rust in the Kubernetes Ecosystem
+
+The `kube-rs` crate brings Kubernetes client capabilities to Rust. I've built custom controllers that use a fraction of the resources compared to Go-based operators:
+
+```rust
+use kube::{Api, Client};
+use k8s_openapi::api::core::v1::Pod;
+
+async fn list_gpu_pods(namespace: &str) -> anyhow::Result<Vec<String>> {
+    let client = Client::try_default().await?;
+    let pods: Api<Pod> = Api::namespaced(client, namespace);
+    let pod_list = pods.list(&Default::default()).await?;
+
+    Ok(pod_list.items.iter()
+        .filter(|p| has_gpu_resources(p))
+        .filter_map(|p| p.metadata.name.clone())
+        .collect())
+}
+```
+
+For teams running [multi-cluster Kubernetes](/blog/multi-cluster-kubernetes-management/) or [GPU workloads](/blog/gpu-sharing-kubernetes-mig-mps/), Rust controllers can reduce operator resource overhead significantly.
+
+## When NOT to Use Rust
+
+Rust isn't always the right choice:
+
+- **Glue scripts** — Bash or Python is faster to write for one-off automation
+- **Rapid prototyping** — Go's simplicity wins when you need something working today
+- **Team adoption** — if your [platform team](/blog/platform-engineering-maturity-model/) doesn't know Rust, the learning curve is real (3-6 months to productivity)
+- **Ansible playbooks** — for configuration management, [Ansible](https://ansiblepilot.com/) remains the right tool
+
+Use Rust for long-running services, performance-critical paths, and tools that ship to untrusted environments.
+
+## The Infrastructure Rust Stack
+
+My recommended Rust stack for infrastructure tools in 2026:
+
+| Layer | Crate | Purpose |
+|-------|-------|---------|
+| Async runtime | `tokio` | Async I/O |
+| HTTP | `reqwest` + `axum` | Client + server |
+| CLI | `clap` | Argument parsing |
+| Serialization | `serde` | JSON/YAML/TOML |
+| Kubernetes | `kube-rs` | K8s client |
+| Observability | `tracing` | Structured logging |
+| Error handling | `anyhow` + `thiserror` | App vs library errors |
+| Cloud SDKs | `aws-sdk-rust` | AWS services |
+
+## Getting Started
+
+If you're a platform engineer considering Rust, start with a CLI tool. Replace one Python script with a Rust binary. The [Terraform](https://terraformpilot.com/) ecosystem already uses Rust internally — your infrastructure stack is heading this direction whether you adopt it explicitly or not.
+
+The Rust compiler is strict. It will fight you. But every error it catches at compile time is a production incident you never have to debug at 3 AM.

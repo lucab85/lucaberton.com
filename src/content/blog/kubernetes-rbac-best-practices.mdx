@@ -17,3 +17,86 @@ image:
   alt: "Kubernetes RBAC best practices"
 ---
 
+Kubernetes RBAC is simultaneously simple in concept and treacherous in practice. After auditing RBAC configurations at dozens of organizations, the same mistakes appear repeatedly. Here is how to get it right.
+
+## The Principle of Least Privilege
+
+Every ServiceAccount, user, and group should have exactly the permissions they need and nothing more. This sounds obvious. In practice, most clusters have at least one `cluster-admin` binding that should not exist.
+
+## Common RBAC Mistakes
+
+**Binding cluster-admin to CI/CD service accounts.** Your deployment pipeline does not need cluster-wide admin access. It needs permission to update Deployments, Services, and ConfigMaps in specific namespaces.
+
+```yaml
+# Bad: cluster-admin for CI/CD
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cicd-admin
+subjects:
+- kind: ServiceAccount
+  name: gitlab-runner
+  namespace: cicd
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+
+# Good: namespace-scoped deployment permissions
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer
+  namespace: production
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list", "watch", "update", "patch"]
+- apiGroups: [""]
+  resources: ["services", "configmaps"]
+  verbs: ["get", "list", "watch", "create", "update"]
+```
+
+**Using default ServiceAccounts.** Every namespace has a `default` ServiceAccount. Pods use it automatically. If you grant permissions to `default`, every pod in the namespace inherits them.
+
+```yaml
+# Always create dedicated ServiceAccounts
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app-specific-sa
+  namespace: production
+automountServiceAccountToken: false
+```
+
+**Forgetting about aggregated ClusterRoles.** Kubernetes has built-in role aggregation. Custom CRDs should define their own RBAC rules that aggregate into the standard `admin`, `edit`, and `view` roles.
+
+## RBAC Audit Script
+
+Run this regularly to find overprivileged bindings:
+
+```bash
+# Find all cluster-admin bindings
+kubectl get clusterrolebindings -o json | \
+  jq -r '.items[] | select(.roleRef.name=="cluster-admin") |
+  .metadata.name + " -> " +
+  (.subjects[]? | .kind + "/" + .name)'
+```
+
+## Multi-Tenancy RBAC
+
+For [multi-cluster environments](/blog/multi-cluster-kubernetes-management/), RBAC becomes more complex. Each tenant needs:
+
+- Dedicated namespace(s)
+- ResourceQuotas and LimitRanges
+- NetworkPolicies for isolation
+- RBAC roles scoped to their namespaces only
+
+Tools like [Open Policy Agent](/blog/zero-trust-kubernetes-service-mesh-opa/) and Kyverno add policy enforcement on top of RBAC for defense in depth.
+
+## RBAC and Supply Chain Security
+
+Your [container signing pipeline](/blog/supply-chain-security-slsa-sigstore/) needs RBAC too. The signing keys and verification policies should be accessible only to the CI/CD service accounts that need them.
+
+Automate RBAC audits with [Ansible](/blog/ansible-kubernetes-operators-day2/) or [Terraform](https://terraformpilot.com/) so drift gets caught before it becomes a breach.
+
+RBAC is not glamorous, but getting it wrong is how clusters get compromised. Invest the time upfront.

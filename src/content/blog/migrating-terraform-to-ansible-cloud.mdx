@@ -17,3 +17,95 @@ image:
   alt: "Migrating Terraform to Ansible"
 ---
 
+Migrating from Terraform to Ansible for cloud provisioning is a decision I see teams consider when their infrastructure automation needs evolve beyond what HCL handles well. The answer is usually not "migrate everything" — it is "use both where each excels."
+
+## When the Migration Makes Sense
+
+Terraform excels at declarative infrastructure provisioning. [Ansible](https://ansiblepilot.com/) excels at configuration management and operational tasks. The friction starts when teams try to make Terraform do configuration management or Ansible do complex state tracking.
+
+Signs you need Ansible alongside (or instead of) Terraform:
+
+- Your Terraform `local-exec` and `remote-exec` provisioners are doing heavy lifting
+- You need post-provisioning configuration that changes frequently
+- Your team is stronger in Python/YAML than HCL
+- You need to manage both cloud and on-premises infrastructure with one tool
+
+## The Hybrid Approach
+
+The pattern I recommend most often:
+
+```
+Terraform → Provisions infrastructure (VMs, networks, databases)
+    ↓ outputs inventory
+Ansible → Configures everything (packages, services, security)
+```
+
+```hcl
+# Terraform outputs for Ansible consumption
+output "ansible_inventory" {
+  value = templatefile("inventory.tpl", {
+    web_servers = aws_instance.web[*].private_ip
+    db_servers  = aws_instance.db[*].private_ip
+  })
+}
+```
+
+```yaml
+# Ansible picks up where Terraform leaves off
+- name: Configure web servers
+  hosts: web_servers
+  roles:
+    - common
+    - nginx
+    - app_deploy
+    - monitoring
+```
+
+## Full Migration Path
+
+If you are fully migrating away from Terraform, Ansible's cloud modules cover most providers:
+
+```yaml
+- name: Provision AWS infrastructure
+  hosts: localhost
+  collections:
+    - amazon.aws
+
+  tasks:
+    - name: Create VPC
+      amazon.aws.ec2_vpc_net:
+        name: production-vpc
+        cidr_block: 10.0.0.0/16
+        region: eu-west-1
+        state: present
+      register: vpc
+
+    - name: Create subnet
+      amazon.aws.ec2_vpc_subnet:
+        vpc_id: "{{ vpc.vpc.id }}"
+        cidr: 10.0.1.0/24
+        az: eu-west-1a
+        state: present
+```
+
+The main trade-off: Ansible does not have Terraform's state file concept. You need to handle idempotency through module design rather than state comparison.
+
+## What You Lose
+
+- **Plan before apply** — Terraform's `plan` command shows exactly what will change. Ansible's `--check` mode is less reliable for cloud resources.
+- **State tracking** — Terraform knows what it created. Ansible operates on current state, which means orphaned resources are harder to detect.
+- **Provider ecosystem** — [Terraform has more providers](https://terraformpilot.com/) with deeper coverage than Ansible collections for some cloud services.
+
+## What You Gain
+
+- **Single tool** — one language for provisioning AND configuration. Your team learns [Ansible by Example](https://ansiblebyexample.com/) and covers everything.
+- **Procedural flexibility** — complex deployment orchestration with rolling updates, canary deployments, and health checks built in.
+- **Agent-based AND agentless** — push configuration without installing agents on target hosts.
+
+## Decision Framework
+
+Use Terraform when: pure infrastructure provisioning, complex dependency graphs, multi-cloud with consistent patterns.
+
+Use Ansible when: configuration management dominates, operational automation needed, team expertise is in Ansible, post-provisioning complexity is high.
+
+Use both when: you want the best of each — Terraform for infra, Ansible for config. This is what I recommend for most enterprise teams.

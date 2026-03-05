@@ -17,3 +17,104 @@ image:
   alt: "Software supply chain security 2026"
 ---
 
+Software supply chain attacks increased 700 percent in 2025. The SolarWinds and XZ Utils incidents proved that compromising one dependency can breach thousands of organizations. SLSA and Sigstore provide the framework and tooling to defend against these attacks.
+
+## SLSA Framework
+
+Supply-chain Levels for Software Artifacts (SLSA, pronounced "salsa") defines four levels of supply chain integrity:
+
+- **Level 1** — documentation of the build process
+- **Level 2** — tamper resistance of the build service
+- **Level 3** — hardened builds with non-falsifiable provenance
+- **Level 4** — two-person review and hermetic builds
+
+Most organizations should target Level 3 initially.
+
+## Sigstore in Practice
+
+Sigstore provides keyless signing for containers and artifacts. No more managing GPG keys or PKI infrastructure:
+
+```bash
+# Sign a container image with Cosign (keyless)
+cosign sign --yes ghcr.io/myorg/myapp:v1.2.3
+
+# Verify signature
+cosign verify \
+  --certificate-identity=ci@myorg.com \
+  --certificate-oidc-issuer=https://token.actions.githubusercontent.com \
+  ghcr.io/myorg/myapp:v1.2.3
+```
+
+Keyless signing uses OIDC tokens from your CI provider (GitHub Actions, GitLab CI) as identity. No secrets to manage, rotate, or leak.
+
+## GitLab CI Integration
+
+```yaml
+# .gitlab-ci.yml
+sign-image:
+  stage: sign
+  image: gcr.io/projectsigstore/cosign:latest
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  script:
+    - cosign sign --yes
+        --oidc-issuer=https://gitlab.com
+        --oidc-client-id=sigstore
+        ${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}
+```
+
+## Kubernetes Admission Control
+
+Signing images is half the battle. You also need to enforce that only signed images run:
+
+```yaml
+# Kyverno policy to verify signatures
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+spec:
+  validationFailureAction: enforce
+  rules:
+    - name: verify-cosign-signature
+      match:
+        resources:
+          kinds: ["Pod"]
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/myorg/*"
+          attestors:
+            - entries:
+                - keyless:
+                    subject: "ci@myorg.com"
+                    issuer: "https://token.actions.githubusercontent.com"
+```
+
+Now unsigned or tampered images cannot run on your cluster.
+
+## SBOM Generation
+
+[Software Bill of Materials](/blog/cra-sbom-requirements-implementation/) is becoming a compliance requirement under the [EU Cyber Resilience Act](/blog/cra-what-is-cyber-resilience-act/). Generate SBOMs in your CI pipeline:
+
+```bash
+# Generate SBOM with Syft
+syft ghcr.io/myorg/myapp:v1.2.3 -o spdx-json > sbom.spdx.json
+
+# Attach SBOM as attestation
+cosign attest --yes \
+  --predicate sbom.spdx.json \
+  --type spdxjson \
+  ghcr.io/myorg/myapp:v1.2.3
+```
+
+## The Full Pipeline
+
+1. **Build** — reproducible, hermetic builds in CI
+2. **Scan** — vulnerability scanning with Trivy or Grype
+3. **Sign** — keyless signing with Cosign
+4. **Attest** — attach SBOM and scan results as attestations
+5. **Verify** — admission controller rejects unsigned images
+6. **Monitor** — continuous scanning of running images
+
+This is the [shift-left security](/blog/shift-left-security-policy-as-code/) pipeline that enterprises need. Automate it once with [Ansible](https://ansiblepilot.com/) or [Terraform](https://terraformpilot.com/), and every deployment inherits supply chain security.

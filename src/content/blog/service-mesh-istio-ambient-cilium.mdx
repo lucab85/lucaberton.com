@@ -17,3 +17,82 @@ image:
   alt: "Service mesh comparison: Istio vs Cilium"
 ---
 
+The service mesh landscape has shifted dramatically. Istio's ambient mode removes sidecars. Cilium's mesh runs in the kernel via eBPF. The sidecar era is ending, and the question is which post-sidecar approach fits your platform.
+
+## The Sidecar Problem
+
+Sidecar proxies (Envoy in Istio, Linkerd-proxy) add 50-100MB memory per pod and 1-3ms latency per hop. At scale, this means gigabytes of memory consumed by proxies and measurable latency increase across your service graph.
+
+For AI inference workloads running on expensive [GPU nodes](/blog/gpu-sharing-kubernetes-mig-mps/), wasting memory on sidecars is particularly costly.
+
+## Istio Ambient Mode
+
+Istio ambient replaces per-pod sidecars with per-node ztunnel (zero-trust tunnel) agents and optional per-namespace waypoint proxies:
+
+```bash
+# Install Istio with ambient profile
+istioctl install --set profile=ambient
+
+# Enable ambient mode for a namespace
+kubectl label namespace production istio.io/dataplane-mode=ambient
+```
+
+Benefits:
+- No sidecar injection, no pod restarts
+- L4 mTLS handled by ztunnel (DaemonSet)
+- L7 policies only where needed (waypoint proxies)
+- Lower memory overhead (one ztunnel per node vs one sidecar per pod)
+
+## Cilium Service Mesh
+
+Cilium takes a different approach entirely: eBPF programs in the Linux kernel handle networking, security, and observability without any proxy:
+
+```yaml
+# Cilium L7 network policy
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: api-l7-policy
+spec:
+  endpointSelector:
+    matchLabels:
+      app: api-server
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: frontend
+      toPorts:
+        - ports:
+            - port: "8080"
+          rules:
+            http:
+              - method: "GET"
+                path: "/api/v1/.*"
+```
+
+eBPF runs in kernel space, eliminating user-space proxy overhead. Latency impact is sub-millisecond.
+
+## Comparison
+
+| Feature | Istio Ambient | Cilium Mesh |
+|---------|--------------|-------------|
+| Architecture | ztunnel + waypoint | eBPF in kernel |
+| Memory overhead | Low (per-node) | Minimal |
+| L7 features | Full Envoy | Growing |
+| mTLS | Built-in (SPIFFE) | Built-in |
+| Observability | Kiali, Prometheus | Hubble |
+| Learning curve | Moderate | Steep (eBPF) |
+
+## When to Use Each
+
+**Choose Istio Ambient** when you need advanced L7 traffic management (canary deployments, fault injection, header-based routing) and your team already knows Istio.
+
+**Choose Cilium** when performance is critical, you want unified networking + security + observability, and you are comfortable with the eBPF ecosystem. Cilium integrates naturally with [Kubernetes RBAC](/blog/kubernetes-rbac-best-practices/) and [network policies](/blog/ebpf-kubernetes-security/).
+
+**Choose neither** when your service count is under 20 and basic NetworkPolicies cover your security requirements. Not every platform needs a service mesh.
+
+## Zero Trust with Service Mesh
+
+Both options enable [zero-trust networking](/blog/zero-trust-kubernetes-service-mesh-opa/) by default: mTLS between all services, identity-based policies, and encrypted east-west traffic. This is increasingly a compliance requirement for [SOC 2](/blog/soc2-compliance-cloud-native/) and [CRA](/blog/cra-what-is-cyber-resilience-act/).
+
+The sidecar is dead. Long live the mesh.

@@ -17,3 +17,99 @@ image:
   alt: "Container security for AI workloads"
 ---
 
+AI workloads present unique security challenges. GPU passthrough breaks container isolation assumptions. Model weights are valuable intellectual property. Training data may contain sensitive information. Standard container security is necessary but not sufficient.
+
+## GPU Security Challenges
+
+When you pass a GPU into a container, you are granting direct hardware access. This bypasses many of the isolation guarantees that containers provide:
+
+- **Shared GPU memory** — without proper isolation, one container could read another's GPU memory
+- **Driver vulnerabilities** — GPU drivers run in kernel space with full system access
+- **Side-channel attacks** — GPU cache timing attacks can leak information across containers
+
+## Isolation Strategies
+
+**NVIDIA MIG (Multi-Instance GPU)** — hardware-level GPU partitioning. Each partition gets dedicated memory and compute. This is the strongest isolation for [multi-tenant GPU sharing](/blog/gpu-sharing-kubernetes-mig-mps/).
+
+```yaml
+# Kubernetes pod requesting a MIG partition
+resources:
+  limits:
+    nvidia.com/mig-3g.40gb: 1
+```
+
+**gVisor with GPU support** — Google's application kernel provides stronger syscall filtering. Limited GPU support is available but adds latency.
+
+**Confidential containers** — run AI workloads in [hardware-encrypted enclaves](/blog/confidential-containers-kubernetes/) using AMD SEV-SNP or Intel TDX. The host cannot inspect container memory, even with root access.
+
+## Protecting Model Weights
+
+Model weights are your competitive advantage. Protect them:
+
+```yaml
+# Mount model weights as read-only from encrypted storage
+volumes:
+  - name: model-weights
+    persistentVolumeClaim:
+      claimName: encrypted-models
+      readOnly: true
+
+securityContext:
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: ["ALL"]
+```
+
+Use [Kubernetes secrets management](/blog/secrets-management-vault-vs-external-secrets/) with Vault or External Secrets Operator for API keys and model access tokens.
+
+## Network Policies for AI Workloads
+
+AI inference services should have strict network boundaries:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: inference-isolation
+spec:
+  podSelector:
+    matchLabels:
+      app: inference-server
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              role: api-gateway
+      ports:
+        - port: 8080
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              role: model-store
+```
+
+No internet access for inference pods. No lateral movement. Only the API gateway can reach them.
+
+## Supply Chain Security for AI
+
+AI supply chains include model registries, training data pipelines, and framework dependencies. Apply [SLSA and Sigstore practices](/blog/supply-chain-security-slsa-sigstore/) to:
+
+- Sign model artifacts with Cosign
+- Verify model provenance before deployment
+- Scan container images for vulnerabilities
+- Use [SBOM generation](/blog/cra-sbom-requirements-implementation/) for compliance
+
+## Runtime Monitoring
+
+Monitor AI workloads for security anomalies using [eBPF-based tools](/blog/ebpf-kubernetes-security/):
+
+- Unexpected network connections from inference pods
+- File system writes in read-only containers
+- Unusual GPU utilization patterns (potential cryptomining)
+- Model endpoint scanning or prompt injection attempts
+
+AI security is an evolving field. The fundamentals — least privilege, defense in depth, monitoring — apply. The specifics around GPU isolation and model protection require specialized attention.

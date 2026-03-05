@@ -17,3 +17,135 @@ image:
   alt: "Zero trust for Kubernetes"
 ---
 
+Zero trust in Kubernetes means no implicit trust between any workload, regardless of network location. Every service authenticates, every connection is encrypted, every access is authorized. The traditional "trusted internal network" model does not exist in Kubernetes.
+
+## Zero Trust Principles for Kubernetes
+
+1. **Verify explicitly** — authenticate every service-to-service call
+2. **Least privilege** — minimum [RBAC permissions](/blog/kubernetes-rbac-best-practices/) for each workload
+3. **Assume breach** — design as if the attacker is already inside your cluster
+
+## mTLS Everywhere
+
+Mutual TLS ensures both client and server authenticate. In Kubernetes, implement through [service mesh](/blog/service-mesh-istio-ambient-cilium/) or native approaches:
+
+```yaml
+# Istio PeerAuthentication - require mTLS cluster-wide
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  mtls:
+    mode: STRICT
+```
+
+Without a service mesh, use cert-manager with SPIFFE identities:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: workload-cert
+spec:
+  secretName: workload-tls
+  duration: 1h
+  renewBefore: 30m
+  issuerRef:
+    name: spiffe-issuer
+    kind: ClusterIssuer
+  uris:
+    - spiffe://cluster.local/ns/production/sa/api-server
+```
+
+## Network Policies as Firewalls
+
+Default deny all traffic, then explicitly allow only what is needed:
+
+```yaml
+# Default deny all ingress and egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+
+---
+# Allow specific service communication
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-to-database
+  namespace: production
+spec:
+  podSelector:
+    matchLabels:
+      app: database
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: api-server
+      ports:
+        - port: 5432
+```
+
+Use [eBPF-based enforcement](/blog/ebpf-kubernetes-security/) with Cilium for L7 policies that inspect HTTP methods and paths.
+
+## Policy as Code with OPA
+
+Open Policy Agent validates Kubernetes requests against policy:
+
+```rego
+# Deny pods without security contexts
+package kubernetes.admission
+
+deny[msg] {
+    input.request.kind.kind == "Pod"
+    container := input.request.object.spec.containers[_]
+    not container.securityContext.runAsNonRoot
+    msg := sprintf("Container %v must set runAsNonRoot", [container.name])
+}
+
+deny[msg] {
+    input.request.kind.kind == "Pod"
+    container := input.request.object.spec.containers[_]
+    container.securityContext.privileged
+    msg := sprintf("Container %v cannot be privileged", [container.name])
+}
+```
+
+## Secrets Zero Trust
+
+Do not mount secrets that workloads do not need. Use [External Secrets Operator](/blog/secrets-management-vault-vs-external-secrets/) with Vault's dynamic secrets — credentials are generated on demand and expire automatically.
+
+## Runtime Security
+
+Detect anomalous behavior in running containers:
+
+```yaml
+# Falco rule for suspicious activity
+- rule: Unexpected outbound connection from inference pod
+  desc: AI inference pods should not make outbound connections
+  condition: >
+    outbound and container and
+    k8s.ns.name = "ai-inference" and
+    not (fd.sport in (443, 8080))
+  output: "Unexpected connection from inference pod"
+  priority: WARNING
+```
+
+Combine with [supply chain verification](/blog/supply-chain-security-slsa-sigstore/) so only signed, verified images run in your cluster.
+
+## Implementation Roadmap
+
+1. **Week 1-2**: Default deny NetworkPolicies, enable audit logging
+2. **Week 3-4**: Deploy service mesh with mTLS (Istio ambient or Cilium)
+3. **Month 2**: OPA/Kyverno admission policies, secrets migration to Vault
+4. **Month 3**: Runtime security (Falco), continuous [compliance monitoring](/blog/soc2-compliance-cloud-native/)
+
+Zero trust is not a product — it is an architecture. Build it layer by layer.

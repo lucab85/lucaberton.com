@@ -17,3 +17,116 @@ image:
   alt: "Observability-driven development with OpenTelemetry"
 ---
 
+Observability-driven development means instrumenting your code for production visibility before you ship it, not after the first outage. OpenTelemetry has made this practical by providing a single standard for traces, metrics, and logs.
+
+## The OTel Standard
+
+OpenTelemetry provides vendor-neutral APIs and SDKs for:
+
+- **Traces** — follow a request across services
+- **Metrics** — counters, histograms, gauges
+- **Logs** — structured log events correlated with traces
+
+The key insight: instrument once, export anywhere. Switch from Jaeger to Datadog to Grafana Tempo without changing application code.
+
+## Instrumenting a Python Service
+
+```python
+from opentelemetry import trace, metrics
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+# Initialize tracing
+trace.set_tracer_provider(TracerProvider())
+tracer = trace.get_tracer(__name__)
+span_exporter = OTLPSpanExporter(endpoint="otel-collector:4317")
+
+# Initialize metrics
+meter = metrics.get_meter(__name__)
+request_counter = meter.create_counter(
+    "http_requests_total",
+    description="Total HTTP requests"
+)
+
+# Auto-instrument FastAPI
+FastAPIInstrumentor.instrument()
+
+# Custom spans for business logic
+@tracer.start_as_current_span("process_order")
+def process_order(order_id: str):
+    span = trace.get_current_span()
+    span.set_attribute("order.id", order_id)
+    # ... business logic
+    request_counter.add(1, {"endpoint": "/orders"})
+```
+
+## The Collector Architecture
+
+The OpenTelemetry Collector sits between your applications and backends:
+
+```yaml
+# otel-collector-config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+  otlp/tempo:
+    endpoint: tempo:4317
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, memory_limiter]
+      exporters: [otlp/tempo]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]
+```
+
+## Kubernetes-Native Observability
+
+On Kubernetes, deploy the OTel Collector as a DaemonSet for node-level collection and a Deployment for cluster-level aggregation. The [OTel Operator](https://github.com/open-telemetry/opentelemetry-operator) automates this.
+
+For [platform engineering teams](/blog/platform-engineering-maturity-model/), observability is a platform capability. Provide developers with auto-instrumented sidecars so they get traces without writing instrumentation code.
+
+## Common Pitfalls
+
+**Too many custom spans** — every span has overhead. Instrument service boundaries and business-critical paths, not every function call.
+
+**Missing context propagation** — if trace context does not propagate across service boundaries, you get disconnected traces. Use W3C Trace Context headers.
+
+**Ignoring cardinality** — high-cardinality labels on metrics (user IDs, request IDs) will blow up your metrics storage. Use traces for high-cardinality data.
+
+## The Grafana Stack
+
+My recommended open-source observability backend:
+
+- **Grafana** — dashboards and alerting
+- **Tempo** — distributed traces
+- **Mimir** — Prometheus-compatible metrics (long-term)
+- **Loki** — log aggregation
+
+This stack handles everything from [edge monitoring](/blog/edge-ai-monitoring-prometheus-grafana/) to [AI workload observability](/blog/ai-observability-opentelemetry-llm-tracing/) at enterprise scale.
+
+Instrument before you ship. Debug in production with confidence, not with panic.

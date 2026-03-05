@@ -17,3 +17,144 @@ image:
   alt: "Testing Ansible with Molecule"
 ---
 
+Untested Ansible code is broken code you haven't discovered yet. Molecule provides the testing framework, and CI/CD (GitHub Actions or GitLab CI) ensures every change is validated before it reaches production.
+
+## Molecule Basics
+
+Molecule is the de facto testing framework for [Ansible roles and collections](https://ansiblepilot.com/). It creates ephemeral infrastructure, runs your role, and validates the result:
+
+```bash
+# Initialize Molecule in an existing role
+cd roles/nginx
+molecule init scenario --driver-name docker
+
+# Run the full test lifecycle
+molecule test
+```
+
+The test lifecycle: create → prepare → converge → idempotence → verify → destroy.
+
+## Writing Effective Tests
+
+The `molecule/default/molecule.yml` defines your test infrastructure:
+
+```yaml
+dependency:
+  name: galaxy
+driver:
+  name: docker
+platforms:
+  - name: rhel9
+    image: registry.access.redhat.com/ubi9/ubi:latest
+    command: /sbin/init
+    privileged: true
+  - name: ubuntu2404
+    image: ubuntu:24.04
+    command: /bin/bash
+    privileged: true
+provisioner:
+  name: ansible
+verifier:
+  name: ansible
+```
+
+Test against multiple distributions. A role that works on Ubuntu but breaks on RHEL is a production risk.
+
+## Verification with Testinfra
+
+Write verification tests that check the actual state of the system:
+
+```python
+# molecule/default/tests/test_default.py
+import pytest
+
+def test_nginx_installed(host):
+    nginx = host.package("nginx")
+    assert nginx.is_installed
+
+def test_nginx_running(host):
+    nginx = host.service("nginx")
+    assert nginx.is_running
+    assert nginx.is_enabled
+
+def test_nginx_port(host):
+    assert host.socket("tcp://0.0.0.0:80").is_listening
+
+def test_config_valid(host):
+    cmd = host.run("nginx -t")
+    assert cmd.rc == 0
+```
+
+These tests verify outcomes, not implementation. You do not care how nginx was installed — only that it is installed, running, and configured correctly.
+
+## CI/CD Integration
+
+### GitHub Actions
+
+```yaml
+name: Molecule Test
+on: [push, pull_request]
+
+jobs:
+  molecule:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        distro: [ubuntu2404, rhel9, debian12]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install molecule molecule-docker ansible-lint
+      - run: molecule test
+        env:
+          MOLECULE_DISTRO: ${{ matrix.distro }}
+```
+
+### GitLab CI
+
+```yaml
+molecule:
+  image: python:3.12
+  services:
+    - docker:dind
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+  before_script:
+    - pip install molecule molecule-docker
+  script:
+    - molecule test
+```
+
+## Testing Collections
+
+For [Ansible collections](/blog/ansible-collections-best-practices/), test each role independently and add integration tests that verify roles work together:
+
+```yaml
+# Integration test playbook
+- name: Full stack integration test
+  hosts: all
+  roles:
+    - role: common
+    - role: security_baseline
+    - role: monitoring_agent
+  post_tasks:
+    - name: Verify full stack
+      assert:
+        that:
+          - "'prometheus' in ansible_facts.packages"
+          - "ansible_facts.services['node_exporter'].state == 'running'"
+```
+
+## Ansible-lint
+
+Run `ansible-lint` alongside Molecule. It catches style issues, deprecated syntax, and potential bugs before they become test failures:
+
+```bash
+ansible-lint roles/ playbooks/
+```
+
+Combine with [Event-Driven Ansible](/blog/event-driven-ansible-reactive-automation/) tests where EDA rulebooks trigger test playbooks, and you have a comprehensive quality pipeline.
+
+Check the [Ansible by Example](https://ansiblebyexample.com/) collection for tested, production-ready role patterns.

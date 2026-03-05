@@ -17,3 +17,117 @@ image:
   alt: "SOC 2 compliance for cloud-native"
 ---
 
+SOC 2 compliance in cloud-native environments is achievable without sacrificing engineering velocity. The key is building compliance into your platform rather than bolting it on as an afterthought.
+
+## SOC 2 and Cloud Native
+
+SOC 2 Trust Service Criteria map naturally to cloud-native practices:
+
+- **Security** — [RBAC](/blog/kubernetes-rbac-best-practices/), network policies, encryption
+- **Availability** — redundancy, auto-scaling, disaster recovery
+- **Processing Integrity** — CI/CD pipelines, automated testing
+- **Confidentiality** — secrets management, data classification
+- **Privacy** — data handling, retention policies
+
+## Infrastructure as Evidence
+
+The advantage of cloud-native: your infrastructure is code. Code is auditable. Every Terraform module, [Ansible playbook](https://ansiblepilot.com/), and Kubernetes manifest serves as compliance evidence.
+
+```yaml
+# This NetworkPolicy IS your compliance evidence
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: database-isolation
+  annotations:
+    compliance.soc2/control: "CC6.1"
+    compliance.soc2/description: "Database access restricted to app tier"
+spec:
+  podSelector:
+    matchLabels:
+      tier: database
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              tier: application
+```
+
+## Automated Compliance Checks
+
+Use [Policy as Code](/blog/shift-left-security-policy-as-code/) to enforce SOC 2 controls continuously:
+
+```yaml
+# Kyverno policy for SOC 2 CC6.1 (logical access)
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-security-context
+spec:
+  validationFailureAction: enforce
+  rules:
+    - name: require-non-root
+      match:
+        resources:
+          kinds: ["Pod"]
+      validate:
+        message: "SOC 2 CC6.1: Containers must run as non-root"
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  runAsNonRoot: true
+```
+
+## Secrets Management
+
+SOC 2 requires proper handling of credentials. Use [Vault or External Secrets](/blog/secrets-management-vault-vs-external-secrets/) with automatic rotation:
+
+```yaml
+apiVersion: external-secrets.io/v1beta1
+kind: ExternalSecret
+metadata:
+  name: database-credentials
+spec:
+  refreshInterval: 1h
+  secretStoreRef:
+    name: vault-backend
+    kind: SecretStore
+  target:
+    name: db-creds
+  data:
+    - secretKey: password
+      remoteRef:
+        key: secret/data/database
+        property: password
+```
+
+## Audit Logging
+
+Every action on your cluster must be logged. Enable Kubernetes audit logging:
+
+```yaml
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps"]
+  - level: Metadata
+    resources:
+      - group: "apps"
+        resources: ["deployments"]
+```
+
+Ship audit logs to immutable storage. SOC 2 auditors will ask for 12 months of access logs.
+
+## Supply Chain Controls
+
+[SLSA framework and Sigstore](/blog/supply-chain-security-slsa-sigstore/) provide the container signing and verification that SOC 2 CC8.1 (change management) requires. Every deployment artifact should be signed, verified, and traceable to a specific commit.
+
+## The Compliance Platform
+
+Build compliance into your [internal developer platform](/blog/backstage-idp-ai-developer-portal/). When developers create a new service through your platform, it should automatically include security contexts, network policies, audit logging, and secrets management.
+
+Compliance should be the default, not a checklist. Platform engineering makes this possible.

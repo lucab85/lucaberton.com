@@ -17,3 +17,79 @@ image:
   alt: "Edge AI deployment on Kubernetes"
 ---
 
+Running AI models at the network edge changes everything about your deployment strategy. Latency drops from hundreds of milliseconds to single digits, data stays local, and your cloud bill shrinks. But the operational complexity is real.
+
+## Why Deploy AI at the Edge
+
+Three forces are driving edge AI adoption:
+
+1. **Latency requirements** — autonomous vehicles, industrial robotics, and real-time video analytics cannot tolerate round-trip cloud latency
+2. **Data sovereignty** — healthcare, finance, and government workloads subject to [EU regulations](/blog/cra-what-is-cyber-resilience-act/) often cannot leave the premises
+3. **Bandwidth costs** — streaming raw video to the cloud for inference is prohibitively expensive at scale
+
+## Kubernetes at the Edge
+
+Standard Kubernetes is too heavy for most edge nodes. The alternatives:
+
+**K3s** — Rancher's lightweight distribution. Single binary under 100MB. My go-to for edge deployments with 2-8GB RAM. Runs [AI inference workloads](/blog/edge-ai-kubernetes-kubeedge-k3s/) comfortably on ARM64.
+
+**KubeEdge** — extends cloud Kubernetes to edge nodes. The edge nodes run a lightweight agent that syncs with the cloud control plane. Best for hybrid cloud-edge architectures.
+
+**MicroK8s** — Canonical's option. Snap-based, simple clustering. Good for developer workstations and small edge deployments.
+
+```bash
+# K3s installation on edge node
+curl -sfL https://get.k3s.io | \
+  INSTALL_K3S_EXEC="--disable traefik --disable metrics-server" \
+  sh -
+
+# Deploy inference workload
+kubectl apply -f - <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: inference
+  template:
+    spec:
+      containers:
+      - name: model
+        image: inference-server:latest
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+EOF
+```
+
+## Model Optimization for Edge
+
+Cloud GPUs have 80GB VRAM. Edge devices have 4-16GB. You need to optimize:
+
+- **Quantization** — reduce model precision from FP32 to [INT8 or INT4](/blog/edge-ai-model-quantization-int4-int8/)
+- **Pruning** — remove unnecessary weights
+- **Distillation** — train a smaller model to mimic the larger one
+
+For [NVIDIA Jetson devices](/blog/edge-ai-nvidia-jetson-vs-intel-npu-vs-apple/), TensorRT provides hardware-specific optimization that can double inference throughput.
+
+## Fleet Management with Ansible
+
+Managing hundreds of edge nodes manually is not viable. I use [Ansible](/blog/edge-ai-ansible-model-deployment-fleet/) for:
+
+- OS configuration and security hardening
+- K3s installation and upgrades
+- Model deployment and rollback
+- Monitoring agent deployment via [Prometheus](/blog/edge-ai-monitoring-prometheus-grafana/)
+
+The [Ansible Pilot](https://ansiblepilot.com/) patterns work at edge scale with minimal modification.
+
+## Monitoring Edge AI
+
+Edge nodes fail differently than cloud infrastructure. Network connectivity is intermittent. Hardware degrades. Models drift.
+
+Monitor inference latency, model accuracy, GPU temperature, and memory pressure. Ship metrics to a central [Prometheus/Grafana stack](/blog/edge-ai-monitoring-prometheus-grafana/) when connectivity allows, buffer locally when it does not.
+
+Edge AI is not a future technology — it is a current production requirement for an increasing number of use cases.

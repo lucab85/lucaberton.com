@@ -1,0 +1,279 @@
+---
+draft: false
+title: "Quay Robot Accounts for CI/CD Container Pulls"
+snippet: "How to create and use Quay.io robot accounts for secure, automated container image pulls in CI/CD pipelines without exposing personal credentials."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Quay robot accounts for container registries" }
+category: "DevOps"
+author: "Luca Berton"
+tags: ["containers", "devops", "security", "kubernetes", "CI/CD"]
+---
+
+If you are pulling container images from Quay.io in your CI/CD pipelines, you should not be using your personal credentials. Robot accounts exist for exactly this purpose, and setting them up takes about two minutes.
+
+## What Is a Robot Account
+
+A Quay robot account is a machine credential that grants access to specific repositories without tying access to a human user. Think of it as a service account for your container registry.
+
+Robot accounts have several advantages over personal credentials:
+
+- **Scoped permissions**: grant read-only or read/write access to specific repositories, not your entire account
+- **No password rotation headaches**: robot tokens are independent of your personal password
+- **Audit trail**: pulls from robot accounts are logged separately from human activity
+- **No MFA complications**: robot accounts bypass two-factor authentication requirements that would break automation
+- **Revocable without impact**: disable a robot account without affecting your personal login
+
+## Creating a Robot Account
+
+### Via the Quay.io Web UI
+
+1. Log in to [quay.io](https://quay.io) and navigate to your organization or user namespace
+2. Go to **Robot Accounts** in the left sidebar
+3. Click **Create Robot Account**
+4. Enter a name (e.g., `cicd_puller`) -- the full name will be `yournamespace+cicd_puller`
+5. Set permissions on the repositories the robot needs access to
+6. Save and copy the generated token
+
+### Via the Quay API
+
+```bash
+# Create a robot account
+curl -X PUT \
+  -H "Authorization: Bearer $QUAY_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "CI/CD pipeline image pulls"}' \
+  "https://quay.io/api/v1/organization/myorg/robots/cicd_puller"
+```
+
+The response includes the robot token you will use for authentication.
+
+## Using Robot Accounts in Kubernetes
+
+The most common use case is creating an image pull secret so your Kubernetes clusters can pull private images from Quay.
+
+### Create the Pull Secret
+
+```bash
+kubectl create secret docker-registry quay-pull-secret \
+  --docker-server=quay.io \
+  --docker-username="myorg+cicd_puller" \
+  --docker-password="$ROBOT_TOKEN" \
+  --docker-email="robot@example.com" \
+  -n my-namespace
+```
+
+### Reference in Pod Spec
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-app
+spec:
+  containers:
+    - name: app
+      image: quay.io/myorg/my-app:latest
+  imagePullSecrets:
+    - name: quay-pull-secret
+```
+
+### Attach to a Service Account
+
+For a cleaner approach, attach the pull secret to a service account so every pod using that service account automatically gets access:
+
+```bash
+kubectl patch serviceaccount default \
+  -p '{"imagePullSecrets": [{"name": "quay-pull-secret"}]}' \
+  -n my-namespace
+```
+
+This eliminates the need to add `imagePullSecrets` to every individual pod or deployment spec.
+
+## Using Robot Accounts in CI/CD Pipelines
+
+### GitLab CI
+
+```yaml
+stages:
+  - build
+  - deploy
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - echo "$QUAY_ROBOT_TOKEN" | docker login quay.io
+        -u "$QUAY_ROBOT_USER" --password-stdin
+  script:
+    - docker build -t quay.io/myorg/my-app:$CI_COMMIT_SHA .
+    - docker push quay.io/myorg/my-app:$CI_COMMIT_SHA
+```
+
+Store `QUAY_ROBOT_USER` (e.g., `myorg+cicd_puller`) and `QUAY_ROBOT_TOKEN` as CI/CD variables in GitLab.
+
+### GitHub Actions
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to Quay.io
+        uses: docker/login-action@v3
+        with:
+          registry: quay.io
+          username: ${{ secrets.QUAY_ROBOT_USER }}
+          password: ${{ secrets.QUAY_ROBOT_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: quay.io/myorg/my-app:${{ github.sha }}
+```
+
+### Jenkins
+
+```groovy
+pipeline {
+    agent any
+    environment {
+        QUAY_CREDS = credentials('quay-robot-account')
+    }
+    stages {
+        stage('Build') {
+            steps {
+                sh '''
+                    echo $QUAY_CREDS_PSW | docker login quay.io \
+                        -u $QUAY_CREDS_USR --password-stdin
+                    docker build -t quay.io/myorg/my-app:${BUILD_NUMBER} .
+                    docker push quay.io/myorg/my-app:${BUILD_NUMBER}
+                '''
+            }
+        }
+    }
+}
+```
+
+## Automating Robot Account Setup with Ansible
+
+If you manage multiple Quay organizations or need to provision robot accounts across environments, [Ansible](https://www.ansiblepilot.com/) makes this repeatable:
+
+```yaml
+---
+- name: Create Quay robot accounts
+  hosts: localhost
+  vars:
+    quay_api_url: "https://quay.io/api/v1"
+    quay_org: "myorg"
+    robots:
+      - name: cicd_puller
+        description: "CI/CD pipeline pulls"
+        repositories:
+          - my-app
+          - my-api
+        permission: read
+      - name: cicd_pusher
+        description: "CI/CD pipeline pushes"
+        repositories:
+          - my-app
+          - my-api
+        permission: write
+  tasks:
+    - name: Create robot account
+      ansible.builtin.uri:
+        url: "{{ quay_api_url }}/organization/{{ quay_org }}/robots/{{ item.name }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ quay_api_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          description: "{{ item.description }}"
+        status_code: [200, 201]
+      loop: "{{ robots }}"
+
+    - name: Set repository permissions
+      ansible.builtin.uri:
+        url: "{{ quay_api_url }}/repository/{{ quay_org }}/{{ item.1 }}/permissions/user/{{ quay_org }}+{{ item.0.name }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ quay_api_token }}"
+          Content-Type: "application/json"
+        body_format: json
+        body:
+          role: "{{ item.0.permission }}"
+        status_code: [200, 201]
+      loop: "{{ robots | subelements('repositories') }}"
+```
+
+This approach scales well when you are managing robot accounts across multiple [Kubernetes](https://kubernetes.recipes/) clusters and need consistent, auditable provisioning.
+
+## Security Best Practices
+
+### Principle of Least Privilege
+
+Create separate robot accounts for different purposes:
+
+- **Read-only puller** for production clusters that only need to pull images
+- **Read/write pusher** for CI/CD pipelines that build and push
+- **Never use a single robot account for everything**
+
+### Token Rotation
+
+Quay robot tokens do not expire by default. Establish a rotation schedule:
+
+```bash
+# Regenerate robot token via API
+curl -X POST \
+  -H "Authorization: Bearer $QUAY_API_TOKEN" \
+  "https://quay.io/api/v1/organization/myorg/robots/cicd_puller/regenerate"
+```
+
+Automate this with a cron job or scheduled pipeline, and update your Kubernetes secrets and CI/CD variables accordingly.
+
+### Monitor Usage
+
+Check the Quay audit logs regularly. Look for:
+
+- Unexpected repositories being accessed
+- Pulls from unexpected IP ranges
+- Robot accounts that have not been used in months (candidates for deletion)
+
+### Use Organization-Level Robot Accounts
+
+Prefer organization-level robot accounts over user-level ones. If an employee leaves, user-level robot accounts go with them. Organization-level accounts persist independently of team changes.
+
+## Quay Robot Accounts vs Alternatives
+
+| Feature | Quay Robot Account | Docker Hub Access Token | GitHub Container Registry PAT |
+|---|---|---|---|
+| Scoped to specific repos | Yes | Limited | Yes (fine-grained) |
+| Independent of user password | Yes | Yes | Yes |
+| Expiration support | No (manual rotation) | Yes | Yes |
+| Organization-level | Yes | Yes (teams) | Yes |
+| Free tier available | Yes | Yes (limited pulls) | Yes |
+| Self-hosted option | Yes (Quay Enterprise) | No | No |
+
+## When to Use Quay Enterprise
+
+For teams running [OpenShift](https://lucaberton.com/blog/kubecon-europe-2026/) or managing sensitive workloads, Red Hat Quay (the enterprise self-hosted version) adds:
+
+- **Geo-replication** for multi-region image distribution
+- **Image vulnerability scanning** with Clair integration
+- **Repository mirroring** from upstream registries
+- **LDAP/OIDC integration** for robot account governance
+- **Air-gapped deployment** for disconnected environments
+
+The robot account model works identically in both Quay.io (SaaS) and Red Hat Quay (self-hosted).
+
+## Final Thoughts
+
+Robot accounts are one of those things that take two minutes to set up but save hours of debugging credential issues, security incidents, and broken pipelines. If your CI/CD is still logging into Quay with someone's personal account, fix it today.
+
+The pattern is simple: one robot per purpose, least privilege permissions, store tokens in your secret manager, and rotate periodically. Your future self (and your security team) will thank you.

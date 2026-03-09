@@ -1,0 +1,258 @@
+---
+draft: false
+title: "Model Serving on OpenShift AI with vLLM"
+snippet: "How to deploy and serve large language models on OpenShift AI using vLLM for high-throughput inference with PagedAttention and continuous batching."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Model Serving on OpenShift AI with vLLM" }
+category: "AI"
+author: "Luca Berton"
+tags: ["AI", "kubernetes", "openshift", "vllm", "GPU"]
+---
+
+Deploying large language models in production requires more than just downloading weights and running inference. You need efficient memory management, request batching, and GPU utilization that justifies the hardware cost. vLLM on OpenShift AI gives you all of this with a production-grade serving stack.
+
+## Why vLLM
+
+vLLM introduced PagedAttention, which manages the KV cache like virtual memory pages instead of allocating contiguous GPU memory blocks. This single innovation increased throughput by 2-4x compared to naive inference approaches.
+
+Key capabilities:
+
+- **PagedAttention**: efficient KV cache management, near-zero memory waste
+- **Continuous batching**: new requests are added to running batches without waiting for the current batch to complete
+- **Tensor parallelism**: split models across multiple GPUs automatically
+- **OpenAI-compatible API**: drop-in replacement for OpenAI endpoints
+- **Quantization support**: AWQ, GPTQ, and FP8 for running larger models on smaller GPUs
+
+## Prerequisites
+
+Before deploying on OpenShift AI, you need:
+
+- OpenShift 4.14+ with the OpenShift AI operator installed
+- NVIDIA GPU Operator configured with your GPU nodes
+- At least one node with NVIDIA A100, H100, or L40S GPUs
+- A model stored in a PersistentVolume or accessible via S3-compatible storage
+
+## Deploying vLLM on OpenShift AI
+
+### Create the ServingRuntime
+
+OpenShift AI uses ServingRuntime custom resources to define inference engines:
+
+```yaml
+apiVersion: serving.kserve.io/v1alpha1
+kind: ServingRuntime
+metadata:
+  name: vllm-runtime
+  namespace: my-ai-project
+spec:
+  supportedModelFormats:
+    - name: vllm
+      version: "1"
+      autoSelect: true
+  multiModel: false
+  containers:
+    - name: kserve-container
+      image: quay.io/modh/vllm:latest
+      command:
+        - python
+        - -m
+        - vllm.entrypoints.openai.api_server
+      args:
+        - --model=/mnt/models
+        - --tensor-parallel-size=2
+        - --max-model-len=4096
+        - --gpu-memory-utilization=0.9
+        - --dtype=float16
+      resources:
+        requests:
+          nvidia.com/gpu: 2
+          memory: 48Gi
+          cpu: 8
+        limits:
+          nvidia.com/gpu: 2
+          memory: 64Gi
+          cpu: 16
+      ports:
+        - containerPort: 8000
+          protocol: TCP
+      volumeMounts:
+        - name: model-storage
+          mountPath: /mnt/models
+```
+
+### Create the InferenceService
+
+```yaml
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: llama-3-service
+  namespace: my-ai-project
+  annotations:
+    serving.kserve.io/deploymentMode: RawDeployment
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: vllm
+      runtime: vllm-runtime
+      storageUri: pvc://model-pvc/llama-3-8b
+```
+
+### Verify the Deployment
+
+```bash
+# Check pod status
+oc get pods -n my-ai-project
+
+# Check the inference service
+oc get inferenceservice llama-3-service -n my-ai-project
+
+# Test the endpoint
+curl -X POST \
+  "https://llama-3-service-my-ai-project.apps.cluster.example.com/v1/completions" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-3-8b",
+    "prompt": "Explain Kubernetes in one paragraph:",
+    "max_tokens": 200,
+    "temperature": 0.7
+  }'
+```
+
+## GPU Memory Planning
+
+Choosing the right configuration depends on your model size and GPU hardware:
+
+| Model | Parameters | FP16 Memory | Minimum GPUs (A100 80GB) |
+|---|---|---|---|
+| Llama 3 8B | 8B | ~16GB | 1 |
+| Mistral 7B | 7B | ~14GB | 1 |
+| Llama 3 70B | 70B | ~140GB | 2 |
+| Mixtral 8x7B | 47B | ~94GB | 2 |
+| Llama 3.1 405B | 405B | ~810GB | 10+ |
+
+For smaller GPUs like L40S (48GB) or A10G (24GB), use quantized models:
+
+```bash
+# AWQ quantized Llama 3 8B fits on a single 24GB GPU
+--quantization awq --model TheBloke/Llama-3-8B-AWQ
+```
+
+## Performance Tuning
+
+### Continuous Batching Configuration
+
+```bash
+# Increase max concurrent sequences for higher throughput
+--max-num-seqs=256
+
+# Set maximum number of batched tokens
+--max-num-batched-tokens=8192
+```
+
+### KV Cache Optimization
+
+```bash
+# Use 90% of GPU memory for KV cache (default is 0.9)
+--gpu-memory-utilization=0.9
+
+# Enable prefix caching for repeated prompts
+--enable-prefix-caching
+```
+
+### Monitoring with Prometheus
+
+vLLM exposes Prometheus metrics out of the box. On OpenShift, connect these to the built-in monitoring stack:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-metrics
+spec:
+  selector:
+    matchLabels:
+      app: vllm
+  endpoints:
+    - port: metrics
+      interval: 15s
+```
+
+Key metrics to watch:
+
+- `vllm:num_requests_running` -- active requests
+- `vllm:num_requests_waiting` -- queued requests
+- `vllm:gpu_cache_usage_perc` -- KV cache utilization
+- `vllm:avg_generation_throughput_toks_per_s` -- tokens per second
+
+## Autoscaling
+
+Configure horizontal pod autoscaling based on GPU utilization or request queue depth:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vllm-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: llama-3-service-predictor
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: vllm_num_requests_waiting
+        target:
+          type: AverageValue
+          averageValue: "10"
+```
+
+## Automating Deployment with Ansible
+
+For teams managing multiple models across environments, [Ansible](https://www.ansiblepilot.com/) can automate the entire deployment lifecycle:
+
+```yaml
+---
+- name: Deploy vLLM model on OpenShift AI
+  hosts: localhost
+  vars:
+    model_name: llama-3-8b
+    namespace: my-ai-project
+    gpu_count: 2
+    model_pvc: model-pvc
+  tasks:
+    - name: Apply ServingRuntime
+      kubernetes.core.k8s:
+        state: present
+        src: templates/vllm-runtime.yaml
+
+    - name: Apply InferenceService
+      kubernetes.core.k8s:
+        state: present
+        src: templates/inference-service.yaml
+
+    - name: Wait for deployment
+      kubernetes.core.k8s_info:
+        api_version: serving.kserve.io/v1beta1
+        kind: InferenceService
+        name: "{{ model_name }}-service"
+        namespace: "{{ namespace }}"
+      register: isvc
+      until: isvc.resources[0].status.conditions |
+             selectattr('type', 'equalto', 'Ready') |
+             selectattr('status', 'equalto', 'True') | list | length > 0
+      retries: 30
+      delay: 10
+```
+
+## Final Thoughts
+
+vLLM on OpenShift AI is the production-grade path for serving LLMs at scale. PagedAttention alone justifies the choice over naive serving approaches. Combined with OpenShift's GPU scheduling, monitoring, and autoscaling, you get an enterprise-ready inference platform.
+
+Start with a single GPU node for development, validate your throughput requirements, then scale horizontally with the HPA configuration. The OpenAI-compatible API means your application code does not need to change as you scale the infrastructure underneath.

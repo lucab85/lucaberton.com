@@ -1,0 +1,273 @@
+---
+draft: false
+title: "OpenTelemetry on Kubernetes: The 2026 Observability Stack"
+snippet: "How to implement a complete observability stack on Kubernetes using OpenTelemetry for traces, metrics, and logs with auto-instrumentation and the OpenTelemetry Operator."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "OpenTelemetry on Kubernetes: The 2026 Observability Stack" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "observability", "opentelemetry", "platform-engineering", "monitoring"]
+---
+
+OpenTelemetry has won the observability standards war. In 2026, if you are building a new observability stack on [Kubernetes](https://kubernetes.recipes/), OTel is the foundation. Here is how to set it up properly.
+
+## Why OpenTelemetry Won
+
+OpenTelemetry merged the OpenTracing and OpenCensus projects into a single, vendor-neutral observability framework. It provides:
+
+- **Unified SDK** for traces, metrics, and logs
+- **Auto-instrumentation** that requires zero code changes
+- **Vendor-neutral data export** to any backend (Jaeger, Prometheus, Grafana, Datadog, New Relic)
+- **CNCF graduated project** with broad industry support
+
+The key insight is that instrumentation should be decoupled from the backend. Instrument once with OTel, send data wherever you want. Switch backends without touching application code.
+
+## The OpenTelemetry Operator
+
+The OTel Operator for Kubernetes automates collector deployment and application auto-instrumentation:
+
+```bash
+# Install the operator
+kubectl apply -f https://github.com/open-telemetry/opentelemetry-operator/releases/latest/download/opentelemetry-operator.yaml
+```
+
+Or via Helm:
+
+```bash
+helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+helm install otel-operator open-telemetry/opentelemetry-operator   --namespace otel-system --create-namespace
+```
+
+## Deploying the Collector
+
+The OpenTelemetry Collector receives, processes, and exports telemetry data. Deploy it as a DaemonSet for node-level collection:
+
+```yaml
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: otel-collector
+  namespace: otel-system
+spec:
+  mode: daemonset
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: kubernetes-pods
+              kubernetes_sd_configs:
+                - role: pod
+              relabel_configs:
+                - source_labels:
+                    - __meta_kubernetes_pod_annotation_prometheus_io_scrape
+                  action: keep
+                  regex: "true"
+
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 1000
+      memory_limiter:
+        check_interval: 1s
+        limit_mib: 512
+        spike_limit_mib: 128
+      k8sattributes:
+        extract:
+          metadata:
+            - k8s.pod.name
+            - k8s.namespace.name
+            - k8s.deployment.name
+            - k8s.node.name
+
+    exporters:
+      otlp/jaeger:
+        endpoint: jaeger-collector.observability:4317
+        tls:
+          insecure: true
+      prometheus:
+        endpoint: 0.0.0.0:8889
+      otlp/loki:
+        endpoint: loki-gateway.observability:3100
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, batch]
+          exporters: [otlp/jaeger]
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlp/loki]
+```
+
+## Auto-Instrumentation
+
+The killer feature. Auto-instrumentation injects OTel SDKs into your applications without code changes:
+
+```yaml
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: auto-instrumentation
+  namespace: my-app
+spec:
+  exporter:
+    endpoint: http://otel-collector.otel-system:4317
+  propagators:
+    - tracecontext
+    - baggage
+  sampler:
+    type: parentbased_traceidratio
+    argument: "0.25"
+  python:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-python:latest
+  java:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:latest
+  nodejs:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-node:latest
+  dotnet:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-dotnet:latest
+  go:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-go:latest
+```
+
+Then annotate your deployments:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-python-app
+spec:
+  template:
+    metadata:
+      annotations:
+        instrumentation.opentelemetry.io/inject-python: "true"
+    spec:
+      containers:
+        - name: app
+          image: my-python-app:latest
+```
+
+That single annotation gives you distributed traces, HTTP metrics, and database query spans with zero code changes. The operator injects an init container that adds the OTel SDK to your application at startup.
+
+## Sampling Strategies
+
+At scale, collecting 100% of traces is expensive and unnecessary. Configure intelligent sampling:
+
+### Head-Based Sampling
+
+Decide at trace start whether to sample:
+
+```yaml
+sampler:
+  type: parentbased_traceidratio
+  argument: "0.1"  # Sample 10% of traces
+```
+
+### Tail-Based Sampling
+
+Decide after the trace completes, keeping all error traces and slow traces:
+
+```yaml
+processors:
+  tail_sampling:
+    decision_wait: 10s
+    policies:
+      - name: errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: slow-traces
+        type: latency
+        latency:
+          threshold_ms: 1000
+      - name: percentage
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 5
+```
+
+Tail-based sampling requires a gateway collector deployment (not daemonset) since it needs to see all spans of a trace before deciding.
+
+## The Grafana Stack Integration
+
+The most common open-source backend combination in 2026:
+
+- **Grafana Tempo** for traces
+- **Prometheus / Mimir** for metrics
+- **Loki** for logs
+- **Grafana** for visualization and correlation
+
+Configure the collector to export to all three:
+
+```yaml
+exporters:
+  otlp/tempo:
+    endpoint: tempo-distributor.observability:4317
+  prometheusremotewrite:
+    endpoint: http://mimir.observability:9009/api/v1/push
+  loki:
+    endpoint: http://loki.observability:3100/loki/api/v1/push
+```
+
+Grafana correlates traces, metrics, and logs using trace IDs, giving you the ability to jump from a log line to the trace that produced it to the metrics dashboard showing the impact.
+
+## Resource Considerations
+
+The collector and auto-instrumentation add overhead. Plan for it:
+
+- **Collector DaemonSet**: 256MB-512MB memory per node, minimal CPU
+- **Auto-instrumentation**: 50-100MB additional memory per instrumented pod, 5-10% latency increase on first request (SDK initialization)
+- **Sampling**: at 10% sampling rate, trace storage requirements drop by 90%
+
+For large clusters, deploy collectors in a tiered architecture:
+
+1. **Agent collectors** (DaemonSet): collect and forward
+2. **Gateway collectors** (Deployment): process, sample, export
+
+## Automating with Ansible
+
+For teams managing multiple clusters, [automate the OTel stack deployment](https://www.ansiblepilot.com/) across environments:
+
+```yaml
+---
+- name: Deploy OpenTelemetry stack
+  hosts: localhost
+  tasks:
+    - name: Install OTel Operator
+      kubernetes.core.helm:
+        name: otel-operator
+        chart_ref: open-telemetry/opentelemetry-operator
+        release_namespace: otel-system
+        create_namespace: true
+
+    - name: Deploy collector
+      kubernetes.core.k8s:
+        state: present
+        src: manifests/otel-collector.yaml
+
+    - name: Deploy auto-instrumentation
+      kubernetes.core.k8s:
+        state: present
+        src: manifests/instrumentation.yaml
+```
+
+## Final Thoughts
+
+OpenTelemetry on Kubernetes is the observability stack that will last. The vendor-neutral instrumentation means you invest once in instrumentation and keep the freedom to switch backends. Auto-instrumentation means you get immediate value without touching application code.
+
+Start with auto-instrumentation on your most critical services, send traces to Grafana Tempo, and iterate from there. The 25% sampling rate is a good default -- you capture enough to debug issues without drowning in data.

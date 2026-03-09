@@ -1,0 +1,169 @@
+---
+draft: false
+title: "Podman vs Docker in 2026: Which One Should You Use"
+snippet: "A practical comparison of Podman and Docker in 2026 covering rootless containers, Kubernetes integration, CI/CD workflows, and when each tool is the right choice."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Podman vs Docker in 2026: Which One Should You Use" }
+category: "DevOps"
+author: "Luca Berton"
+tags: ["containers", "podman", "docker", "devops", "kubernetes"]
+---
+
+If you are still defaulting to Docker without considering Podman, you are missing out on some significant improvements in the container tooling landscape. Here is where things stand in 2026.
+
+## The Core Difference
+
+Docker uses a daemon-based architecture. Every container operation goes through the Docker daemon (`dockerd`), which runs as root. Podman is daemonless. Each container runs as a child process of the Podman command, with no persistent background service.
+
+This is not just an architectural curiosity. It has real implications for security, resource usage, and how you run containers in production.
+
+## Rootless Containers
+
+Podman was designed from the ground up for rootless operation. You can run containers as a regular user without any elevated privileges:
+
+```bash
+# No sudo needed
+podman run -d -p 8080:80 nginx:latest
+```
+
+Docker added rootless mode later, but it requires additional setup and has some limitations around networking and storage drivers. With Podman, rootless is the default experience.
+
+For security-conscious environments -- especially those following CIS benchmarks or running on [RHEL AI](https://lucaberton.com/practical-rhel-ai/) -- rootless containers eliminate an entire class of privilege escalation attacks.
+
+## Kubernetes Compatibility
+
+Podman can generate Kubernetes YAML directly from running containers:
+
+```bash
+# Run a container
+podman run -d --name my-app -p 8080:80 nginx:latest
+
+# Generate Kubernetes manifest
+podman generate kube my-app > my-app.yaml
+```
+
+This produces a valid Pod spec you can apply directly to a [Kubernetes](https://kubernetes.recipes/) cluster. Docker requires additional tooling like Kompose to achieve the same result.
+
+Podman also supports `podman play kube` to run Kubernetes YAML locally:
+
+```bash
+podman play kube my-app.yaml
+```
+
+This makes local development and testing with Kubernetes manifests seamless without needing a full cluster or minikube.
+
+## Pod Support
+
+Podman natively supports the concept of pods -- groups of containers that share network and IPC namespaces, just like Kubernetes pods:
+
+```bash
+# Create a pod
+podman pod create --name my-pod -p 8080:80
+
+# Add containers to the pod
+podman run -d --pod my-pod nginx:latest
+podman run -d --pod my-pod my-sidecar:latest
+```
+
+Docker has no equivalent concept. You use Docker Compose for multi-container applications, but Compose does not provide the same network namespace sharing that pods give you.
+
+## Docker Compose Compatibility
+
+Podman now supports Docker Compose files through `podman compose`:
+
+```bash
+podman compose up -d
+```
+
+This works with existing `docker-compose.yml` files, making migration straightforward. Under the hood, Podman delegates to either `docker-compose` (if installed) or `podman-compose`.
+
+For most development workflows, you can alias `docker` to `podman` and your existing scripts will work unchanged:
+
+```bash
+alias docker=podman
+```
+
+## CI/CD Considerations
+
+### GitHub Actions
+
+GitHub-hosted runners come with Docker pre-installed. Using Podman requires an extra setup step:
+
+```yaml
+steps:
+  - name: Install Podman
+    run: |
+      sudo apt-get update
+      sudo apt-get install -y podman
+
+  - name: Build image
+    run: podman build -t my-app:latest .
+```
+
+### GitLab CI
+
+GitLab CI runners typically use Docker-in-Docker (`dind`). Switching to Podman eliminates the need for privileged containers in your CI pipeline:
+
+```yaml
+build:
+  image: quay.io/podman/stable
+  script:
+    - podman build -t my-app:latest .
+    - podman push my-app:latest quay.io/myorg/my-app:latest
+```
+
+### Jenkins
+
+Jenkins pipelines can use Podman as a drop-in Docker replacement. The [Ansible automation](https://www.ansiblepilot.com/) for provisioning Jenkins agents can install Podman instead of Docker with minimal playbook changes.
+
+## Image Compatibility
+
+Podman uses the same OCI image format as Docker. Any image built with Docker works with Podman and vice versa. They share the same registries (Docker Hub, Quay.io, GHCR).
+
+```bash
+# Pull from Docker Hub
+podman pull docker.io/library/nginx:latest
+
+# Pull from Quay
+podman pull quay.io/myorg/my-app:latest
+```
+
+## Performance
+
+In benchmarks, Podman and Docker perform nearly identically for container runtime operations. The startup time difference is negligible for most workloads.
+
+Where Podman has an edge is resource usage. Without a daemon, Podman does not consume memory or CPU when no containers are running. Docker's daemon uses 50-100MB of memory even when idle.
+
+## When to Choose Docker
+
+- Your team is deeply invested in Docker Desktop's GUI and extensions
+- You rely on Docker Swarm for orchestration (though you should probably migrate to Kubernetes)
+- Your CI/CD platform only supports Docker natively and adding Podman is too much friction
+- You need BuildKit's advanced caching features for complex multi-stage builds
+
+## When to Choose Podman
+
+- Security is a priority and you want rootless containers by default
+- You are running on RHEL, CentOS Stream, or Fedora where Podman is the default
+- You want native pod support for local Kubernetes development
+- You need to generate or run Kubernetes manifests directly
+- You want to avoid running a privileged daemon
+- Your organization is standardizing on Red Hat ecosystem tools
+
+## Migration Path
+
+Moving from Docker to Podman is straightforward:
+
+1. Install Podman on your systems
+2. Alias `docker` to `podman` for backward compatibility
+3. Replace `docker-compose` with `podman compose`
+4. Update CI/CD pipelines to use Podman images
+5. Convert Docker Compose files to Kubernetes manifests with `podman generate kube`
+6. Remove Docker daemon from your servers
+
+## Final Thoughts
+
+In 2026, the choice between Docker and Podman often comes down to your ecosystem. If you are building on Red Hat, OpenShift, or Kubernetes-first infrastructure, Podman is the natural fit. If you are in a Docker Desktop environment with a team that knows Docker tooling, the switch may not be worth the friction.
+
+The good news is that OCI standardization means your images work everywhere regardless of which tool built them. Choose the tool that fits your security posture and workflow, not the one with more name recognition.

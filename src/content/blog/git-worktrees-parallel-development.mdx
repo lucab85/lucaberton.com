@@ -1,0 +1,226 @@
+---
+draft: false
+title: "Git Worktrees: Work on Multiple Branches at Once"
+snippet: "Git worktrees let you check out multiple branches simultaneously in separate directories. Stop stashing and switching -- work on your feature, hotfix, and review in parallel."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "Git Worktrees: Work on Multiple Branches at Once" }
+category: "DevOps"
+author: "Luca Berton"
+tags: ["git", "devops", "productivity", "development"]
+---
+
+Every developer knows the pain. You are deep in a feature branch, someone reports a critical bug, and now you need to stash everything, switch branches, fix the bug, switch back, and pop your stash hoping nothing conflicts. Git worktrees eliminate this entirely.
+
+## What Are Git Worktrees
+
+A git worktree is an additional working directory linked to the same repository. Each worktree has its own checked-out branch, its own staging area, and its own working files. But they all share the same `.git` history, remotes, and objects.
+
+```bash
+# You are on feature/new-api in the main directory
+git worktree add ../hotfix-auth main
+
+# Now you have two directories:
+# ./my-project         -> feature/new-api
+# ./hotfix-auth        -> main (ready for your hotfix branch)
+```
+
+You can open each directory in a separate terminal or IDE window and work on them simultaneously.
+
+## Setting Up Worktrees
+
+### Create a Worktree for a New Branch
+
+```bash
+# Create a new branch and check it out in a worktree
+git worktree add ../review/pr-42 -b review/pr-42 origin/feature/user-auth
+```
+
+This creates directory `../review/pr-42` with a new branch `review/pr-42` based on `origin/feature/user-auth`.
+
+### Create a Worktree for an Existing Branch
+
+```bash
+# Check out an existing branch in a new worktree
+git worktree add ../hotfix hotfix/critical-fix
+```
+
+### List Active Worktrees
+
+```bash
+git worktree list
+```
+
+Output:
+
+```
+/home/dev/my-project         abc1234 [feature/new-api]
+/home/dev/hotfix-auth        def5678 [main]
+/home/dev/review/pr-42       ghi9012 [review/pr-42]
+```
+
+### Remove a Worktree
+
+```bash
+# Remove after you are done
+git worktree remove ../hotfix-auth
+
+# Force remove if there are uncommitted changes
+git worktree remove --force ../hotfix-auth
+```
+
+## Practical Workflows
+
+### Hotfix Without Context Switching
+
+You are working on a feature. A P1 bug comes in:
+
+```bash
+# Create a worktree for the hotfix (from main)
+git worktree add ../hotfix-p1 -b hotfix/auth-bypass main
+
+# In a new terminal:
+cd ../hotfix-p1
+# Fix the bug, commit, push
+git commit -am "fix: patch authentication bypass"
+git push origin hotfix/auth-bypass
+
+# Back in your original terminal, your feature work is untouched
+# When done with the hotfix:
+git worktree remove ../hotfix-p1
+```
+
+### Code Review in Parallel
+
+When reviewing a pull request, check it out in a separate worktree so you can run and test it without leaving your current work:
+
+```bash
+git worktree add ../review/pr-123 origin/feature/new-dashboard
+
+cd ../review/pr-123
+npm install
+npm run dev
+# Test, review, leave comments
+# Then clean up
+cd ../my-project
+git worktree remove ../review/pr-123
+```
+
+### Running Tests Against Multiple Branches
+
+Compare behavior between branches by running both simultaneously:
+
+```bash
+git worktree add ../test-main main
+git worktree add ../test-feature feature/refactor
+
+# Terminal 1: Run tests on main
+cd ../test-main && npm test
+
+# Terminal 2: Run tests on feature
+cd ../test-feature && npm test
+```
+
+### Long-Running Processes
+
+If you have a branch with a long-running build, deployment, or migration, put it in a worktree and continue working:
+
+```bash
+git worktree add ../deploy release/v2.1
+
+# In deploy worktree: start the slow build
+cd ../deploy && make build-all  # Takes 30 minutes
+
+# In main worktree: keep coding
+cd ../my-project && vim src/new-feature.ts
+```
+
+## Worktrees vs Stash vs Clone
+
+| Approach | Speed | Disk Usage | Shared History | Independent Files |
+|---|---|---|---|---|
+| `git stash` + switch | Fast | None | Yes | No (same directory) |
+| `git worktree` | Fast | Minimal (no .git copy) | Yes | Yes |
+| `git clone` (second copy) | Slow | Full repo duplicate | No (separate) | Yes |
+
+Worktrees give you the independence of a separate clone with the speed and disk efficiency of a single repository.
+
+## Tips and Gotchas
+
+### You Cannot Check Out the Same Branch Twice
+
+Git prevents two worktrees from having the same branch checked out. This avoids conflicts:
+
+```bash
+# This will fail if feature/api is already checked out somewhere
+git worktree add ../test feature/api
+# fatal: 'feature/api' is already checked out at '/home/dev/my-project'
+```
+
+### Keep Worktrees Close to the Repo
+
+I recommend a simple directory structure:
+
+```
+~/projects/
+  my-project/           # Main worktree
+  my-project-hotfix/    # Hotfix worktree
+  my-project-review/    # Review worktree
+```
+
+### Clean Up Stale Worktrees
+
+If you delete a worktree directory manually without `git worktree remove`, run:
+
+```bash
+git worktree prune
+```
+
+### IDE Support
+
+Most modern IDEs handle worktrees well. VSCode opens each worktree as a separate window with full git integration. JetBrains IDEs treat each worktree as a separate project.
+
+## Automating with Shell Functions
+
+Add these to your `.bashrc` or `.zshrc`:
+
+```bash
+# Quick worktree for hotfixes
+hotfix() {
+  local name="$1"
+  git worktree add "../hotfix-${name}" -b "hotfix/${name}" main
+  cd "../hotfix-${name}"
+}
+
+# Quick worktree for PR review
+review() {
+  local pr="$1"
+  git worktree add "../review-pr-${pr}" "origin/pr/${pr}"
+  cd "../review-pr-${pr}"
+}
+
+# Clean up a worktree
+wt-clean() {
+  local dir="$1"
+  cd -
+  git worktree remove "../${dir}"
+}
+```
+
+## CI/CD Integration
+
+Worktrees can speed up CI pipelines that need to compare branches or build multiple versions. In [GitLab CI](https://lucaberton.com/blog/quay-robot-accounts-cicd-container-pulls/) or GitHub Actions:
+
+```bash
+# Build current branch and main for comparison
+git worktree add ../main-build main
+cd ../main-build && make build
+cd ../current && make build
+diff -r ../main-build/dist ../current/dist
+```
+
+## Final Thoughts
+
+Git worktrees are one of those features that most developers do not know about until someone shows them. Once you start using them, stash-and-switch feels painful. The mental overhead of context switching drops significantly when each branch lives in its own directory, with its own terminal and its own IDE window.
+
+Try it on your next hotfix. You will not go back.

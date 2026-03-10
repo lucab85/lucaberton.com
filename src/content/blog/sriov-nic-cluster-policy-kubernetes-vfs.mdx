@@ -1,0 +1,279 @@
+---
+draft: false
+title: "SR-IOV NicClusterPolicy on Kubernetes: VF Config"
+snippet: "Configure SR-IOV Virtual Functions (VFs) on Kubernetes using the NicClusterPolicy for dedicated network interfaces to GPU pods with near-bare-metal performance."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "SR-IOV NicClusterPolicy on Kubernetes: VF Config" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "GPU", "NVIDIA", "networking", "SR-IOV"]
+---
+
+SR-IOV (Single Root I/O Virtualization) lets you split a single physical network adapter into multiple Virtual Functions (VFs), each assignable to a pod as a dedicated network interface. For GPU workloads on Kubernetes, this means near-bare-metal network performance without the overhead of virtual bridges or software switching.
+
+## What Is SR-IOV and Why It Matters
+
+A standard Kubernetes pod gets its network through a virtual bridge (CNI plugin like Calico or Cilium). This adds latency and limits throughput. SR-IOV bypasses the virtual bridge entirely:
+
+- **Physical Function (PF)**: the actual hardware NIC
+- **Virtual Functions (VFs)**: lightweight PCIe functions derived from the PF
+- Each VF appears as an independent network device
+- VFs are passed directly to pods via PCI passthrough
+- Zero software overhead -- the pod talks directly to the hardware
+
+For AI training with NCCL or RDMA workloads, the difference between a bridged connection and an SR-IOV VF can be 30-50% higher throughput and significantly lower latency.
+
+## Prerequisites
+
+- Kubernetes 1.27+ with Multus CNI installed
+- NVIDIA Network Operator deployed
+- Network adapters that support SR-IOV (Mellanox ConnectX-5/6/7)
+- SR-IOV enabled in BIOS/UEFI (VT-d / IOMMU)
+- Kernel with IOMMU support enabled
+
+Verify SR-IOV support:
+
+```bash
+# Check if the NIC supports SR-IOV
+lspci -vvv -s $(lspci | grep Mellanox | awk '{print $1}' | head -1) | grep -i "sr-iov"
+
+# Check current VF count
+cat /sys/class/net/ens3f0/device/sriov_numvfs
+
+# Check maximum VFs supported
+cat /sys/class/net/ens3f0/device/sriov_totalvfs
+```
+
+## Configuring VFs in NicClusterPolicy
+
+The NicClusterPolicy custom resource configures both MOFED drivers and SR-IOV VF creation:
+
+```yaml
+apiVersion: mellanox.com/v1alpha1
+kind: NicClusterPolicy
+metadata:
+  name: nic-cluster-policy
+spec:
+  ofedDriver:
+    image: doca-driver
+    repository: nvcr.io/nvidia/mellanox
+    version: 24.07-0.6.1.0-0
+  sriovDevicePlugin:
+    image: sriov-network-device-plugin
+    repository: ghcr.io/k8snetworkplumbingwg
+    version: v3.7.0
+    config: |
+      {
+        "resourceList": [
+          {
+            "resourcePrefix": "nvidia.com",
+            "resourceName": "sriov_rdma_vf",
+            "selectors": {
+              "vendors": ["15b3"],
+              "devices": ["101e"],
+              "drivers": ["mlx5_core"],
+              "isRdma": true
+            }
+          }
+        ]
+      }
+```
+
+## Creating VFs with SriovNetworkNodePolicy
+
+The SR-IOV Network Operator uses `SriovNetworkNodePolicy` to create VFs on specific nodes:
+
+```yaml
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetworkNodePolicy
+metadata:
+  name: gpu-sriov-policy
+  namespace: nvidia-network-operator
+spec:
+  nodeSelector:
+    feature.node.kubernetes.io/pci-15b3.present: "true"
+  resourceName: sriov_rdma_vf
+  numVfs: 8
+  nicSelector:
+    vendor: "15b3"
+    deviceID: "101b"
+    pfNames: ["ens3f0"]
+  deviceType: netdevice
+  isRdma: true
+  linkType: IB   # or ETH for Ethernet/RoCE
+```
+
+This creates 8 VFs on every node with a Mellanox NIC, each with RDMA capability.
+
+### Key Parameters
+
+- **numVfs**: number of Virtual Functions to create per PF (max depends on NIC model, typically 64-128)
+- **deviceType**: `netdevice` for kernel driver VFs, `vfio-pci` for DPDK/userspace
+- **isRdma**: enable RDMA capability on VFs
+- **linkType**: `IB` for InfiniBand, `ETH` for Ethernet (RoCE)
+- **nicSelector**: target specific NICs by vendor, device ID, or PF name
+
+## Creating the Network Attachment
+
+Define a `SriovNetwork` that pods can request:
+
+```yaml
+apiVersion: sriovnetwork.openshift.io/v1
+kind: SriovNetwork
+metadata:
+  name: gpu-sriov-network
+  namespace: nvidia-network-operator
+spec:
+  resourceName: sriov_rdma_vf
+  networkNamespace: ai-training
+  ipam: |
+    {
+      "type": "whereabouts",
+      "range": "192.168.100.0/24",
+      "gateway": "192.168.100.1"
+    }
+```
+
+This creates a `NetworkAttachmentDefinition` in the `ai-training` namespace that pods can reference.
+
+## Using SR-IOV VFs in GPU Pods
+
+Request an SR-IOV VF alongside GPU resources:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-training
+  namespace: ai-training
+  annotations:
+    k8s.v1.cni.cncf.io/networks: gpu-sriov-network
+spec:
+  containers:
+    - name: training
+      image: nvcr.io/nvidia/pytorch:24.07-py3
+      command: ["torchrun", "--nproc_per_node=8", "train.py"]
+      resources:
+        limits:
+          nvidia.com/gpu: 8
+          nvidia.com/sriov_rdma_vf: 1
+      env:
+        - name: NCCL_IB_DISABLE
+          value: "0"
+        - name: NCCL_NET_GDR_LEVEL
+          value: "5"
+```
+
+The pod gets a dedicated SR-IOV VF as an additional network interface alongside the default cluster network.
+
+## Verifying VF Configuration
+
+```bash
+# Check VFs are created on the node
+kubectl get sriovnetworknodestates -n nvidia-network-operator -o yaml
+
+# Check available VF resources
+kubectl get nodes -o json | jq '.items[].status.allocatable | to_entries[] | select(.key | contains("sriov"))'
+
+# Inside a pod, verify the VF interface
+kubectl exec -it gpu-training -- ip link show
+# Should show net1 (or similar) as the SR-IOV VF interface
+
+kubectl exec -it gpu-training -- ibv_devinfo
+# Should show the VF with RDMA capability
+```
+
+## VF Partitioning Strategies
+
+### Dedicated VFs per Training Job
+
+Assign one VF per training pod for maximum isolation:
+
+```yaml
+resources:
+  limits:
+    nvidia.com/sriov_rdma_vf: 1
+```
+
+### Multiple VFs for Multi-Rail
+
+For maximum bandwidth, assign multiple VFs (one per physical port):
+
+```yaml
+resources:
+  limits:
+    nvidia.com/sriov_rdma_vf_port0: 1
+    nvidia.com/sriov_rdma_vf_port1: 1
+```
+
+### VF Pool Sizing
+
+Calculate VF requirements:
+
+- Number of GPU pods per node x VFs per pod = minimum VFs needed
+- Add 10-20% buffer for scheduling flexibility
+- Do not exceed the NIC's maximum VF count
+
+## Troubleshooting
+
+### VFs Not Created
+
+```bash
+# Check SR-IOV operator logs
+kubectl logs -n nvidia-network-operator -l app=sriov-network-config-daemon
+
+# Verify IOMMU is enabled
+dmesg | grep -i iommu
+
+# Check if SR-IOV is enabled in the NIC firmware
+mstconfig -d /dev/mst/mt4125_pciconf0 query | grep SRIOV_EN
+```
+
+### Pod Cannot Get VF
+
+```bash
+# Check available VF resources
+kubectl describe node gpu-node-1 | grep sriov
+
+# If 0 allocatable, check:
+# 1. SriovNetworkNodePolicy matches node labels
+# 2. NIC selector matches actual hardware
+# 3. Driver pods are running
+```
+
+## Automating with Ansible
+
+Deploy SR-IOV configuration across multiple clusters with [Ansible](https://www.ansiblepilot.com/):
+
+```yaml
+---
+- name: Configure SR-IOV on GPU Kubernetes cluster
+  hosts: localhost
+  vars:
+    num_vfs: 8
+    nic_vendor: "15b3"
+  tasks:
+    - name: Apply NicClusterPolicy
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: mellanox.com/v1alpha1
+          kind: NicClusterPolicy
+          metadata:
+            name: nic-cluster-policy
+          spec:
+            sriovDevicePlugin:
+              image: sriov-network-device-plugin
+              repository: ghcr.io/k8snetworkplumbingwg
+              version: v3.7.0
+
+    - name: Create SriovNetworkNodePolicy
+      kubernetes.core.k8s:
+        state: present
+        src: manifests/sriov-node-policy.yaml
+```
+
+## Final Thoughts
+
+SR-IOV VFs give your GPU pods dedicated, hardware-accelerated network interfaces with near-bare-metal performance. For distributed AI training where NCCL communication is the bottleneck, the combination of SR-IOV VFs with RDMA and [GPUDirect](https://lucaberton.com/blog/nvidia-gpu-operator-gds-gpudirect-storage/) delivers the highest possible inter-node bandwidth. The overhead is worth it for any serious multi-node GPU workload.

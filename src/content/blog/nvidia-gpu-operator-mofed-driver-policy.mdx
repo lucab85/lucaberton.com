@@ -1,0 +1,261 @@
+---
+draft: false
+title: "NVIDIA GPU Operator MOFED Driver Policy on K8s"
+snippet: "How to configure the NVIDIA GPU Operator with Mellanox OFED (MOFED) driver policy for high-performance InfiniBand and RDMA networking on Kubernetes GPU clusters."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "NVIDIA GPU Operator MOFED Driver Policy on K8s" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "GPU", "NVIDIA", "networking", "RDMA"]
+---
+
+When you are running large-scale AI training on Kubernetes, the network between your GPU nodes matters as much as the GPUs themselves. Mellanox OFED (MOFED) drivers enable InfiniBand and RDMA networking that delivers the bandwidth and latency your distributed training workloads need. The NVIDIA GPU Operator can manage these drivers through the Network Operator and ClusterPolicy configuration.
+
+## Why MOFED Matters for GPU Workloads
+
+Standard Ethernet networking introduces significant overhead for GPU-to-GPU communication in distributed training. RDMA (Remote Direct Memory Access) via InfiniBand or RoCE bypasses the CPU entirely, allowing GPUs on different nodes to communicate directly:
+
+- **InfiniBand HDR**: 200 Gbps per port
+- **InfiniBand NDR**: 400 Gbps per port
+- **RoCE v2**: RDMA over standard Ethernet infrastructure
+- **GPUDirect RDMA**: GPU memory accessed directly by the network adapter, zero CPU copies
+
+Without MOFED drivers, you cannot use RDMA. Without RDMA, multi-node training on large models like Llama 3 70B+ is bottlenecked by the network.
+
+## Architecture Overview
+
+The GPU Operator works alongside the NVIDIA Network Operator to manage both GPU and networking components:
+
+```
+NVIDIA GPU Operator          NVIDIA Network Operator
+├── GPU Driver               ├── MOFED Driver
+├── Container Toolkit         ├── RDMA Shared Device Plugin
+├── Device Plugin            ├── SR-IOV Network Operator
+├── DCGM Exporter            ├── IB Kubernetes Plugin
+├── MIG Manager              └── Multus CNI
+└── GDS Driver
+```
+
+## Installing the Network Operator with MOFED
+
+### Deploy the Network Operator
+
+```bash
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+helm repo update
+
+helm install network-operator nvidia/network-operator \
+  --namespace nvidia-network-operator \
+  --create-namespace \
+  --set deployCR=true \
+  --set nfd.enabled=false \
+  --set ofedDriver.deploy=true \
+  --set rdmaSharedDevicePlugin.deploy=true
+```
+
+### Configure the NicClusterPolicy for MOFED
+
+The `NicClusterPolicy` custom resource controls MOFED driver deployment:
+
+```yaml
+apiVersion: mellanox.com/v1alpha1
+kind: NicClusterPolicy
+metadata:
+  name: nic-cluster-policy
+spec:
+  ofedDriver:
+    image: doca-driver
+    repository: nvcr.io/nvidia/mellanox
+    version: 24.07-0.6.1.0-0
+    startupProbe:
+      initialDelaySeconds: 10
+      periodSeconds: 20
+    livenessProbe:
+      initialDelaySeconds: 30
+      periodSeconds: 30
+    readinessProbe:
+      initialDelaySeconds: 10
+      periodSeconds: 30
+    upgradePolicy:
+      autoUpgrade: true
+      maxParallelUpgrades: 1
+      drain:
+        enable: true
+        force: true
+        podSelector: ""
+        timeoutSeconds: 300
+        deleteEmptyDir: true
+  rdmaSharedDevicePlugin:
+    image: k8s-rdma-shared-dev-plugin
+    repository: ghcr.io/mellanox
+    version: v1.5.1
+    config: |
+      {
+        "periodicUpdateInterval": 300,
+        "configList": [
+          {
+            "resourceName": "rdma_shared_device_a",
+            "rdmaHcaMax": 63,
+            "selectors": {
+              "vendors": ["15b3"],
+              "deviceIDs": ["101b"]
+            }
+          }
+        ]
+      }
+```
+
+## MOFED Driver Policy Options
+
+### Auto-Upgrade Policy
+
+Control how MOFED driver updates are rolled out across the cluster:
+
+```yaml
+spec:
+  ofedDriver:
+    upgradePolicy:
+      autoUpgrade: true
+      maxParallelUpgrades: 1  # Upgrade one node at a time
+      drain:
+        enable: true          # Drain node before upgrade
+        force: true           # Force drain even with local storage
+        timeoutSeconds: 300   # Wait up to 5 minutes for drain
+        deleteEmptyDir: true  # Allow draining pods with emptyDir
+```
+
+Setting `maxParallelUpgrades: 1` ensures you never lose more than one node during a rolling driver upgrade -- critical for production GPU clusters where every node represents significant compute capacity.
+
+### Version Pinning
+
+Pin the MOFED driver version to ensure consistency:
+
+```yaml
+spec:
+  ofedDriver:
+    version: "24.07-0.6.1.0-0"  # Pin to a specific version
+```
+
+Check compatibility between MOFED version, GPU driver version, and kernel version before upgrading. The NVIDIA compatibility matrix documents supported combinations.
+
+### Custom Kernel Module Parameters
+
+Pass parameters to the MOFED kernel modules:
+
+```yaml
+spec:
+  ofedDriver:
+    env:
+      - name: CREATE_IFNAMES_UDEV
+        value: "true"
+      - name: UNLOAD_STORAGE_MODULES
+        value: "true"
+```
+
+## Verifying MOFED Installation
+
+```bash
+# Check MOFED driver pods
+kubectl get pods -n nvidia-network-operator -l app=mofed
+
+# Verify driver is loaded on a node
+kubectl exec -n nvidia-network-operator mofed-xxxx -- ofed_info -s
+# Expected: MLNX_OFED_LINUX-24.07-0.6.1.0
+
+# Check InfiniBand devices
+kubectl exec -n nvidia-network-operator mofed-xxxx -- ibstat
+```
+
+## Integrating with GPU Operator
+
+When both operators are deployed, configure the GPU Operator to use the Network Operator's MOFED drivers:
+
+```bash
+helm install gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator \
+  --create-namespace \
+  --set driver.enabled=true \
+  --set driver.rdma.enabled=true \
+  --set driver.rdma.useHostMofed=true
+```
+
+The `useHostMofed: true` setting tells the GPU driver container to use the MOFED drivers installed by the Network Operator rather than bundling its own.
+
+## Testing RDMA Connectivity
+
+Deploy a test pod to verify RDMA is working:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rdma-test
+spec:
+  containers:
+    - name: rdma-test
+      image: mellanox/rping-test
+      command: ["sleep", "infinity"]
+      resources:
+        limits:
+          rdma/rdma_shared_device_a: 1
+          nvidia.com/gpu: 1
+```
+
+```bash
+kubectl exec -it rdma-test -- ibv_devinfo
+# Should show InfiniBand device details with active port
+```
+
+## Performance Considerations
+
+For distributed AI training workloads:
+
+- Use **NCCL** with the RDMA transport for multi-node GPU communication
+- Set `NCCL_IB_DISABLE=0` and `NCCL_NET_GDR_LEVEL=5` for GPUDirect RDMA
+- Monitor InfiniBand port errors with `perfquery`
+- Use `ibdiagnet` for fabric-level diagnostics
+
+```yaml
+# Example training pod environment variables
+env:
+  - name: NCCL_IB_DISABLE
+    value: "0"
+  - name: NCCL_NET_GDR_LEVEL
+    value: "5"
+  - name: NCCL_IB_HCA
+    value: "mlx5"
+  - name: NCCL_DEBUG
+    value: "INFO"
+```
+
+## Automating with Ansible
+
+Scale MOFED deployment across multiple clusters with [Ansible](https://www.ansiblepilot.com/):
+
+```yaml
+---
+- name: Deploy NVIDIA Network Operator with MOFED
+  hosts: localhost
+  tasks:
+    - name: Install Network Operator
+      kubernetes.core.helm:
+        name: network-operator
+        chart_ref: nvidia/network-operator
+        release_namespace: nvidia-network-operator
+        create_namespace: true
+        values:
+          ofedDriver:
+            deploy: true
+          rdmaSharedDevicePlugin:
+            deploy: true
+
+    - name: Apply NicClusterPolicy
+      kubernetes.core.k8s:
+        state: present
+        src: manifests/nic-cluster-policy.yaml
+```
+
+## Final Thoughts
+
+MOFED drivers are not optional for serious GPU infrastructure. If you are running multi-node training workloads on [Kubernetes](https://kubernetes.recipes/), the network is your bottleneck without RDMA. The Network Operator makes MOFED management Kubernetes-native, and the upgrade policy ensures you can update drivers without downtime. Combined with the GPU Operator, you get a fully automated GPU + networking stack.

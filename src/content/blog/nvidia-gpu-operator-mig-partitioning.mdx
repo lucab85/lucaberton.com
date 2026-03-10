@@ -1,0 +1,265 @@
+---
+draft: false
+title: "MIG Partitioning with the NVIDIA GPU Operator"
+snippet: "How to use Multi-Instance GPU (MIG) partitioning on Kubernetes with the GPU Operator to split A100 and H100 GPUs into isolated instances for multi-tenant workloads."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "MIG Partitioning with the NVIDIA GPU Operator" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "GPU", "NVIDIA", "multi-tenancy", "AI"]
+---
+
+A single A100 80GB GPU costs thousands of dollars per month. Most inference workloads use a fraction of that capacity. Multi-Instance GPU (MIG) lets you split one physical GPU into up to seven isolated instances, each with dedicated compute, memory, and memory bandwidth. The NVIDIA GPU Operator automates MIG configuration on Kubernetes.
+
+## What Is MIG
+
+MIG is a hardware-level partitioning technology available on NVIDIA A100, A30, H100, and H200 GPUs. Unlike time-sharing or MPS (Multi-Process Service), MIG provides:
+
+- **Hardware isolation**: each instance has dedicated streaming multiprocessors
+- **Memory isolation**: each instance gets a dedicated memory slice with its own memory controllers
+- **Error isolation**: a fault in one instance does not affect others
+- **QoS guarantees**: each instance gets guaranteed bandwidth
+
+## MIG Profiles
+
+The available profiles depend on your GPU model. For A100 80GB:
+
+| Profile | GPU Memory | Compute SMs | Max Instances |
+|---|---|---|---|
+| 1g.10gb | 10 GB | 1/7 | 7 |
+| 2g.20gb | 20 GB | 2/7 | 3 |
+| 3g.40gb | 40 GB | 3/7 | 2 |
+| 4g.40gb | 40 GB | 4/7 | 1 |
+| 7g.80gb | 80 GB | 7/7 | 1 |
+
+For H100 80GB:
+
+| Profile | GPU Memory | Compute SMs | Max Instances |
+|---|---|---|---|
+| 1g.10gb | 10 GB | 1/7 | 7 |
+| 1g.20gb | 20 GB | 1/7 | 4 |
+| 2g.20gb | 20 GB | 2/7 | 3 |
+| 3g.40gb | 40 GB | 3/7 | 2 |
+| 7g.80gb | 80 GB | 7/7 | 1 |
+
+## Enabling MIG with the GPU Operator
+
+### Install with MIG Manager
+
+```bash
+helm install gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator \
+  --create-namespace \
+  --set migManager.enabled=true \
+  --set migManager.config.name=default-mig-parted-config
+```
+
+### Define MIG Configuration
+
+Create a ConfigMap with your MIG partitioning strategy:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: default-mig-parted-config
+  namespace: gpu-operator
+data:
+  config.yaml: |
+    version: v1
+    mig-configs:
+      all-1g.10gb:
+        - device-filter: ["0x2330", "0x2324"]
+          devices: all
+          mig-enabled: true
+          mig-devices:
+            "1g.10gb": 7
+
+      all-2g.20gb:
+        - device-filter: ["0x2330", "0x2324"]
+          devices: all
+          mig-enabled: true
+          mig-devices:
+            "2g.20gb": 3
+
+      all-3g.40gb:
+        - device-filter: ["0x2330", "0x2324"]
+          devices: all
+          mig-enabled: true
+          mig-devices:
+            "3g.40gb": 2
+
+      mixed-strategy:
+        - device-filter: ["0x2330", "0x2324"]
+          devices: all
+          mig-enabled: true
+          mig-devices:
+            "3g.40gb": 1
+            "2g.20gb": 1
+            "1g.10gb": 2
+
+      all-disabled:
+        - device-filter: ["0x2330", "0x2324"]
+          devices: all
+          mig-enabled: false
+          mig-devices: {}
+```
+
+### Apply MIG Configuration to Nodes
+
+Label nodes with the desired MIG configuration:
+
+```bash
+# Split all GPUs on this node into 7x 1g.10gb instances
+kubectl label node gpu-node-1 nvidia.com/mig.config=all-1g.10gb --overwrite
+
+# Use mixed partitioning on another node
+kubectl label node gpu-node-2 nvidia.com/mig.config=mixed-strategy --overwrite
+
+# Disable MIG (use full GPUs)
+kubectl label node gpu-node-3 nvidia.com/mig.config=all-disabled --overwrite
+```
+
+The MIG Manager will:
+1. Drain GPU workloads from the node
+2. Enable MIG mode on the GPUs
+3. Create the specified GPU instances
+4. Update the device plugin to expose new resources
+5. Uncordon the node
+
+## Scheduling Pods on MIG Instances
+
+MIG instances appear as distinct resource types:
+
+```bash
+kubectl get nodes gpu-node-1 -o json | jq '.status.allocatable' | grep nvidia
+```
+
+Output:
+
+```json
+{
+  "nvidia.com/mig-1g.10gb": "7",
+  "nvidia.com/mig-2g.20gb": "0",
+  "nvidia.com/mig-3g.40gb": "0"
+}
+```
+
+Request a specific MIG instance in your pod:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inference-small
+spec:
+  containers:
+    - name: inference
+      image: nvcr.io/nvidia/tritonserver:24.07-py3
+      resources:
+        limits:
+          nvidia.com/mig-1g.10gb: 1
+```
+
+## Mixed MIG Strategies
+
+### Inference Cluster
+
+Maximize pod density for small model inference:
+
+```yaml
+# 7 inference pods per GPU, each with 10GB
+mig-configs:
+  inference-dense:
+    - devices: all
+      mig-enabled: true
+      mig-devices:
+        "1g.10gb": 7
+```
+
+### Training + Inference
+
+Split GPUs between training and inference:
+
+```yaml
+# 1x 3g.40gb for training, 2x 2g.20gb for inference
+mig-configs:
+  training-and-inference:
+    - devices: [0, 1]  # First 2 GPUs for training
+      mig-enabled: true
+      mig-devices:
+        "3g.40gb": 2
+    - devices: [2, 3]  # Last 2 GPUs for inference
+      mig-enabled: true
+      mig-devices:
+        "1g.10gb": 7
+```
+
+### Development Environment
+
+Give each developer a GPU slice:
+
+```yaml
+mig-configs:
+  dev-environment:
+    - devices: all
+      mig-enabled: true
+      mig-devices:
+        "1g.10gb": 7  # 7 devs per GPU
+```
+
+## Monitoring MIG Instances
+
+DCGM Exporter reports per-instance metrics:
+
+```bash
+# Metrics include MIG instance labels
+DCGM_FI_DEV_GPU_UTIL{gpu="0", GPU_I_ID="0", GPU_I_PROFILE="1g.10gb"} 45
+DCGM_FI_DEV_FB_USED{gpu="0", GPU_I_ID="0", GPU_I_PROFILE="1g.10gb"} 2048
+```
+
+Create Grafana dashboards that show utilization per MIG instance to identify under-utilized slices.
+
+## Cost Optimization
+
+MIG directly impacts your [GPU cost calculations](https://lucaberton.com/gpu-cost-calculator/):
+
+- **Without MIG**: 1 GPU per inference pod = $2.50/hour per pod
+- **With MIG (7x 1g.10gb)**: 1 GPU serves 7 pods = $0.36/hour per pod
+- **Cost reduction**: 86% for small inference workloads
+
+This assumes the inference model fits in 10GB VRAM. Models like Mistral 7B (quantized to INT4) fit in under 5GB, making 1g.10gb instances more than sufficient.
+
+## Automating with Ansible
+
+Manage MIG configuration across your fleet with [Ansible](https://www.ansiblepilot.com/):
+
+```yaml
+---
+- name: Configure MIG partitioning
+  hosts: localhost
+  vars:
+    mig_nodes:
+      - name: gpu-node-1
+        config: all-1g.10gb
+      - name: gpu-node-2
+        config: mixed-strategy
+      - name: gpu-node-3
+        config: all-disabled
+  tasks:
+    - name: Label nodes with MIG config
+      kubernetes.core.k8s:
+        state: patched
+        kind: Node
+        name: "{{ item.name }}"
+        definition:
+          metadata:
+            labels:
+              nvidia.com/mig.config: "{{ item.config }}"
+      loop: "{{ mig_nodes }}"
+```
+
+## Final Thoughts
+
+MIG is the most effective way to improve GPU utilization on [Kubernetes](https://kubernetes.recipes/). If your inference pods are using 10-20GB of an 80GB GPU, you are wasting 60-70GB of expensive hardware. The GPU Operator's MIG Manager makes reconfiguration as simple as changing a node label. Start with your inference workloads where the ROI is immediate and obvious.

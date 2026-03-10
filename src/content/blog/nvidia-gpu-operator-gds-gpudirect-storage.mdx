@@ -1,0 +1,302 @@
+---
+draft: false
+title: "GPUDirect Storage with the NVIDIA GPU Operator"
+snippet: "Enable GPUDirect Storage (GDS) on Kubernetes through the GPU Operator to bypass CPU and system memory when loading training data directly into GPU memory from NVMe and network storage."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "GPUDirect Storage with the NVIDIA GPU Operator" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "GPU", "NVIDIA", "storage", "AI"]
+---
+
+Every GPU training job spends time waiting for data. The traditional path is: storage to CPU memory to GPU memory. GPUDirect Storage (GDS) eliminates the CPU from this path entirely, allowing data to flow directly from storage into GPU memory via DMA. The NVIDIA GPU Operator can deploy and manage the GDS kernel module automatically.
+
+## How GPUDirect Storage Works
+
+Without GDS:
+```
+NVMe/NFS Storage -> CPU Memory (bounce buffer) -> GPU Memory
+```
+
+With GDS:
+```
+NVMe/NFS Storage -> GPU Memory (direct DMA transfer)
+```
+
+The difference is significant:
+
+- **2-3x higher storage throughput** to GPU memory
+- **Reduced CPU utilization** (CPU is freed from data movement)
+- **Lower latency** for data loading
+- **Better GPU utilization** (GPUs spend more time computing, less time waiting)
+
+GDS is particularly impactful for:
+
+- Large dataset training (ImageNet, Common Crawl)
+- Checkpoint loading and saving
+- Model weight loading for inference
+- Any workload where I/O is the bottleneck
+
+## Prerequisites
+
+- NVIDIA GPU Operator v23.9.0+
+- GPUs that support GDS (A100, H100, L40S)
+- Compatible storage: local NVMe, NFS over RDMA, Lustre, GPFS/Spectrum Scale, WekaFS
+- MOFED drivers installed (for network storage GDS)
+- Linux kernel 5.4+
+
+## Enabling GDS in the GPU Operator
+
+### Via Helm
+
+```bash
+helm install gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator \
+  --create-namespace \
+  --set gds.enabled=true \
+  --set gds.version="v2.17.5"
+```
+
+### Via ClusterPolicy
+
+```yaml
+apiVersion: nvidia.com/v1
+kind: ClusterPolicy
+metadata:
+  name: cluster-policy
+spec:
+  driver:
+    enabled: true
+    version: "550.127.05"
+  gds:
+    enabled: true
+    image: nvidia-fs
+    repository: nvcr.io/nvidia/cloud-native
+    version: "2.17.5"
+    imagePullPolicy: IfNotPresent
+```
+
+### Verify GDS Installation
+
+```bash
+# Check GDS driver pod
+kubectl get pods -n gpu-operator -l app=nvidia-fs-ctr
+
+# Verify the nvidia-fs kernel module is loaded
+kubectl exec -n gpu-operator nvidia-driver-daemonset-xxxx -- lsmod | grep nvidia_fs
+
+# Check GDS status
+kubectl exec -n gpu-operator nvidia-driver-daemonset-xxxx -- nvidia-smi -q | grep "GPUDirect"
+```
+
+## GDS with Local NVMe Storage
+
+For the highest performance, use local NVMe drives with GDS:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gds-training
+spec:
+  containers:
+    - name: training
+      image: nvcr.io/nvidia/pytorch:24.07-py3
+      command: ["python", "train.py", "--data-path=/data"]
+      resources:
+        limits:
+          nvidia.com/gpu: 4
+      volumeMounts:
+        - name: nvme-data
+          mountPath: /data
+      env:
+        - name: CUFILE_ENV_PATH_JSON
+          value: "/etc/cufile.json"
+  volumes:
+    - name: nvme-data
+      hostPath:
+        path: /mnt/nvme0
+        type: Directory
+```
+
+### cuFile Configuration
+
+GDS uses the cuFile API. Configure it via `cufile.json`:
+
+```json
+{
+  "logging": {
+    "type": "stderr",
+    "level": "ERROR"
+  },
+  "profile": {
+    "nvtx": false,
+    "cufile_stats": 0
+  },
+  "fs": {
+    "generic": {
+      "posix_unaligned_writes": false,
+      "posix_gds_min_kb": 0
+    },
+    "lustre": {
+      "posix_gds_min_kb": 0
+    },
+    "beegfs": {
+      "posix_gds_min_kb": 0
+    }
+  },
+  "denylist": "",
+  "allowlist": ""
+}
+```
+
+## GDS with Network Storage
+
+For GDS over network storage (NFS, Lustre, GPFS), you need both GDS and MOFED drivers:
+
+```bash
+helm install gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator \
+  --create-namespace \
+  --set gds.enabled=true \
+  --set driver.rdma.enabled=true \
+  --set driver.rdma.useHostMofed=true
+```
+
+This enables the full path: Network Storage -> RDMA NIC -> GPU Memory, bypassing both CPU and system memory.
+
+## Benchmarking GDS Performance
+
+Use the `gdsio` tool to benchmark GDS performance:
+
+```bash
+# Sequential read benchmark
+gdsio -f /data/testfile -d 0 -w 4 -s 1G -i 1M -x 0 -I 1
+
+# Parameters:
+# -f: file path
+# -d: GPU device ID
+# -w: number of workers
+# -s: file size
+# -i: I/O size
+# -x: 0=read, 1=write
+# -I: 1=GDS enabled, 0=GDS disabled (for comparison)
+```
+
+Expected results on NVMe with A100:
+
+| Mode | Throughput | CPU Usage |
+|---|---|---|
+| Without GDS | ~3.5 GB/s | 40-60% |
+| With GDS | ~6.5 GB/s | 5-10% |
+
+## Using GDS in PyTorch
+
+PyTorch supports GDS through the `kvikio` library:
+
+```python
+import kvikio
+import cupy as cp
+
+# Open file with GDS
+f = kvikio.CuFile("/data/training_batch.bin", "r")
+
+# Read directly into GPU memory
+gpu_buffer = cp.empty(1024 * 1024 * 1024, dtype=cp.uint8)  # 1GB
+bytes_read = f.read(gpu_buffer)
+
+# Use in PyTorch
+import torch
+tensor = torch.as_tensor(gpu_buffer, device='cuda')
+```
+
+For the NVIDIA DALI data loading pipeline, GDS is integrated automatically when the `nvidia-fs` module is loaded.
+
+## GDS with Kubernetes Storage Classes
+
+Integrate GDS with dynamic provisioning:
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: nvme-gds
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nvme-pv
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nvme-gds
+  local:
+    path: /mnt/nvme0
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: ["gpu-node-1"]
+```
+
+## Monitoring GDS
+
+Track GDS usage through DCGM and custom metrics:
+
+```bash
+# Check GDS statistics
+nvidia-smi -q | grep -A 10 "GPU Direct"
+
+# Monitor nvidia-fs module stats
+cat /proc/driver/nvidia-fs/stats
+```
+
+Key metrics to monitor:
+
+- GDS reads/writes per second
+- GDS throughput (GB/s)
+- Fallback to bounce buffer (indicates GDS bypass)
+- GPU memory usage for I/O buffers
+
+## Automating with Ansible
+
+Deploy GDS across your GPU fleet with [Ansible](https://www.ansiblepilot.com/):
+
+```yaml
+---
+- name: Enable GPUDirect Storage
+  hosts: localhost
+  tasks:
+    - name: Upgrade GPU Operator with GDS
+      kubernetes.core.helm:
+        name: gpu-operator
+        chart_ref: nvidia/gpu-operator
+        release_namespace: gpu-operator
+        values:
+          gds:
+            enabled: true
+            version: "2.17.5"
+          driver:
+            rdma:
+              enabled: true
+              useHostMofed: true
+
+    - name: Verify GDS on all GPU nodes
+      kubernetes.core.k8s_exec:
+        namespace: gpu-operator
+        pod: "{{ item }}"
+        command: lsmod | grep nvidia_fs
+      loop: "{{ gpu_driver_pods }}"
+```
+
+## Final Thoughts
+
+GPUDirect Storage is one of those optimizations that sounds incremental but delivers transformational results. Doubling your storage-to-GPU throughput while halving CPU utilization means your GPUs spend more time computing and less time waiting. For large-scale training on [Kubernetes](https://kubernetes.recipes/), enabling GDS through the GPU Operator is a one-line Helm change that pays for itself immediately in GPU utilization improvements.

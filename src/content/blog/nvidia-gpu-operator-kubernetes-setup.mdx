@@ -1,0 +1,278 @@
+---
+draft: false
+title: "NVIDIA GPU Operator on Kubernetes: Complete Setup"
+snippet: "Step-by-step guide to deploying the NVIDIA GPU Operator on Kubernetes for automated GPU driver management, device plugin, and container toolkit configuration."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "NVIDIA GPU Operator on Kubernetes: Complete Setup" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "GPU", "NVIDIA", "devops"]
+---
+
+Managing GPU nodes in Kubernetes used to mean manually installing drivers, container toolkits, and device plugins on every node. The NVIDIA GPU Operator automates all of this through Kubernetes-native operators and custom resources.
+
+## What the GPU Operator Manages
+
+The GPU Operator deploys and manages the entire GPU software stack as a set of Kubernetes pods:
+
+- **NVIDIA Driver** (or pre-installed driver detection)
+- **NVIDIA Container Toolkit** (nvidia-container-runtime)
+- **NVIDIA Device Plugin** (exposes GPUs as schedulable resources)
+- **NVIDIA DCGM** (GPU monitoring and diagnostics)
+- **NVIDIA DCGM Exporter** (Prometheus metrics)
+- **NVIDIA MIG Manager** (Multi-Instance GPU partitioning)
+- **NVIDIA GDS Driver** (GPUDirect Storage, covered in a separate article)
+- **Node Feature Discovery** (NFD for GPU node labeling)
+
+## Prerequisites
+
+Before installing the GPU Operator:
+
+- Kubernetes 1.27+ cluster with GPU nodes
+- Nodes with NVIDIA GPUs (A100, H100, L40S, T4, etc.)
+- Helm 3 installed
+- No pre-existing NVIDIA drivers on GPU nodes (unless using pre-installed driver mode)
+
+```bash
+# Verify GPU hardware is detected
+lspci | grep -i nvidia
+```
+
+## Installation with Helm
+
+```bash
+# Add the NVIDIA Helm repository
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+helm repo update
+
+# Install the GPU Operator
+helm install gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator \
+  --create-namespace \
+  --set driver.enabled=true \
+  --set toolkit.enabled=true \
+  --set devicePlugin.enabled=true \
+  --set dcgmExporter.enabled=true \
+  --set migManager.enabled=false \
+  --set gds.enabled=false
+```
+
+## Verifying the Installation
+
+```bash
+# Check all GPU Operator pods are running
+kubectl get pods -n gpu-operator
+
+# Expected output shows pods for each component:
+# gpu-operator-xxxx                    Running
+# nvidia-driver-daemonset-xxxx         Running
+# nvidia-container-toolkit-xxxx        Running
+# nvidia-device-plugin-xxxx            Running
+# nvidia-dcgm-exporter-xxxx            Running
+# gpu-feature-discovery-xxxx           Running
+```
+
+Verify GPUs are schedulable:
+
+```bash
+kubectl get nodes -o json | jq '.items[].status.allocatable["nvidia.com/gpu"]'
+```
+
+## Running a GPU Workload
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-test
+spec:
+  restartPolicy: Never
+  containers:
+    - name: cuda-test
+      image: nvcr.io/nvidia/cuda:12.4.0-base-ubuntu22.04
+      command: ["nvidia-smi"]
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+```
+
+```bash
+kubectl apply -f gpu-test.yaml
+kubectl logs gpu-test
+# Should show nvidia-smi output with your GPU details
+```
+
+## ClusterPolicy Configuration
+
+The GPU Operator is configured through a `ClusterPolicy` custom resource:
+
+```yaml
+apiVersion: nvidia.com/v1
+kind: ClusterPolicy
+metadata:
+  name: cluster-policy
+spec:
+  operator:
+    defaultRuntime: containerd
+  driver:
+    enabled: true
+    version: "550.127.05"
+    repository: nvcr.io/nvidia
+    image: driver
+    manager:
+      env:
+        - name: ENABLE_AUTO_DRAIN
+          value: "true"
+  toolkit:
+    enabled: true
+    version: v1.16.2-ubuntu20.04
+  devicePlugin:
+    enabled: true
+    version: v0.16.2
+    config:
+      name: device-plugin-config
+      default: default
+  dcgmExporter:
+    enabled: true
+    version: 3.3.8-3.6.0-ubuntu22.04
+  migManager:
+    enabled: false
+  gds:
+    enabled: false
+  nodeStatusExporter:
+    enabled: true
+```
+
+## Driver Version Management
+
+Pin a specific driver version to ensure consistency across your cluster:
+
+```bash
+helm upgrade gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator \
+  --set driver.version="550.127.05"
+```
+
+For air-gapped environments, mirror the driver image to your internal registry:
+
+```bash
+skopeo copy \
+  docker://nvcr.io/nvidia/driver:550.127.05-ubuntu22.04 \
+  docker://registry.internal/nvidia/driver:550.127.05-ubuntu22.04
+```
+
+## Pre-Installed Drivers
+
+If your nodes already have NVIDIA drivers installed (common with cloud providers like GKE, EKS, AKS):
+
+```bash
+helm install gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator \
+  --create-namespace \
+  --set driver.enabled=false
+```
+
+The operator will detect the pre-installed drivers and configure the rest of the stack accordingly.
+
+## Monitoring with Prometheus
+
+The DCGM Exporter provides GPU metrics for Prometheus:
+
+```yaml
+# ServiceMonitor for Prometheus Operator
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: nvidia-dcgm-exporter
+  namespace: gpu-operator
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-dcgm-exporter
+  endpoints:
+    - port: gpu-metrics
+      interval: 15s
+```
+
+Key metrics:
+
+- `DCGM_FI_DEV_GPU_UTIL` -- GPU utilization percentage
+- `DCGM_FI_DEV_FB_USED` -- GPU memory used (MiB)
+- `DCGM_FI_DEV_FB_FREE` -- GPU memory free (MiB)
+- `DCGM_FI_DEV_GPU_TEMP` -- GPU temperature
+- `DCGM_FI_DEV_POWER_USAGE` -- Power consumption (watts)
+
+## Automating with Ansible
+
+For teams managing multiple [Kubernetes](https://kubernetes.recipes/) clusters, [Ansible](https://www.ansiblepilot.com/) can automate the GPU Operator deployment:
+
+```yaml
+---
+- name: Deploy NVIDIA GPU Operator
+  hosts: localhost
+  vars:
+    gpu_operator_version: "v24.9.0"
+    driver_version: "550.127.05"
+  tasks:
+    - name: Add NVIDIA Helm repo
+      kubernetes.core.helm_repository:
+        name: nvidia
+        repo_url: https://helm.ngc.nvidia.com/nvidia
+
+    - name: Install GPU Operator
+      kubernetes.core.helm:
+        name: gpu-operator
+        chart_ref: nvidia/gpu-operator
+        release_namespace: gpu-operator
+        create_namespace: true
+        values:
+          driver:
+            enabled: true
+            version: "{{ driver_version }}"
+          toolkit:
+            enabled: true
+          devicePlugin:
+            enabled: true
+          dcgmExporter:
+            enabled: true
+
+    - name: Wait for GPU Operator pods
+      kubernetes.core.k8s_info:
+        kind: Pod
+        namespace: gpu-operator
+        label_selectors:
+          - app=gpu-operator
+      register: pods
+      until: pods.resources | selectattr('status.phase', 'equalto', 'Running') | list | length > 0
+      retries: 30
+      delay: 10
+```
+
+## Troubleshooting
+
+### Driver Pod Stuck in Init
+
+```bash
+# Check driver pod logs
+kubectl logs -n gpu-operator nvidia-driver-daemonset-xxxx -c nvidia-driver-ctr
+
+# Common causes:
+# - Secure Boot enabled (disable in BIOS or use signed drivers)
+# - Kernel headers missing (install kernel-devel package)
+# - Conflicting nouveau driver (blacklist it)
+```
+
+### GPUs Not Visible
+
+```bash
+# Check node labels
+kubectl get nodes --show-labels | grep nvidia
+
+# Check device plugin logs
+kubectl logs -n gpu-operator nvidia-device-plugin-xxxx
+```
+
+## Final Thoughts
+
+The GPU Operator transforms GPU node management from a manual, error-prone process into a Kubernetes-native, declarative workflow. Install it once, and every GPU node in your cluster is automatically configured with the right drivers, toolkit, and monitoring. Combined with the [GPU Cost Calculator](https://lucaberton.com/gpu-cost-calculator/) for capacity planning, you have a complete GPU infrastructure management solution.

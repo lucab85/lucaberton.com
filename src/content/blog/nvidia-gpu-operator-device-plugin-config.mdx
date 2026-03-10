@@ -1,0 +1,283 @@
+---
+draft: false
+title: "NVIDIA Device Plugin Configuration on Kubernetes"
+snippet: "Advanced configuration of the NVIDIA Kubernetes Device Plugin through the GPU Operator for time-slicing, resource naming, and GPU scheduling strategies."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "NVIDIA Device Plugin Configuration on Kubernetes" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "GPU", "NVIDIA", "scheduling", "devops"]
+---
+
+The NVIDIA Device Plugin is the bridge between your GPUs and Kubernetes scheduling. It exposes GPUs as `nvidia.com/gpu` resources that pods can request. Through the GPU Operator, you can configure advanced features like time-slicing, custom resource names, and GPU health monitoring.
+
+## Default Behavior
+
+Out of the box, the device plugin:
+
+- Discovers all NVIDIA GPUs on each node
+- Exposes them as `nvidia.com/gpu` resources
+- Allocates whole GPUs to pods (1 GPU = 1 resource unit)
+- Runs health checks on allocated GPUs
+
+```bash
+# Check GPU resources on a node
+kubectl describe node gpu-node-1 | grep -A 5 "Allocatable"
+# nvidia.com/gpu: 8
+```
+
+## Device Plugin ConfigMap
+
+Create a ConfigMap to customize device plugin behavior:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: device-plugin-config
+  namespace: gpu-operator
+data:
+  default: |
+    version: v1
+    sharing:
+      timeSlicing:
+        renameByDefault: false
+        failRequestsGreaterThanOne: false
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 1
+
+  time-slicing-4: |
+    version: v1
+    sharing:
+      timeSlicing:
+        renameByDefault: true
+        failRequestsGreaterThanOne: false
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 4
+
+  time-slicing-10: |
+    version: v1
+    sharing:
+      timeSlicing:
+        renameByDefault: true
+        failRequestsGreaterThanOne: false
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 10
+```
+
+## GPU Time-Slicing
+
+Time-slicing lets multiple pods share a single GPU through time-division multiplexing. Unlike MIG, time-slicing does not provide memory isolation -- all pods share the full GPU memory space.
+
+### Enable Time-Slicing
+
+```bash
+# Label a node to use 4-way time-slicing
+kubectl label node dev-gpu-node nvidia.com/device-plugin.config=time-slicing-4
+
+# The node now reports 4x the actual GPU count
+# 2 physical GPUs -> 8 allocatable nvidia.com/gpu.shared
+```
+
+### When to Use Time-Slicing vs MIG
+
+| Feature | Time-Slicing | MIG |
+|---|---|---|
+| Memory isolation | No (shared) | Yes (dedicated) |
+| Compute isolation | No (time-shared) | Yes (dedicated SMs) |
+| Error isolation | No | Yes |
+| GPU support | All NVIDIA GPUs | A100, A30, H100 only |
+| Overhead | Minimal | Minimal |
+| Use case | Dev/test, light inference | Production inference, multi-tenant |
+
+**Use time-slicing for**: development environments, Jupyter notebooks, light inference workloads where memory isolation is not critical.
+
+**Use MIG for**: production inference, multi-tenant clusters, workloads requiring guaranteed performance.
+
+### Time-Slicing Pod Spec
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: dev-notebook
+spec:
+  containers:
+    - name: jupyter
+      image: nvcr.io/nvidia/pytorch:24.07-py3
+      command: ["jupyter", "lab", "--ip=0.0.0.0"]
+      resources:
+        limits:
+          nvidia.com/gpu.shared: 1  # Gets 1/4 of a GPU (with replicas=4)
+```
+
+## GPU Health Monitoring
+
+Configure health checks that remove unhealthy GPUs from the schedulable pool:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: device-plugin-config
+  namespace: gpu-operator
+data:
+  default: |
+    version: v1
+    flags:
+      migStrategy: none
+      failOnInitError: true
+      nvidiaDriverRoot: /
+      gdsEnabled: false
+      mpsEnabled: false
+    health:
+      plugin:
+        - name: nvidia.com/gpu
+          failOnInitError: true
+```
+
+The device plugin runs Xid error monitoring. When a GPU reports specific Xid errors (hardware faults), the plugin marks the GPU as unhealthy and Kubernetes stops scheduling pods to it.
+
+## Custom Resource Naming
+
+Expose different GPU models as different resource types:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: device-plugin-config
+  namespace: gpu-operator
+data:
+  multi-gpu-types: |
+    version: v1
+    flags:
+      migStrategy: none
+    sharing:
+      timeSlicing:
+        resources:
+          - name: nvidia.com/gpu.a100
+            replicas: 1
+            devices:
+              - "GPU-xxxxx-a100-uuid"
+          - name: nvidia.com/gpu.t4
+            replicas: 4
+            devices:
+              - "GPU-xxxxx-t4-uuid"
+```
+
+This lets you request specific GPU types:
+
+```yaml
+resources:
+  limits:
+    nvidia.com/gpu.a100: 1  # Specifically request an A100
+```
+
+## GPU Feature Discovery Integration
+
+The GPU Feature Discovery component (deployed by the GPU Operator) labels nodes with GPU attributes:
+
+```bash
+kubectl get node gpu-node-1 --show-labels | tr ',' '
+' | grep nvidia
+
+# nvidia.com/gpu.product=NVIDIA-A100-SXM4-80GB
+# nvidia.com/gpu.count=8
+# nvidia.com/gpu.memory=81920
+# nvidia.com/gpu.family=ampere
+# nvidia.com/mig.capable=true
+# nvidia.com/cuda.driver.major=550
+# nvidia.com/gpu.compute.major=8
+```
+
+Use these labels for targeted scheduling:
+
+```yaml
+spec:
+  nodeSelector:
+    nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+  containers:
+    - name: training
+      resources:
+        limits:
+          nvidia.com/gpu: 8
+```
+
+## Configuring via GPU Operator ClusterPolicy
+
+```yaml
+apiVersion: nvidia.com/v1
+kind: ClusterPolicy
+metadata:
+  name: cluster-policy
+spec:
+  devicePlugin:
+    enabled: true
+    version: v0.16.2
+    config:
+      name: device-plugin-config  # Reference the ConfigMap
+      default: default            # Default config key
+    env:
+      - name: PASS_DEVICE_SPECS
+        value: "true"
+      - name: DEVICE_LIST_STRATEGY
+        value: "envvar"
+      - name: DEVICE_ID_STRATEGY
+        value: "uuid"
+```
+
+## Node-Level Configuration
+
+Different nodes can use different device plugin configurations:
+
+```bash
+# Production nodes: no sharing
+kubectl label node prod-gpu-1 nvidia.com/device-plugin.config=default
+
+# Dev nodes: 4-way time-slicing
+kubectl label node dev-gpu-1 nvidia.com/device-plugin.config=time-slicing-4
+
+# Notebook nodes: 10-way time-slicing
+kubectl label node notebook-gpu-1 nvidia.com/device-plugin.config=time-slicing-10
+```
+
+## Automating with Ansible
+
+Manage device plugin configuration across clusters with [Ansible](https://www.ansiblepilot.com/):
+
+```yaml
+---
+- name: Configure GPU Device Plugin
+  hosts: localhost
+  vars:
+    gpu_nodes:
+      - name: prod-gpu-1
+        config: default
+      - name: dev-gpu-1
+        config: time-slicing-4
+  tasks:
+    - name: Apply device plugin ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        src: manifests/device-plugin-config.yaml
+
+    - name: Label nodes with config
+      kubernetes.core.k8s:
+        state: patched
+        kind: Node
+        name: "{{ item.name }}"
+        definition:
+          metadata:
+            labels:
+              nvidia.com/device-plugin.config: "{{ item.config }}"
+      loop: "{{ gpu_nodes }}"
+```
+
+## Final Thoughts
+
+The device plugin is the scheduling layer of your GPU infrastructure on [Kubernetes](https://kubernetes.recipes/). Getting the configuration right -- time-slicing for dev, MIG for production, health monitoring for reliability -- is the difference between a GPU cluster that runs efficiently and one that wastes expensive hardware. The GPU Operator makes this a ConfigMap change rather than a node-by-node manual process.

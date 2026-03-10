@@ -1,0 +1,295 @@
+---
+draft: false
+title: "NVIDIA Network Operator: RDMA on Kubernetes"
+snippet: "Deploy the NVIDIA Network Operator on Kubernetes for RDMA networking with Mellanox NICs, enabling high-performance GPU-to-GPU communication for distributed AI training."
+publishDate: "2026-03-09"
+lastModified: "2026-03-09"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "NVIDIA Network Operator: RDMA on Kubernetes" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "GPU", "NVIDIA", "networking", "RDMA"]
+---
+
+Distributed AI training performance is limited by how fast GPUs on different nodes can communicate. The NVIDIA Network Operator deploys and manages the networking stack required for RDMA (Remote Direct Memory Access) on Kubernetes, enabling GPU-to-GPU transfers that bypass the CPU entirely.
+
+## What the Network Operator Manages
+
+The Network Operator is a Kubernetes operator that automates deployment of:
+
+- **MOFED Drivers**: Mellanox OFED kernel drivers for InfiniBand and RoCE
+- **RDMA Shared Device Plugin**: exposes RDMA devices as Kubernetes resources
+- **SR-IOV Network Operator**: manages SR-IOV VFs for dedicated pod networking
+- **IB Kubernetes Plugin**: InfiniBand network plugin for pod connectivity
+- **Multus CNI**: enables multiple network interfaces per pod
+- **Container Networking Plugins**: secondary network configuration
+
+## Installation
+
+```bash
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia
+helm repo update
+
+helm install network-operator nvidia/network-operator \
+  --namespace nvidia-network-operator \
+  --create-namespace \
+  --set nfd.enabled=true \
+  --set ofedDriver.deploy=true \
+  --set rdmaSharedDevicePlugin.deploy=true \
+  --set sriovNetworkOperator.enabled=true \
+  --set secondaryNetwork.deploy=true \
+  --set secondaryNetwork.multus.deploy=true
+```
+
+## NicClusterPolicy
+
+The central configuration resource:
+
+```yaml
+apiVersion: mellanox.com/v1alpha1
+kind: NicClusterPolicy
+metadata:
+  name: nic-cluster-policy
+spec:
+  ofedDriver:
+    image: doca-driver
+    repository: nvcr.io/nvidia/mellanox
+    version: 24.07-0.6.1.0-0
+    upgradePolicy:
+      autoUpgrade: true
+      maxParallelUpgrades: 1
+      drain:
+        enable: true
+        force: true
+        timeoutSeconds: 300
+
+  rdmaSharedDevicePlugin:
+    image: k8s-rdma-shared-dev-plugin
+    repository: ghcr.io/mellanox
+    version: v1.5.1
+    config: |
+      {
+        "periodicUpdateInterval": 300,
+        "configList": [
+          {
+            "resourceName": "rdma_shared_device_a",
+            "rdmaHcaMax": 63,
+            "selectors": {
+              "vendors": ["15b3"]
+            }
+          }
+        ]
+      }
+
+  secondaryNetwork:
+    cniPlugins:
+      image: plugins
+      repository: ghcr.io/k8snetworkplumbingwg
+      version: v1.5.0
+    multus:
+      image: multus-cni
+      repository: ghcr.io/k8snetworkplumbingwg
+      version: v4.0.2
+    ipamPlugin:
+      image: whereabouts
+      repository: ghcr.io/k8snetworkplumbingwg
+      version: v0.7.0
+```
+
+## RDMA Network Configuration
+
+### MacVLAN for RDMA
+
+For shared RDMA access without SR-IOV:
+
+```yaml
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: rdma-macvlan
+  namespace: ai-training
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "macvlan",
+      "master": "ens3f0",
+      "mode": "bridge",
+      "ipam": {
+        "type": "whereabouts",
+        "range": "192.168.200.0/24"
+      }
+    }
+```
+
+### IPoIB for InfiniBand
+
+For InfiniBand networks:
+
+```yaml
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: ib-network
+  namespace: ai-training
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "ib-sriov",
+      "ibKubernetesEnabled": true,
+      "ipam": {
+        "type": "whereabouts",
+        "range": "10.56.217.0/24"
+      }
+    }
+```
+
+## Multi-Node Training with RDMA
+
+Deploy a distributed PyTorch training job using RDMA:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: distributed-training
+  namespace: ai-training
+spec:
+  parallelism: 4
+  template:
+    metadata:
+      annotations:
+        k8s.v1.cni.cncf.io/networks: rdma-macvlan
+    spec:
+      containers:
+        - name: trainer
+          image: nvcr.io/nvidia/pytorch:24.07-py3
+          command:
+            - torchrun
+            - --nnodes=4
+            - --nproc_per_node=8
+            - --rdzv_backend=c10d
+            - --rdzv_endpoint=trainer-0:29500
+            - train.py
+          resources:
+            limits:
+              nvidia.com/gpu: 8
+              rdma/rdma_shared_device_a: 1
+          env:
+            - name: NCCL_IB_DISABLE
+              value: "0"
+            - name: NCCL_NET_GDR_LEVEL
+              value: "5"
+            - name: NCCL_IB_HCA
+              value: "mlx5"
+            - name: NCCL_SOCKET_IFNAME
+              value: "net1"
+            - name: NCCL_DEBUG
+              value: "INFO"
+      restartPolicy: Never
+```
+
+## NCCL Environment Variables
+
+Critical NCCL settings for RDMA performance:
+
+```yaml
+env:
+  # Enable InfiniBand
+  - name: NCCL_IB_DISABLE
+    value: "0"
+
+  # GPUDirect RDMA level (5 = max)
+  - name: NCCL_NET_GDR_LEVEL
+    value: "5"
+
+  # Specify InfiniBand HCA
+  - name: NCCL_IB_HCA
+    value: "mlx5_0,mlx5_1"
+
+  # Use secondary network for NCCL
+  - name: NCCL_SOCKET_IFNAME
+    value: "net1"
+
+  # Number of RDMA QPs per connection
+  - name: NCCL_IB_QPS_PER_CONNECTION
+    value: "4"
+
+  # Enable adaptive routing (if switch supports it)
+  - name: NCCL_IB_ADAPTIVE_ROUTING
+    value: "1"
+```
+
+## Verifying RDMA Performance
+
+### ib_write_bw Benchmark
+
+```bash
+# On node 1 (server)
+kubectl exec -it rdma-test-node1 -- ib_write_bw -d mlx5_0
+
+# On node 2 (client)
+kubectl exec -it rdma-test-node2 -- ib_write_bw -d mlx5_0 192.168.200.1
+
+# Expected: ~24 GB/s for HDR InfiniBand, ~48 GB/s for NDR
+```
+
+### NCCL Tests
+
+```bash
+# All-reduce bandwidth test across 4 nodes x 8 GPUs
+mpirun -np 32 -hostfile hosts \
+  --mca btl_openib_allow_ib true \
+  nccl-tests/build/all_reduce_perf -b 8 -e 2G -f 2 -g 1
+```
+
+## Monitoring
+
+```bash
+# Check InfiniBand port status
+kubectl exec -it mofed-pod -- ibstat
+
+# Monitor port counters
+kubectl exec -it mofed-pod -- perfquery
+
+# Check for errors
+kubectl exec -it mofed-pod -- ibdiagnet
+```
+
+## Automating with Ansible
+
+Deploy the Network Operator across clusters with [Ansible](https://www.ansiblepilot.com/):
+
+```yaml
+---
+- name: Deploy NVIDIA Network Operator
+  hosts: localhost
+  tasks:
+    - name: Add NVIDIA Helm repo
+      kubernetes.core.helm_repository:
+        name: nvidia
+        repo_url: https://helm.ngc.nvidia.com/nvidia
+
+    - name: Install Network Operator
+      kubernetes.core.helm:
+        name: network-operator
+        chart_ref: nvidia/network-operator
+        release_namespace: nvidia-network-operator
+        create_namespace: true
+        values:
+          ofedDriver:
+            deploy: true
+          rdmaSharedDevicePlugin:
+            deploy: true
+          sriovNetworkOperator:
+            enabled: true
+
+    - name: Apply NicClusterPolicy
+      kubernetes.core.k8s:
+        state: present
+        src: manifests/nic-cluster-policy.yaml
+```
+
+## Final Thoughts
+
+The Network Operator is the networking counterpart to the GPU Operator. Together they automate the entire GPU infrastructure stack on [Kubernetes](https://kubernetes.recipes/) -- from drivers and device plugins to RDMA networking and monitoring. For any multi-node GPU deployment, the Network Operator is not optional. It is the difference between GPU nodes that can communicate at 24 GB/s over InfiniBand and nodes bottlenecked at 3 GB/s over TCP.

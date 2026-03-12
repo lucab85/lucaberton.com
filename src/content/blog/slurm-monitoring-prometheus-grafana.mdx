@@ -1,0 +1,260 @@
+---
+title: "Monitoring Slurm GPU Clusters with Prometheus"
+snippet: "Set up Prometheus and Grafana monitoring for Slurm clusters with NVIDIA DCGM, job metrics, and queue utilization dashboards."
+publishDate: "2026-02-26"
+image: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["Slurm", "Prometheus", "Grafana", "GPU", "Monitoring"]
+draft: false
+lastModified: "2026-02-26"
+---
+
+A GPU cluster without monitoring is flying blind. You need to know which GPUs are idle, which jobs are memory-bound, and whether your expensive H100s are actually being utilized.
+
+I have set up monitoring stacks for Slurm clusters that surface the metrics teams actually need. Here is the practical approach.
+
+## The Monitoring Stack
+
+```
+NVIDIA DCGM → dcgm-exporter → Prometheus → Grafana
+Slurm        → slurm-exporter → Prometheus → Grafana
+Node         → node-exporter  → Prometheus → Grafana
+```
+
+Three exporters feed Prometheus. Grafana provides the dashboards.
+
+## NVIDIA DCGM Exporter
+
+DCGM (Data Center GPU Manager) exposes detailed GPU metrics. The exporter runs on each compute node:
+
+```bash
+# Install DCGM
+dnf install -y datacenter-gpu-manager
+
+# Run the exporter
+docker run -d --gpus all --rm \
+  -p 9400:9400 \
+  nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.1-ubuntu22.04
+
+# Or install natively
+dcgm-exporter --address :9400
+```
+
+Key metrics exposed:
+
+```
+DCGM_FI_DEV_GPU_UTIL        # GPU utilization (%)
+DCGM_FI_DEV_FB_USED         # GPU memory used (MB)
+DCGM_FI_DEV_FB_FREE         # GPU memory free (MB)
+DCGM_FI_DEV_GPU_TEMP        # GPU temperature (C)
+DCGM_FI_DEV_POWER_USAGE     # Power consumption (W)
+DCGM_FI_DEV_PCIE_TX_THROUGHPUT   # PCIe TX bandwidth
+DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL  # NVLink bandwidth
+DCGM_FI_PROF_SM_ACTIVE      # Streaming multiprocessor activity
+DCGM_FI_PROF_SM_OCCUPANCY   # SM occupancy
+```
+
+### Custom DCGM Metrics
+
+Create a custom CSV to select specific counters:
+
+```csv
+# /etc/dcgm-exporter/custom-counters.csv
+DCGM_FI_DEV_GPU_UTIL,       gauge, GPU utilization
+DCGM_FI_DEV_FB_USED,        gauge, GPU memory used (MiB)
+DCGM_FI_DEV_POWER_USAGE,    gauge, Power usage (W)
+DCGM_FI_PROF_SM_ACTIVE,     gauge, SM active ratio
+DCGM_FI_PROF_PIPE_TENSOR_ACTIVE, gauge, Tensor core active ratio
+DCGM_FI_DEV_NVLINK_BANDWIDTH_TOTAL, gauge, NVLink bandwidth
+```
+
+The Tensor Core active ratio is particularly useful — it tells you whether your training job is actually using the hardware efficiently or wasting cycles on data loading.
+
+## Slurm Exporter
+
+The [prometheus-slurm-exporter](https://github.com/vpenso/prometheus-slurm-exporter) exposes scheduler metrics:
+
+```bash
+# Install
+go install github.com/vpenso/prometheus-slurm-exporter@latest
+
+# Run on the Slurm controller
+prometheus-slurm-exporter --listen-address=:9341
+```
+
+Metrics include:
+
+```
+slurm_queue_pending          # Pending jobs by partition
+slurm_queue_running          # Running jobs by partition
+slurm_nodes_alloc            # Allocated nodes
+slurm_nodes_idle             # Idle nodes
+slurm_cpus_total             # Total CPUs
+slurm_gpus_total             # Total GPUs
+slurm_gpus_alloc             # Allocated GPUs
+slurm_scheduler_backfill_cycle_seconds  # Backfill scheduler performance
+```
+
+## Prometheus Configuration
+
+```yaml
+# prometheus.yml
+global:
+  scrape_interval: 30s
+
+scrape_configs:
+  - job_name: 'dcgm'
+    static_configs:
+      - targets:
+        - 'gpu-node01:9400'
+        - 'gpu-node02:9400'
+        - 'gpu-node03:9400'
+        # Or use service discovery
+    file_sd_configs:
+      - files: ['/etc/prometheus/gpu-nodes.json']
+
+  - job_name: 'slurm'
+    static_configs:
+      - targets: ['slurmctl01:9341']
+
+  - job_name: 'node'
+    static_configs:
+      - targets:
+        - 'gpu-node01:9100'
+        - 'gpu-node02:9100'
+```
+
+For large clusters, use file-based service discovery so you can update targets without restarting Prometheus.
+
+## Essential Grafana Dashboards
+
+### Cluster Overview Dashboard
+
+```
+# GPU Utilization Heatmap
+avg by (Hostname) (DCGM_FI_DEV_GPU_UTIL)
+
+# Total GPU Memory Usage
+sum(DCGM_FI_DEV_FB_USED) / sum(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE) * 100
+
+# Cluster GPU Allocation Rate
+slurm_gpus_alloc / slurm_gpus_total * 100
+
+# Job Queue Depth
+slurm_queue_pending
+```
+
+### Per-Job GPU Efficiency
+
+```
+# Average GPU utilization per node
+avg by (instance) (DCGM_FI_DEV_GPU_UTIL{job="dcgm"})
+
+# Tensor Core utilization (are you using the expensive hardware?)
+avg(DCGM_FI_PROF_PIPE_TENSOR_ACTIVE) * 100
+
+# GPU memory waste (allocated but unused)
+1 - (avg(DCGM_FI_DEV_FB_USED) / avg(DCGM_FI_DEV_FB_USED + DCGM_FI_DEV_FB_FREE))
+```
+
+### Power and Thermal
+
+```
+# Total cluster power draw
+sum(DCGM_FI_DEV_POWER_USAGE)
+
+# GPU temperature distribution
+histogram_quantile(0.95, DCGM_FI_DEV_GPU_TEMP)
+
+# Power efficiency (FLOPS per watt)
+avg(DCGM_FI_PROF_SM_ACTIVE) / avg(DCGM_FI_DEV_POWER_USAGE)
+```
+
+## Alerting Rules
+
+```yaml
+# prometheus-rules.yml
+groups:
+  - name: gpu-cluster
+    rules:
+      - alert: GPUUtilizationLow
+        expr: avg by (Hostname) (DCGM_FI_DEV_GPU_UTIL) < 20
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "GPU utilization below 20% on {{ $labels.Hostname }}"
+
+      - alert: GPUTemperatureHigh
+        expr: DCGM_FI_DEV_GPU_TEMP > 85
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU temperature {{ $value }}C on {{ $labels.Hostname }}"
+
+      - alert: QueueBacklog
+        expr: slurm_queue_pending > 100
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} pending jobs in Slurm queue"
+```
+
+## Integration with OpenTelemetry
+
+For organizations using [OpenTelemetry](/blog/opentelemetry-kubernetes-observability-2026/), you can bridge DCGM metrics into your existing observability stack:
+
+```yaml
+# otel-collector config
+receivers:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: dcgm
+          static_configs:
+            - targets: ['localhost:9400']
+
+exporters:
+  otlp:
+    endpoint: otel-collector.monitoring:4317
+
+service:
+  pipelines:
+    metrics:
+      receivers: [prometheus]
+      exporters: [otlp]
+```
+
+## Automating Deployment
+
+Deploy the monitoring stack across all nodes with [Ansible](/blog/ansible-gpu-cluster-provisioning/):
+
+```yaml
+- name: Deploy DCGM exporter
+  hosts: gpu_nodes
+  tasks:
+    - name: Install DCGM
+      dnf:
+        name: datacenter-gpu-manager
+        state: present
+
+    - name: Start DCGM exporter
+      systemd:
+        name: dcgm-exporter
+        state: started
+        enabled: yes
+```
+
+## Key Metrics to Watch
+
+From experience, these are the numbers that matter most:
+
+1. **GPU utilization below 50%** — your jobs are likely data-loading bound
+2. **Tensor Core activity below 30%** — you are paying for Tensor Cores but not using them
+3. **Queue wait time above 4 hours** — you need more capacity or better [scheduling policies](/blog/slurm-job-scheduling-priority-fairshare/)
+4. **GPU allocation above 90%** — you will hit contention soon, plan capacity
+
+For help designing your monitoring infrastructure, visit my [services page](/services/) or check the [GPU Cost Calculator](/gpu-cost-calculator/) to plan capacity.

@@ -1,0 +1,216 @@
+---
+title: "Slurm with Pyxis and Enroot for GPU Containers"
+snippet: "Run containerized AI workloads on Slurm using NVIDIA Pyxis and Enroot. Faster than Docker, native GPU support, no daemon."
+publishDate: "2026-02-26"
+image: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["Slurm", "Pyxis", "Enroot", "Containers", "GPU"]
+draft: false
+lastModified: "2026-02-26"
+---
+
+Running AI workloads on bare metal Slurm is fast, but managing software environments across a hundred-node cluster without containers is a nightmare. Docker is too heavy for HPC. NVIDIA built Pyxis and Enroot specifically to solve this.
+
+## Why Not Docker on Slurm
+
+Docker has a daemon. In HPC, daemons running as root on every compute node are a security and operations headache. Docker also adds network namespacing and storage overhead that you do not need when Slurm already manages resource isolation.
+
+Enroot is a lightweight container runtime that:
+
+- Runs unprivileged (no root daemon)
+- Imports images from Docker registries
+- Provides native GPU access without extra configuration
+- Uses simple squashfs bundles for fast startup
+
+Pyxis is the Slurm plugin that integrates Enroot into `srun` and `sbatch`.
+
+## Installing Enroot
+
+```bash
+# On each compute node (RHEL/Rocky)
+dnf install -y enroot enroot+caps
+
+# Configure GPU hooks
+cat > /etc/enroot/enroot.conf << EOF
+ENROOT_RUNTIME_PATH=/run/enroot/user-\$(id -u)
+ENROOT_CACHE_PATH=/tmp/enroot-cache
+ENROOT_DATA_PATH=/tmp/enroot-data
+EOF
+```
+
+Enroot uses libnvidia-container under the hood, so GPUs are available inside containers automatically.
+
+## Installing Pyxis
+
+```bash
+# Build from source
+git clone https://github.com/NVIDIA/pyxis.git
+cd pyxis
+make
+make install
+
+# Add to slurm.conf
+echo "SrunPlugstack=/usr/local/share/pyxis/pyxis.conf" >> /etc/slurm/slurm.conf
+systemctl restart slurmctld
+```
+
+## Running Containers with Slurm
+
+Once Pyxis is installed, you can run container images directly:
+
+```bash
+srun --container-image=nvcr.io/nvidia/pytorch:24.03-py3 \
+     --container-mounts=/data:/data,/shared:/shared \
+     python -c "import torch; print(torch.cuda.device_count())"
+```
+
+The first run pulls and caches the image. Subsequent runs start in seconds.
+
+### Batch Script with Containers
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=train-llm
+#SBATCH --nodes=4
+#SBATCH --gres=gpu:8
+#SBATCH --ntasks-per-node=8
+#SBATCH --container-image=nvcr.io/nvidia/pytorch:24.03-py3
+#SBATCH --container-mounts=/datasets:/datasets,/checkpoints:/checkpoints
+
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
+export MASTER_PORT=29500
+
+srun torchrun \
+  --nproc_per_node=8 \
+  --nnodes=4 \
+  --node_rank=$SLURM_NODEID \
+  --master_addr=$MASTER_ADDR \
+  --master_port=$MASTER_PORT \
+  train.py --config configs/model.yaml
+```
+
+This is the same multi-node training pattern from the [distributed training guide](/blog/slurm-multi-node-distributed-training/), but now running inside a container with a pinned PyTorch version.
+
+## Custom Images from NGC
+
+NVIDIA GPU Cloud (NGC) provides optimized containers for AI training:
+
+```bash
+# Pre-import images on compute nodes (run during provisioning)
+enroot import docker://nvcr.io#nvidia/pytorch:24.03-py3
+enroot import docker://nvcr.io#nvidia/tensorflow:24.03-tf2-py3
+
+# List cached images
+enroot list
+```
+
+### Building Custom Images
+
+When NGC images need extra packages:
+
+```dockerfile
+FROM nvcr.io/nvidia/pytorch:24.03-py3
+
+RUN pip install transformers datasets accelerate
+RUN pip install flash-attn --no-build-isolation
+
+COPY configs/ /app/configs/
+COPY train.py /app/
+WORKDIR /app
+```
+
+Build and push to your registry, then reference in Slurm:
+
+```bash
+srun --container-image=registry.internal/ml/custom-train:latest \
+     python train.py
+```
+
+## Enroot vs Singularity/Apptainer
+
+Singularity (now Apptainer) is the other major HPC container runtime. Key differences:
+
+- **Enroot** — NVIDIA-built, tighter GPU integration, lighter weight, purpose-built for Slurm
+- **Apptainer** — broader community, SIF format, more portable across HPC sites
+
+If your cluster is NVIDIA GPU-focused and uses Slurm, Enroot + Pyxis is the more streamlined choice. If you need to share containers with other HPC sites running different schedulers, Apptainer has wider adoption.
+
+## Performance Considerations
+
+Container overhead with Enroot is minimal:
+
+```bash
+# Benchmark: bare metal vs container
+# Bare metal
+srun python train_bench.py  # 100 iterations: 42.3s
+
+# Enroot container
+srun --container-image=nvcr.io/nvidia/pytorch:24.03-py3 \
+     python train_bench.py  # 100 iterations: 42.8s
+```
+
+The approximately 1% overhead comes from filesystem overlay operations. For long-running training jobs, it is negligible.
+
+### Shared Memory
+
+Some training frameworks need large shared memory. Configure it:
+
+```bash
+srun --container-image=nvcr.io/nvidia/pytorch:24.03-py3 \
+     --container-mounts=/dev/shm:/dev/shm \
+     python train.py --num-workers=16
+```
+
+## Multi-Tenancy with Containers
+
+Containers solve the "works on my machine" problem in shared GPU clusters:
+
+```bash
+# Team A uses PyTorch 2.4
+srun --container-image=registry/team-a/train:v2.4 python train.py
+
+# Team B uses PyTorch 2.2 with custom CUDA kernels
+srun --container-image=registry/team-b/train:v2.2-custom python train.py
+```
+
+No module conflicts, no virtualenv collisions, no "who installed that system package" debugging sessions.
+
+Combined with Slurm's [fair-share scheduling](/blog/slurm-job-scheduling-priority-fairshare/), each team gets their share of GPUs running their own software stack.
+
+## Automating the Setup
+
+For clusters with many nodes, automate Pyxis and Enroot installation with [Ansible](/blog/ansible-gpu-cluster-provisioning/):
+
+```yaml
+- name: Install Enroot
+  dnf:
+    name:
+      - enroot
+      - enroot+caps
+    state: present
+
+- name: Configure Enroot
+  template:
+    src: enroot.conf.j2
+    dest: /etc/enroot/enroot.conf
+
+- name: Install Pyxis plugin
+  make:
+    chdir: /opt/pyxis
+    target: install
+```
+
+For the full infrastructure automation approach, check [AnsiblePilot](https://www.ansiblepilot.com/) and the [Ansible collections best practices](/blog/ansible-collections-best-practices/).
+
+## Getting Started
+
+1. Install Enroot on all compute nodes
+2. Install Pyxis on the Slurm controller and compute nodes
+3. Pre-cache your NGC images with `enroot import`
+4. Test with a single-node `srun --container-image=...` command
+5. Scale to multi-node with the batch scripts above
+
+The investment pays off immediately. No more "can you install library X on the cluster" tickets. Teams manage their own environments through container images while Slurm handles scheduling and GPU allocation.
+
+For GPU cluster architecture consulting, visit my [services page](/services/) or connect on [LinkedIn](https://www.linkedin.com/in/lucaberton/).

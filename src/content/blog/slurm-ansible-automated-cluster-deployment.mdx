@@ -1,0 +1,420 @@
+---
+title: "Automated Slurm Cluster Deployment with Ansible"
+snippet: "Deploy and manage Slurm GPU clusters at scale using Ansible playbooks for consistent configuration across hundreds of nodes."
+publishDate: "2026-02-26"
+image: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+category: "Automation"
+author: "Luca Berton"
+tags: ["Slurm", "Ansible", "GPU", "Automation", "HPC"]
+draft: false
+lastModified: "2026-02-26"
+---
+
+Configuring Slurm manually on ten nodes is annoying. On a hundred nodes, it is impossible. On a thousand, it does not even come up as an option. Ansible is how you manage Slurm clusters at scale.
+
+I have built Ansible automation for GPU clusters from small departmental setups to multi-rack HPC installations. This is what works.
+
+## Cluster Architecture
+
+A typical GPU cluster has:
+
+```
+Control plane:
+  - slurmctl01, slurmctl02 (HA controllers)
+  - slurmdb01 (accounting database)
+
+Compute nodes:
+  - gpu-a100-[001-064] (64 A100 nodes)
+  - gpu-h100-[001-032] (32 H100 nodes)
+
+Infrastructure:
+  - nfs01 (shared storage)
+  - mon01 (monitoring)
+  - login01 (user access)
+```
+
+## Ansible Inventory
+
+```ini
+# inventory/gpu-cluster/hosts
+[slurm_controllers]
+slurmctl01 slurm_role=primary
+slurmctl02 slurm_role=backup
+
+[slurm_dbd]
+slurmdb01
+
+[gpu_a100]
+gpu-a100-[001:064]
+
+[gpu_h100]
+gpu-h100-[001:032]
+
+[gpu_nodes:children]
+gpu_a100
+gpu_h100
+
+[login]
+login01
+
+[all:vars]
+slurm_version=24.05
+```
+
+### Group Variables
+
+```yaml
+# inventory/gpu-cluster/group_vars/gpu_a100.yml
+gpu_type: a100
+gpus_per_node: 8
+gpu_gres: "gpu:a100:8"
+cpus_per_node: 128
+memory_mb: 1024000
+ib_interface: ib0
+```
+
+```yaml
+# inventory/gpu-cluster/group_vars/gpu_h100.yml
+gpu_type: h100
+gpus_per_node: 8
+gpu_gres: "gpu:h100:8"
+cpus_per_node: 192
+memory_mb: 2048000
+ib_interface: ib0
+```
+
+## Slurm Controller Role
+
+```yaml
+# roles/slurm-controller/tasks/main.yml
+---
+- name: Install Slurm controller packages
+  dnf:
+    name:
+      - slurm-slurmctld
+      - slurm-slurmd
+      - slurm-perlapi
+      - munge
+    state: present
+
+- name: Configure Munge authentication
+  copy:
+    src: munge.key
+    dest: /etc/munge/munge.key
+    owner: munge
+    group: munge
+    mode: '0400'
+  notify: restart munge
+
+- name: Deploy slurm.conf
+  template:
+    src: slurm.conf.j2
+    dest: /etc/slurm/slurm.conf
+    owner: slurm
+    group: slurm
+    mode: '0644'
+  notify: restart slurmctld
+
+- name: Deploy cgroup.conf
+  template:
+    src: cgroup.conf.j2
+    dest: /etc/slurm/cgroup.conf
+  notify: restart slurmctld
+
+- name: Enable and start slurmctld
+  systemd:
+    name: slurmctld
+    state: started
+    enabled: yes
+```
+
+### slurm.conf Template
+
+```jinja2
+# roles/slurm-controller/templates/slurm.conf.j2
+ClusterName={{ cluster_name }}
+SlurmctldHost={{ groups['slurm_controllers'][0] }}
+{% if groups['slurm_controllers'] | length > 1 %}
+SlurmctldHost={{ groups['slurm_controllers'][1] }}
+{% endif %}
+
+# Authentication
+AuthType=auth/munge
+CryptoType=crypto/munge
+
+# Scheduling
+SchedulerType=sched/backfill
+SelectType=select/cons_tres
+SelectTypeParameters=CR_Core_Memory
+GresTypes=gpu
+
+# Accounting
+AccountingStorageType=accounting_storage/slurmdbd
+AccountingStorageHost={{ groups['slurm_dbd'][0] }}
+JobAcctGatherType=jobacct_gather/cgroup
+
+# Priority
+PriorityType=priority/multifactor
+PriorityWeightFairshare=10000
+PriorityWeightAge=1000
+PriorityWeightJobSize=500
+
+# Logging
+SlurmctldLogFile=/var/log/slurm/slurmctld.log
+SlurmdLogFile=/var/log/slurm/slurmd.log
+
+# Node definitions
+{% for host in groups['gpu_a100'] %}
+NodeName={{ host }} CPUs={{ hostvars[host].cpus_per_node }} RealMemory={{ hostvars[host].memory_mb }} Gres={{ hostvars[host].gpu_gres }}
+{% endfor %}
+{% for host in groups['gpu_h100'] %}
+NodeName={{ host }} CPUs={{ hostvars[host].cpus_per_node }} RealMemory={{ hostvars[host].memory_mb }} Gres={{ hostvars[host].gpu_gres }}
+{% endfor %}
+
+# Partitions
+PartitionName=a100 Nodes={{ groups['gpu_a100'] | join(',') }} MaxTime=168:00:00 Default=YES
+PartitionName=h100 Nodes={{ groups['gpu_h100'] | join(',') }} MaxTime=168:00:00
+```
+
+## Compute Node Role
+
+```yaml
+# roles/slurm-compute/tasks/main.yml
+---
+- name: Install Slurm compute packages
+  dnf:
+    name:
+      - slurm-slurmd
+      - slurm-pam_slurm
+      - munge
+    state: present
+
+- name: Install NVIDIA drivers and CUDA
+  include_role:
+    name: nvidia-driver
+
+- name: Configure Munge
+  copy:
+    src: munge.key
+    dest: /etc/munge/munge.key
+    owner: munge
+    group: munge
+    mode: '0400'
+  notify: restart munge
+
+- name: Deploy slurm.conf
+  template:
+    src: slurm.conf.j2
+    dest: /etc/slurm/slurm.conf
+  notify: restart slurmd
+
+- name: Deploy gres.conf
+  template:
+    src: gres.conf.j2
+    dest: /etc/slurm/gres.conf
+  notify: restart slurmd
+
+- name: Configure cgroups for GPU isolation
+  template:
+    src: cgroup.conf.j2
+    dest: /etc/slurm/cgroup.conf
+  notify: restart slurmd
+
+- name: Enable and start slurmd
+  systemd:
+    name: slurmd
+    state: started
+    enabled: yes
+```
+
+### gres.conf Template
+
+```jinja2
+# roles/slurm-compute/templates/gres.conf.j2
+AutoDetect=nvml
+{% for i in range(gpus_per_node) %}
+Name=gpu Type={{ gpu_type }} File=/dev/nvidia{{ i }}
+{% endfor %}
+```
+
+## NVIDIA Driver Role
+
+```yaml
+# roles/nvidia-driver/tasks/main.yml
+---
+- name: Add NVIDIA CUDA repository
+  dnf:
+    name: "https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-repo-rhel9-12-4.repo"
+    state: present
+    disable_gpg_check: yes
+
+- name: Install NVIDIA driver and CUDA toolkit
+  dnf:
+    name:
+      - nvidia-driver-latest
+      - cuda-toolkit-12-4
+      - nvidia-fabricmanager
+      - datacenter-gpu-manager
+    state: present
+
+- name: Enable nvidia-fabricmanager (required for NVSwitch)
+  systemd:
+    name: nvidia-fabricmanager
+    state: started
+    enabled: yes
+
+- name: Verify GPU detection
+  command: nvidia-smi -L
+  register: gpu_list
+  changed_when: false
+
+- name: Display detected GPUs
+  debug:
+    var: gpu_list.stdout_lines
+```
+
+## Pyxis and Enroot Installation
+
+```yaml
+# roles/slurm-pyxis/tasks/main.yml
+---
+- name: Install Enroot
+  dnf:
+    name:
+      - enroot
+      - enroot+caps
+    state: present
+
+- name: Configure Enroot
+  template:
+    src: enroot.conf.j2
+    dest: /etc/enroot/enroot.conf
+  notify: restart slurmd
+
+- name: Clone and build Pyxis
+  git:
+    repo: https://github.com/NVIDIA/pyxis.git
+    dest: /opt/pyxis
+    version: "v{{ pyxis_version }}"
+
+- name: Build Pyxis
+  make:
+    chdir: /opt/pyxis
+
+- name: Install Pyxis
+  make:
+    chdir: /opt/pyxis
+    target: install
+
+- name: Configure Pyxis in Slurm
+  lineinfile:
+    path: /etc/slurm/plugstack.conf
+    line: "required /usr/local/lib/slurm/spank_pyxis.so"
+    create: yes
+  notify: restart slurmd
+```
+
+## Full Deployment Playbook
+
+```yaml
+# site.yml
+---
+- name: Deploy Slurm GPU Cluster
+  hosts: all
+  become: yes
+  roles:
+    - common
+    - munge
+
+- name: Configure GPU nodes
+  hosts: gpu_nodes
+  become: yes
+  roles:
+    - nvidia-driver
+    - slurm-compute
+    - slurm-pyxis
+    - dcgm-exporter
+
+- name: Configure Slurm controllers
+  hosts: slurm_controllers
+  become: yes
+  roles:
+    - slurm-controller
+
+- name: Configure accounting database
+  hosts: slurm_dbd
+  become: yes
+  roles:
+    - mariadb
+    - slurm-dbd
+
+- name: Configure login nodes
+  hosts: login
+  become: yes
+  roles:
+    - slurm-client
+```
+
+Deploy the entire cluster:
+
+```bash
+ansible-playbook -i inventory/gpu-cluster site.yml
+```
+
+Add new nodes:
+
+```bash
+ansible-playbook -i inventory/gpu-cluster site.yml --limit gpu-a100-065
+```
+
+## Rolling Updates
+
+Update Slurm across the cluster without downtime:
+
+```yaml
+# playbooks/rolling-update.yml
+---
+- name: Update compute nodes (rolling)
+  hosts: gpu_nodes
+  become: yes
+  serial: 10  # Update 10 nodes at a time
+  tasks:
+    - name: Drain node
+      command: scontrol update NodeName={{ inventory_hostname }} State=DRAIN Reason="Rolling update"
+      delegate_to: "{{ groups['slurm_controllers'][0] }}"
+
+    - name: Wait for running jobs to complete
+      command: squeue -w {{ inventory_hostname }} -h
+      register: running_jobs
+      until: running_jobs.stdout == ""
+      retries: 60
+      delay: 60
+      delegate_to: "{{ groups['slurm_controllers'][0] }}"
+
+    - name: Update packages
+      dnf:
+        name: slurm-slurmd
+        state: latest
+
+    - name: Restart slurmd
+      systemd:
+        name: slurmd
+        state: restarted
+
+    - name: Resume node
+      command: scontrol update NodeName={{ inventory_hostname }} State=RESUME
+      delegate_to: "{{ groups['slurm_controllers'][0] }}"
+```
+
+This drains each batch of nodes, waits for running jobs to finish, updates, and brings them back.
+
+## What I Recommend
+
+1. **Version-pin everything** — Slurm, NVIDIA drivers, CUDA. Mismatched versions cause silent failures
+2. **Test in a staging partition first** — keep two nodes for testing updates before rolling to production
+3. **Store munge.key in Ansible Vault** — it is the authentication secret for your entire cluster
+4. **Use tags** — `ansible-playbook site.yml --tags slurm-config` to update just Slurm configuration without touching drivers
+
+For more on [Ansible automation at scale](https://www.ansiblepilot.com/), see the [collections best practices guide](/blog/ansible-collections-best-practices/) and the [Ansible Lightspeed AI integration](/blog/ansible-lightspeed-ai-automation-2026/).
+
+Connect on [LinkedIn](https://www.linkedin.com/in/lucaberton/) or check the [CopyPaste Learn Academy](https://www.copypastelearn.com/) for hands-on courses.

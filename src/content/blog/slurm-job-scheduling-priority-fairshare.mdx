@@ -1,0 +1,217 @@
+---
+title: "Slurm Job Scheduling, Priority, and Fair-Share"
+snippet: "Configure Slurm scheduling policies for GPU clusters with fair-share, preemption, backfill, and QOS for multi-team environments."
+publishDate: "2026-02-26"
+image: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["Slurm", "Scheduling", "GPU", "HPC", "Fair-Share"]
+draft: false
+lastModified: "2026-02-26"
+---
+
+A GPU cluster without good scheduling policies is a political problem disguised as a technical one. Team A complains that Team B hogs all the GPUs. Urgent inference jobs wait behind week-long training runs. The CEO's demo is stuck in queue.
+
+Slurm's scheduling system is powerful enough to handle all of this, but only if you configure it correctly.
+
+## The Priority System
+
+Slurm calculates a priority score for each pending job:
+
+```
+Priority = (Age × AgeFactor) + (FairShare × FairShareFactor) +
+           (JobSize × JobSizeFactor) + (QOS × QOSFactor) +
+           (Partition × PartitionFactor)
+```
+
+The job with the highest priority runs next when resources become available.
+
+### Enabling Multi-Factor Priority
+
+```bash
+# slurm.conf
+PriorityType=priority/multifactor
+PriorityWeightAge=1000
+PriorityWeightFairshare=10000
+PriorityWeightJobSize=500
+PriorityWeightQOS=5000
+PriorityWeightPartition=2000
+PriorityDecayHalfLife=7-0
+PriorityMaxAge=7-0
+```
+
+The weights determine which factor matters most. In this config, fair-share dominates — teams that have used fewer resources recently get higher priority.
+
+## Fair-Share Scheduling
+
+Fair-share prevents any team from monopolizing the cluster. It tracks historical usage and penalizes heavy consumers.
+
+### Setting Up Accounts and Shares
+
+```bash
+# Create a cluster
+sacctmgr add cluster gpu-cluster
+
+# Create accounts (teams) with share allocations
+sacctmgr add account ml-research Share=40
+sacctmgr add account ml-platform Share=30
+sacctmgr add account data-science Share=20
+sacctmgr add account executives Share=10
+
+# Add users to accounts
+sacctmgr add user alice Account=ml-research
+sacctmgr add user bob Account=ml-platform
+```
+
+Shares are relative weights, not absolute quotas. If ml-research has Share=40 and ml-platform has Share=30, ml-research gets roughly 57% of the cluster when both are competing.
+
+### Checking Fair-Share Status
+
+```bash
+sshare -a -l
+```
+
+This shows each account's target share, actual usage, and resulting fair-share factor. A factor above 1.0 means the account has used less than its share (higher priority). Below 1.0 means it has used more (lower priority).
+
+## Quality of Service (QOS)
+
+QOS policies let you define job classes with different limits and priorities:
+
+```bash
+# High-priority QOS for urgent production jobs
+sacctmgr add qos urgent Priority=10000 MaxTRES=gpu=32 MaxWall=4:00:00
+
+# Standard QOS for regular training
+sacctmgr add qos standard Priority=1000 MaxTRES=gpu=64 MaxWall=72:00:00
+
+# Low-priority QOS for research experiments
+sacctmgr add qos research Priority=100 MaxTRES=gpu=16 MaxWall=168:00:00 \
+  Preempt=cluster
+```
+
+Users specify QOS when submitting:
+
+```bash
+#SBATCH --qos=urgent
+```
+
+## Preemption
+
+Preemption lets high-priority jobs take resources from lower-priority ones:
+
+```bash
+# slurm.conf
+PreemptType=preempt/qos
+PreemptMode=REQUEUE
+PreemptExemptTime=00:30:00  # Grace period before preemption
+```
+
+When an `urgent` job needs GPUs and the cluster is full, Slurm requeues `research` jobs (because we set `Preempt=cluster` on the research QOS).
+
+Combined with [checkpointing](/blog/slurm-multi-node-distributed-training/), preempted training jobs resume from their last checkpoint automatically.
+
+## Backfill Scheduling
+
+Backfill is essential for GPU cluster utilization. Without it, small jobs wait behind large jobs even when resources are available:
+
+```bash
+# slurm.conf
+SchedulerType=sched/backfill
+SchedulerParameters=bf_max_job_test=5000,bf_interval=30,bf_resolution=600
+```
+
+Backfill works by looking at the estimated end time of running jobs. If a small job can complete before the next large job needs those resources, it starts immediately.
+
+This is why `--time` matters. Jobs without time limits cannot be backfilled effectively.
+
+## Partition Design for GPU Clusters
+
+Separate GPU types and use cases into partitions:
+
+```bash
+# slurm.conf
+PartitionName=a100-training Nodes=a100-node[01-16] MaxTime=168:00:00 \
+  Default=NO AllowQos=standard,urgent Priority=100
+
+PartitionName=h100-training Nodes=h100-node[01-08] MaxTime=168:00:00 \
+  Default=NO AllowQos=standard,urgent Priority=200
+
+PartitionName=inference Nodes=inf-node[01-04] MaxTime=24:00:00 \
+  Default=NO AllowQos=urgent Priority=300
+
+PartitionName=dev Nodes=dev-node[01-02] MaxTime=8:00:00 \
+  Default=YES AllowQos=standard,research Priority=50
+```
+
+This keeps inference nodes available for production serving and prevents training jobs from starving interactive development work.
+
+## Resource Limits
+
+Prevent any single user or team from consuming too much:
+
+```bash
+# Per-account limits
+sacctmgr modify account ml-research set MaxTRES=gpu=64 MaxJobs=20 MaxSubmitJobs=50
+
+# Per-user limits
+sacctmgr modify user alice set MaxTRES=gpu=16 MaxJobs=5
+```
+
+### TRES (Trackable Resources)
+
+Slurm tracks GPUs as TRES (Trackable RESource):
+
+```bash
+# slurm.conf
+AccountingStorageTRES=gres/gpu,gres/gpu:a100,gres/gpu:h100
+```
+
+This lets you set limits per GPU type:
+
+```bash
+sacctmgr modify account data-science set MaxTRES=gres/gpu:h100=8
+```
+
+The data science team gets at most 8 H100 GPUs but can use more A100s.
+
+## Monitoring and Reporting
+
+### Cluster Utilization
+
+```bash
+# Current cluster state
+sinfo -N -l --format="%N %P %T %G %C %m"
+
+# GPU utilization over time
+sreport cluster utilization Start=2026-01-01 End=2026-03-01
+
+# Per-account GPU-hours
+sreport cluster AccountUtilizationByUser Start=2026-01-01 \
+  format=Account,Login,Used,TRESName
+```
+
+### Job Wait Time Analysis
+
+```bash
+# Average wait time by partition
+sacct --starttime=2026-01-01 --format=Partition,Elapsed,Reserved \
+  --parsable2 | awk -F'|' '{print $1, $3}' | sort | uniq -c
+```
+
+High wait times indicate you need more capacity or better scheduling policies.
+
+## Practical Recommendations
+
+1. **Start with fair-share** — it solves 80% of scheduling conflicts without manual intervention
+2. **Always set `--time`** — enables backfill and prevents runaway jobs
+3. **Use preemption sparingly** — only for genuinely urgent work, not to game priority
+4. **Monitor utilization weekly** — under 70% GPU utilization means your scheduling is too conservative
+5. **Separate partitions by GPU type** — users who need A100 MIG should not block H100 training
+
+For automated Slurm cluster management, [Ansible playbooks](/blog/ansible-gpu-cluster-provisioning/) handle configuration drift across hundreds of nodes. The [AnsiblePilot](https://www.ansiblepilot.com/) project has ready-made roles for HPC infrastructure.
+
+## Further Reading
+
+- [Slurm documentation](https://slurm.schedmd.com/)
+- [NVIDIA GPU Operator](/blog/nvidia-gpu-operator-complete-setup-guide/) for Kubernetes-managed GPU infrastructure
+- [GPU Cost Calculator](/gpu-cost-calculator/) to estimate your GPU infrastructure costs

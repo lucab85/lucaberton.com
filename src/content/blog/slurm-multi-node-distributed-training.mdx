@@ -1,0 +1,260 @@
+---
+title: "Slurm Multi-Node Distributed AI Training"
+snippet: "How to run distributed PyTorch and DeepSpeed training across multiple GPU nodes using Slurm with NCCL and InfiniBand."
+publishDate: "2026-02-26"
+image: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["Slurm", "Distributed Training", "PyTorch", "NCCL", "GPU"]
+draft: false
+lastModified: "2026-02-26"
+---
+
+Single-node training hits a ceiling fast. When your model does not fit on eight GPUs, or training takes weeks instead of days, you need multi-node distributed training. Slurm is the scheduler that makes this manageable.
+
+I have debugged enough distributed training failures to know where things break. This is a practical guide to getting multi-node GPU training working reliably with Slurm.
+
+## The Distributed Training Stack
+
+A multi-node training job involves several layers:
+
+```
+Your training script (PyTorch / DeepSpeed)
+    ↓
+torch.distributed / DeepSpeed runtime
+    ↓
+NCCL (GPU-to-GPU communication)
+    ↓
+InfiniBand / RoCE (network fabric)
+    ↓
+Slurm (resource allocation and job launch)
+```
+
+Slurm handles the bottom layer — allocating nodes, setting up the environment, launching processes, and cleaning up when the job finishes or fails.
+
+## Basic Multi-Node Job Script
+
+Here is a real-world Slurm batch script for distributed PyTorch training:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=llm-pretrain
+#SBATCH --partition=gpu-large
+#SBATCH --nodes=8
+#SBATCH --gres=gpu:h100:8
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=96
+#SBATCH --mem=0
+#SBATCH --exclusive
+#SBATCH --time=168:00:00
+#SBATCH --output=logs/pretrain_%j.log
+#SBATCH --error=logs/pretrain_%j.err
+
+# NCCL configuration
+export NCCL_IB_DISABLE=0
+export NCCL_IB_GID_INDEX=3
+export NCCL_NET_GDR_LEVEL=5
+export NCCL_TOPO_DUMP_FILE=/tmp/nccl_topo_${SLURM_JOB_ID}.xml
+
+# Get master node address
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
+export MASTER_PORT=29500
+export WORLD_SIZE=$((SLURM_NNODES * 8))
+
+srun --kill-on-bad-exit=1 bash -c '
+  export LOCAL_RANK=$SLURM_LOCALID
+  export RANK=$((SLURM_NODEID * 8 + SLURM_LOCALID))
+  torchrun \
+    --nproc_per_node=8 \
+    --nnodes=$SLURM_NNODES \
+    --node_rank=$SLURM_NODEID \
+    --master_addr=$MASTER_ADDR \
+    --master_port=$MASTER_PORT \
+    train.py \
+      --model-config configs/7b.yaml \
+      --data-path /shared/datasets/pile \
+      --checkpoint-dir /shared/checkpoints/$SLURM_JOB_ID
+'
+```
+
+Key decisions in this script:
+
+- **`--ntasks-per-node=1`** with `torchrun` handling per-GPU processes internally
+- **`--exclusive`** ensures no other jobs share the nodes
+- **`--mem=0`** allocates all available memory
+- **NCCL environment variables** tuned for InfiniBand with [GPUDirect RDMA](/blog/nvidia-gpu-operator-gds-gpudirect-storage/)
+
+## NCCL Tuning for Multi-Node
+
+NCCL (NVIDIA Collective Communications Library) is the communication backbone. Getting it right is the difference between 50% and 90% scaling efficiency.
+
+### Essential NCCL Variables
+
+```bash
+# Enable InfiniBand
+export NCCL_IB_DISABLE=0
+
+# Use GPUDirect RDMA (bypass CPU for GPU-to-GPU across nodes)
+export NCCL_NET_GDR_LEVEL=5
+
+# Pin to correct InfiniBand port
+export NCCL_IB_HCA=mlx5
+
+# Socket interface for out-of-band communication
+export NCCL_SOCKET_IFNAME=eth0
+
+# Debug logging (use for troubleshooting, disable in production)
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=INIT,NET
+```
+
+### Verifying NCCL Performance
+
+Before running real training, test all-reduce bandwidth:
+
+```bash
+#!/bin/bash
+#SBATCH --nodes=2
+#SBATCH --gres=gpu:8
+#SBATCH --ntasks-per-node=8
+
+srun /usr/local/bin/all_reduce_perf \
+  -b 8 -e 4G -f 2 -g 1 -c 1 -n 100
+```
+
+You should see bandwidth close to your InfiniBand line rate (200 Gbps for HDR, 400 Gbps for NDR). If you see significantly less, check your [MOFED driver configuration](/blog/nvidia-gpu-operator-mofed-driver-policy/) and [network topology](/blog/nvidia-network-operator-kubernetes-rdma/).
+
+## DeepSpeed on Slurm
+
+[DeepSpeed](https://github.com/microsoft/DeepSpeed) adds ZeRO optimization, pipeline parallelism, and mixed precision. Here is a Slurm script for DeepSpeed:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=deepspeed-train
+#SBATCH --nodes=4
+#SBATCH --gres=gpu:a100:8
+#SBATCH --ntasks-per-node=1
+#SBATCH --exclusive
+
+export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n1)
+export MASTER_PORT=29500
+
+# Generate hostfile for DeepSpeed
+scontrol show hostnames $SLURM_JOB_NODELIST | \
+  while read host; do echo "$host slots=8"; done > /tmp/hostfile_${SLURM_JOB_ID}
+
+srun deepspeed \
+  --hostfile /tmp/hostfile_${SLURM_JOB_ID} \
+  --master_addr $MASTER_ADDR \
+  --master_port $MASTER_PORT \
+  train.py \
+    --deepspeed \
+    --deepspeed_config configs/ds_zero3.json
+```
+
+### DeepSpeed ZeRO-3 Config
+
+```json
+{
+  "train_batch_size": 256,
+  "gradient_accumulation_steps": 4,
+  "fp16": { "enabled": true },
+  "zero_optimization": {
+    "stage": 3,
+    "offload_optimizer": { "device": "none" },
+    "offload_param": { "device": "none" },
+    "overlap_comm": true,
+    "contiguous_gradients": true,
+    "reduce_bucket_size": 5e8
+  }
+}
+```
+
+## Checkpointing Strategy
+
+Long training jobs will fail. Plan for it:
+
+```bash
+#SBATCH --signal=B:USR1@120  # Send signal 120s before time limit
+#SBATCH --requeue            # Automatically requeue on preemption
+
+# In your training script, handle SIGUSR1:
+trap 'echo "Saving checkpoint..."; kill -INT $PID' USR1
+```
+
+Save checkpoints to shared storage (NFS, Lustre, or GPFS) every N steps. When the job restarts, it resumes from the latest checkpoint.
+
+```python
+# In your PyTorch training loop
+if step % checkpoint_interval == 0:
+    torch.save({
+        'step': step,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'loss': loss,
+    }, f'/shared/checkpoints/{job_id}/step_{step}.pt')
+```
+
+## Job Arrays for Hyperparameter Sweeps
+
+Slurm job arrays are perfect for parallel experiments:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=hparam-sweep
+#SBATCH --array=0-19
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=16
+
+LEARNING_RATES=(1e-5 2e-5 5e-5 1e-4 2e-4)
+BATCH_SIZES=(8 16 32 64)
+
+LR_IDX=$((SLURM_ARRAY_TASK_ID / 4))
+BS_IDX=$((SLURM_ARRAY_TASK_ID % 4))
+
+python train.py \
+  --lr ${LEARNING_RATES[$LR_IDX]} \
+  --batch-size ${BATCH_SIZES[$BS_IDX]} \
+  --output results/run_${SLURM_ARRAY_TASK_ID}
+```
+
+This launches 20 single-GPU jobs covering all learning rate and batch size combinations.
+
+## Common Failures and Fixes
+
+**NCCL timeout on multi-node**: Usually a firewall or network config issue. Ensure all GPU nodes can reach each other on the NCCL port range.
+
+```bash
+# Check connectivity
+srun --nodes=2 bash -c 'hostname && ibstat | grep State'
+```
+
+**OOM on large models**: Use DeepSpeed ZeRO-3 or FSDP to shard model parameters across GPUs.
+
+**Hanging jobs**: Set `NCCL_DEBUG=INFO` and check for asymmetric collective operations. One node entering all-reduce while another has not reached it yet is the most common cause.
+
+**Slow data loading**: Use parallel data loaders and ensure your shared filesystem can handle the I/O. Consider staging data to local NVMe before training starts.
+
+## Monitoring GPU Utilization
+
+Track cluster-wide GPU usage:
+
+```bash
+# Real-time GPU status across all nodes
+srun --nodes=$SLURM_JOB_NUM_NODES nvidia-smi --query-gpu=name,utilization.gpu,memory.used --format=csv
+
+# Historical accounting
+sacct -j $SLURM_JOB_ID --format=JobID,Elapsed,MaxRSS,TRESUsageInTot
+```
+
+For deeper observability, integrate with [OpenTelemetry](/blog/opentelemetry-kubernetes-observability-2026/) or NVIDIA DCGM (Data Center GPU Manager).
+
+## What I Recommend
+
+Start with a two-node test before scaling to your full cluster. Get NCCL all-reduce working at line rate first — if the communication layer is slow, nothing else matters.
+
+Use Slurm's `--exclusive` flag for training jobs. GPU memory fragmentation from shared nodes causes mysterious OOMs.
+
+Invest in checkpointing from day one. A 72-hour training job that fails at hour 60 with no checkpoint is an expensive lesson.
+
+For help designing your distributed training infrastructure, visit my [services page](/services/) or explore [AnsiblePilot](https://www.ansiblepilot.com/) for automated GPU cluster provisioning.

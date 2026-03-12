@@ -1,0 +1,203 @@
+---
+title: "Slurm for GPU Clusters: The Workload Manager"
+snippet: "Slurm is the dominant workload manager for GPU clusters and HPC. How to configure it for NVIDIA GPUs, MIG, and AI training jobs."
+publishDate: "2026-02-26"
+image: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["Slurm", "GPU", "HPC", "NVIDIA", "AI"]
+draft: false
+lastModified: "2026-02-26"
+---
+
+If you are running GPU infrastructure at scale, you will eventually meet Slurm. It is the workload manager behind six of the top ten supercomputers in the world, and it is the standard scheduler for AI training clusters running NVIDIA hardware.
+
+I have worked with Slurm in environments ranging from a handful of GPU nodes to multi-thousand node clusters. This is how it works, why it dominates, and how to configure it for modern AI workloads.
+
+## What Slurm Actually Does
+
+Slurm (Simple Linux Utility for Resource Management) handles three things:
+
+1. **Resource allocation** — decides which nodes and GPUs your job gets
+2. **Job scheduling** — queues, prioritizes, and dispatches work
+3. **Job monitoring** — tracks running jobs, handles failures, collects accounting data
+
+It is open source, maintained by [SchedMD](https://www.schedmd.com/), and scales to millions of cores and tens of thousands of GPUs.
+
+## Why Slurm Dominates GPU/AI Infrastructure
+
+[Kubernetes](https://kubernetes.recipes/) is great for microservices. But for HPC and large-scale AI training, Slurm wins because:
+
+- **Native GPU awareness** — Slurm understands NVIDIA GPUs as first-class resources (GRES)
+- **MIG support** — schedule jobs on specific [Multi-Instance GPU partitions](/blog/nvidia-gpu-operator-mig-partitioning/)
+- **Topology-aware scheduling** — places jobs on nodes connected by NVLink or InfiniBand for maximum throughput
+- **No container overhead** — jobs run directly on bare metal when needed
+- **Mature accounting** — track GPU-hours by user, project, or department
+
+## Core Architecture
+
+A minimal Slurm cluster has three components:
+
+```
+slurmctld (controller) → manages the cluster
+slurmd (daemon)        → runs on each compute node
+slurmdbd (database)    → optional accounting daemon
+```
+
+The controller is the brain. It maintains the job queue, tracks node states, and dispatches work. Every compute node runs `slurmd`, which receives and executes jobs.
+
+## Configuring Slurm for NVIDIA GPUs
+
+GPU resources are configured through the Generic Resource (GRES) system. You need two files.
+
+### slurm.conf — Cluster Configuration
+
+```bash
+# Define GPU resources on nodes
+GresTypes=gpu
+NodeName=gpu-node[01-08] Gres=gpu:a100:8 CPUs=128 RealMemory=1024000
+PartitionName=training Nodes=gpu-node[01-08] Default=YES MaxTime=72:00:00
+```
+
+### gres.conf — GPU Details Per Node
+
+```bash
+# /etc/slurm/gres.conf on each GPU node
+AutoDetect=nvml
+Name=gpu Type=a100 File=/dev/nvidia[0-7]
+```
+
+The `AutoDetect=nvml` option uses NVIDIA Management Library to automatically detect GPU properties. This is the recommended approach for modern setups.
+
+## Submitting GPU Jobs
+
+A basic GPU training job submission:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=llm-finetune
+#SBATCH --partition=training
+#SBATCH --nodes=4
+#SBATCH --gres=gpu:a100:8
+#SBATCH --ntasks-per-node=8
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=900G
+#SBATCH --time=48:00:00
+#SBATCH --output=training_%j.log
+
+module load cuda/12.4
+module load nccl/2.21
+
+srun torchrun \
+  --nproc_per_node=8 \
+  --nnodes=4 \
+  --rdzv_backend=c10d \
+  train.py --config configs/finetune.yaml
+```
+
+Submit it:
+
+```bash
+sbatch train.sh
+```
+
+Check GPU utilization across the cluster:
+
+```bash
+squeue --format="%.18i %.9P %.30j %.8u %.8T %.10M %.6D %R %b"
+```
+
+## MIG Partitioning with Slurm
+
+For multi-tenant clusters, [MIG partitioning](/blog/nvidia-gpu-operator-mig-partitioning/) lets you split A100 or H100 GPUs into isolated instances. Slurm supports this natively:
+
+```bash
+# gres.conf for MIG instances
+Name=gpu Type=a100_3g.20gb File=/dev/nvidia[0-7] Cores=[0-1]
+Name=gpu Type=a100_1g.5gb File=/dev/nvidia[0-7] Cores=[2-3]
+```
+
+Users request specific MIG profiles:
+
+```bash
+#SBATCH --gres=gpu:a100_3g.20gb:1
+```
+
+This is how you run inference workloads alongside training without interference.
+
+## Slurm vs Kubernetes for AI Workloads
+
+| Aspect | Slurm | Kubernetes |
+|--------|-------|------------|
+| **Best for** | HPC, large training jobs | Microservices, inference |
+| **GPU scheduling** | Native GRES, topology-aware | Device plugin, less mature |
+| **Multi-node training** | First-class support | Requires operators (MPI, PyTorch) |
+| **Overhead** | Minimal | Container + orchestration |
+| **Learning curve** | HPC community | Cloud-native community |
+
+Many organizations run both: Slurm for training, [Kubernetes for inference and serving](/blog/nvidia-gpu-operator-complete-setup-guide/). The [NVIDIA GPU Operator](/blog/nvidia-gpu-operator-mofed-driver-policy/) bridges the Kubernetes side.
+
+## InfiniBand and RDMA Integration
+
+For distributed training, network topology matters. Slurm's topology-aware scheduling places multi-node jobs on nodes sharing the same InfiniBand fabric:
+
+```bash
+# topology.conf
+SwitchName=leaf1 Nodes=gpu-node[01-04]
+SwitchName=leaf2 Nodes=gpu-node[05-08]
+SwitchName=spine1 Switches=leaf1:leaf2
+```
+
+Combined with [MOFED drivers](/blog/nvidia-gpu-operator-mofed-driver-policy/) and [RDMA networking](/blog/nvidia-network-operator-kubernetes-rdma/), this ensures your all-reduce operations run at line rate.
+
+## Job Accounting and GPU Tracking
+
+Enable accounting to track GPU usage by team:
+
+```bash
+# slurm.conf
+AccountingStorageType=accounting_storage/slurmdbd
+AccountingStorageHost=slurmdb01
+JobAcctGatherType=jobacct_gather/linux
+```
+
+Query GPU-hours per user:
+
+```bash
+sacct --format=JobID,User,Partition,AllocGRES,Elapsed,State \
+  --starttime=2026-01-01 --endtime=2026-03-01
+```
+
+This is essential for chargeback models in shared GPU clusters.
+
+## Pyxis and Enroot: Containers on Slurm
+
+You do not have to choose between bare metal and containers. NVIDIA's [Pyxis](https://github.com/NVIDIA/pyxis) plugin lets you run container images directly within Slurm jobs:
+
+```bash
+srun --container-image=nvcr.io/nvidia/pytorch:24.03-py3 \
+     --container-mounts=/data:/data \
+     python train.py
+```
+
+[Enroot](https://github.com/NVIDIA/enroot) handles the container runtime underneath. It is faster than Docker for HPC workloads because it avoids the daemon overhead.
+
+## Getting Started
+
+For a small GPU cluster:
+
+1. Install Slurm packages from [SchedMD](https://www.schedmd.com/)
+2. Configure `slurm.conf` with your node inventory
+3. Set up `gres.conf` with `AutoDetect=nvml`
+4. Start `slurmctld` on the controller, `slurmd` on compute nodes
+5. Submit your first job with `sbatch`
+
+For production clusters, consider [Ansible automation](/blog/ansible-gpu-cluster-provisioning/) to manage Slurm configuration across hundreds of nodes. Tools like [DeepOps](https://github.com/NVIDIA/DeepOps) provide ready-made playbooks.
+
+## What I Recommend
+
+If you are building a GPU cluster for AI training, start with Slurm. It is battle-tested, the NVIDIA ecosystem assumes it, and the operational overhead is lower than Kubernetes for batch workloads.
+
+If you need both training and inference, run Slurm for the training partition and Kubernetes for the inference serving layer. The GPUs can even be the same physical hardware, managed by different schedulers on different node pools.
+
+For consulting on GPU infrastructure architecture, check my [services](/services/) or connect on [LinkedIn](https://www.linkedin.com/in/lucaberton/).

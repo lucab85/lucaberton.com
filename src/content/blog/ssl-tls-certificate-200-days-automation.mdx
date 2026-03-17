@@ -1,0 +1,152 @@
+---
+title: "SSL/TLS Certificates Drop to 200 Days Maximum"
+snippet: "SSL/TLS certificate lifetimes dropped from 398 to 200 days on March 15, 2026. What this means for your infrastructure and how to automate renewal."
+publishDate: "2026-03-17"
+image: { src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg", alt: "SSL TLS Certificate Shorter Lifetime 200 Days Automation" }
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["Security", "SSL", "TLS", "Automation", "DevOps"]
+draft: false
+lastModified: "2026-03-17"
+---
+
+As of **March 15, 2026**, the maximum lifetime for SSL/TLS certificates and Domain Control Validation (DCV) has dropped from 398 days to **200 days**. If you manage certificates manually, your operational burden just doubled.
+
+This is not a surprise — the CA/Browser Forum has been pushing for shorter certificate lifetimes for years. But the practical impact on engineering teams is significant.
+
+## What Changed
+
+Previously, you could issue an SSL/TLS certificate valid for up to 398 days (roughly 13 months). Now the maximum is 200 days (roughly 6.5 months). Domain validation reuse periods have been shortened as well.
+
+This means:
+
+- **More frequent renewals** — certificates expire nearly twice as often
+- **Shorter DCV windows** — domain ownership must be re-validated more frequently
+- **Higher operational load** — every certificate in your infrastructure needs attention more often
+
+If you manage 10 certificates manually, this is annoying. If you manage 100 or more across multiple environments, this is a crisis waiting to happen.
+
+## Why Shorter Lifetimes
+
+The rationale is straightforward: shorter certificate lifetimes reduce the window of exposure if a private key is compromised. A stolen key for a certificate that expires in 200 days is less dangerous than one valid for 398 days.
+
+Shorter lifetimes also force organizations to maintain working renewal processes. A certificate that auto-renews every 60 days proves your automation works. A certificate renewed manually once a year is a single point of failure you forget about until it breaks at 3 AM.
+
+The trajectory is clear. The CA/Browser Forum is moving toward even shorter lifetimes — potentially 90 days or less in the future. Google has been advocating for 90-day maximums. This 200-day step is an intermediate milestone.
+
+## The Real Problem: Manual Certificate Management
+
+The shorter lifetime is not the problem. The problem is that many organizations still manage certificates manually:
+
+- **No centralized inventory** — nobody knows how many certificates exist or when they expire
+- **Manual renewal processes** — someone has to remember, generate a CSR, validate, download, and install
+- **Scattered across environments** — load balancers, CDNs, Kubernetes ingress controllers, API gateways, mail servers
+- **No alerting** — expired certificates discovered when users complain
+
+With 398-day certificates, you could get away with this (barely). With 200-day certificates, manual management becomes unsustainable.
+
+## How to Automate Certificate Lifecycle
+
+### ACME and Let's Encrypt
+
+The most straightforward path to automation is [ACME](https://datatracker.ietf.org/doc/html/rfc8555) (Automatic Certificate Management Environment) with a provider like Let's Encrypt. Certificates are issued for 90 days and renewed automatically — you never think about expiry.
+
+For web servers:
+
+```bash
+# Certbot auto-renewal (runs as cron/systemd timer)
+certbot renew --quiet --deploy-hook "systemctl reload nginx"
+```
+
+### cert-manager in Kubernetes
+
+If you are running [Kubernetes](/blog/kubernetes-recipes-mindset-cto-platform-strategy/), **cert-manager** is the standard. It automates issuance and renewal for TLS certificates across your cluster:
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: api-tls
+  namespace: production
+spec:
+  secretName: api-tls-secret
+  duration: 2160h    # 90 days
+  renewBefore: 360h  # renew 15 days before expiry
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - api.example.com
+    - "*.api.example.com"
+```
+
+cert-manager handles the entire lifecycle: CSR generation, ACME challenge completion, certificate storage in Kubernetes Secrets, and automatic renewal before expiry. Combined with an [ingress controller](/blog/kubernetes-recipes-mindset-cto-platform-strategy/) or service mesh, your TLS is fully automated.
+
+### Ansible for Non-Kubernetes Infrastructure
+
+For traditional infrastructure — load balancers, reverse proxies, mail servers — [Ansible](/blog/ansible-automation-at-scale/) can automate certificate deployment:
+
+```yaml
+- name: Renew and deploy certificates
+  hosts: webservers
+  tasks:
+    - name: Run certbot renewal
+      command: certbot renew --quiet
+      register: certbot_result
+
+    - name: Reload nginx if renewed
+      service:
+        name: nginx
+        state: reloaded
+      when: certbot_result.changed
+```
+
+Integrate this into your [automation pipelines](/blog/event-driven-ansible-reactive-automation/) and certificate renewal becomes a non-event.
+
+### HashiCorp Vault PKI
+
+For internal certificates (service-to-service mTLS, internal APIs), HashiCorp Vault's PKI secrets engine lets you issue short-lived certificates on demand:
+
+```bash
+vault write pki/issue/internal-service \
+  common_name="service.internal" \
+  ttl="72h"
+```
+
+Short-lived internal certificates combined with automated rotation eliminate certificate management entirely for internal traffic.
+
+## Building a Certificate Inventory
+
+Before you can automate, you need visibility. Audit your infrastructure:
+
+1. **Scan all endpoints** — use tools like `ssl-cert-check`, Qualys SSL Labs, or Nmap to discover certificates
+2. **Document every certificate** — domain, issuer, expiry, location, responsible team
+3. **Set up monitoring** — [Prometheus](/blog/opentelemetry-kubernetes-observability-2026/) exporters like `blackbox_exporter` can track certificate expiry across all endpoints
+4. **Alert early** — trigger alerts at 30, 14, and 7 days before expiry
+
+```yaml
+# Prometheus alerting rule
+- alert: CertificateExpiringSoon
+  expr: probe_ssl_earliest_cert_expiry - time() < 86400 * 14
+  for: 1h
+  labels:
+    severity: warning
+  annotations:
+    summary: "Certificate expires in less than 14 days"
+```
+
+## What This Means for Platform Engineers
+
+If you are building [internal developer platforms](/blog/devex-internal-developer-platform/), certificate management should be invisible to application teams. They should never have to think about TLS — the platform handles it.
+
+The 200-day maximum accelerates a trend that was already inevitable: **certificate management must be automated**. Organizations that treat this as a one-time fix will be back in the same situation when lifetimes drop to 90 days.
+
+For enterprises with [compliance requirements](/blog/ai-automation-guardrails-enterprise-governance/), shorter certificate lifetimes actually help — they reduce the risk window and force demonstrable automation practices that auditors want to see.
+
+## The Bottom Line
+
+The shift from 398 to 200 days is not a technical problem. It is an organizational one. The technology to automate certificate lifecycle has existed for years. The question is whether your organization has adopted it.
+
+If you are still managing certificates manually, this is your forcing function. Invest in automation now, before the next reduction to 90 days makes it an emergency.
+
+For more on building automated, resilient [cloud infrastructure](/blog/architecture-scale-ai-enterprise-platform/) and [Kubernetes platforms](/blog/kubernetes-transform-unlock-roi-business-value/), connect with me on [LinkedIn](https://www.linkedin.com/in/lucaberton/) or explore hands-on courses at [CopyPaste Learn Academy](https://www.copypastelearn.com/).

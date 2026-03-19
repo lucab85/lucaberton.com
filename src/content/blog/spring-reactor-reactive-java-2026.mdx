@@ -1,0 +1,274 @@
+---
+draft: false
+title: "Spring Reactor in 2026: When to Use Reactive Java and When to Walk Away"
+snippet: "Spring WebFlux and Project Reactor promised non-blocking Java at scale. With virtual threads now mainstream, here is an honest assessment of when reactive still wins and when you should switch back to blocking code."
+description: "Spring WebFlux and Project Reactor promised non-blocking Java at scale. With virtual threads now mainstream, here is an honest assessment of when reactive still wins and when you should switch back to blocking code."
+publishDate: "2026-03-19"
+lastModified: "2026-03-19"
+image:
+  src: "/blog/thumbnails/spring-reactor-reactive-java-2026.jpg"
+  alt: "Spring Reactor and reactive Java in 2026"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "java"
+  - "spring-reactor"
+  - "spring-webflux"
+  - "reactive"
+  - "virtual-threads"
+  - "project-loom"
+  - "spring-boot"
+  - "performance"
+---
+
+## The reactive revolution that almost happened
+
+When Spring WebFlux and Project Reactor launched, the pitch was compelling: non-blocking I/O, backpressure, massive concurrency — all without the thread-per-request model that limited traditional Spring MVC.
+
+The reality was more painful. Reactive code is harder to write, harder to debug, harder to hire for, and harder to reason about. Stack traces become meaningless. Simple CRUD operations turn into `Mono`/`Flux` chains that nobody enjoys maintaining.
+
+Now Java 21 virtual threads offer a third option: write blocking code that scales like reactive. So where does that leave Spring Reactor in 2026?
+
+## How Reactor works under the hood
+
+Project Reactor implements the Reactive Streams specification. The core types:
+
+- **`Mono<T>`** — 0 or 1 element (like `Optional` but async)
+- **`Flux<T>`** — 0 to N elements (like `Stream` but async with backpressure)
+
+```java
+// Traditional Spring MVC (blocking)
+@GetMapping("/users/{id}")
+public User getUser(@PathVariable Long id) {
+    return userService.findById(id); // Thread blocked during DB call
+}
+
+// Spring WebFlux (reactive)
+@GetMapping("/users/{id}")
+public Mono<User> getUser(@PathVariable Long id) {
+    return userService.findById(id); // Returns immediately, executes async
+}
+```
+
+The key insight: Reactor uses a small number of event loop threads (typically equal to CPU cores) and multiplexes thousands of requests across them. No request blocks a thread — everything is callbacks under the hood.
+
+```
+Spring MVC:     200 threads → 200 concurrent requests → thread pool exhaustion
+Spring WebFlux: 8 threads   → 10,000+ concurrent requests → event loop
+```
+
+## The operator model
+
+Reactor's power comes from its operators — composable transformations on async streams:
+
+```java
+public Flux<OrderSummary> getRecentOrders(String userId) {
+    return userRepository.findById(userId)                    // Mono<User>
+        .flatMapMany(user -> orderRepository.findByUser(user)) // Flux<Order>
+        .filter(order -> order.getDate().isAfter(thirtyDaysAgo))
+        .flatMap(order -> enrichWithProducts(order))           // Async enrichment
+        .map(this::toSummary)                                  // Transform
+        .sort(Comparator.comparing(OrderSummary::getDate).reversed())
+        .take(10);                                             // Backpressure: only 10
+}
+```
+
+This is elegant when it works. The problem is error handling, debugging, and what happens when the chain grows to 30+ operators.
+
+## Where Reactor still wins in 2026
+
+### 1. Streaming data
+
+Virtual threads are great for request-response. But for continuous data streams — Server-Sent Events, WebSockets, real-time feeds — Reactor's `Flux` model is natural:
+
+```java
+@GetMapping(value = "/metrics/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+public Flux<ServerSentEvent<MetricSnapshot>> streamMetrics() {
+    return Flux.interval(Duration.ofSeconds(1))
+        .flatMap(tick -> metricsService.getCurrentSnapshot())
+        .map(snapshot -> ServerSentEvent.<MetricSnapshot>builder()
+            .data(snapshot)
+            .build())
+        .doOnCancel(() -> log.info("Client disconnected"));
+}
+```
+
+Virtual threads cannot express "emit one element per second forever" as cleanly.
+
+### 2. Backpressure across services
+
+When your consumer is slower than your producer, backpressure prevents memory blowout:
+
+```java
+// Producer generates 10,000 events/sec
+// Consumer processes 100 events/sec
+// Without backpressure: OOM in seconds
+// With Reactor: producer slows to consumer's pace
+
+kafkaReceiver.receive()
+    .groupBy(record -> record.key())
+    .flatMap(group -> group
+        .concatMap(record -> processSlowly(record))  // Sequential per key
+        .sample(Duration.ofMillis(100)),              // Rate limit
+        256)                                          // Max concurrency
+    .subscribe();
+```
+
+### 3. Fan-out/fan-in patterns
+
+When you need to call 5 services in parallel and combine results:
+
+```java
+public Mono<DashboardData> buildDashboard(String userId) {
+    Mono<UserProfile> profile = userService.getProfile(userId);
+    Mono<List<Order>> orders = orderService.getRecent(userId);
+    Mono<AccountBalance> balance = billingService.getBalance(userId);
+    Mono<List<Notification>> notifications = notifService.getUnread(userId);
+    Mono<RecommendationSet> recs = recoService.getForUser(userId);
+
+    return Mono.zip(profile, orders, balance, notifications, recs)
+        .map(tuple -> new DashboardData(
+            tuple.getT1(), tuple.getT2(), tuple.getT3(),
+            tuple.getT4(), tuple.getT5()
+        ))
+        .timeout(Duration.ofSeconds(3))
+        .onErrorResume(e -> buildDegradedDashboard(userId));
+}
+```
+
+Virtual threads can do this with `StructuredTaskScope`, but Reactor's timeout and fallback operators are more mature.
+
+### 4. Gateway and proxy patterns
+
+API gateways that proxy thousands of concurrent connections with minimal resource usage:
+
+```java
+// Spring Cloud Gateway uses Reactor internally
+// 50,000 concurrent connections on 4 CPU cores
+// Virtual threads would need 50,000 carrier thread switches
+// Reactor event loop handles it natively
+```
+
+## Where virtual threads win (and Reactor should retire)
+
+### Simple CRUD services
+
+```java
+// DON'T DO THIS in 2026:
+public Mono<User> createUser(CreateUserRequest request) {
+    return Mono.just(request)
+        .map(this::validateRequest)
+        .flatMap(req -> userRepository.save(toEntity(req)))
+        .map(this::toResponse)
+        .onErrorMap(DuplicateKeyException.class, 
+            e -> new ConflictException("User already exists"));
+}
+
+// DO THIS INSTEAD (with virtual threads):
+public User createUser(CreateUserRequest request) {
+    validateRequest(request);
+    try {
+        return toResponse(userRepository.save(toEntity(request)));
+    } catch (DuplicateKeyException e) {
+        throw new ConflictException("User already exists");
+    }
+}
+```
+
+The blocking version is readable, debuggable, and with virtual threads, scales just as well.
+
+### Services with JDBC/Hibernate
+
+As I covered in my post on [JDBC and virtual threads](/blog/jdbc-virtual-threads-hibernate-java-problems/), reactive requires R2DBC which loses Hibernate's ORM. If your domain model relies on lazy loading, entity graphs, and cascade operations, stick with blocking Hibernate + virtual threads.
+
+### Teams without reactive experience
+
+Reactive code has a steep learning curve. If your team writes imperative Java and you need to ship features, virtual threads give you scalability without rewriting your mental model.
+
+## The honest comparison
+
+```
+                        Spring MVC +          Spring WebFlux +
+                        Virtual Threads       Project Reactor
+─────────────────────────────────────────────────────────────
+Code readability        ★★★★★                ★★☆☆☆
+Debugging               ★★★★★                ★★☆☆☆
+Stack traces            Normal                Useless
+Learning curve          Low                   High
+Hire-ability            Easy                  Hard
+Streaming data          Manual                ★★★★★
+Backpressure            Manual                ★★★★★
+Max concurrency         Very high             Very high
+Memory per request      Low                   Very low
+JDBC/Hibernate support  Full                  R2DBC only
+Ecosystem maturity      25 years              8 years
+```
+
+## Migration strategy: reactive to virtual threads
+
+If you have an existing WebFlux application and want to simplify:
+
+### Phase 1: Identify candidates
+
+```bash
+# Find simple Mono chains that are just wrapping blocking calls
+grep -r "Mono.fromCallable\|Mono.fromSupplier\|Mono.defer" src/
+# These are usually blocking operations wrapped in reactive — prime migration targets
+```
+
+### Phase 2: Convert endpoint by endpoint
+
+```java
+// Before: reactive wrapper around blocking service
+@GetMapping("/orders/{id}")
+public Mono<Order> getOrder(@PathVariable Long id) {
+    return Mono.fromCallable(() -> orderService.findById(id))
+        .subscribeOn(Schedulers.boundedElastic());
+}
+
+// After: simple blocking with virtual threads
+@GetMapping("/orders/{id}")
+public Order getOrder(@PathVariable Long id) {
+    return orderService.findById(id);
+}
+```
+
+### Phase 3: Keep reactive where it adds value
+
+Do not migrate streaming endpoints, WebSocket handlers, or services with genuine backpressure requirements.
+
+### Phase 4: Update dependencies
+
+```xml
+<!-- Remove -->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-webflux</artifactId>
+</dependency>
+
+<!-- Add -->
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-web</artifactId>
+</dependency>
+```
+
+```yaml
+# Enable virtual threads
+spring:
+  threads:
+    virtual:
+      enabled: true
+```
+
+## My take
+
+Spring Reactor solved a real problem: Java could not handle massive concurrency with platform threads. In 2020, if you needed 10,000 concurrent connections on a 4-core server, reactive was the only answer.
+
+In 2026, virtual threads solve the same concurrency problem with simpler code. Reactor is still the right choice for streaming, backpressure, and gateway patterns. But for the 80% of Java services that are request-response CRUD, virtual threads with Spring MVC is the pragmatic choice.
+
+The best architecture uses both: virtual threads for your domain services, Reactor for your edge gateways and event processors. No dogma — just the right tool for each job.
+
+---
+
+*Modernizing your Java microservices architecture? [Let's discuss](/contact/) performance optimization, migration strategies, and cloud native deployment patterns.*

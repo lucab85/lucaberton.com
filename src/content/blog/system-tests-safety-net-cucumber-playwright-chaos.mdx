@@ -1,0 +1,378 @@
+---
+draft: false
+title: "System Tests as a Safety Net: End-to-End Validation with Cucumber, Playwright, and Chaos Engineering"
+snippet: "Why system tests are your most valuable safety net — covering major use cases, validating lifecycle updates like Keycloak, enabling security testing with ZAP, chaos testing with Toxiproxy, and auto-generating documentation."
+description: "Why system tests are your most valuable safety net — covering major use cases, validating lifecycle updates like Keycloak, chaos testing with Toxiproxy, security scanning with ZAP, and living documentation generation."
+publishDate: "2026-03-19"
+lastModified: "2026-03-19"
+image:
+  src: "/blog/thumbnails/system-tests-safety-net-cucumber-playwright-chaos.jpg"
+  alt: "System tests as safety net with Cucumber Playwright and chaos engineering"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "testing"
+  - "system-tests"
+  - "cucumber"
+  - "playwright"
+  - "chaos-engineering"
+  - "toxiproxy"
+  - "zap"
+  - "keycloak"
+  - "ci-cd"
+---
+
+## The most undervalued test layer
+
+Unit tests are fast. Integration tests catch interface bugs. But **system tests** — the ones that exercise your entire application end-to-end, the way a real user would — are where the real safety net lives.
+
+I have seen teams with 90% unit test coverage ship broken releases because nobody tested the actual user journey. The login flow worked in isolation. The API worked in isolation. But together, with Keycloak in the middle, through a reverse proxy, with real network latency? Broken.
+
+System tests catch what nothing else can: **the emergent behavior of your whole system working together**.
+
+## The testing stack
+
+The combination that makes this work:
+
+- **Cucumber** — behavior-driven scenarios in plain English
+- **Playwright** — browser automation that is fast and reliable
+- **REST Assured** — API-level validation
+- **Docker Compose / Testcontainers** — spin up the full environment
+
+```gherkin
+# login.feature
+Feature: User authentication through Keycloak
+
+  Scenario: User logs in with valid credentials
+    Given the application is running
+    And Keycloak is configured with realm "production"
+    When I navigate to the login page
+    And I enter username "testuser" and password "secure123"
+    And I click "Sign In"
+    Then I should be redirected to the dashboard
+    And I should see "Welcome, Test User"
+    And the JWT token should contain role "user"
+```
+
+```java
+// LoginSteps.java
+@Given("the application is running")
+public void applicationIsRunning() {
+    playwright.page().navigate(appUrl);
+    assertThat(playwright.page().title()).isNotEmpty();
+}
+
+@When("I enter username {string} and password {string}")
+public void enterCredentials(String username, String password) {
+    // Keycloak login page
+    playwright.page().fill("#username", username);
+    playwright.page().fill("#password", password);
+}
+
+@Then("the JWT token should contain role {string}")
+public void jwtContainsRole(String role) {
+    String token = playwright.page().evaluate(
+        "() => localStorage.getItem('access_token')"
+    ).toString();
+    Claims claims = Jwts.parser()
+        .verifyWith(publicKey)
+        .build()
+        .parseSignedClaims(token)
+        .getPayload();
+    assertThat(claims.get("roles", List.class)).contains(role);
+}
+```
+
+## The real value: four capabilities unlocked
+
+### 1. Safety net — all major use cases covered
+
+When your system tests cover the critical user journeys, every deployment becomes safer:
+
+```gherkin
+Feature: Order processing end-to-end
+
+  Scenario: Complete purchase flow
+    Given user "alice" is authenticated
+    And product "GPU-H200" is in stock
+    When alice adds "GPU-H200" to cart
+    And alice proceeds to checkout
+    And alice enters payment details
+    And alice confirms the order
+    Then the order status should be "confirmed"
+    And an email should be sent to alice
+    And inventory for "GPU-H200" should decrease by 1
+    And the payment service should have processed EUR 35000
+```
+
+This single scenario validates: authentication, product catalog, cart service, checkout flow, payment processing, email notifications, and inventory management. Seven services, one test.
+
+The safety net is not about catching every bug — it is about **guaranteeing the critical paths never break silently**.
+
+### 2. Quickly validate lifecycle updates
+
+This is where system tests pay for themselves ten times over. When you upgrade a dependency like **Keycloak** from 24.x to 25.x:
+
+```yaml
+# docker-compose.system-test.yml
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0  # Updated from 24.0
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+    command: start-dev --import-realm
+    volumes:
+      - ./test-realm.json:/opt/keycloak/data/import/realm.json
+```
+
+Run the system tests. If they pass, the Keycloak upgrade is safe for your application. No manual testing needed. No "let's try it in staging and click around." The tests prove it.
+
+This applies to any lifecycle management (LCM) update:
+
+- **Database upgrades** — PostgreSQL 16 to 17
+- **Runtime upgrades** — Java 21 to 22
+- **Framework upgrades** — Spring Boot 3.3 to 3.4
+- **Infrastructure changes** — new ingress controller, updated TLS config
+- **Identity provider changes** — Keycloak realm restructuring, OIDC flow changes
+
+```bash
+# CI pipeline: validate Keycloak upgrade
+docker compose -f docker-compose.system-test.yml up -d
+./gradlew systemTest
+# All green? Merge the upgrade PR.
+```
+
+### 3. Security testing with ZAP proxy
+
+Here is where it gets powerful. The same system tests that validate functionality can simultaneously run **security scans**:
+
+```yaml
+services:
+  zap:
+    image: ghcr.io/zaproxy/zaproxy:stable
+    command: zap.sh -daemon -host 0.0.0.0 -port 8090 
+             -config api.disablekey=true
+    ports:
+      - "8090:8090"
+```
+
+Configure Playwright to route through ZAP as a proxy:
+
+```java
+// SystemTestConfig.java
+Browser browser = playwright.chromium().launch(
+    new BrowserType.LaunchOptions()
+        .setProxy(new Proxy("http://zap:8090"))
+);
+```
+
+Now every page navigation, every API call, every form submission during your system tests is also being scanned by ZAP for:
+
+- SQL injection vulnerabilities
+- Cross-site scripting (XSS)
+- Insecure headers
+- Authentication bypass
+- Session management issues
+- CSRF vulnerabilities
+
+```java
+@AfterAll
+static void generateSecurityReport() {
+    // Pull ZAP results after all system tests complete
+    String report = given()
+        .baseUri("http://zap:8090")
+        .get("/OTHER/core/other/htmlreport/")
+        .asString();
+    
+    Files.writeString(Path.of("build/reports/zap-report.html"), report);
+    
+    // Fail the build if high-severity issues found
+    JsonPath alerts = given()
+        .baseUri("http://zap:8090")
+        .get("/JSON/alert/view/alertsSummary/")
+        .jsonPath();
+    
+    int highAlerts = alerts.getInt("alertsSummary.High");
+    assertThat(highAlerts).isZero();
+}
+```
+
+You get security testing for free — no separate security test suite, no additional test scenarios. The functional tests **are** the security tests.
+
+### 4. Living documentation with Cucumber
+
+Cucumber scenarios are written in Gherkin — plain English that non-technical stakeholders can read. When your system tests pass, the scenarios become **verified documentation**:
+
+```bash
+# Generate living documentation
+./gradlew systemTest
+./gradlew generateCucumberReport
+```
+
+The output: an HTML report showing every feature, every scenario, with pass/fail status. This documentation is:
+
+- **Always up-to-date** — it is generated from tests that just ran
+- **Always accurate** — if the behavior changes, the test fails, the docs get updated
+- **Stakeholder-readable** — product owners can review what the system actually does
+
+```gherkin
+Feature: Multi-tenant isolation
+  As a tenant administrator
+  I want my data isolated from other tenants
+  So that there is no cross-tenant data leakage
+
+  Scenario: Tenant A cannot see Tenant B data
+    Given user "admin-a" is authenticated in tenant "acme"
+    And user "admin-b" has created project "secret-project" in tenant "globex"
+    When "admin-a" searches for "secret-project"
+    Then the search results should be empty
+    And the API should return 0 results for tenant "acme"
+```
+
+This scenario is simultaneously a test, a security validation, and a documentation artifact. When auditors ask "how do you ensure tenant isolation?" — you point them to this.
+
+### 5. Chaos testing with Toxiproxy
+
+Toxiproxy simulates network failures between your services. Combined with system tests, you can validate resilience:
+
+```yaml
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:latest
+    ports:
+      - "8474:8474"    # API
+      - "19092:19092"  # Proxied Kafka
+      - "15432:15432"  # Proxied PostgreSQL
+```
+
+```java
+// Configure toxic conditions
+ToxiproxyClient client = new ToxiproxyClient("toxiproxy", 8474);
+
+// Create proxy for PostgreSQL
+Proxy dbProxy = client.createProxy(
+    "postgresql", "0.0.0.0:15432", "postgres:5432"
+);
+
+// Add 500ms latency to database calls
+dbProxy.toxics().latency("db-slow", ToxicDirection.DOWNSTREAM, 500);
+```
+
+```gherkin
+Feature: Resilience under degraded conditions
+
+  Scenario: Application handles slow database gracefully
+    Given the database has 500ms added latency
+    When I submit a search query
+    Then I should see results within 3 seconds
+    And no error page should be displayed
+
+  Scenario: Application handles database outage
+    Given the database connection is severed
+    When I navigate to the dashboard
+    Then I should see a degraded dashboard with cached data
+    And an alert should be logged
+
+  Scenario: Application recovers after database reconnection
+    Given the database connection was severed
+    When the database connection is restored
+    And I refresh the page
+    Then the dashboard should show live data within 10 seconds
+```
+
+This validates your circuit breakers, fallbacks, retry logic, and timeout configurations — under realistic failure conditions.
+
+## The architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    System Tests                      │
+│                                                      │
+│  Cucumber ──→ Playwright (browser)                  │
+│           ──→ REST Assured (API)                    │
+│           ──→ Assertions                            │
+│                    │                                 │
+│         ┌──────────┼──────────┐                     │
+│         ▼          ▼          ▼                      │
+│    ┌─────────┐ ┌───────┐ ┌──────────┐              │
+│    │ ZAP     │ │ Toxi  │ │ Cucumber │              │
+│    │ Proxy   │ │ proxy │ │ Reports  │              │
+│    │(security)│ │(chaos)│ │ (docs)   │              │
+│    └─────────┘ └───────┘ └──────────┘              │
+│                    │                                 │
+│    ┌───────────────┼────────────────────┐           │
+│    ▼               ▼                    ▼           │
+│ ┌──────┐    ┌──────────┐    ┌──────────────┐       │
+│ │ App  │    │ Keycloak │    │  PostgreSQL  │       │
+│ │      │◄──►│  (OIDC)  │    │              │       │
+│ └──────┘    └──────────┘    └──────────────┘       │
+│    Docker Compose / Testcontainers                   │
+└─────────────────────────────────────────────────────┘
+```
+
+One test run produces:
+
+1. **Functional validation** — do the features work?
+2. **Security report** — are there vulnerabilities?
+3. **Living documentation** — what does the system do?
+4. **Resilience validation** — does it handle failures?
+5. **Upgrade safety** — is the new dependency compatible?
+
+## CI/CD integration
+
+```yaml
+# .github/workflows/system-test.yml
+name: System Tests
+on:
+  pull_request:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 6 AM
+
+jobs:
+  system-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Start environment
+        run: docker compose -f docker-compose.system-test.yml up -d --wait
+      
+      - name: Run system tests
+        run: ./gradlew systemTest
+      
+      - name: Generate reports
+        if: always()
+        run: |
+          ./gradlew generateCucumberReport
+          curl http://localhost:8090/OTHER/core/other/htmlreport/ > zap-report.html
+      
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: system-test-reports
+          path: |
+            build/reports/cucumber/
+            zap-report.html
+      
+      - name: Fail on security issues
+        run: |
+          HIGH=$(curl -s http://localhost:8090/JSON/alert/view/alertsSummary/ \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['alertsSummary']['High'])")
+          [ "$HIGH" -eq 0 ] || exit 1
+```
+
+## My take
+
+System tests are expensive to write and slower to run than unit tests. That is true. But they are the only tests that answer the question that actually matters: **does the system work?**
+
+The multiplier effect is what makes them worth it. One test suite validates functionality, security, resilience, and generates documentation. You write the test once and get four capabilities. That is not expensive — that is efficient.
+
+Start with five scenarios covering your critical user journeys. Then add ZAP, then Toxiproxy, then Cucumber reports. Each layer costs almost nothing to add because the test infrastructure already exists.
+
+The system test is not just a test. It is your safety net, your security scanner, your documentation engine, and your chaos lab — all in one.
+
+---
+
+*Building a robust testing strategy for your platform? [Get in touch](/contact/) for consulting on test automation, CI/CD pipelines, and quality engineering.*

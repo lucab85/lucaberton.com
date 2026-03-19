@@ -1,0 +1,272 @@
+---
+draft: false
+title: "Why JDBC Breaks with Virtual Threads and Hibernate in Java"
+snippet: "JDBC connection pools and Hibernate were designed for platform threads. Virtual threads expose pinning, pool exhaustion, and session-per-thread assumptions that can crash your Java application under load."
+description: "JDBC connection pools and Hibernate were designed for platform threads. Virtual threads expose pinning, pool exhaustion, and session-per-thread assumptions that can crash your Java application under load."
+publishDate: "2026-03-19"
+lastModified: "2026-03-19"
+image:
+  src: "/blog/thumbnails/jdbc-virtual-threads-hibernate-java-problems.jpg"
+  alt: "JDBC and Virtual Threads problems with Hibernate in Java"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "java"
+  - "virtual-threads"
+  - "jdbc"
+  - "hibernate"
+  - "project-loom"
+  - "performance"
+  - "spring-boot"
+  - "database"
+---
+
+## The promise vs the reality
+
+Java 21 made virtual threads a first-class feature. The promise: millions of lightweight threads, massively concurrent I/O, no more reactive spaghetti. Just write blocking code and the runtime handles the rest.
+
+Then you enable virtual threads in your Spring Boot app, hit it with load, and everything falls apart. Connections leak, threads pin to carriers, Hibernate sessions corrupt, and your connection pool becomes the bottleneck it was never designed to handle.
+
+Here is why, and what you can do about it.
+
+## The fundamental mismatch
+
+Virtual threads are designed for **high-concurrency I/O**. The JVM can schedule millions of them because they yield their carrier thread during blocking operations (network I/O, sleep, etc.).
+
+JDBC and Hibernate were designed for **platform threads** — a world where you have maybe 200 threads in a pool, each holding a database connection for the duration of a request.
+
+The collision:
+
+- **Virtual threads**: "I can run 100,000 concurrent requests"
+- **Connection pool**: "I have 20 connections"
+- **Result**: 99,980 virtual threads waiting for a connection, pool exhaustion, timeouts
+
+```java
+// This looks innocent with virtual threads
+@GetMapping("/users/{id}")
+public User getUser(@PathVariable Long id) {
+    return userRepository.findById(id).orElseThrow();
+    // With platform threads: 200 concurrent requests, 20 connections = fine
+    // With virtual threads: 100,000 concurrent requests, 20 connections = disaster
+}
+```
+
+## Problem 1: Thread pinning with synchronized blocks
+
+Virtual threads yield their carrier thread during blocking I/O — but **not inside synchronized blocks**. This is called "pinning." The virtual thread holds onto its carrier, preventing other virtual threads from using it.
+
+JDBC drivers are full of `synchronized`:
+
+```java
+// Inside most JDBC drivers
+public class ConnectionImpl {
+    public synchronized PreparedStatement prepareStatement(String sql) {
+        // Virtual thread is PINNED here
+        // Carrier thread is blocked, cannot serve other virtual threads
+        return new PreparedStatementImpl(this, sql);
+    }
+}
+```
+
+Hibernate compounds this with its own synchronized blocks around session management, first-level cache access, and flush operations.
+
+The effect under load: your carrier thread pool (typically equal to CPU cores) saturates. Virtual threads queue up waiting for carriers, and throughput **drops below** what you had with platform threads.
+
+### How to detect pinning
+
+```bash
+# JVM flag to log pinning events
+-Djdk.tracePinnedThreads=full
+
+# Output looks like:
+# Thread[#14,ForkJoinPool-1-worker-1,5,CarrierThreads]
+#     java.base/java.lang.VirtualThread$VThreadContinuation.onPinned
+#     com.mysql.cj.jdbc.ConnectionImpl.prepareStatement(ConnectionImpl.java:1234)
+```
+
+## Problem 2: Connection pool exhaustion
+
+HikariCP (the default Spring Boot pool) sizes its pool based on platform thread assumptions. The classic formula:
+
+```
+connections = (core_count * 2) + effective_spindle_count
+```
+
+For a 4-core server, that gives you ~10 connections. With platform threads and a 200-thread pool, utilization stays healthy.
+
+With virtual threads, you suddenly have thousands of concurrent requests all wanting a connection:
+
+```java
+// HikariCP config that worked fine before virtual threads
+spring.datasource.hikari.maximum-pool-size=10
+spring.datasource.hikari.connection-timeout=30000
+
+// With virtual threads under load:
+// - 5,000 virtual threads request connections simultaneously
+// - 10 connections available
+// - 4,990 threads block waiting
+// - Connection timeout → HikariPool-1 - Connection is not available
+```
+
+Increasing the pool size is not the answer. PostgreSQL defaults to 100 max connections. MySQL defaults to 151. Your database cannot handle thousands of concurrent connections, which is exactly what virtual threads want to give it.
+
+## Problem 3: Hibernate session-per-thread
+
+Hibernate's `Session` is **not thread-safe**. The standard pattern binds one Session to one thread via `ThreadLocal`:
+
+```java
+// Spring's OpenSessionInViewFilter / @Transactional
+// Binds a Hibernate Session to the current thread
+Session session = sessionFactory.getCurrentSession();
+// This works because platform threads are reused from a bounded pool
+```
+
+With virtual threads, the assumptions break:
+
+1. **ThreadLocal behavior changes** — virtual threads use `ThreadLocal` correctly, but the sheer number of threads means thousands of Sessions exist simultaneously, consuming memory
+2. **Session lifecycle** — if a virtual thread is preempted mid-transaction and resumed later, the Session state must be consistent. Hibernate was never tested for this scale of concurrency
+3. **First-level cache bloat** — each Session maintains a first-level cache. 10,000 concurrent Sessions = 10,000 caches in memory
+
+```java
+// With platform threads: ~200 Sessions at peak
+// With virtual threads: potentially thousands of Sessions
+// Each Session holds: entity cache, dirty tracking state, 
+// JDBC connection reference, pending SQL statements
+```
+
+## Problem 4: Transaction isolation surprises
+
+Hibernate uses `synchronized` internally for flush operations and dirty checking. Combined with virtual thread pinning:
+
+```java
+@Transactional
+public void transferFunds(Long from, Long to, BigDecimal amount) {
+    Account sender = accountRepo.findById(from).orElseThrow();
+    Account receiver = accountRepo.findById(to).orElseThrow();
+    
+    sender.debit(amount);   // Dirty tracking in Session (synchronized)
+    receiver.credit(amount); // More dirty tracking
+    
+    // flush() at commit — synchronized block in Hibernate
+    // Virtual thread pinned during entire flush
+    // If flush involves multiple SQL statements, carrier is blocked
+}
+```
+
+Under high concurrency with virtual threads, this can lead to:
+
+- Carrier thread starvation during bulk flush operations
+- Increased transaction duration due to queuing
+- Deadlocks between pinned virtual threads holding different connections
+
+## What actually works today
+
+### 1. Use ReentrantLock-based JDBC drivers
+
+Some JDBC drivers have replaced `synchronized` with `ReentrantLock`, which virtual threads **can** yield on:
+
+```xml
+<!-- PostgreSQL JDBC 42.7+ has virtual thread improvements -->
+<dependency>
+    <groupId>org.postgresql</groupId>
+    <artifactId>postgresql</artifactId>
+    <version>42.7.4</version>
+</dependency>
+```
+
+MySQL Connector/J 9.x also has improvements, but check the release notes for your specific version.
+
+### 2. Use Semaphore-based connection limiting
+
+Instead of relying solely on HikariCP's pool size, add a Semaphore to limit concurrent database access:
+
+```java
+@Component
+public class DatabaseAccessLimiter {
+    // Allow max 50 concurrent database operations
+    private final Semaphore semaphore = new Semaphore(50);
+    
+    public <T> T executeWithLimit(Supplier<T> dbOperation) {
+        try {
+            semaphore.acquire();
+            return dbOperation.get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Database access interrupted", e);
+        } finally {
+            semaphore.release();
+        }
+    }
+}
+```
+
+### 3. Size your connection pool deliberately
+
+```yaml
+# For virtual threads, think about database capacity, not thread count
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 50  # Based on what your DB can handle
+      minimum-idle: 10
+      connection-timeout: 5000  # Fail fast instead of queueing
+```
+
+### 4. Consider reactive alternatives for hot paths
+
+For the highest-throughput endpoints, consider using R2DBC or reactive Hibernate:
+
+```java
+// R2DBC — truly non-blocking, no pinning issues
+@Repository
+public interface UserRepository extends ReactiveCrudRepository<User, Long> {
+    Mono<User> findByEmail(String email);
+}
+```
+
+The tradeoff: you lose Hibernate's rich ORM features. For CRUD operations, it is fine. For complex domain models with lazy loading and cascades, it is painful.
+
+### 5. Spring Boot 3.2+ virtual thread support
+
+Spring Boot 3.2+ has explicit virtual thread support, but you need to understand what it changes:
+
+```yaml
+spring:
+  threads:
+    virtual:
+      enabled: true  # Creates virtual threads for request handling
+```
+
+This enables virtual threads for the web layer but does **not** fix the underlying JDBC/Hibernate issues. You still need the connection pool and driver fixes above.
+
+## The deeper issue: blocking APIs in a non-blocking world
+
+The real problem is architectural. Virtual threads make blocking **cheap** at the thread level, but they do not make blocking cheap at the **resource** level. Your database still has finite connections, finite memory, and finite I/O.
+
+Virtual threads remove the thread-per-request bottleneck but expose the next bottleneck: **resources per request**. In most Java applications, that resource is the database connection.
+
+```
+Platform threads:    Thread pool (200) → Connection pool (20) → Database
+                     Bottleneck here ↑
+
+Virtual threads:     Virtual threads (∞) → Connection pool (20) → Database
+                                           Bottleneck here ↑
+```
+
+The bottleneck moved. Your code needs to move with it.
+
+## My recommendation
+
+For most Spring Boot applications in 2026:
+
+1. **Enable virtual threads** for I/O-heavy services (HTTP clients, file I/O, message queues)
+2. **Keep platform threads** for database-heavy services until your JDBC driver fully supports virtual threads
+3. **Add Semaphore guards** around database access if you do use virtual threads
+4. **Monitor pinning** with `-Djdk.tracePinnedThreads=short` in production
+5. **Test under realistic load** — the problems only appear at scale
+
+Virtual threads are genuinely transformative for Java concurrency. But JDBC and Hibernate carry 20 years of platform thread assumptions. That gap is closing, but it is not closed yet.
+
+---
+
+*Dealing with Java performance challenges in your cloud infrastructure? [Let's talk](/contact/) about optimizing your application stack for modern deployment patterns.*

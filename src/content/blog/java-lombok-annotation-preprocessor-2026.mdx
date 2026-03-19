@@ -1,0 +1,425 @@
+---
+draft: false
+title: "Project Lombok in 2026: The Java Annotation Preprocessor You Love to Debate"
+snippet: "A practical guide to Lombok — how annotation preprocessing works, essential annotations like @Data and @Builder, IDE integration, the virtual threads and records debate, and when to use it versus modern Java alternatives."
+description: "A practical guide to Lombok — how annotation preprocessing works, essential annotations like @Data and @Builder, IDE integration, the virtual threads and records debate, and when to use it versus modern Java alternatives."
+publishDate: "2026-03-19"
+lastModified: "2026-03-19"
+image:
+  src: "/blog/thumbnails/java-lombok-annotation-preprocessor-2026.jpg"
+  alt: "Java Lombok annotation preprocessor in 2026"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "java"
+  - "lombok"
+  - "annotation-processing"
+  - "spring-boot"
+  - "developer-experience"
+  - "code-generation"
+---
+
+## What Lombok actually does
+
+Project Lombok is an **annotation preprocessor** that plugs into the Java compilation pipeline. It reads annotations on your classes and generates bytecode — getters, setters, constructors, builders, equals/hashCode, toString — at compile time. The generated code never exists in your source files.
+
+```java
+// Without Lombok: 80 lines
+public class User {
+    private Long id;
+    private String name;
+    private String email;
+    private LocalDateTime createdAt;
+
+    public User() {}
+    
+    public User(Long id, String name, String email, LocalDateTime createdAt) {
+        this.id = id;
+        this.name = name;
+        this.email = email;
+        this.createdAt = createdAt;
+    }
+
+    public Long getId() { return id; }
+    public void setId(Long id) { this.id = id; }
+    public String getName() { return name; }
+    public void setName(String name) { this.name = name; }
+    // ... 50 more lines of getters, setters, equals, hashCode, toString
+}
+
+// With Lombok: 8 lines
+@Data
+@AllArgsConstructor
+@NoArgsConstructor
+public class User {
+    private Long id;
+    private String name;
+    private String email;
+    private LocalDateTime createdAt;
+}
+```
+
+Same bytecode. Same behavior. 90% less boilerplate.
+
+## How annotation preprocessing works
+
+Lombok hooks into `javac` using the **Java Annotation Processing API** (JSR 269) — but with a twist. Standard annotation processors can only *generate new files*. Lombok modifies the **Abstract Syntax Tree (AST)** of existing classes, which is technically using internal compiler APIs.
+
+The compilation flow:
+
+```
+Source code (.java)
+       │
+       ▼
+   javac parses → AST (Abstract Syntax Tree)
+       │
+       ▼
+   Lombok intercepts AST
+       │
+       ▼
+   Lombok modifies AST (adds methods, constructors, etc.)
+       │
+       ▼
+   javac continues compilation → bytecode (.class)
+       │
+       ▼
+   Your IDE reads Lombok annotations → shows generated methods
+```
+
+```xml
+<!-- Maven setup -->
+<dependency>
+    <groupId>org.projectlombok</groupId>
+    <artifactId>lombok</artifactId>
+    <version>1.18.34</version>
+    <scope>provided</scope>
+</dependency>
+
+<!-- Compiler plugin configuration -->
+<plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-compiler-plugin</artifactId>
+    <configuration>
+        <annotationProcessorPaths>
+            <path>
+                <groupId>org.projectlombok</groupId>
+                <artifactId>lombok</artifactId>
+                <version>1.18.34</version>
+            </path>
+        </annotationProcessorPaths>
+    </configuration>
+</plugin>
+```
+
+```groovy
+// Gradle setup
+dependencies {
+    compileOnly 'org.projectlombok:lombok:1.18.34'
+    annotationProcessor 'org.projectlombok:lombok:1.18.34'
+}
+```
+
+## The essential annotations
+
+### @Data — the kitchen sink
+
+Generates `@Getter`, `@Setter`, `@ToString`, `@EqualsAndHashCode`, and `@RequiredArgsConstructor`:
+
+```java
+@Data
+public class Order {
+    private final Long id;          // getter only (final = no setter)
+    private String status;          // getter + setter
+    private BigDecimal total;       // getter + setter
+    private LocalDateTime created;  // getter + setter
+}
+```
+
+### @Builder — fluent object construction
+
+```java
+@Builder
+@Data
+public class DeploymentConfig {
+    private String namespace;
+    private String image;
+    private int replicas;
+    @Builder.Default
+    private String pullPolicy = "IfNotPresent";
+    @Singular
+    private List<String> envVars;
+}
+
+// Usage
+DeploymentConfig config = DeploymentConfig.builder()
+    .namespace("production")
+    .image("myapp:v2.1")
+    .replicas(3)
+    .envVar("DB_HOST=postgres.svc")
+    .envVar("CACHE_HOST=redis.svc")
+    .build();
+```
+
+### @Slf4j — logger injection
+
+```java
+@Slf4j
+@Service
+public class PaymentService {
+    
+    public PaymentResult process(PaymentRequest request) {
+        log.info("Processing payment for order {}", request.getOrderId());
+        // log is automatically: 
+        // private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
+        
+        try {
+            PaymentResult result = gateway.charge(request);
+            log.debug("Payment succeeded: {}", result.getTransactionId());
+            return result;
+        } catch (PaymentException e) {
+            log.error("Payment failed for order {}", request.getOrderId(), e);
+            throw e;
+        }
+    }
+}
+```
+
+### @Value — immutable data classes
+
+```java
+@Value
+public class Money {
+    BigDecimal amount;
+    String currency;
+    // All fields are private final
+    // Only getters, no setters
+    // equals/hashCode based on all fields
+}
+```
+
+### @With — immutable copy-on-modify
+
+```java
+@Value
+@With
+public class AppConfig {
+    String dbHost;
+    int dbPort;
+    boolean sslEnabled;
+}
+
+// Create modified copy without mutation
+AppConfig prod = new AppConfig("db.prod", 5432, true);
+AppConfig staging = prod.withDbHost("db.staging").withSslEnabled(false);
+```
+
+### @SneakyThrows — checked exception escape hatch
+
+```java
+@SneakyThrows  // Throws IOException without declaring it
+public String readConfig(Path path) {
+    return Files.readString(path);
+}
+```
+
+Use sparingly. This hides checked exceptions from the method signature, which can surprise callers.
+
+### @Cleanup — automatic resource management
+
+```java
+public void processFile(String path) throws IOException {
+    @Cleanup InputStream in = new FileInputStream(path);
+    @Cleanup OutputStream out = new FileOutputStream("output.txt");
+    // Resources closed automatically at end of scope
+    // Like try-with-resources but less verbose
+}
+```
+
+## Lombok and Spring Boot
+
+Lombok and Spring Boot are natural partners. Most Spring projects use them together:
+
+```java
+@Data
+@Entity
+@Table(name = "users")
+@NoArgsConstructor
+@AllArgsConstructor
+@Builder
+public class UserEntity {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @Column(nullable = false)
+    private String username;
+    
+    @Column(nullable = false)
+    private String email;
+    
+    @Enumerated(EnumType.STRING)
+    private Role role;
+    
+    @CreationTimestamp
+    private LocalDateTime createdAt;
+}
+
+@Data
+@Builder
+public class UserDto {
+    private Long id;
+    private String username;
+    private String email;
+    private String role;
+}
+
+@Slf4j
+@RestController
+@RequestMapping("/api/users")
+@RequiredArgsConstructor  // Inject final fields via constructor
+public class UserController {
+    
+    private final UserService userService;  // Injected by Spring
+    
+    @GetMapping("/{id}")
+    public UserDto getUser(@PathVariable Long id) {
+        log.info("Fetching user {}", id);
+        return userService.findById(id);
+    }
+}
+```
+
+`@RequiredArgsConstructor` is particularly elegant with Spring — it generates a constructor for all `final` fields, which Spring uses for dependency injection. No `@Autowired` needed.
+
+## The 2026 debate: Lombok vs modern Java
+
+### Java Records (Java 16+)
+
+Records solve some of what Lombok does for immutable data:
+
+```java
+// Record — built into the language
+public record UserDto(Long id, String username, String email, String role) {}
+
+// Lombok @Value — same result, more features
+@Value
+@Builder
+public class UserDto {
+    Long id;
+    String username;
+    String email;
+    String role;
+}
+```
+
+**Records win when:** you need simple immutable data carriers with no customization.
+
+**Lombok wins when:** you need builders, `@With`, custom equals/hashCode, or mutable entities (JPA requires no-arg constructor and setters).
+
+### Sealed classes + pattern matching
+
+```java
+// Modern Java approach
+sealed interface PaymentResult permits Success, Failure, Pending {}
+record Success(String transactionId, BigDecimal amount) implements PaymentResult {}
+record Failure(String errorCode, String message) implements PaymentResult {}
+record Pending(String referenceId) implements PaymentResult {}
+
+// Pattern matching
+switch (result) {
+    case Success s -> log.info("Paid: {}", s.transactionId());
+    case Failure f -> log.error("Failed: {}", f.message());
+    case Pending p -> log.warn("Pending: {}", p.referenceId());
+}
+```
+
+This is cleaner than Lombok for algebraic data types. But Lombok still fills gaps that language features do not cover.
+
+### What Lombok still does that Java cannot
+
+1. **@Builder** — no language-level builder support
+2. **@Slf4j** — still need one line per class without it
+3. **@RequiredArgsConstructor** — Spring DI convenience
+4. **@Data on JPA entities** — records cannot be JPA entities
+5. **@SneakyThrows** — checked exceptions are still verbose
+6. **@With** on mutable classes — records have `with` patterns but not classes
+
+## The gotchas
+
+### 1. IDE support is mandatory
+
+Without the Lombok plugin, your IDE shows errors everywhere:
+
+```
+// IntelliJ: Install "Lombok" plugin
+// Eclipse: Run lombok.jar installer
+// VS Code: Install "Lombok Annotations Support" extension
+```
+
+### 2. @EqualsAndHashCode with JPA entities
+
+```java
+// WRONG: Lombok uses all fields including lazy-loaded ones
+@Data
+@Entity
+public class Order {
+    @Id private Long id;
+    @OneToMany(fetch = FetchType.LAZY)
+    private List<OrderItem> items;  // Triggers lazy loading in equals()!
+}
+
+// RIGHT: Only use business key
+@Data
+@EqualsAndHashCode(of = "id")
+@Entity
+public class Order {
+    @Id private Long id;
+    @OneToMany(fetch = FetchType.LAZY)
+    private List<OrderItem> items;
+}
+```
+
+### 3. @ToString and circular references
+
+```java
+@Data
+@Entity
+public class Parent {
+    @OneToMany(mappedBy = "parent")
+    private List<Child> children;  // toString() → child.toString() → parent.toString() → StackOverflow
+}
+
+// Fix: exclude the circular reference
+@Data
+@ToString(exclude = "children")
+@Entity
+public class Parent { ... }
+```
+
+### 4. Debugging generated code
+
+You cannot set breakpoints in generated methods. Use `delombok` to see what Lombok generates:
+
+```bash
+# Generate delomboked source for inspection
+java -jar lombok.jar delombok src/main/java -d delomboked/
+```
+
+## My recommendation
+
+In 2026, the pragmatic approach:
+
+- **Use Records** for DTOs, API responses, value objects — immutable data carriers
+- **Use Lombok** for JPA entities, Spring services, builders, and anything mutable
+- **Use @Slf4j** everywhere — there is no language alternative
+- **Use @RequiredArgsConstructor** in Spring components — cleaner than `@Autowired`
+- **Avoid @SneakyThrows** unless you have a clear reason
+- **Always configure @EqualsAndHashCode** explicitly on JPA entities
+
+Lombok is not going away. Java is slowly absorbing some of its features (records, potential future value types), but the full Lombok toolkit still saves thousands of lines across any non-trivial project.
+
+The annotation preprocessor approach is a pragmatic hack — it works, it is battle-tested, and the alternative is writing boilerplate that adds no value.
+
+---
+
+*Modernizing your Java stack? [Get in touch](/contact/) for consulting on Spring Boot architecture, performance optimization, and developer experience improvements.*

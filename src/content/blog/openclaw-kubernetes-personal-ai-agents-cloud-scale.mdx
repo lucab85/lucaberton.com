@@ -1,0 +1,426 @@
+---
+draft: false
+title: "Running OpenClaw on Kubernetes: Personal AI Agents at Cloud Scale"
+snippet: "Deploy OpenClaw AI agents on Kubernetes — from single-node k3s to multi-node clusters. Helm chart setup, persistent memory, scaling strategies, and integrating with your existing cloud native stack."
+description: "Deploy OpenClaw AI agents on Kubernetes — from single-node k3s to multi-node clusters. Helm chart setup, persistent memory, scaling strategies, and integrating with your existing cloud native stack."
+publishDate: "2026-03-19"
+lastModified: "2026-03-19"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "openclaw"
+  - "kubernetes"
+  - "k3s"
+  - "ai-agents"
+  - "helm"
+  - "containers"
+  - "self-hosted"
+  - "cloud-native"
+image:
+  src: "/blog/thumbnails/openclaw-kubernetes-personal-ai-agents-cloud-scale.jpg"
+  alt: "Running OpenClaw on Kubernetes for personal AI agents"
+---
+
+## Why run your AI agent on Kubernetes?
+
+Most people run [OpenClaw](https://openclaw.ai) on a single machine — a Raspberry Pi, a laptop, a small VPS. That works great for personal use. But what happens when you want:
+
+- **High availability** — your agent stays online even if a node goes down
+- **GPU scheduling** — route inference workloads to GPU nodes while the gateway runs on cheap CPUs
+- **Multi-agent orchestration** — run multiple specialized agents with different models
+- **Persistent memory** — agent memory survives pod restarts and node failures
+- **Integration with existing infrastructure** — your agent lives alongside your monitoring, logging, and secrets management
+
+That is when Kubernetes makes sense. And if you are already running a cluster, adding OpenClaw is straightforward.
+
+## Architecture overview
+
+OpenClaw on Kubernetes follows a simple pattern:
+
+```
+┌──────────────────────────────────────────┐
+│              Kubernetes Cluster           │
+│                                          │
+│  ┌─────────────┐   ┌─────────────────┐  │
+│  │   OpenClaw   │   │   OpenClaw      │  │
+│  │   Gateway    │   │   Agent Pods    │  │
+│  │   (1 replica)│   │   (1-N replicas)│  │
+│  └──────┬──────┘   └────────┬────────┘  │
+│         │                    │           │
+│  ┌──────▼────────────────────▼────────┐  │
+│  │       PersistentVolumeClaim        │  │
+│  │   (agent memory + workspace)       │  │
+│  └────────────────────────────────────┘  │
+│                                          │
+│  ┌────────────────────────────────────┐  │
+│  │   Ingress / LoadBalancer           │  │
+│  │   (Discord/Telegram webhooks)      │  │
+│  └────────────────────────────────────┘  │
+└──────────────────────────────────────────┘
+```
+
+The gateway is the brain — it handles messaging channels, scheduling, and agent lifecycle. Agent pods do the actual work: processing messages, running tools, and maintaining memory.
+
+## Option 1: k3s single-node (simplest path)
+
+If you are running a homelab or a small VPS, [k3s](https://k3s.io) gives you a full Kubernetes API with minimal overhead:
+
+```bash
+# Install k3s
+curl -sfL https://get.k3s.io | sh -
+
+# Create namespace
+kubectl create namespace openclaw
+
+# Create persistent storage for agent memory
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openclaw-data
+  namespace: openclaw
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi
+EOF
+```
+
+Then deploy OpenClaw:
+
+```yaml
+# openclaw-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openclaw-gateway
+  namespace: openclaw
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: openclaw
+  template:
+    metadata:
+      labels:
+        app: openclaw
+    spec:
+      containers:
+        - name: openclaw
+          image: ghcr.io/openclaw/openclaw:latest
+          ports:
+            - containerPort: 3000
+          volumeMounts:
+            - name: data
+              mountPath: /home/node/.openclaw
+          env:
+            - name: OPENCLAW_MODEL
+              value: "anthropic/claude-sonnet-4"
+          envFrom:
+            - secretRef:
+                name: openclaw-secrets
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: openclaw-data
+```
+
+```bash
+# Create secrets
+kubectl create secret generic openclaw-secrets \
+  --namespace openclaw \
+  --from-literal=ANTHROPIC_API_KEY=sk-ant-... \
+  --from-literal=DISCORD_TOKEN=...
+
+# Deploy
+kubectl apply -f openclaw-deployment.yaml
+```
+
+## Option 2: Multi-node cluster with GPU scheduling
+
+For teams running inference locally, you want GPU workloads on GPU nodes and the gateway on regular nodes:
+
+```yaml
+# Node labels
+# GPU node: kubectl label node gpu-node-1 accelerator=nvidia
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openclaw-gateway
+  namespace: openclaw
+spec:
+  replicas: 1
+  template:
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: accelerator
+                    operator: DoesNotExist
+      containers:
+        - name: openclaw
+          image: ghcr.io/openclaw/openclaw:latest
+          resources:
+            requests:
+              memory: "512Mi"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: local-inference
+  namespace: openclaw
+spec:
+  replicas: 1
+  template:
+    spec:
+      nodeSelector:
+        accelerator: nvidia
+      containers:
+        - name: ollama
+          image: ollama/ollama:latest
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          ports:
+            - containerPort: 11434
+```
+
+This pairs well with the [NVIDIA GPU Operator](/blog/nvidia-gpu-operator-kubernetes-setup-guide/) for automated driver and runtime management. If you are running multiple GPU nodes, [GPU sharing with time-slicing](/blog/nvidia-gpu-operator-time-slicing-shared-gpu-kubernetes/) lets multiple agents share a single GPU.
+
+## Persistent memory with PVCs
+
+OpenClaw agents build memory over time — daily notes, long-term memories, workspace files. Losing this on a pod restart defeats the purpose. PersistentVolumeClaims ensure memory survives:
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: openclaw-workspace
+  namespace: openclaw
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn  # or your CSI driver
+  resources:
+    requests:
+      storage: 10Gi
+```
+
+For multi-agent setups where multiple pods need read access to shared knowledge bases, consider ReadWriteMany volumes backed by NFS or a distributed filesystem.
+
+### Backup strategy
+
+Agent memory is irreplaceable. Set up automated backups:
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: openclaw-backup
+  namespace: openclaw
+spec:
+  schedule: "0 */6 * * *"  # Every 6 hours
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: backup
+              image: alpine:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  tar czf /backup/openclaw-$(date +%Y%m%d-%H%M).tar.gz \
+                    /data/workspace /data/memory
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                  readOnly: true
+                - name: backup
+                  mountPath: /backup
+          volumes:
+            - name: data
+              persistentVolumeClaim:
+                claimName: openclaw-data
+            - name: backup
+              persistentVolumeClaim:
+                claimName: openclaw-backups
+          restartPolicy: OnFailure
+```
+
+## Exposing your agent to messaging channels
+
+OpenClaw connects to Discord, Telegram, WhatsApp, and other channels. For webhook-based channels, you need an Ingress:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: openclaw-ingress
+  namespace: openclaw
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts:
+        - agent.yourdomain.com
+      secretName: openclaw-tls
+  rules:
+    - host: agent.yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: openclaw-gateway
+                port:
+                  number: 3000
+```
+
+For Discord and most messaging platforms, OpenClaw uses outbound WebSocket connections — no ingress needed. The gateway connects to Discord's API directly from inside the cluster.
+
+## Monitoring with Prometheus
+
+Add observability to track your agent's behavior:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: openclaw
+  namespace: openclaw
+spec:
+  selector:
+    matchLabels:
+      app: openclaw
+  endpoints:
+    - port: metrics
+      interval: 30s
+```
+
+Key metrics to watch:
+
+- **Message processing latency** — how fast your agent responds
+- **Token usage** — track API costs per agent
+- **Memory volume usage** — prevent storage exhaustion
+- **Pod restarts** — catch stability issues early
+
+## Multi-agent patterns
+
+Kubernetes makes it easy to run multiple specialized agents:
+
+```yaml
+# Research agent — uses a larger model, more memory
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openclaw-research
+spec:
+  template:
+    spec:
+      containers:
+        - name: openclaw
+          env:
+            - name: OPENCLAW_MODEL
+              value: "anthropic/claude-opus-4"
+            - name: OPENCLAW_AGENT
+              value: "research"
+---
+# Operations agent — faster model, tool-heavy
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: openclaw-ops
+spec:
+  template:
+    spec:
+      containers:
+        - name: openclaw
+          env:
+            - name: OPENCLAW_MODEL
+              value: "anthropic/claude-sonnet-4"
+            - name: OPENCLAW_AGENT
+              value: "ops"
+```
+
+Each agent gets its own workspace, memory, and channel connections. They can communicate through shared volumes or message passing.
+
+## Security hardening
+
+Running AI agents in a cluster requires careful RBAC:
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openclaw
+  namespace: openclaw
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: openclaw-role
+  namespace: openclaw
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]  # Read-only cluster access
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: openclaw-netpol
+  namespace: openclaw
+spec:
+  podSelector:
+    matchLabels:
+      app: openclaw
+  policyTypes:
+    - Egress
+  egress:
+    - to: []  # Allow outbound (API calls, messaging)
+      ports:
+        - port: 443
+        - port: 80
+```
+
+For production deployments, also consider:
+
+- **Pod Security Standards** — restrict capabilities
+- **Secret rotation** — use external-secrets-operator for API keys
+- **Image scanning** — scan OpenClaw images before deployment
+- **[Kyverno policies](/blog/kyverno-cncf-graduated-kubernetes-policy-engine/)** — enforce security baselines
+
+## Going deeper with Kubernetes
+
+If you are new to Kubernetes and want to build a solid foundation before deploying agents, my book [Kubernetes Recipes](https://kubernetes.recipes) covers everything from cluster setup to production patterns — networking, storage, security, and observability. It is the practical companion for running real workloads (like OpenClaw) on Kubernetes.
+
+For GPU-specific Kubernetes patterns, check out:
+
+- [NVIDIA GPU Operator setup guide](/blog/nvidia-gpu-operator-kubernetes-setup-guide/)
+- [GPU time-slicing for shared workloads](/blog/nvidia-gpu-operator-time-slicing-shared-gpu-kubernetes/)
+- [Slurm to Kubernetes GPU migration](/blog/slurm-kubernetes-gpu-cluster-migration-guide/)
+
+## My take
+
+Running OpenClaw on Kubernetes is overkill for a single personal agent on a Raspberry Pi. But for teams running multiple agents, integrating with GPU infrastructure, or wanting enterprise-grade reliability for their AI assistant, Kubernetes provides the right abstraction. The agent becomes just another workload in your cluster — backed by the same monitoring, scaling, and security you use for everything else.
+
+The beauty of the cloud native approach: your AI agent benefits from everything the [Kubernetes ecosystem](/blog/cncf-landscape-platform-engineering-stack-2026/) has already solved.
+
+---
+
+*Need help deploying AI workloads on Kubernetes? [Get in touch](/contact/) for workshops on cloud native AI infrastructure and platform engineering.*

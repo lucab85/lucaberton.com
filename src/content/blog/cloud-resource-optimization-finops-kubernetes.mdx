@@ -1,0 +1,389 @@
+---
+draft: false
+title: "Cloud Resource Optimization: Stop Paying for What You Are Not Using"
+snippet: "Practical strategies for optimizing cloud and Kubernetes resource usage — right-sizing, bin packing, spot instances, FinOps dashboards, and the metrics that reveal where your money actually goes."
+description: "Practical strategies for optimizing cloud and Kubernetes resource usage — right-sizing, bin packing, spot instances, FinOps dashboards, and the metrics that reveal where your money actually goes."
+publishDate: "2026-03-20"
+lastModified: "2026-03-20"
+image:
+  src: "/blog/thumbnails/cloud-resource-optimization-finops-kubernetes.jpg"
+  alt: "Cloud resource optimization FinOps and Kubernetes"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - "finops"
+  - "cost-optimization"
+  - "kubernetes"
+  - "cloud"
+  - "resource-management"
+  - "right-sizing"
+  - "autoscaling"
+  - "observability"
+---
+
+## The waste is invisible
+
+Most organizations overprovision by 30-60%. They request 4 CPU and 8GB memory for a service that uses 0.3 CPU and 400MB at peak. They run dev environments 24/7 when developers work 8 hours. They keep snapshots from 2024 "just in case."
+
+The waste is invisible because nobody is looking. Resource optimization is not about cutting costs — it is about **making the invisible visible** so you can make informed decisions.
+
+## Where the money actually goes
+
+Before optimizing anything, you need to see where resources are consumed:
+
+### Kubernetes: requests vs actual usage
+
+```bash
+# Show the gap between requested and actual CPU usage
+kubectl top pods -A --no-headers | while read ns name cpu mem; do
+  requested=$(kubectl get pod $name -n $ns -o jsonpath='{.spec.containers[0].resources.requests.cpu}' 2>/dev/null)
+  echo "$ns/$name requested=$requested actual=$cpu"
+done
+```
+
+The typical finding:
+
+```
+Namespace/Pod              Requested    Actual    Waste
+────────────────────────────────────────────────────────
+prod/api-server-abc        2000m        180m      91%
+prod/worker-xyz            4000m        450m      89%
+prod/cache-redis           1000m        50m       95%
+dev/api-server-dev         2000m        20m       99%
+staging/full-stack         8000m        100m      99%
+```
+
+That staging environment requesting 8 CPU cores and using 100 millicores? That is 7.9 cores of paid capacity sitting idle.
+
+### Cloud: instance utilization
+
+```python
+# AWS: find underutilized EC2 instances (CloudWatch)
+import boto3
+from datetime import datetime, timedelta
+
+cw = boto3.client('cloudwatch')
+ec2 = boto3.client('ec2')
+
+instances = ec2.describe_instances(
+    Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
+)
+
+for reservation in instances['Reservations']:
+    for instance in reservation['Instances']:
+        instance_id = instance['InstanceId']
+        instance_type = instance['InstanceType']
+        
+        # Get average CPU over 14 days
+        stats = cw.get_metric_statistics(
+            Namespace='AWS/EC2',
+            MetricName='CPUUtilization',
+            Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+            StartTime=datetime.utcnow() - timedelta(days=14),
+            EndTime=datetime.utcnow(),
+            Period=86400,
+            Statistics=['Average']
+        )
+        
+        avg_cpu = sum(d['Average'] for d in stats['Datapoints']) / max(len(stats['Datapoints']), 1)
+        
+        if avg_cpu < 10:
+            print(f"UNDERUTILIZED: {instance_id} ({instance_type}) avg CPU: {avg_cpu:.1f}%")
+```
+
+## Strategy 1: Right-sizing Kubernetes workloads
+
+The Vertical Pod Autoscaler (VPA) analyzes actual usage and recommends correct resource settings:
+
+```yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: api-server-vpa
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-server
+  updatePolicy:
+    updateMode: "Off"  # Start with recommendations only
+  resourcePolicy:
+    containerPolicies:
+      - containerName: api-server
+        minAllowed:
+          cpu: 50m
+          memory: 64Mi
+        maxAllowed:
+          cpu: 2000m
+          memory: 4Gi
+```
+
+Check recommendations:
+
+```bash
+kubectl get vpa api-server-vpa -o jsonpath='{.status.recommendation.containerRecommendations[0]}' | python3 -m json.tool
+```
+
+```json
+{
+  "containerName": "api-server",
+  "lowerBound": { "cpu": "80m", "memory": "180Mi" },
+  "target": { "cpu": "150m", "memory": "256Mi" },
+  "upperBound": { "cpu": "400m", "memory": "512Mi" }
+}
+```
+
+If you were requesting 2000m CPU and the upper bound is 400m, you are overprovisioned by 5x.
+
+## Strategy 2: Autoscaling that responds to demand
+
+### Horizontal Pod Autoscaler (HPA)
+
+Scale on actual demand rather than peak provisioning:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-server-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-server
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: 100
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Wait 5 min before scaling down
+      policies:
+        - type: Percent
+          value: 25               # Remove max 25% of pods at a time
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0   # Scale up immediately
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+```
+
+### Karpenter / Cluster Autoscaler
+
+Scale the cluster itself based on pending pods:
+
+```yaml
+# Karpenter: provision right-sized nodes on demand
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: default
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]  # Prefer spot!
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: 
+            - m6i.large
+            - m6i.xlarge
+            - m6a.large
+            - m6a.xlarge
+            - m7i.large
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+  limits:
+    cpu: 100
+    memory: 400Gi
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 30s
+```
+
+Karpenter's `consolidationPolicy: WhenEmptyOrUnderutilized` automatically replaces nodes with smaller ones when workloads can fit on fewer resources.
+
+## Strategy 3: Schedule non-production environments
+
+Dev and staging environments do not need to run at 3 AM:
+
+```yaml
+# CronJob to scale down dev at night
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dev-scale-down
+spec:
+  schedule: "0 20 * * 1-5"  # 8 PM weekdays
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: scaler
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  kubectl scale deployment --all -n dev --replicas=0
+                  kubectl scale deployment --all -n staging --replicas=0
+          restartPolicy: OnFailure
+---
+# Scale back up in the morning
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: dev-scale-up
+spec:
+  schedule: "0 7 * * 1-5"  # 7 AM weekdays
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: scaler
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  kubectl scale deployment --all -n dev --replicas=1
+                  kubectl scale deployment --all -n staging --replicas=1
+          restartPolicy: OnFailure
+```
+
+Scaling dev to zero for 12 hours on weekdays and all weekend saves ~65% on those environments.
+
+## Strategy 4: Spot and preemptible instances
+
+For fault-tolerant workloads, spot instances cost 60-90% less:
+
+```yaml
+# Kubernetes: tolerate spot interruptions
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: batch-processor
+spec:
+  replicas: 10
+  template:
+    spec:
+      nodeSelector:
+        karpenter.sh/capacity-type: spot
+      tolerations:
+        - key: karpenter.sh/disruption
+          operator: Exists
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: processor
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "checkpoint-state.sh"]
+```
+
+Workloads suited for spot: batch processing, CI/CD runners, dev/test environments, stateless web servers behind load balancers. Not suited: databases, stateful services, single-replica deployments.
+
+## Strategy 5: Storage lifecycle management
+
+Old snapshots and unused volumes accumulate silently:
+
+```bash
+# AWS: find unattached EBS volumes
+aws ec2 describe-volumes \
+  --filters Name=status,Values=available \
+  --query 'Volumes[*].{ID:VolumeId,Size:Size,Created:CreateTime}' \
+  --output table
+
+# AWS: find snapshots older than 90 days
+aws ec2 describe-snapshots --owner-ids self \
+  --query "Snapshots[?StartTime<='$(date -d '90 days ago' -Iseconds)'].[SnapshotId,VolumeSize,StartTime]" \
+  --output table
+```
+
+```yaml
+# S3 lifecycle policy: transition and expire
+{
+  "Rules": [
+    {
+      "ID": "archive-old-logs",
+      "Filter": { "Prefix": "logs/" },
+      "Status": "Enabled",
+      "Transitions": [
+        { "Days": 30, "StorageClass": "GLACIER_IR" },
+        { "Days": 90, "StorageClass": "DEEP_ARCHIVE" }
+      ],
+      "Expiration": { "Days": 365 }
+    }
+  ]
+}
+```
+
+## The FinOps dashboard
+
+Build visibility into resource usage:
+
+```yaml
+# Key metrics to track
+metrics:
+  cluster_efficiency:
+    formula: actual_usage / total_capacity
+    target: "> 60%"
+    alert: "< 40%"
+
+  cost_per_request:
+    formula: monthly_infrastructure_cost / monthly_requests
+    trend: "should decrease or stay flat"
+
+  waste_percentage:
+    formula: (requested - actual) / requested
+    target: "< 30%"
+    alert: "> 50%"
+
+  reserved_coverage:
+    formula: reserved_hours / total_hours
+    target: "> 70% for stable workloads"
+```
+
+Tools that help:
+- **Kubecost** — Kubernetes-native cost allocation
+- **OpenCost** — open source cost monitoring
+- **AWS Cost Explorer** / **Azure Cost Management** — cloud-native
+- **Prometheus + Grafana** — custom dashboards
+
+## Quick wins checklist
+
+Start here for immediate impact:
+
+1. **Delete unused resources** — unattached volumes, old snapshots, stopped instances (saves 5-15%)
+2. **Right-size top 10 workloads** — use VPA recommendations (saves 20-40%)
+3. **Schedule non-prod environments** — scale to zero overnight (saves 40-65% on dev/staging)
+4. **Use spot for batch workloads** — CI runners, data processing (saves 60-90%)
+5. **Set resource limits** — prevent runaway containers from consuming unbounded resources
+6. **Review reserved instance coverage** — commit to 1-year RIs for stable workloads (saves 30-40%)
+7. **Implement storage lifecycle policies** — auto-archive and expire old data
+
+Most organizations find 25-40% savings within the first month just by making usage visible and acting on the obvious waste.
+
+---
+
+*Need help optimizing your cloud spend? [Get in touch](/contact/) for FinOps assessments, Kubernetes resource optimization, and cost governance implementation.*

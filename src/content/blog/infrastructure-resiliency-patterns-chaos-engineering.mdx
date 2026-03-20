@@ -1,0 +1,381 @@
+---
+draft: false
+title: "Infrastructure Resiliency: Patterns That Keep Systems Running When Everything Fails"
+snippet: "Practical resiliency patterns for cloud infrastructure — circuit breakers, bulkheads, retry budgets, chaos engineering, multi-AZ architecture, and measuring reliability with SLOs that actually mean something."
+description: "Practical resiliency patterns for cloud infrastructure — circuit breakers, bulkheads, retry budgets, chaos engineering, multi-AZ architecture, and measuring reliability with SLOs that actually mean something."
+publishDate: "2026-03-20"
+lastModified: "2026-03-20"
+image:
+  src: "/blog/thumbnails/infrastructure-resiliency-patterns-chaos-engineering.jpg"
+  alt: "Infrastructure resiliency patterns and chaos engineering"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - "resiliency"
+  - "chaos-engineering"
+  - "sre"
+  - "reliability"
+  - "circuit-breaker"
+  - "kubernetes"
+  - "disaster-recovery"
+  - "slo"
+---
+
+## Everything fails, all the time
+
+Werner Vogels said it. Every infrastructure engineer has lived it. Disks fail, networks partition, entire availability zones go dark (as we saw with [AWS Dubai](/blog/aws-availability-zone-disruption-dubai-cloud-resilience/)). The question is not *if* your infrastructure will fail, but *how it behaves when it does*.
+
+Resiliency is not about preventing failure — it is about **designing systems that continue to function despite failure**. The difference between a 5-minute blip and a 12-hour outage is almost always architectural.
+
+## The resiliency hierarchy
+
+Think of resiliency as layers, from innermost (application) to outermost (organizational):
+
+```
+Layer 5: Organizational  — Runbooks, on-call, post-mortems
+Layer 4: Platform         — Multi-AZ, auto-scaling, self-healing
+Layer 3: Service          — Circuit breakers, retries, bulkheads
+Layer 2: Data             — Replication, backups, consistency
+Layer 1: Compute          — Health checks, restarts, redundancy
+```
+
+You need all five. Most teams focus on Layer 1 and 4, neglect Layer 3, and ignore Layer 5 until an incident forces it.
+
+## Pattern 1: Circuit breakers
+
+When a downstream service is failing, stop calling it. Hammering a dead service makes everything worse:
+
+```java
+// Resilience4j circuit breaker
+@CircuitBreaker(name = "paymentService", fallbackMethod = "paymentFallback")
+public PaymentResult processPayment(PaymentRequest request) {
+    return paymentClient.charge(request);
+}
+
+public PaymentResult paymentFallback(PaymentRequest request, Exception e) {
+    log.warn("Payment service unavailable, queueing for retry");
+    paymentQueue.enqueue(request);
+    return PaymentResult.queued(request.getId());
+}
+```
+
+Circuit breaker states:
+
+```
+CLOSED  → Normal operation, requests flow through
+         If failure rate exceeds threshold → OPEN
+
+OPEN    → All requests immediately fail/fallback
+         After wait duration → HALF_OPEN
+
+HALF_OPEN → Allow limited requests through
+            If successful → CLOSED
+            If failing → OPEN
+```
+
+```yaml
+# Resilience4j configuration
+resilience4j:
+  circuitbreaker:
+    instances:
+      paymentService:
+        slidingWindowSize: 100
+        failureRateThreshold: 50
+        waitDurationInOpenState: 30s
+        permittedNumberOfCallsInHalfOpenState: 10
+        slowCallDurationThreshold: 2s
+        slowCallRateThreshold: 80
+```
+
+## Pattern 2: Bulkhead isolation
+
+Prevent one failing component from consuming all resources:
+
+```java
+// Thread pool bulkhead: isolate payment calls to 10 threads max
+@Bulkhead(name = "paymentService", type = Bulkhead.Type.THREADPOOL)
+public CompletableFuture<PaymentResult> processPayment(PaymentRequest req) {
+    return CompletableFuture.supplyAsync(() -> paymentClient.charge(req));
+}
+```
+
+```yaml
+resilience4j:
+  bulkhead:
+    instances:
+      paymentService:
+        maxConcurrentCalls: 10
+        maxWaitDuration: 500ms
+```
+
+In Kubernetes, bulkheads map to resource limits and namespace isolation:
+
+```yaml
+# Namespace-level resource quotas as bulkheads
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-alpha-quota
+  namespace: team-alpha
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: 16Gi
+    limits.cpu: "16"
+    limits.memory: 32Gi
+    pods: "50"
+```
+
+Team Alpha's runaway pod cannot starve the cluster. The blast radius is contained to their namespace.
+
+## Pattern 3: Retry with exponential backoff and jitter
+
+Retries are essential but dangerous. Naive retries create thundering herds:
+
+```java
+// WRONG: immediate retry storms
+for (int i = 0; i < 3; i++) {
+    try { return callService(); }
+    catch (Exception e) { /* retry immediately */ }
+}
+
+// RIGHT: exponential backoff with jitter
+@Retry(name = "inventoryService")
+public InventoryStatus checkStock(String sku) {
+    return inventoryClient.getStatus(sku);
+}
+```
+
+```yaml
+resilience4j:
+  retry:
+    instances:
+      inventoryService:
+        maxAttempts: 3
+        waitDuration: 500ms
+        enableExponentialBackoff: true
+        exponentialBackoffMultiplier: 2
+        enableRandomizedWait: true    # Jitter!
+        randomizedWaitFactor: 0.5
+        retryExceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+        ignoreExceptions:
+          - com.example.BusinessValidationException
+```
+
+The jitter is critical. Without it, all retries from all clients hit the recovering service at the exact same intervals, creating synchronized waves of load.
+
+## Pattern 4: Timeout budgets
+
+Every call should have a timeout. But individual timeouts are not enough — you need a **budget** for the entire request:
+
+```java
+// Request budget: 3 seconds total
+// If auth takes 1s and inventory takes 1.5s,
+// payment only gets 0.5s before we fail the whole request
+
+@Component
+public class RequestBudget {
+    private static final ThreadLocal<Deadline> deadline = new ThreadLocal<>();
+    
+    public static void start(Duration budget) {
+        deadline.set(Deadline.after(budget));
+    }
+    
+    public static Duration remaining() {
+        Deadline d = deadline.get();
+        return d != null ? d.remaining() : Duration.ofSeconds(30);
+    }
+}
+
+// Each service call uses the remaining budget
+public OrderResult createOrder(OrderRequest request) {
+    RequestBudget.start(Duration.ofSeconds(3));
+    
+    User user = authService.validate(request.getToken());
+    // Budget: ~2.5s remaining
+    
+    InventoryStatus stock = inventoryService.check(request.getSku());
+    // Budget: ~1s remaining
+    
+    PaymentResult payment = paymentService.charge(
+        request.getAmount(), 
+        RequestBudget.remaining()  // Use whatever is left
+    );
+    
+    return new OrderResult(user, stock, payment);
+}
+```
+
+## Pattern 5: Multi-AZ and multi-region
+
+Infrastructure-level resiliency:
+
+```yaml
+# Kubernetes: spread pods across availability zones
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+spec:
+  replicas: 6
+  template:
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app: api-server
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: api-server
+                topologyKey: kubernetes.io/hostname
+```
+
+This ensures your 6 replicas spread evenly across zones and avoid co-locating on the same node.
+
+## Pattern 6: Health checks that mean something
+
+```yaml
+# Kubernetes: three types of health checks
+livenessProbe:
+  httpGet:
+    path: /healthz          # Is the process alive?
+    port: 8080
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  failureThreshold: 3       # Kill after 3 failures
+
+readinessProbe:
+  httpGet:
+    path: /ready            # Can it serve traffic?
+    port: 8080
+  periodSeconds: 5
+  failureThreshold: 2       # Remove from service after 2 failures
+
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: 8080
+  failureThreshold: 30      # Allow 5 minutes to start
+  periodSeconds: 10
+```
+
+The `/ready` endpoint should check actual dependencies:
+
+```java
+@GetMapping("/ready")
+public ResponseEntity<Map<String, String>> ready() {
+    Map<String, String> checks = new LinkedHashMap<>();
+    
+    checks.put("database", checkDatabase() ? "UP" : "DOWN");
+    checks.put("cache", checkRedis() ? "UP" : "DOWN");
+    checks.put("queue", checkKafka() ? "UP" : "DOWN");
+    
+    boolean allUp = checks.values().stream().allMatch("UP"::equals);
+    return ResponseEntity
+        .status(allUp ? 200 : 503)
+        .body(checks);
+}
+```
+
+## Chaos engineering: proving resiliency works
+
+You do not know if your resiliency patterns work until you test them under failure. Chaos engineering does this systematically:
+
+```yaml
+# Chaos Mesh: kill a random pod every hour
+apiVersion: chaos-mesh.org/v1alpha1
+kind: PodChaos
+metadata:
+  name: pod-kill-test
+spec:
+  action: pod-kill
+  mode: one
+  selector:
+    namespaces:
+      - production
+    labelSelectors:
+      app: api-server
+  scheduler:
+    cron: "@every 1h"
+```
+
+```yaml
+# Network chaos: add latency between services
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: network-delay
+spec:
+  action: delay
+  mode: all
+  selector:
+    namespaces:
+      - production
+    labelSelectors:
+      app: payment-service
+  delay:
+    latency: "500ms"
+    jitter: "100ms"
+  duration: "5m"
+```
+
+For application-level chaos, [Toxiproxy](/blog/system-tests-safety-net-cucumber-playwright-chaos/) lets you inject failures in your test suite.
+
+## Measuring resiliency with SLOs
+
+Define what "reliable enough" means with Service Level Objectives:
+
+```yaml
+slos:
+  api_availability:
+    description: "API returns successful responses"
+    target: 99.9%          # 8.7 hours downtime per year
+    window: 30d
+    sli: |
+      sum(rate(http_requests_total{code=~"2.."}[5m])) /
+      sum(rate(http_requests_total[5m]))
+
+  api_latency:
+    description: "API responds within acceptable time"
+    target: 99%
+    window: 30d
+    sli: |
+      histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
+      < 0.5  # p95 under 500ms
+
+  data_durability:
+    description: "No data loss events"
+    target: 99.999%
+    window: 365d
+```
+
+The **error budget** is what makes SLOs actionable: if you have 0.1% error budget (99.9% target) and you have used 80% of it this month, slow down deployments. If you have plenty of budget left, ship faster.
+
+## The resiliency checklist
+
+Apply these in order of impact:
+
+1. **Health checks** on every service (liveness + readiness)
+2. **Timeouts** on every external call (no infinite waits)
+3. **Retries with backoff and jitter** on idempotent operations
+4. **Circuit breakers** on critical dependencies
+5. **Bulkheads** between tenants and between service pools
+6. **Multi-AZ deployment** with topology spread
+7. **Automated failover** for databases and stateful services
+8. **Chaos testing** in staging, then production
+9. **SLOs and error budgets** for every user-facing service
+10. **Runbooks** for every alert that pages someone
+
+---
+
+*Building resilient infrastructure for your platform? [Let's talk](/contact/) about architecture reviews, chaos engineering programs, and SRE practices.*

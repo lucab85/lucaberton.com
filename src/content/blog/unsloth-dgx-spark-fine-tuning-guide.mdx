@@ -1,0 +1,279 @@
+---
+draft: false
+title: "Unsloth on NVIDIA DGX Spark: 2x Faster Fine-Tuning in Under an Hour"
+snippet: "A step-by-step guide to running Unsloth on the NVIDIA DGX Spark for optimized LLM fine-tuning. From pulling the PyTorch container to running your first LoRA training job — complete with troubleshooting and next steps."
+description: "A step-by-step guide to running Unsloth on the NVIDIA DGX Spark for optimized LLM fine-tuning. From pulling the PyTorch container to running your first LoRA training job — complete with troubleshooting and next steps."
+publishDate: "2026-03-29"
+lastModified: "2026-03-29"
+image:
+  src: "/blog/thumbnails/unsloth-dgx-spark-fine-tuning-guide.jpg"
+  alt: "Unsloth on NVIDIA DGX Spark fine-tuning guide with CUDA 13 and PyTorch"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "nvidia"
+  - "dgx-spark"
+  - "unsloth"
+  - "fine-tuning"
+  - "llm"
+  - "pytorch"
+  - "cuda"
+  - "lora"
+---
+
+## Why Unsloth on DGX Spark
+
+Fine-tuning large language models is expensive — in time, in compute, and in patience. [Unsloth](https://github.com/unslothai/unsloth) changes the equation by delivering **2x faster fine-tuning** with significantly less memory usage, making it possible to fine-tune models like Llama 3.1 8B on hardware that would otherwise be too constrained.
+
+The [NVIDIA DGX Spark](https://www.nvidia.com/en-us/products/workstations/dgx-spark/) is NVIDIA's compact AI workstation — a desktop-class device with serious GPU capability. Combining it with Unsloth's optimized training kernels gives you a local fine-tuning environment that punches well above its weight class.
+
+This guide walks through the complete setup in about an hour.
+
+## Prerequisites
+
+Before starting, verify your DGX Spark has the required CUDA toolkit and GPU resources.
+
+**Check CUDA version:**
+
+```bash
+nvcc --version
+```
+
+The output should show **CUDA 13.0** or later. DGX Spark ships with the CUDA toolkit pre-installed.
+
+**Check GPU status:**
+
+```bash
+nvidia-smi
+```
+
+You should see a summary of your GPU information — device name, driver version, memory usage, and temperature. If either command fails, ensure your NVIDIA drivers are properly installed before continuing.
+
+## Step 1: Pull the PyTorch container
+
+NVIDIA's NGC container registry provides optimized PyTorch containers with the correct CUDA libraries, cuDNN, and NCCL pre-configured. Using the official container avoids dependency conflicts:
+
+```bash
+docker pull nvcr.io/nvidia/pytorch:25.11-py3
+```
+
+This is a large image (15-20 GB). On a fast connection it takes a few minutes; on slower connections, plan accordingly.
+
+## Step 2: Launch the container
+
+Start an interactive session with full GPU access:
+
+```bash
+docker run --gpus all \
+  --ulimit memlock=-1 \
+  --ulimit stack=67108864 \
+  -it \
+  --entrypoint /usr/bin/bash \
+  --rm \
+  nvcr.io/nvidia/pytorch:25.11-py3
+```
+
+Breaking down the flags:
+
+- `--gpus all` — exposes all GPUs to the container
+- `--ulimit memlock=-1` — removes memory lock limits (required for large model training)
+- `--ulimit stack=67108864` — sets a 64 MB stack size (prevents stack overflow during training)
+- `-it` — interactive terminal
+- `--entrypoint /usr/bin/bash` — starts a shell instead of the default entrypoint
+- `--rm` — automatically removes the container when you exit
+
+## Step 3: Install dependencies
+
+Inside the container, install the required Python packages:
+
+```bash
+pip install transformers peft hf_transfer "datasets==4.3.0" "trl==0.26.1"
+pip install --no-deps unsloth unsloth_zoo bitsandbytes
+```
+
+**Important**: Unsloth and its dependencies are installed with `--no-deps` to avoid overwriting the optimized PyTorch and CUDA libraries already present in the NGC container. This is intentional — the container's pre-built libraries are tuned for NVIDIA hardware.
+
+### What each package does
+
+| Package | Purpose |
+|---------|---------|
+| `transformers` | Hugging Face model loading and tokenization |
+| `peft` | Parameter-Efficient Fine-Tuning (LoRA, QLoRA) |
+| `hf_transfer` | Fast model downloads from Hugging Face Hub |
+| `datasets` | Dataset loading and preprocessing |
+| `trl` | Transformer Reinforcement Learning — includes SFTTrainer |
+| `unsloth` | Optimized training kernels for 2x speedup |
+| `unsloth_zoo` | Model patches and optimizations |
+| `bitsandbytes` | 4-bit and 8-bit quantization for memory efficiency |
+
+## Step 4: Download the validation script
+
+NVIDIA provides a test script to verify the installation:
+
+```bash
+curl -O https://raw.githubusercontent.com/NVIDIA/dgx-spark-playbooks/refs/heads/main/nvidia/unsloth/assets/test_unsloth.py
+```
+
+This script runs a simple fine-tuning task to confirm everything is wired up correctly — Unsloth patches, GPU access, dataset loading, and training loop.
+
+## Step 5: Run the validation
+
+```bash
+python test_unsloth.py
+```
+
+**Expected output:**
+
+1. `"Unsloth: Will patch your computer to enable 2x faster free finetuning"` — confirms Unsloth's kernel patches are active
+2. Training progress bars showing **loss decreasing** over 60 steps
+3. Final training metrics showing completion
+
+If you see all three, your environment is ready for production fine-tuning.
+
+### What the test script does
+
+The validation script:
+
+- Loads a small quantized model (typically a 4-bit Llama variant)
+- Applies LoRA adapters using Unsloth's optimized patching
+- Runs a short fine-tuning job (60 steps) on a sample dataset
+- Reports training loss and throughput metrics
+
+## Troubleshooting
+
+### CUDA out of memory
+
+If you see `CUDA out of memory` errors:
+
+```bash
+# Check GPU memory usage
+nvidia-smi
+
+# Reduce batch size in the script
+# Edit test_unsloth.py, change per_device_train_batch_size to 1
+```
+
+### Docker GPU not detected
+
+If `nvidia-smi` works on the host but not inside the container:
+
+```bash
+# Ensure the NVIDIA Container Toolkit is installed
+sudo apt install nvidia-container-toolkit
+sudo systemctl restart docker
+```
+
+### Pip install conflicts
+
+If `pip install` fails with dependency conflicts, ensure you are running inside the NGC container (not the host system) and using `--no-deps` for Unsloth:
+
+```bash
+# Verify you are inside the container
+cat /etc/os-release  # Should show the NGC base image
+
+# Reinstall with --no-deps
+pip install --no-deps --force-reinstall unsloth unsloth_zoo bitsandbytes
+```
+
+### Slow model download
+
+If model downloads from Hugging Face are slow:
+
+```bash
+# Enable fast transfers
+export HF_HUB_ENABLE_HF_TRANSFER=1
+```
+
+The `hf_transfer` package was installed in Step 3 specifically for this — it uses multi-threaded downloads for significantly faster model pulls.
+
+## Next steps: Fine-tune your own model
+
+Once validation passes, customize the script for your use case:
+
+### Change the model
+
+```python
+# Replace the model in test_unsloth.py (line 32)
+model_name = "unsloth/Meta-Llama-3.1-8B-bnb-4bit"
+```
+
+Popular choices for DGX Spark:
+
+- `unsloth/Meta-Llama-3.1-8B-bnb-4bit` — Meta's Llama 3.1, 4-bit quantized
+- `unsloth/Mistral-7B-v0.3-bnb-4bit` — Mistral 7B, good for code and reasoning
+- `unsloth/Phi-3.5-mini-instruct-bnb-4bit` — Microsoft's compact model, fast to fine-tune
+
+### Use your own dataset
+
+```python
+# Load your custom dataset (line 8)
+dataset = load_dataset("your_dataset_name")
+
+# Or load from a local JSON/CSV file
+dataset = load_dataset("json", data_files="your_data.json")
+```
+
+### Adjust training parameters
+
+```python
+# Training arguments (line 61)
+per_device_train_batch_size = 4   # Increase for faster training (if memory allows)
+max_steps = 1000                   # More steps for larger datasets
+learning_rate = 2e-4               # Default works well for most tasks
+warmup_steps = 10                  # Warm up the learning rate
+```
+
+### Save in GGUF format
+
+For deployment with [vLLM](https://github.com/vllm-project/vllm) or local inference engines like llama.cpp:
+
+```python
+# Save as GGUF after training
+model.save_pretrained_gguf("output_model", tokenizer, quantization_method="q4_k_m")
+```
+
+### Resume from checkpoints
+
+For long training runs, save and resume from checkpoints:
+
+```python
+# In TrainingArguments
+save_steps = 100
+save_total_limit = 3
+
+# Resume training
+trainer.train(resume_from_checkpoint=True)
+```
+
+## How Unsloth achieves 2x speedup
+
+Unsloth's performance gains come from several optimizations:
+
+- **Custom CUDA kernels** — hand-optimized attention and MLP kernels that reduce memory copies
+- **Intelligent gradient checkpointing** — recomputes activations selectively instead of storing everything
+- **Optimized LoRA implementation** — fused operations that reduce kernel launch overhead
+- **Memory-efficient backpropagation** — reduces peak memory usage by 50-70%
+
+These optimizations are applied automatically when you load a model through Unsloth's API. No code changes needed beyond using `FastLanguageModel` instead of the standard Hugging Face loader.
+
+## Why this matters for AI infrastructure
+
+The DGX Spark + Unsloth combination is significant for teams building AI capabilities:
+
+- **Local fine-tuning** removes the dependency on cloud GPU instances for experimentation
+- **2x speedup** means faster iteration cycles — critical for [the first 90 days](/blog/ai-platform-first-90-days-kubernetes/) of AI platform development
+- **4-bit quantization** makes it practical to fine-tune models that would otherwise require much larger GPU memory
+- **Reproducible container environment** ensures consistency across team members
+
+For production deployment at scale, the fine-tuned models can be exported and served on [Kubernetes GPU infrastructure](/blog/kubecon-2026-talk-multi-tenant-gpus-recap/) using vLLM, Triton Inference Server, or TGI.
+
+## Resources
+
+- [Unsloth GitHub](https://github.com/unslothai/unsloth) — source code and documentation
+- [Unsloth Wiki](https://github.com/unslothai/unsloth/wiki) — advanced usage (GGUF export, continued training, multi-GPU)
+- [NVIDIA DGX Spark Playbooks](https://github.com/NVIDIA/dgx-spark-playbooks) — official guides and scripts
+- [NGC PyTorch Container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch) — container release notes
+
+---
+
+*Related: [GPU Sharing on Kubernetes: MIG, MPS, Time-Slicing](/blog/gpu-sharing-kubernetes-mig-mps-time-slicing/), [Hidden Cost Drivers in AI Workloads](/blog/hidden-cost-ai-kubernetes-workloads/), [KubeCon 2026: AI Industrialization](/blog/kubecon-2026-ai-kubernetes-industrialization/). Need help with AI infrastructure? [Book a consultation](https://calendly.com/lucaberton/).*

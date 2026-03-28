@@ -1,8 +1,8 @@
 ---
 draft: false
 title: "Ubuntu 25.10 Installer Broken? Fix the Subiquity Socket Error Step by Step"
-snippet: "The Ubuntu 25.10 Questing Quokka desktop installer shows the UI but fails to connect to the backend. The root cause is the Subiquity server not answering on its Unix socket. Here is the exact troubleshooting sequence to fix it."
-description: "The Ubuntu 25.10 Questing Quokka desktop installer shows the UI but fails to connect to the backend. The root cause is the Subiquity server not answering on its Unix socket. Here is the exact troubleshooting sequence to fix it."
+snippet: "The Ubuntu 25.10 Questing Quokka desktop installer shows the UI but fails to connect to the backend. The root cause is the Subiquity server not answering on its Unix socket — or a broken PAM stack below the installer. Here is the exact troubleshooting sequence."
+description: "The Ubuntu 25.10 Questing Quokka desktop installer shows the UI but fails to connect to the backend. The root cause is the Subiquity server not answering on its Unix socket — or a broken PAM stack below the installer. Here is the exact troubleshooting sequence."
 publishDate: "2026-03-29"
 lastModified: "2026-03-29"
 image:
@@ -101,6 +101,51 @@ Then relaunch the installer:
 /snap/bin/ubuntu-desktop-bootstrap --try-or-install
 ```
 
+If `snap remove` says it is not installed, skip straight to the install. If `snap` itself is broken, restart the snap daemon first:
+
+```bash
+sudo systemctl restart snapd
+```
+
+## Step 3.5: Fix broken PAM (deeper issue)
+
+Sometimes the problem is below the installer entirely. If your logs show PAM errors — messages like `unable to dlopen pam_*.so`, authentication failures, or `pam_systemd.so` missing — the live session's PAM stack is broken. Reinstalling the installer snap alone will not fix this.
+
+PAM (Pluggable Authentication Modules) is the authentication layer that everything on the system depends on, including Snap. When a PAM module is missing or misconfigured, it breaks authentication system-wide — not just the installer.
+
+**Rebuild the PAM stack:**
+
+```bash
+sudo apt update
+sudo apt install --reinstall libpam0g libpam-modules libpam-modules-bin libpam-runtime libpam-systemd
+sudo pam-auth-update --force
+```
+
+Then reinstall the snap and relaunch:
+
+```bash
+sudo systemctl restart snapd
+sudo snap remove ubuntu-desktop-bootstrap
+sudo snap install ubuntu-desktop-bootstrap --classic
+/snap/bin/ubuntu-desktop-bootstrap --try-or-install
+```
+
+**Diagnose a specific missing module:**
+
+If the PAM rebuild does not help, check which modules are referenced but missing:
+
+```bash
+# List all PAM modules referenced in config
+grep -R "pam_.*\.so" /etc/pam.d | sort -u
+
+# List all PAM modules actually installed
+ls /lib/x86_64-linux-gnu/security/ | grep pam_
+```
+
+If a module appears in `/etc/pam.d` but is not present under `/lib/x86_64-linux-gnu/security/`, that is the broken piece. Install the package that provides it — for example, `libpam-systemd` provides `pam_systemd.so`.
+
+PAM problems on a live USB are a strong signal that the installation media itself is corrupted, because the live environment should have a working PAM stack out of the box. If the above commands do not repair it, proceed to Step 4.
+
 ## Step 4: Reflash the USB (nuclear option)
 
 If the service still will not stay up after reinstalling the snap, the most likely cause is corrupted installation media. This is especially common when:
@@ -159,10 +204,19 @@ journalctl -u snap.ubuntu-desktop-bootstrap.subiquity-server.service -b --no-pag
 # 4. Relaunch installer
 /snap/bin/ubuntu-desktop-bootstrap --try-or-install
 
-# 5. Nuclear: reinstall snap
+# 5. Reinstall snap
 sudo snap remove ubuntu-desktop-bootstrap
 sudo snap install ubuntu-desktop-bootstrap --classic
 sudo systemctl restart snap.ubuntu-desktop-bootstrap.subiquity-server.service
+/snap/bin/ubuntu-desktop-bootstrap --try-or-install
+
+# 6. Fix broken PAM (if PAM errors in logs)
+sudo apt update
+sudo apt install --reinstall libpam0g libpam-modules libpam-modules-bin libpam-runtime libpam-systemd
+sudo pam-auth-update --force
+sudo systemctl restart snapd
+sudo snap remove ubuntu-desktop-bootstrap
+sudo snap install ubuntu-desktop-bootstrap --classic
 /snap/bin/ubuntu-desktop-bootstrap --try-or-install
 ```
 

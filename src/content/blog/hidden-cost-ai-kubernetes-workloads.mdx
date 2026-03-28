@@ -1,0 +1,106 @@
+---
+draft: false
+title: "The Hidden Cost Drivers in AI Workloads on Kubernetes"
+snippet: "The obvious cost is GPUs. The hidden costs are everything that makes GPUs sit idle or get used inefficiently. Here are the three buckets of AI infrastructure waste — compute, data-path, and operational — and how to fix them."
+description: "The obvious cost is GPUs. The hidden costs are everything that makes GPUs sit idle or get used inefficiently. Here are the three buckets of AI infrastructure waste — compute, data-path, and operational — and how to fix them."
+publishDate: "2026-03-28"
+lastModified: "2026-03-28"
+image:
+  src: "/blog/thumbnails/hidden-cost-ai-kubernetes-workloads.jpg"
+  alt: "Hidden cost drivers in AI Kubernetes workloads — compute, data-path, operational waste"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "kubernetes"
+  - "ai-infrastructure"
+  - "cost-optimization"
+  - "gpu"
+  - "token-economics"
+  - "finops"
+---
+
+*Part 6 of a 10-part series on running AI workloads on Kubernetes in production.*
+
+## GPUs are the obvious cost. Everything else is the real cost.
+
+Everyone knows GPUs are expensive. An A100 80GB costs $2-3/hour on cloud. An H100 costs $3-8/hour. At scale, GPU compute is the largest line item in any AI infrastructure budget.
+
+But the hidden costs — the ones that make GPUs sit idle or get used inefficiently — often exceed the raw compute cost. I look at AI platform cost in three buckets.
+
+## Bucket 1: Compute waste
+
+### Poor bin-packing
+
+When GPU requests do not align with available GPU capacity, you get fragmentation. A team requests 3 GPUs on a node with 4. The remaining GPU sits idle because no workload can fit into a single GPU. Multiply this across a cluster with hundreds of GPUs and the waste adds up fast.
+
+### Oversized requests
+
+Data scientists request 8 GPUs for a job that actually uses 2. This is rational behavior — nobody wants their training job to fail because of insufficient resources. But it means 6 GPUs are reserved and idle for the entire job duration.
+
+**Fix**: Implement right-sizing recommendations based on actual usage. Show teams what they requested vs. what they used. Make it easy to adjust.
+
+### Model duplication
+
+The same model loaded into GPU memory on 10 different pods across 5 different teams. Without a shared model serving layer, every team loads its own copy, consuming 10x the GPU memory needed.
+
+### Failed experiments
+
+A training run that diverges in the first 5 minutes but runs for 8 hours because nobody is watching. Multiply by dozens of experiments per day and the wasted GPU hours are significant.
+
+**Fix**: Automated early stopping. If loss is not improving after N steps, kill the job and free the GPU.
+
+## Bucket 2: Data-path waste
+
+### Slow storage pipelines
+
+Training that takes 4 hours on fast storage takes 12 hours on slow storage — because the GPU spends most of its time waiting for data. The GPU cost triples, but the storage cost savings that motivated the slow storage were negligible by comparison.
+
+### Redundant data copies
+
+Datasets copied from object storage to local SSD for every training run. No caching layer. No data locality awareness. Every run pays the full data transfer cost in time and network bandwidth.
+
+### Checkpoint bloat
+
+Saving a full model checkpoint every 100 steps for a multi-billion parameter model generates terabytes of data per day. Without lifecycle policies, old checkpoints accumulate indefinitely.
+
+**Fix**: Keep only the last N checkpoints. Archive to cold storage after evaluation. Delete after the model is promoted or abandoned.
+
+## Bucket 3: Operational waste
+
+This is the most insidious bucket because it does not show up on the infrastructure bill.
+
+### Manual operations
+
+Every deployment, quota change, or incident that requires a human adds operational cost. If your platform requires a ticket to get GPU access, a manual approval to deploy a model, and a Slack message to scale up — your people cost per deployment may exceed your compute cost per deployment.
+
+### Incident investigation
+
+Without proper [observability](/blog/observability-ai-kubernetes-three-layers/), every incident becomes a multi-team investigation. Platform team checks the cluster. SRE checks the nodes. ML team checks the model. Nobody finds the root cause quickly because the signals are disconnected.
+
+### Knowledge silos
+
+When only one person knows how to deploy a model, troubleshoot GPU issues, or configure the inference server — every absence, vacation, or departure creates operational risk that translates to cost through delays and workarounds.
+
+## Measuring what matters
+
+For engineering leaders, the metrics that matter are:
+
+| Metric | Formula | Target |
+|--------|---------|--------|
+| GPU utilization | Actual GPU compute time / total GPU reserved time | >70% |
+| Cost per inference | Total GPU cost / successful inference requests | Decreasing |
+| Time to deploy | From model approval to production serving | <1 hour |
+| Waste ratio | Idle + failed GPU hours / total GPU hours | <20% |
+| Platform ops cost | Engineering hours on platform operations / total engineering hours | <15% |
+
+If you cannot measure these today, start with GPU utilization and cost per inference. Those two metrics alone will reveal most of your hidden costs.
+
+## The compounding effect
+
+The three buckets compound. Poor bin-packing (compute waste) forces more nodes, which increases data transfer costs (data-path waste), which increases the surface area for incidents (operational waste). Fixing any one bucket improves the others.
+
+The fastest wins are usually in compute waste — right-sizing requests, cleaning up idle workloads, and implementing basic bin-packing optimization. The largest long-term savings come from operational automation.
+
+---
+
+*Next: [Platform + SRE + ML Teams: The Production Contract](/blog/platform-sre-ml-team-contract/). Previous: [AI Observability: Three Layers](/blog/observability-ai-kubernetes-three-layers/). Need help optimizing your AI infrastructure costs? [Book a free consultation](https://calendly.com/lucaberton/).*

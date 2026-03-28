@@ -1,0 +1,109 @@
+---
+draft: false
+title: "Autoscaling AI Inference on Kubernetes: Why It Is Harder Than You Think"
+snippet: "Inference is harder to autoscale because the unit economics and latency profile are fundamentally different from normal apps. One extra replica is not just another pod — it is another expensive GPU, another model copy in memory, and another cold-start penalty."
+description: "Inference is harder to autoscale because the unit economics and latency profile are fundamentally different from normal apps. One extra replica is not just another pod — it is another expensive GPU, another model copy in memory, and another cold-start penalty."
+publishDate: "2026-03-28"
+lastModified: "2026-03-28"
+image:
+  src: "/blog/thumbnails/autoscaling-ai-inference-kubernetes.jpg"
+  alt: "Autoscaling AI inference on Kubernetes — latency, cost, batching trade-offs"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "kubernetes"
+  - "ai-inference"
+  - "autoscaling"
+  - "gpu"
+  - "token-economics"
+  - "latency"
+---
+
+*Part 4 of a 10-part series on running AI workloads on Kubernetes in production.*
+
+## Why HPA is not enough
+
+With a normal stateless app, scaling on CPU or request count is often enough. The Horizontal Pod Autoscaler watches a metric, adds replicas, and the load balancer distributes traffic. Simple.
+
+With AI inference, everything about that model breaks:
+
+### Model load time
+
+A large language model takes 30-120 seconds to load into GPU memory. That is not a cold start — that is a cold glacier. By the time your new replica is ready, the traffic spike may be over. Or your existing replicas have already started dropping requests.
+
+### Warm-up penalties
+
+Even after loading, many models need warm-up inference calls to reach optimal performance. JIT compilation, CUDA kernel optimization, and memory allocation patterns all improve after the first few requests. Your P99 latency for the first 100 requests may be 10x worse than steady state.
+
+### Token-level latency variation
+
+For generative models, latency is not per-request — it is per-token. A 50-token response and a 2000-token response look identical at the request level but have wildly different resource profiles. Scaling on request count misses this entirely.
+
+### GPU memory constraints
+
+Each replica needs the full model in GPU memory. A 70B parameter model at FP16 needs approximately 140 GB of GPU memory. You cannot just "add another replica" — you need another node with enough GPU capacity. That might mean provisioning new hardware, which takes minutes to hours, not seconds.
+
+### Batching trade-offs
+
+Batching multiple inference requests together dramatically improves throughput but increases latency for individual requests. The optimal batch size depends on load, model size, and latency requirements — and it changes dynamically.
+
+## Token economics
+
+The economics of inference scaling are fundamentally different from web app scaling:
+
+**Cost per inference request:**
+- CPU-based web service: fractions of a cent
+- GPU-based inference: cents to dollars depending on model size and token count
+
+**Cost of an idle replica:**
+- Web service: negligible (small CPU allocation)
+- Inference service: $2-8/hour for a GPU sitting idle with a loaded model
+
+**Cost of being wrong about scale:**
+- Overprovisioned web service: wasted CPU (cheap)
+- Overprovisioned inference: wasted GPUs (very expensive)
+- Underprovisioned inference: dropped requests, timeout errors, user-facing failures
+
+This means the margin for error in autoscaling decisions is much thinner. Every unnecessary replica burns real money. Every missing replica loses real users.
+
+## What actually works
+
+### Custom metrics, not just request count
+
+Scale on metrics that reflect actual inference load:
+
+- **GPU utilization** — but be careful, this can be misleading with batching
+- **Queue depth** — requests waiting for inference capacity
+- **Token throughput** — tokens generated per second vs. capacity
+- **P95 latency** — scale up when latency degrades, not just when utilization increases
+
+### Predictive scaling
+
+If your traffic patterns are predictable (market hours, business hours, batch windows), pre-scale before the demand arrives. Waiting for reactive autoscaling to detect load, spin up a pod, load the model, and warm up is too slow for many use cases.
+
+The [5-Spot Machine Scheduler](/blog/finos-5spot-scheduler-kubernetes-bare-metal/) approach works here: schedule capacity based on known patterns rather than reacting to real-time signals.
+
+### Right-sized model serving
+
+Not every request needs the largest model. Routing strategies that send simple queries to smaller, cheaper models and complex queries to larger models can reduce cost dramatically without significant quality loss.
+
+### Graceful scale-down
+
+Never kill an inference pod that is mid-generation. Implement drain-based scale-down that finishes in-flight requests before terminating the pod. The graceful shutdown period for an inference server should be much longer than for a web service.
+
+## The inference cost equation
+
+For engineering leaders evaluating AI infrastructure costs:
+
+```
+Monthly inference cost = 
+  (average concurrent replicas × GPU cost/hour × 730 hours)
+  + (scale-up events × model load time × GPU cost/hour)
+  + (overprovisioning buffer × GPU cost/hour × 730 hours)
+```
+
+Optimizing any of these three terms — steady-state capacity, scaling overhead, or safety buffer — has a direct impact on the bottom line. The challenge is that reducing one often increases another.
+
+---
+
+*Next: [AI Observability on Kubernetes: The Three Layers](/blog/observability-ai-kubernetes-three-layers/). Previous: [Multi-Tenant GPU Platform Operating Model](/blog/multi-tenant-gpu-platform-operating-model/). Need help with inference scaling strategy? [Book a free consultation](https://calendly.com/lucaberton/).*

@@ -1,0 +1,108 @@
+---
+draft: false
+title: "Building a Multi-Tenant GPU Platform: It's an Operating Model Problem"
+snippet: "Multi-tenant GPU platforms fail when teams treat them as purely technical challenges. The harder problem is agreeing on who gets what, when, and under which rules. Here is the operating model that works."
+description: "Multi-tenant GPU platforms fail when teams treat them as purely technical challenges. The harder problem is agreeing on who gets what, when, and under which rules. Here is the operating model that works."
+publishDate: "2026-03-28"
+lastModified: "2026-03-28"
+image:
+  src: "/blog/thumbnails/multi-tenant-gpu-platform-operating-model.jpg"
+  alt: "Multi-tenant GPU platform operating model — isolation, fairness, policy enforcement"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - "kubernetes"
+  - "gpu"
+  - "multi-tenancy"
+  - "platform-engineering"
+  - "openshift"
+  - "ai-infrastructure"
+---
+
+*Part 3 of a 10-part series on running AI workloads on Kubernetes in production.*
+
+## The real problem is not technical
+
+Before building a multi-tenant GPU platform, teams should know that this is as much an operating model problem as a technical one.
+
+Technically, you need to make decisions on isolation, GPU partitioning, scheduling fairness, storage, and policy enforcement. But the harder part is **agreeing on who gets what, when, and under which rules**. If that is fuzzy, the platform becomes political very fast.
+
+I presented this exact challenge at [KubeCon Europe 2026](/kubecon/) — multi-tenant GPUs on bare metal OpenShift AI. The value was not just better utilization. It was creating a structure where multiple teams could share expensive resources safely and predictably.
+
+## The technical decisions
+
+### Isolation model
+
+You have a spectrum from hard isolation (dedicated nodes per tenant) to soft isolation (shared nodes with policy enforcement). The right choice depends on your security requirements, compliance posture, and cost tolerance:
+
+- **Dedicated nodes**: Maximum isolation, minimum utilization, highest cost
+- **Namespace-level isolation with network policies**: Good balance for most enterprises
+- **Shared nodes with GPU partitioning**: Best utilization, requires mature policy enforcement
+
+### GPU partitioning
+
+[MIG, MPS, and time-slicing](/blog/gpu-sharing-kubernetes-mig-mps-time-slicing/) are not interchangeable. The choice depends on workload characteristics:
+
+| Method | Isolation | Flexibility | Best for |
+|--------|-----------|-------------|----------|
+| MIG | Hardware-level | Fixed partitions | Inference, small training |
+| MPS | Process-level | Dynamic | Concurrent inference |
+| Time-slicing | None | Simple | Dev/test, non-critical |
+
+### Scheduling fairness
+
+Without explicit fairness policies, the team with the most aggressive autoscaler wins. You need:
+
+- **Resource quotas** per namespace/tenant
+- **Priority classes** for production vs. experiment workloads
+- **Preemption policies** that are transparent and documented
+- **Fair-share scheduling** that prevents starvation
+
+### Storage architecture
+
+AI workloads have unique storage patterns: large sequential reads for training, random reads for data loading, large writes for checkpoints. The storage backend needs to handle all three without becoming the bottleneck.
+
+## The operating model
+
+The technical decisions are the easy part. The operating model is what makes or breaks the platform:
+
+### 1. Define tenants explicitly
+
+A tenant is not just a namespace. It is a team, a budget, a set of SLAs, and a governance structure. Define:
+
+- Who owns the tenant
+- What their resource allocation is (guaranteed and burstable)
+- What their priority level is
+- What their data access boundaries are
+
+### 2. Make costs visible
+
+If teams cannot see what they are spending, they cannot optimize. Per-tenant cost attribution — broken down by GPU hours, storage, network, and support — drives the right behavior without heavy-handed controls.
+
+### 3. Automate the guardrails
+
+Manual approval for GPU access does not scale. Policy engines like Kyverno or OPA/Gatekeeper can enforce:
+
+- Maximum GPU requests per pod
+- Required labels and annotations
+- Image source restrictions
+- Network policy requirements
+- Resource limit enforcement
+
+### 4. Build escape hatches
+
+Every policy needs an exception path. If the only way to get more GPUs for an urgent deadline is to escalate to a VP, your platform has failed. Build self-service exception paths with audit trails.
+
+## The Safe, Fair, Efficient framework
+
+At KubeCon, I presented a framework for evaluating multi-tenant GPU platforms:
+
+- **Safe**: Workload isolation, security boundaries, graceful degradation
+- **Fair**: Transparent resource allocation, no starvation, clear priority rules
+- **Efficient**: High utilization without sacrificing safety or fairness
+
+Most platforms optimize for one dimension. The challenge — and the value — is optimizing for all three simultaneously.
+
+---
+
+*Next: [Autoscaling AI Inference: Why It Is Harder Than You Think](/blog/autoscaling-ai-inference-kubernetes/). Previous: [Biggest Mistakes Scaling AI/ML](/blog/scaling-ai-ml-kubernetes-mistakes/). Need help designing your multi-tenant GPU platform? [Book a free consultation](https://calendly.com/lucaberton/).*

@@ -1,0 +1,128 @@
+---
+draft: false
+title: "AI Observability on Kubernetes: The Three Layers That Actually Matter"
+snippet: "Good observability for AI systems is not just pod health and cluster metrics. It must connect infrastructure signals, model behavior, and business outcomes. Here are the three layers and how to instrument them."
+description: "Good observability for AI systems is not just pod health and cluster metrics. It must connect infrastructure signals, model behavior, and business outcomes. Here are the three layers and how to instrument them."
+publishDate: "2026-03-28"
+lastModified: "2026-03-28"
+image:
+  src: "/blog/thumbnails/observability-ai-kubernetes-three-layers.jpg"
+  alt: "AI observability on Kubernetes three layers — platform, ML runtime, business outcomes"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "kubernetes"
+  - "observability"
+  - "ai-infrastructure"
+  - "monitoring"
+  - "opentelemetry"
+  - "mlops"
+---
+
+*Part 5 of a 10-part series on running AI workloads on Kubernetes in production.*
+
+## Pod health is not observability
+
+Most Kubernetes monitoring setups tell you whether pods are running. For AI workloads, that is table stakes. A pod can be running, healthy, and returning 200s while serving increasingly wrong predictions from a stale model. Your cluster metrics will look perfect while your business outcomes collapse.
+
+Good AI observability connects three layers. If any layer is disconnected, troubleshooting becomes guesswork.
+
+## Layer 1: Platform signals
+
+This is the infrastructure layer — what most teams already have:
+
+- **GPU utilization** — per-device, per-pod, per-tenant. Not just average — P50, P95, and max
+- **GPU memory pressure** — how close are you to OOM on the GPU
+- **Node health** — thermal throttling, ECC errors, PCIe bandwidth
+- **Queue depth** — pending pods waiting for GPU resources
+- **Storage throughput** — read/write IOPS and latency for model artifacts and training data
+- **Network hotspots** — especially for distributed training with NCCL/RDMA
+
+The key insight: platform signals tell you **can** the workload run, not **should** it run or **how well** it is running.
+
+### What to instrument
+
+```yaml
+# Example: GPU metrics via DCGM Exporter
+- DCGM_FI_DEV_GPU_UTIL        # GPU core utilization
+- DCGM_FI_DEV_FB_USED         # Framebuffer memory used
+- DCGM_FI_DEV_FB_FREE         # Framebuffer memory free
+- DCGM_FI_PROF_PIPE_TENSOR_ACTIVE  # Tensor core utilization
+- DCGM_FI_DEV_POWER_USAGE     # Power consumption
+- DCGM_FI_DEV_PCIE_TX_THROUGHPUT   # PCIe bandwidth
+```
+
+## Layer 2: ML/runtime signals
+
+This is where most teams have gaps. These metrics come from the inference server, training framework, or ML pipeline:
+
+- **Model load times** — how long from pod start to serving-ready
+- **Inference latency by model and version** — broken down by P50, P95, P99
+- **Token throughput** — tokens per second for generative models
+- **Batch efficiency** — actual batch sizes vs. configured maximums
+- **Failure modes** — input validation errors, timeout errors, OOM kills during inference
+- **Model version tracking** — which version is serving traffic right now
+
+This layer answers: **how well** is the AI workload performing?
+
+### The latency decomposition
+
+For inference services, total latency breaks down into:
+
+1. **Queue time** — waiting for an available slot
+2. **Preprocessing** — tokenization, feature extraction
+3. **Inference** — actual model computation
+4. **Postprocessing** — detokenization, formatting
+5. **Network** — request/response transfer
+
+If you only measure total latency, you cannot distinguish between a slow model and a congested queue. Instrument each component.
+
+## Layer 3: Outcome signals
+
+This is the layer that connects infrastructure to business value:
+
+- **Accuracy drift** — is model quality degrading over time
+- **User-facing latency** — end-to-end, not just inference time
+- **Cost per inference** — GPU hours divided by successful completions
+- **Cost per training run** — total compute cost for model updates
+- **Tenant-level consumption** — per-team resource usage and cost
+- **SLA compliance** — percentage of requests meeting latency targets
+
+Outcome signals answer: **is the AI workload delivering value?**
+
+## Connecting the layers
+
+The power comes from correlation. When a user reports slow responses:
+
+1. **Layer 3** shows P95 latency exceeded SLA at 14:32
+2. **Layer 2** shows inference latency spiked due to increased batch sizes
+3. **Layer 1** shows GPU memory pressure triggered batch size increases because a new tenant started a training job on the same node
+
+Without all three layers, you would either blame the model (wrong) or blame the infrastructure (partially right) without understanding the root cause (scheduling conflict).
+
+## Making observability a shared language
+
+My bias is to instrument from day one and make observability a shared language between SRE, platform, and ML teams. This means:
+
+- **Shared dashboards** — not separate tools for each team
+- **Common alert definitions** — agreed SLOs that trigger the right team
+- **Unified correlation** — OpenTelemetry traces that span from HTTP request to GPU inference and back
+- **Cost visibility** — every team sees their consumption and its business impact
+
+When observability is fragmented — infrastructure team uses Prometheus, ML team uses MLflow, business team uses a spreadsheet — nobody has the full picture and every incident becomes a blame game.
+
+## The minimum viable observability stack
+
+For teams starting out, I would prioritize:
+
+1. **DCGM Exporter + Prometheus** for GPU and platform metrics
+2. **Custom metrics from your inference server** (vLLM, Triton, TGI all expose good metrics)
+3. **OpenTelemetry for distributed tracing** across the request path
+4. **A single dashboard** that shows all three layers for each tenant
+5. **Alerting on outcome metrics**, not just infrastructure metrics
+
+Get these five right and you can troubleshoot 90% of production issues. The remaining 10% will require deeper instrumentation — but you will know where to look.
+
+---
+
+*Next: [Hidden Cost Drivers in AI Workloads on Kubernetes](/blog/hidden-cost-ai-kubernetes-workloads/). Previous: [Autoscaling AI Inference](/blog/autoscaling-ai-inference-kubernetes/). Need help building your AI observability stack? [Book a free consultation](https://calendly.com/lucaberton/).*

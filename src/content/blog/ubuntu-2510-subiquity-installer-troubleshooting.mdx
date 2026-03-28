@@ -1,0 +1,171 @@
+---
+draft: false
+title: "Ubuntu 25.10 Installer Broken? Fix the Subiquity Socket Error Step by Step"
+snippet: "The Ubuntu 25.10 Questing Quokka desktop installer shows the UI but fails to connect to the backend. The root cause is the Subiquity server not answering on its Unix socket. Here is the exact troubleshooting sequence to fix it."
+description: "The Ubuntu 25.10 Questing Quokka desktop installer shows the UI but fails to connect to the backend. The root cause is the Subiquity server not answering on its Unix socket. Here is the exact troubleshooting sequence to fix it."
+publishDate: "2026-03-29"
+lastModified: "2026-03-29"
+image:
+  src: "/blog/thumbnails/ubuntu-2510-subiquity-installer-troubleshooting.jpg"
+  alt: "Ubuntu 25.10 Subiquity installer socket error troubleshooting guide"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "ubuntu"
+  - "linux"
+  - "troubleshooting"
+  - "subiquity"
+  - "systemd"
+  - "snap"
+---
+
+## The symptom
+
+You boot from an Ubuntu 25.10 (Questing Quokka) live USB. The installer UI loads — you see the language selection or welcome screen — but then it hangs, shows a connection error, or refuses to proceed.
+
+The screen is up. The backend is not.
+
+## The root cause
+
+Ubuntu's desktop installer uses a two-part architecture:
+
+1. **Frontend** — the graphical UI you see on screen (`ubuntu-desktop-bootstrap`)
+2. **Backend** — the Subiquity server that handles the actual installation logic
+
+They communicate over a Unix socket at `/run/subiquity/socket`. When the backend is down or unresponsive, the frontend loads but cannot do anything useful. You get a UI with no brain behind it.
+
+The backend runs as a systemd service:
+
+```
+snap.ubuntu-desktop-bootstrap.subiquity-server.service
+```
+
+If that service crashes, fails to start, or loses its socket — the installer is dead in the water.
+
+## Step 1: Restart the Subiquity backend
+
+Open a terminal (Ctrl+Alt+T or right-click the desktop) and restart the service:
+
+```bash
+sudo systemctl restart snap.ubuntu-desktop-bootstrap.subiquity-server.service
+```
+
+Check if it came back:
+
+```bash
+sudo systemctl status snap.ubuntu-desktop-bootstrap.subiquity-server.service --no-pager -l
+```
+
+You want to see `Active: active (running)`. If you see `failed`, `inactive`, or `activating` stuck in a loop — continue to Step 2.
+
+## Step 2: Check the logs
+
+The logs tell you exactly why the backend is failing:
+
+```bash
+journalctl -u snap.ubuntu-desktop-bootstrap.subiquity-server.service -b --no-pager | tail -100
+```
+
+Common error patterns:
+
+| Log pattern | Likely cause |
+|------------|--------------|
+| `socket.error: [Errno 98] Address already in use` | Stale socket file — delete `/run/subiquity/socket` and restart |
+| `ModuleNotFoundError` or `ImportError` | Corrupted snap — reinstall (Step 3) |
+| `PermissionError` | Snap confinement issue — reinstall with `--classic` |
+| `OSError: [Errno 28] No space left on device` | Live USB tmpfs is full — reboot or use a larger USB |
+| Repeated crash/restart cycle | Corrupted installation media — reflash the USB (Step 4) |
+
+### Fix a stale socket
+
+If the socket file is stale:
+
+```bash
+sudo rm -f /run/subiquity/socket
+sudo systemctl restart snap.ubuntu-desktop-bootstrap.subiquity-server.service
+```
+
+## Step 3: Reinstall the snap
+
+If the service keeps failing after restart, the snap itself may be corrupted:
+
+```bash
+sudo snap remove ubuntu-desktop-bootstrap
+sudo snap install ubuntu-desktop-bootstrap --classic
+sudo systemctl restart snap.ubuntu-desktop-bootstrap.subiquity-server.service
+```
+
+Then relaunch the installer:
+
+```bash
+/snap/bin/ubuntu-desktop-bootstrap --try-or-install
+```
+
+## Step 4: Reflash the USB (nuclear option)
+
+If the service still will not stay up after reinstalling the snap, the most likely cause is corrupted installation media. This is especially common when:
+
+- The ISO download was incomplete or corrupted
+- The USB flash tool did not write cleanly
+- The USB drive has bad sectors
+
+**Download a fresh ISO** from [ubuntu.com/download](https://ubuntu.com/download) and verify the checksum:
+
+```bash
+sha256sum ubuntu-25.10-desktop-amd64.iso
+```
+
+Compare with the official checksum from [releases.ubuntu.com](https://releases.ubuntu.com/25.10/SHA256SUMS).
+
+Reflash with a reliable tool:
+
+```bash
+# On Linux
+sudo dd if=ubuntu-25.10-desktop-amd64.iso of=/dev/sdX bs=4M status=progress oflag=sync
+
+# Or use Balena Etcher on any OS
+```
+
+Canonical's point-release notes frequently mention updated install images that fix installer bugs. A fresh ISO from the latest point release may resolve the issue entirely.
+
+## The diagnostic command
+
+If you are stuck and need to share logs for help, this single command captures the most relevant information:
+
+```bash
+journalctl -u snap.ubuntu-desktop-bootstrap.subiquity-server.service -b --no-pager | tail -50
+```
+
+Paste that output in your support request — it contains the exact error that is preventing the backend from starting.
+
+## Ubuntu 25.10 context
+
+Ubuntu 25.10 Questing Quokka is an **interim release** with only 9 months of support. If you are setting up infrastructure for production or long-term use, consider **Ubuntu 24.04.3 LTS** instead — it is supported until April 2029 (or 2034 with Ubuntu Pro).
+
+The desktop installer (`ubuntu-desktop-bootstrap`) replaced the older Ubiquity installer starting with Ubuntu 23.04. It is Snap-based and uses the Subiquity backend that was originally built for Ubuntu Server. This architecture is newer and occasionally has edge-case bugs that get fixed in point releases.
+
+## Quick reference
+
+```bash
+# 1. Restart the backend
+sudo systemctl restart snap.ubuntu-desktop-bootstrap.subiquity-server.service
+
+# 2. Check status
+sudo systemctl status snap.ubuntu-desktop-bootstrap.subiquity-server.service --no-pager -l
+
+# 3. View logs
+journalctl -u snap.ubuntu-desktop-bootstrap.subiquity-server.service -b --no-pager | tail -100
+
+# 4. Relaunch installer
+/snap/bin/ubuntu-desktop-bootstrap --try-or-install
+
+# 5. Nuclear: reinstall snap
+sudo snap remove ubuntu-desktop-bootstrap
+sudo snap install ubuntu-desktop-bootstrap --classic
+sudo systemctl restart snap.ubuntu-desktop-bootstrap.subiquity-server.service
+/snap/bin/ubuntu-desktop-bootstrap --try-or-install
+```
+
+---
+
+*Related: [Linux Distribution Comparison](/blog/linux-distribution-comparison-enterprise-2026/), [RHEL 9 for SysAdmins](/blog/red-hat-enterprise-linux-9-for-sysadmins/). Need help with Linux infrastructure? [Book a consultation](https://calendly.com/lucaberton/).*

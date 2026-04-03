@@ -1,0 +1,299 @@
+---
+draft: false
+title: "Kubernetes Cheat Sheet: Essential kubectl Commands for 2026"
+snippet: "The only Kubernetes cheat sheet you need. Essential kubectl commands for pods, deployments, services, debugging, and GPU workloads with practical examples."
+description: "Comprehensive Kubernetes kubectl cheat sheet with commands for pods, deployments, services, namespaces, debugging, logs, GPU workloads, and production operations."
+image:
+  src: "/blog/thumbnails/kubernetes-cheat-sheet-kubectl-commands-2026.jpg"
+  alt: "Kubernetes cheat sheet with kubectl commands"
+publishDate: "2026-04-03"
+lastModified: "2026-04-03"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ["Kubernetes", "kubectl", "Cheat Sheet", "DevOps", "Containers"]
+---
+
+I keep this cheat sheet updated as I work with Kubernetes daily across bare metal GPU clusters and cloud deployments. Bookmark it.
+
+## Cluster Information
+
+```bash
+# Cluster info
+kubectl cluster-info
+kubectl version --short
+kubectl get nodes -o wide
+
+# View all resources in a namespace
+kubectl get all -n my-namespace
+
+# View API resources available
+kubectl api-resources
+
+# Check component status
+kubectl get componentstatuses
+```
+
+## Pods
+
+```bash
+# List pods
+kubectl get pods
+kubectl get pods -A                    # All namespaces
+kubectl get pods -o wide               # Show node assignment
+kubectl get pods --show-labels
+kubectl get pods -l app=nginx          # Filter by label
+kubectl get pods --field-selector status.phase=Running
+
+# Create a pod
+kubectl run nginx --image=nginx:latest
+kubectl run debug --image=busybox -it --rm -- sh  # Temporary debug pod
+
+# Pod details
+kubectl describe pod my-pod
+kubectl get pod my-pod -o yaml
+kubectl get pod my-pod -o jsonpath='{.status.podIP}'
+
+# Delete pods
+kubectl delete pod my-pod
+kubectl delete pods --all -n default
+kubectl delete pod my-pod --grace-period=0 --force  # Force delete
+```
+
+## Deployments
+
+```bash
+# Create deployment
+kubectl create deployment nginx --image=nginx --replicas=3
+
+# Scale
+kubectl scale deployment nginx --replicas=5
+
+# Update image (rolling update)
+kubectl set image deployment/nginx nginx=nginx:1.27
+
+# Rollout management
+kubectl rollout status deployment/nginx
+kubectl rollout history deployment/nginx
+kubectl rollout undo deployment/nginx              # Rollback
+kubectl rollout undo deployment/nginx --to-revision=2
+
+# Restart all pods (rolling)
+kubectl rollout restart deployment/nginx
+
+# Pause/resume rollout
+kubectl rollout pause deployment/nginx
+kubectl rollout resume deployment/nginx
+```
+
+## Services
+
+```bash
+# Expose deployment
+kubectl expose deployment nginx --port=80 --type=ClusterIP
+kubectl expose deployment nginx --port=80 --type=LoadBalancer
+kubectl expose deployment nginx --port=80 --type=NodePort
+
+# List services
+kubectl get svc
+kubectl get endpoints
+
+# Port forward (local development)
+kubectl port-forward svc/nginx 8080:80
+kubectl port-forward pod/my-pod 8080:80
+```
+
+## Namespaces
+
+```bash
+# Manage namespaces
+kubectl get namespaces
+kubectl create namespace staging
+kubectl delete namespace staging
+
+# Set default namespace
+kubectl config set-context --current --namespace=staging
+
+# View current context
+kubectl config current-context
+kubectl config get-contexts
+```
+
+## ConfigMaps and Secrets
+
+```bash
+# ConfigMaps
+kubectl create configmap app-config --from-literal=key=value
+kubectl create configmap app-config --from-file=config.yaml
+kubectl get configmap app-config -o yaml
+
+# Secrets
+kubectl create secret generic db-creds --from-literal=password=s3cr3t
+kubectl get secret db-creds -o jsonpath='{.data.password}' | base64 -d
+
+# TLS Secret
+kubectl create secret tls my-tls --cert=cert.pem --key=key.pem
+```
+
+## Debugging and Logs
+
+```bash
+# Logs
+kubectl logs my-pod
+kubectl logs my-pod -c my-container    # Specific container
+kubectl logs my-pod --previous         # Previous crashed container
+kubectl logs -f my-pod                 # Follow/stream
+kubectl logs -l app=nginx --all-containers  # All pods with label
+kubectl logs my-pod --since=1h         # Last hour
+kubectl logs my-pod --tail=100         # Last 100 lines
+
+# Execute into pod
+kubectl exec -it my-pod -- /bin/bash
+kubectl exec -it my-pod -c my-container -- sh
+
+# Debug
+kubectl describe pod my-pod            # Events and status
+kubectl get events --sort-by='.lastTimestamp'
+kubectl top pods                       # Resource usage
+kubectl top nodes
+
+# Network debugging
+kubectl run debug --image=nicolaka/netshoot -it --rm -- bash
+```
+
+## Resource Management
+
+```bash
+# View resource usage
+kubectl top pods --sort-by=memory
+kubectl top nodes
+
+# Resource quotas
+kubectl get resourcequotas -A
+kubectl describe resourcequota -n my-namespace
+
+# Limits and requests
+kubectl set resources deployment/nginx --limits=cpu=200m,memory=512Mi
+kubectl set resources deployment/nginx --requests=cpu=100m,memory=256Mi
+```
+
+## GPU Workloads
+
+```bash
+# Check GPU nodes
+kubectl get nodes -l nvidia.com/gpu.present=true
+kubectl describe node gpu-node | grep -A5 "Allocatable"
+
+# View GPU resources
+kubectl get nodes -o custom-columns="NAME:.metadata.name,GPU:.status.allocatable.nvidia\.com/gpu"
+
+# Run GPU pod
+kubectl run gpu-test --image=nvidia/cuda:12.8.0-base-ubuntu24.04 \
+  --overrides='{"spec":{"containers":[{"name":"gpu-test","image":"nvidia/cuda:12.8.0-base-ubuntu24.04","resources":{"limits":{"nvidia.com/gpu":"1"}},"command":["nvidia-smi"]}]}}'
+
+# Check GPU operator
+kubectl get pods -n gpu-operator
+kubectl logs -n gpu-operator -l app=nvidia-device-plugin-daemonset
+```
+
+## YAML Quick Templates
+
+### Pod
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-pod
+  labels:
+    app: myapp
+spec:
+  containers:
+    - name: app
+      image: myapp:latest
+      ports:
+        - containerPort: 8080
+      resources:
+        requests:
+          cpu: 100m
+          memory: 128Mi
+        limits:
+          cpu: 500m
+          memory: 512Mi
+```
+
+### Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+        - name: app
+          image: myapp:v1.0
+          ports:
+            - containerPort: 8080
+```
+
+### Ingress
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: myapp-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  tls:
+    - hosts: [myapp.example.com]
+      secretName: myapp-tls
+  rules:
+    - host: myapp.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: myapp
+                port:
+                  number: 80
+```
+
+## Productivity Aliases
+
+Add to your `~/.bashrc` or `~/.zshrc`:
+
+```bash
+alias k='kubectl'
+alias kgp='kubectl get pods'
+alias kgs='kubectl get svc'
+alias kgd='kubectl get deployments'
+alias kgn='kubectl get nodes'
+alias kdp='kubectl describe pod'
+alias kl='kubectl logs'
+alias klf='kubectl logs -f'
+alias kex='kubectl exec -it'
+alias kaf='kubectl apply -f'
+alias kdf='kubectl delete -f'
+alias kctx='kubectl config current-context'
+alias kns='kubectl config set-context --current --namespace'
+```
+
+## Related Resources
+
+- [Kubernetes Recipes Book](/blog/kubernetes-recipes-book-giveaway-kubecon-europe-2026/) — my Kubernetes book
+- [AI on Kubernetes in Production Series](/blog/ai-kubernetes-production-first-90-days/)
+- [Multi-Tenant GPUs on Bare Metal](/blog/kubecon-2026-packed-room-multi-tenant-gpus/)
+- [Book a Kubernetes Workshop](/services/kubernetes-workshops/)

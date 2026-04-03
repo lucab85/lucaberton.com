@@ -1,0 +1,723 @@
+---
+draft: false
+title: "20 Ansible Playbook Examples: From Beginner to Advanced (2026)"
+snippet: "Practical Ansible playbook examples you can copy and use today. Covers package management, user creation, Docker deployment, Kubernetes, rolling updates, and more."
+description: "20 real-world Ansible playbook examples from beginner to advanced. Copy-paste examples for package management, Docker, Kubernetes, security hardening, and rolling deployments."
+image:
+  src: "/blog/thumbnails/ansible-playbook-examples-beginners-to-advanced.jpg"
+  alt: "Ansible playbook examples from beginner to advanced"
+publishDate: "2026-04-03"
+lastModified: "2026-04-03"
+author: "Luca Berton"
+category: "Automation"
+tags: ["Ansible", "Playbook", "Automation", "DevOps", "Tutorial"]
+---
+
+After writing [8 books on Ansible](/books/) and running [Ansible Pilot](https://www.ansiblepilot.com/) for years, I have collected the playbook patterns that I use most often. Here are 20 examples you can use right away.
+
+## Beginner Playbooks
+
+### 1. Install Packages
+
+```yaml
+---
+- name: Install essential packages
+  hosts: all
+  become: true
+  tasks:
+    - name: Install packages
+      ansible.builtin.package:
+        name:
+          - vim
+          - curl
+          - git
+          - htop
+        state: present
+```
+
+### 2. Create Users with SSH Keys
+
+```yaml
+---
+- name: Create developer users
+  hosts: all
+  become: true
+  vars:
+    developers:
+      - name: alice
+        ssh_key: "ssh-ed25519 AAAA... alice@company.com"
+      - name: bob
+        ssh_key: "ssh-ed25519 AAAA... bob@company.com"
+  tasks:
+    - name: Create user accounts
+      ansible.builtin.user:
+        name: "{{ item.name }}"
+        shell: /bin/bash
+        groups: sudo
+        append: true
+      loop: "{{ developers }}"
+
+    - name: Add SSH authorized keys
+      ansible.posix.authorized_key:
+        user: "{{ item.name }}"
+        key: "{{ item.ssh_key }}"
+      loop: "{{ developers }}"
+```
+
+### 3. Configure Firewall Rules
+
+```yaml
+---
+- name: Configure UFW firewall
+  hosts: all
+  become: true
+  tasks:
+    - name: Install UFW
+      ansible.builtin.apt:
+        name: ufw
+        state: present
+
+    - name: Allow SSH
+      community.general.ufw:
+        rule: allow
+        port: "22"
+        proto: tcp
+
+    - name: Allow HTTP/HTTPS
+      community.general.ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop: ["80", "443"]
+
+    - name: Enable UFW
+      community.general.ufw:
+        state: enabled
+        default: deny
+```
+
+### 4. Copy Configuration Files with Templates
+
+```yaml
+---
+- name: Deploy Nginx configuration
+  hosts: webservers
+  become: true
+  vars:
+    server_name: example.com
+    document_root: /var/www/html
+  tasks:
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+
+    - name: Deploy site configuration
+      ansible.builtin.template:
+        src: templates/nginx-site.conf.j2
+        dest: /etc/nginx/sites-available/{{ server_name }}
+        mode: "0644"
+      notify: Reload Nginx
+
+  handlers:
+    - name: Reload Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded
+```
+
+### 5. System Update and Reboot
+
+```yaml
+---
+- name: Update all packages and reboot if needed
+  hosts: all
+  become: true
+  tasks:
+    - name: Update all packages
+      ansible.builtin.apt:
+        upgrade: dist
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Check if reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+
+    - name: Reboot if required
+      ansible.builtin.reboot:
+        reboot_timeout: 300
+      when: reboot_required.stat.exists
+```
+
+## Intermediate Playbooks
+
+### 6. Deploy Docker Containers
+
+```yaml
+---
+- name: Deploy application with Docker
+  hosts: docker_hosts
+  become: true
+  tasks:
+    - name: Install Docker
+      ansible.builtin.apt:
+        name:
+          - docker.io
+          - docker-compose-plugin
+        state: present
+
+    - name: Start Docker service
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Deploy application container
+      community.docker.docker_container:
+        name: myapp
+        image: myapp:latest
+        state: started
+        restart_policy: always
+        ports:
+          - "8080:8080"
+        env:
+          DATABASE_URL: "postgres://db:5432/app"
+```
+
+### 7. Configure SSL Certificates with Let's Encrypt
+
+```yaml
+---
+- name: Setup Let's Encrypt SSL
+  hosts: webservers
+  become: true
+  vars:
+    domain: example.com
+    email: admin@example.com
+  tasks:
+    - name: Install Certbot
+      ansible.builtin.apt:
+        name:
+          - certbot
+          - python3-certbot-nginx
+        state: present
+
+    - name: Obtain SSL certificate
+      ansible.builtin.command:
+        cmd: >
+          certbot --nginx -d {{ domain }}
+          --non-interactive --agree-tos
+          --email {{ email }}
+        creates: /etc/letsencrypt/live/{{ domain }}/fullchain.pem
+```
+
+### 8. Database Backup Automation
+
+```yaml
+---
+- name: Automated PostgreSQL backup
+  hosts: database_servers
+  become: true
+  become_user: postgres
+  vars:
+    backup_dir: /var/backups/postgresql
+    retention_days: 7
+  tasks:
+    - name: Create backup directory
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Dump all databases
+      ansible.builtin.shell: |
+        pg_dumpall | gzip > {{ backup_dir }}/backup_{{ ansible_date_time.date }}.sql.gz
+      args:
+        creates: "{{ backup_dir }}/backup_{{ ansible_date_time.date }}.sql.gz"
+
+    - name: Remove old backups
+      ansible.builtin.find:
+        paths: "{{ backup_dir }}"
+        age: "{{ retention_days }}d"
+      register: old_backups
+
+    - name: Delete old backup files
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_backups.files }}"
+```
+
+### 9. Multi-Environment Deployment with Variables
+
+```yaml
+---
+- name: Deploy app to multiple environments
+  hosts: "{{ target_env }}"
+  become: true
+  vars_files:
+    - "vars/{{ target_env }}.yml"
+  tasks:
+    - name: Deploy configuration
+      ansible.builtin.template:
+        src: app-config.j2
+        dest: /opt/app/config.yml
+      notify: Restart application
+
+    - name: Ensure app is running
+      ansible.builtin.service:
+        name: myapp
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Restart application
+      ansible.builtin.service:
+        name: myapp
+        state: restarted
+```
+
+Run with: `ansible-playbook deploy.yml -e target_env=staging`
+
+### 10. System Hardening
+
+```yaml
+---
+- name: Security hardening
+  hosts: all
+  become: true
+  tasks:
+    - name: Disable root SSH login
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^PermitRootLogin"
+        line: "PermitRootLogin no"
+      notify: Restart SSH
+
+    - name: Disable password authentication
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^PasswordAuthentication"
+        line: "PasswordAuthentication no"
+      notify: Restart SSH
+
+    - name: Set SSH idle timeout
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: "^ClientAliveInterval"
+        line: "ClientAliveInterval 300"
+      notify: Restart SSH
+
+    - name: Configure automatic security updates
+      ansible.builtin.apt:
+        name: unattended-upgrades
+        state: present
+
+  handlers:
+    - name: Restart SSH
+      ansible.builtin.service:
+        name: sshd
+        state: restarted
+```
+
+## Advanced Playbooks
+
+### 11. Rolling Update with Zero Downtime
+
+```yaml
+---
+- name: Rolling deployment
+  hosts: webservers
+  serial: 1
+  become: true
+  pre_tasks:
+    - name: Remove from load balancer
+      ansible.builtin.uri:
+        url: "http://lb.internal/api/backends/{{ inventory_hostname }}"
+        method: DELETE
+      delegate_to: localhost
+
+    - name: Wait for connections to drain
+      ansible.builtin.wait_for:
+        timeout: 30
+
+  tasks:
+    - name: Pull latest image
+      community.docker.docker_image:
+        name: myapp
+        tag: "{{ app_version }}"
+        source: pull
+
+    - name: Restart application
+      community.docker.docker_container:
+        name: myapp
+        image: "myapp:{{ app_version }}"
+        state: started
+        restart: true
+
+    - name: Wait for health check
+      ansible.builtin.uri:
+        url: "http://localhost:8080/health"
+        status_code: 200
+      register: health
+      until: health.status == 200
+      retries: 30
+      delay: 2
+
+  post_tasks:
+    - name: Add back to load balancer
+      ansible.builtin.uri:
+        url: "http://lb.internal/api/backends"
+        method: POST
+        body_format: json
+        body:
+          host: "{{ inventory_hostname }}"
+      delegate_to: localhost
+```
+
+### 12. Kubernetes Deployment with Ansible
+
+```yaml
+---
+- name: Deploy to Kubernetes
+  hosts: localhost
+  connection: local
+  vars:
+    namespace: production
+    app_name: myapp
+    image_tag: "v2.1.0"
+  tasks:
+    - name: Create namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{ namespace }}"
+
+    - name: Deploy application
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: "{{ app_name }}"
+            namespace: "{{ namespace }}"
+          spec:
+            replicas: 3
+            selector:
+              matchLabels:
+                app: "{{ app_name }}"
+            template:
+              metadata:
+                labels:
+                  app: "{{ app_name }}"
+              spec:
+                containers:
+                  - name: "{{ app_name }}"
+                    image: "registry.example.com/{{ app_name }}:{{ image_tag }}"
+                    ports:
+                      - containerPort: 8080
+                    resources:
+                      requests:
+                        cpu: 100m
+                        memory: 128Mi
+                      limits:
+                        cpu: 500m
+                        memory: 512Mi
+
+    - name: Create service
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: "{{ app_name }}"
+            namespace: "{{ namespace }}"
+          spec:
+            selector:
+              app: "{{ app_name }}"
+            ports:
+              - port: 80
+                targetPort: 8080
+            type: ClusterIP
+```
+
+### 13. Dynamic Inventory with AWS
+
+```yaml
+---
+- name: Configure AWS instances by tag
+  hosts: tag_Environment_production
+  become: true
+  tasks:
+    - name: Install monitoring agent
+      ansible.builtin.package:
+        name: prometheus-node-exporter
+        state: present
+
+    - name: Configure agent
+      ansible.builtin.template:
+        src: node-exporter.j2
+        dest: /etc/default/prometheus-node-exporter
+      notify: Restart node exporter
+
+  handlers:
+    - name: Restart node exporter
+      ansible.builtin.service:
+        name: prometheus-node-exporter
+        state: restarted
+```
+
+### 14. Vault-Encrypted Secrets
+
+```yaml
+---
+- name: Deploy with encrypted secrets
+  hosts: production
+  become: true
+  vars_files:
+    - vars/secrets.yml  # ansible-vault encrypted
+  tasks:
+    - name: Configure database connection
+      ansible.builtin.template:
+        src: db-config.j2
+        dest: /opt/app/db.conf
+        mode: "0600"
+        owner: app
+      no_log: true
+
+    - name: Set API keys
+      ansible.builtin.copy:
+        content: |
+          API_KEY={{ api_key }}
+          SECRET={{ app_secret }}
+        dest: /opt/app/.env
+        mode: "0600"
+      no_log: true
+```
+
+Run with: `ansible-playbook deploy.yml --ask-vault-pass`
+
+### 15. Conditional Cross-Platform Playbook
+
+```yaml
+---
+- name: Cross-platform package installation
+  hosts: all
+  become: true
+  tasks:
+    - name: Install on Debian/Ubuntu
+      ansible.builtin.apt:
+        name: "{{ debian_packages }}"
+        state: present
+        update_cache: true
+      when: ansible_os_family == "Debian"
+
+    - name: Install on RHEL/CentOS
+      ansible.builtin.dnf:
+        name: "{{ rhel_packages }}"
+        state: present
+      when: ansible_os_family == "RedHat"
+
+  vars:
+    debian_packages:
+      - nginx
+      - python3-pip
+    rhel_packages:
+      - nginx
+      - python3-pip
+```
+
+### 16. Monitoring Stack Deployment
+
+```yaml
+---
+- name: Deploy Prometheus + Grafana
+  hosts: monitoring
+  become: true
+  roles:
+    - prometheus
+    - grafana
+  tasks:
+    - name: Deploy Prometheus config
+      ansible.builtin.template:
+        src: prometheus.yml.j2
+        dest: /etc/prometheus/prometheus.yml
+      notify: Restart Prometheus
+
+    - name: Deploy Grafana dashboards
+      ansible.builtin.copy:
+        src: "dashboards/{{ item }}"
+        dest: /var/lib/grafana/dashboards/
+      loop:
+        - node-exporter.json
+        - application.json
+      notify: Restart Grafana
+```
+
+### 17. GitOps Workflow
+
+```yaml
+---
+- name: GitOps deployment from repository
+  hosts: app_servers
+  become: true
+  vars:
+    repo_url: https://github.com/company/app.git
+    deploy_branch: main
+    deploy_dir: /opt/app
+  tasks:
+    - name: Clone/update repository
+      ansible.builtin.git:
+        repo: "{{ repo_url }}"
+        dest: "{{ deploy_dir }}"
+        version: "{{ deploy_branch }}"
+        force: true
+      register: git_result
+
+    - name: Install dependencies
+      ansible.builtin.command:
+        cmd: pip install -r requirements.txt
+        chdir: "{{ deploy_dir }}"
+      when: git_result.changed
+
+    - name: Run migrations
+      ansible.builtin.command:
+        cmd: python manage.py migrate
+        chdir: "{{ deploy_dir }}"
+      when: git_result.changed
+
+    - name: Restart application
+      ansible.builtin.service:
+        name: myapp
+        state: restarted
+      when: git_result.changed
+```
+
+### 18. Compliance Audit Playbook
+
+```yaml
+---
+- name: Security compliance audit
+  hosts: all
+  become: true
+  tasks:
+    - name: Check SSH protocol version
+      ansible.builtin.command: grep "^Protocol" /etc/ssh/sshd_config
+      register: ssh_protocol
+      changed_when: false
+      failed_when: false
+
+    - name: Check password max age
+      ansible.builtin.command: grep "^PASS_MAX_DAYS" /etc/login.defs
+      register: pass_max
+      changed_when: false
+
+    - name: Check for unowned files
+      ansible.builtin.command: find / -nouser -o -nogroup -maxdepth 3
+      register: unowned_files
+      changed_when: false
+
+    - name: Generate compliance report
+      ansible.builtin.template:
+        src: compliance-report.j2
+        dest: "/tmp/compliance_{{ inventory_hostname }}.html"
+      delegate_to: localhost
+```
+
+### 19. Multi-Tier Application Deployment
+
+```yaml
+---
+- name: Deploy database tier
+  hosts: databases
+  become: true
+  roles:
+    - postgresql
+  tags: [database]
+
+- name: Deploy application tier
+  hosts: app_servers
+  become: true
+  serial: "50%"
+  roles:
+    - java_app
+  tags: [app]
+
+- name: Deploy web tier
+  hosts: webservers
+  become: true
+  serial: 1
+  roles:
+    - nginx_proxy
+  tags: [web]
+
+- name: Run smoke tests
+  hosts: localhost
+  tasks:
+    - name: Test application endpoint
+      ansible.builtin.uri:
+        url: "https://{{ app_domain }}/health"
+        status_code: 200
+      retries: 5
+      delay: 10
+  tags: [test]
+```
+
+### 20. Self-Healing Infrastructure
+
+```yaml
+---
+- name: Self-healing checks
+  hosts: all
+  become: true
+  tasks:
+    - name: Check disk space
+      ansible.builtin.shell: df -h / | awk 'NR==2 {print $5}' | tr -d '%'
+      register: disk_usage
+      changed_when: false
+
+    - name: Clean up if disk over 85%
+      ansible.builtin.shell: |
+        journalctl --vacuum-time=3d
+        apt-get clean
+        find /tmp -type f -mtime +7 -delete
+        find /var/log -name "*.gz" -mtime +30 -delete
+      when: disk_usage.stdout | int > 85
+
+    - name: Check critical services
+      ansible.builtin.service_facts:
+
+    - name: Restart failed services
+      ansible.builtin.service:
+        name: "{{ item }}"
+        state: started
+      loop:
+        - nginx
+        - docker
+      when: ansible_facts.services[item + '.service'].state != 'running'
+      failed_when: false
+```
+
+## Tips for Writing Better Playbooks
+
+1. **Always use FQCNs** — `ansible.builtin.copy` not just `copy`
+2. **Use `become: true`** only where needed, not globally
+3. **Use handlers** for service restarts — avoids unnecessary restarts
+4. **Tag your tasks** — enables running subsets with `--tags`
+5. **Use `no_log: true`** for tasks handling secrets
+6. **Test with `--check --diff`** before applying
+7. **Use roles** for reusable, organized automation
+
+## Next Steps
+
+- **[Ansible for Kubernetes by Example](/blog/ansible-for-kubernetes-by-example/)** — my book on Kubernetes automation
+- **[Red Hat Ansible Automation](/blog/red-hat-ansible-automation/)** — enterprise automation platform
+- **[Ansible Pilot](https://www.ansiblepilot.com/)** — 300+ tutorials and examples
+- **[Book a consultation](/contact/)** if you need help with your automation strategy

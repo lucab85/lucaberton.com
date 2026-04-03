@@ -1,0 +1,262 @@
+---
+draft: false
+title: "GitHub Actions CI/CD Pipeline Tutorial: Build, Test, Deploy (2026)"
+snippet: "Build a complete CI/CD pipeline with GitHub Actions. From basic builds to multi-environment deployments, Docker builds, Kubernetes deploys, and security scanning."
+description: "Complete GitHub Actions CI/CD pipeline tutorial. Build, test, and deploy applications with Docker builds, Kubernetes deployment, security scanning, and multi-environment workflows."
+image:
+  src: "/blog/thumbnails/github-actions-cicd-pipeline-tutorial-2026.jpg"
+  alt: "GitHub Actions CI/CD pipeline tutorial 2026"
+publishDate: "2026-04-03"
+lastModified: "2026-04-03"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["GitHub Actions", "CI/CD", "DevOps", "Docker", "Tutorial"]
+---
+
+I use GitHub Actions for all my projects including [this website](https://github.com/lucab85/lucaberton.com) and my open source tools. Here is how to build production-grade CI/CD pipelines.
+
+## Basic Build and Test
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+```
+
+## Docker Build and Push
+
+```yaml
+name: Docker Build
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=sha,prefix=
+
+      - uses: docker/build-push-action@v5
+        with:
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+```
+
+## Multi-Environment Deployment
+
+```yaml
+name: Deploy
+on:
+  push:
+    branches: [main, staging]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci && npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build
+          path: dist/
+
+  deploy-staging:
+    needs: build
+    if: github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: build
+
+      - name: Deploy to staging
+        run: |
+          # rsync, kubectl apply, or cloud CLI
+          echo "Deploying to staging..."
+
+  deploy-production:
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: build
+
+      - name: Deploy to production
+        run: |
+          echo "Deploying to production..."
+```
+
+## Kubernetes Deployment
+
+```yaml
+name: Deploy to K8s
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: azure/k8s-set-context@v4
+        with:
+          kubeconfig: ${{ secrets.KUBECONFIG }}
+
+      - name: Deploy
+        run: |
+          kubectl set image deployment/myapp \
+            app=ghcr.io/${{ github.repository }}:${{ github.sha }} \
+            -n production
+
+          kubectl rollout status deployment/myapp -n production --timeout=300s
+```
+
+## Security Scanning
+
+```yaml
+name: Security
+on: [push, pull_request]
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Dependency vulnerabilities
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          format: sarif
+          output: trivy-results.sarif
+
+      # Secret scanning
+      - name: Scan for secrets
+        uses: trufflesecurity/trufflehog@main
+        with:
+          extra_args: --only-verified
+
+      # Upload to GitHub Security tab
+      - uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+```
+
+## Reusable Workflows
+
+```yaml
+# .github/workflows/reusable-deploy.yml
+name: Reusable Deploy
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+    secrets:
+      DEPLOY_KEY:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - run: echo "Deploying to ${{ inputs.environment }}"
+```
+
+Call it:
+
+```yaml
+jobs:
+  staging:
+    uses: ./.github/workflows/reusable-deploy.yml
+    with:
+      environment: staging
+    secrets:
+      DEPLOY_KEY: ${{ secrets.STAGING_DEPLOY_KEY }}
+```
+
+## Matrix Builds (Test Multiple Versions)
+
+```yaml
+jobs:
+  test:
+    strategy:
+      matrix:
+        node: [18, 20, 22]
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci && npm test
+```
+
+## Tips
+
+1. **Cache dependencies** — saves minutes per build
+2. **Use environments** — adds approval gates for production
+3. **Pin action versions** — `@v4` not `@main`
+4. **Use OIDC** for cloud auth instead of long-lived secrets
+5. **Run on pull requests** — catch issues before merge
+6. **Add status badges** to your README
+
+## Related Resources
+
+- [DevOps Roadmap 2026](/blog/devops-roadmap-2026-skills-tools-career/)
+- [Terraform vs Ansible](/blog/terraform-vs-ansible-when-to-use-which-2026/)
+- [Docker vs Kubernetes](/blog/docker-vs-kubernetes-when-you-need-which/)
+- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)

@@ -1,0 +1,179 @@
+---
+draft: false
+title: "Terraform vs Ansible: When to Use Which in 2026 (Expert Guide)"
+snippet: "Terraform and Ansible solve different problems. After 18 years in infrastructure, here is when to use each, when to combine them, and common mistakes to avoid."
+description: "Expert comparison of Terraform vs Ansible. When to use each tool, how to combine them, real-world architecture patterns, and common mistakes from 18 years of infrastructure experience."
+image:
+  src: "/blog/thumbnails/terraform-vs-ansible-when-to-use-which-2026.jpg"
+  alt: "Terraform vs Ansible comparison guide 2026"
+publishDate: "2026-04-03"
+lastModified: "2026-04-03"
+author: "Luca Berton"
+category: "Automation"
+tags: ["Terraform", "Ansible", "Infrastructure as Code", "DevOps", "Comparison"]
+---
+
+I have written books on both [Ansible](/books/) and run [Terraform Pilot](https://www.terraformpilot.com/). So when people ask "Terraform or Ansible?" my answer is always: **both, for different things.**
+
+## The Core Difference
+
+**Terraform** = Infrastructure provisioning (create the servers)
+**Ansible** = Configuration management (configure what runs on them)
+
+| Aspect | Terraform | Ansible |
+|--------|-----------|---------|
+| **Primary use** | Create/destroy infrastructure | Configure/manage servers |
+| **Approach** | Declarative | Procedural + Declarative |
+| **State** | State file tracks resources | Stateless (agentless) |
+| **Language** | HCL | YAML |
+| **Idempotent** | Yes (by design) | Yes (when written correctly) |
+| **Agent** | None | None (SSH/WinRM) |
+| **Cloud support** | Excellent (providers) | Good (modules) |
+| **OS config** | Limited | Excellent |
+
+## When to Use Terraform
+
+Use Terraform when you need to **create, modify, or destroy cloud resources**:
+
+- VMs, VPCs, subnets, security groups
+- Kubernetes clusters (EKS, AKS, GKE)
+- Databases (RDS, Cloud SQL)
+- DNS records, CDN configurations
+- Load balancers, firewalls
+- IAM roles and policies
+
+```hcl
+# Terraform: Create a Kubernetes cluster
+resource "azurerm_kubernetes_cluster" "main" {
+  name                = "production-aks"
+  location            = "West Europe"
+  resource_group_name = azurerm_resource_group.main.name
+  dns_prefix          = "production"
+
+  default_node_pool {
+    name       = "default"
+    node_count = 3
+    vm_size    = "Standard_D4s_v3"
+  }
+}
+```
+
+**Terraform excels because** it tracks state. It knows what exists and what needs to change. Try deleting a VM with Ansible — you need to know its ID. Terraform just removes it from config and runs `apply`.
+
+## When to Use Ansible
+
+Use Ansible when you need to **configure what runs on servers**:
+
+- Install and configure software
+- Deploy applications
+- Manage users and permissions
+- Apply security patches
+- Configure networking (inside the OS)
+- Orchestrate multi-step deployments
+
+```yaml
+# Ansible: Configure the Kubernetes nodes
+- name: Configure K8s worker nodes
+  hosts: workers
+  become: true
+  tasks:
+    - name: Install container runtime
+      ansible.builtin.apt:
+        name: containerd
+        state: present
+
+    - name: Load kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+      loop: [overlay, br_netfilter]
+
+    - name: Apply sysctl settings
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+      loop:
+        - { key: net.bridge.bridge-nf-call-iptables, value: "1" }
+        - { key: net.ipv4.ip_forward, value: "1" }
+```
+
+## The Best Pattern: Terraform + Ansible Together
+
+In production, I use both:
+
+1. **Terraform** creates the infrastructure (VMs, networks, DNS)
+2. **Terraform** outputs the inventory (IPs, hostnames)
+3. **Ansible** configures the servers (packages, users, apps)
+
+```hcl
+# Terraform outputs for Ansible
+output "web_server_ips" {
+  value = azurerm_linux_virtual_machine.web[*].private_ip_address
+}
+
+# Generate Ansible inventory
+resource "local_file" "ansible_inventory" {
+  content = templatefile("inventory.tftpl", {
+    web_servers = azurerm_linux_virtual_machine.web[*].private_ip_address
+    db_servers  = azurerm_linux_virtual_machine.db[*].private_ip_address
+  })
+  filename = "../ansible/inventory.ini"
+}
+```
+
+## Common Mistakes
+
+### Mistake 1: Using Ansible to Create Cloud Resources
+
+Ansible *can* create AWS EC2 instances with `amazon.aws.ec2_instance`. But without state tracking, it cannot reliably update or delete them. Use Terraform.
+
+### Mistake 2: Using Terraform Provisioners for Configuration
+
+Terraform `remote-exec` provisioners are a trap. They run once, are not idempotent, and break on retry. Use Ansible.
+
+```hcl
+# Don't do this
+resource "aws_instance" "web" {
+  # ...
+  provisioner "remote-exec" {
+    inline = ["apt-get install nginx"]  # Fragile!
+  }
+}
+```
+
+### Mistake 3: Choosing One and Forcing It to Do Everything
+
+I have seen teams write 500-line Ansible playbooks to manage AWS infrastructure, and Terraform configs with 20 provisioner blocks for OS configuration. Both are painful to maintain.
+
+### Mistake 4: Not Using Terraform State Backend
+
+Terraform state must be stored remotely (S3, Azure Blob, Terraform Cloud) for team collaboration. Local state files cause conflicts.
+
+## Decision Flowchart
+
+- **Creating cloud resources?** → Terraform
+- **Configuring servers/OS?** → Ansible
+- **Deploying applications?** → Ansible (or Kubernetes if containerized)
+- **Managing Kubernetes resources?** → Terraform for cluster, kubectl/Helm for workloads
+- **Network automation?** → Ansible (better device support)
+- **Multi-cloud infrastructure?** → Terraform
+- **Compliance and auditing?** → Ansible (agentless scanning)
+
+## My Recommended Stack for 2026
+
+| Layer | Tool |
+|-------|------|
+| Cloud infrastructure | Terraform |
+| Kubernetes cluster | Terraform |
+| OS configuration | Ansible |
+| App deployment | Ansible or Helm |
+| GitOps | ArgoCD or Flux |
+| Secrets | HashiCorp Vault |
+| CI/CD | GitHub Actions |
+
+## Learn More
+
+- [Ansible Pilot](https://www.ansiblepilot.com/) — 300+ Ansible tutorials
+- [Terraform Pilot](https://www.terraformpilot.com/) — Terraform guides
+- [Ansible Playbook Examples](/blog/ansible-playbook-examples-beginners-to-advanced/)
+- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
+- [Book a consultation](/contact/) — I help teams set up their automation stack

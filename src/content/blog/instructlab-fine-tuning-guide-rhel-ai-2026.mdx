@@ -1,0 +1,398 @@
+---
+draft: false
+title: "InstructLab Fine-Tuning Guide: Customize AI Models on RHEL AI (2026)"
+snippet: "Complete InstructLab fine-tuning guide. Learn taxonomy authoring, synthetic data generation, and model training on RHEL AI step by step."
+description: "InstructLab fine-tuning tutorial: create custom taxonomies, generate synthetic training data, train and evaluate fine-tuned Granite models on RHEL AI."
+image:
+  src: "/blog/thumbnails/instructlab-fine-tuning-guide-rhel-ai-2026.jpg"
+  alt: "InstructLab Fine-Tuning Guide for RHEL AI"
+publishDate: "2026-04-04"
+lastModified: "2026-04-04"
+author: "Luca Berton"
+category: "AI"
+tags: ["InstructLab", "Fine-Tuning", "RHEL AI", "Granite", "LLM", "Red Hat"]
+---
+
+InstructLab changed how I think about fine-tuning. Instead of needing thousands of hand-labeled examples, you write a few seed examples and the system generates the rest synthetically. Here is exactly how to do it.
+
+## What Is InstructLab?
+
+InstructLab is an open source project (LAB = **L**arge-scale **A**lignment for chat**B**ots) that lets you add knowledge and skills to LLMs without traditional fine-tuning infrastructure. It was created by Red Hat and IBM Research.
+
+The key innovation: **taxonomy-driven synthetic data generation**. You provide 5-10 seed examples, InstructLab generates hundreds of synthetic training pairs, and then fine-tunes the model.
+
+## Why Fine-Tune Instead of RAG?
+
+| Approach | Best For | Latency | Cost |
+|----------|----------|---------|------|
+| RAG | Frequently changing data | Higher (retrieval + generation) | Lower upfront |
+| Fine-tuning | Stable domain knowledge | Lower (no retrieval) | Higher upfront |
+| InstructLab | Both (with synthetic data) | Lowest (baked into weights) | Moderate |
+
+Fine-tuning with InstructLab gives you:
+- **Faster inference** — no retrieval step
+- **Better consistency** — knowledge is in the model weights
+- **Offline capable** — no vector database dependency
+- **Lower per-request cost** — just GPU compute
+
+## Prerequisites
+
+- [RHEL AI installed and configured](/blog/rhel-ai-tutorial-complete-beginners-guide-2026/)
+- NVIDIA GPU with 24 GB+ VRAM (A100 recommended)
+- InstructLab CLI: `ilab --version` should return 0.19+
+- Foundation model downloaded (Granite 7B)
+
+## Step 1: Understand the Taxonomy Structure
+
+The taxonomy is a directory tree that organizes knowledge and skills:
+
+```
+taxonomy/
+├── knowledge/           # Factual information
+│   ├── technology/
+│   │   ├── kubernetes/
+│   │   │   └── qna.yaml
+│   │   └── rhel/
+│   │       └── qna.yaml
+│   └── company/
+│       └── internal-docs/
+│           ├── qna.yaml
+│           └── document.md    # Source document
+└── skills/              # Behavioral capabilities
+    ├── coding/
+    │   └── ansible/
+    │       └── qna.yaml
+    └── writing/
+        └── runbooks/
+            └── qna.yaml
+```
+
+**Knowledge** = factual Q&A the model should know
+**Skills** = capabilities the model should have (writing style, code generation patterns)
+
+## Step 2: Write a Knowledge Contribution
+
+Create a knowledge YAML with seed examples:
+
+```yaml
+# taxonomy/knowledge/technology/kubernetes-troubleshooting/qna.yaml
+created_by: luca-berton
+version: 3
+task_description: >
+  Teach the model about Kubernetes troubleshooting patterns
+  commonly seen in production environments.
+document:
+  repo: https://github.com/your-org/k8s-runbooks
+  commit: abc123
+  patterns:
+    - "*.md"
+seed_examples:
+  - context: >
+      When a Pod is stuck in CrashLoopBackOff, Kubernetes is
+      repeatedly trying to restart the container because it
+      keeps failing. The backoff delay doubles each time.
+    question: >
+      A pod is in CrashLoopBackOff status. What should I check first?
+    answer: >
+      Check the container logs with kubectl logs <pod-name> --previous
+      to see the crash reason. Common causes include: application errors
+      on startup, missing environment variables or config maps,
+      insufficient memory limits causing OOM kills, failed health
+      checks (liveness probes), and missing dependencies or wrong
+      container image tags.
+
+  - context: >
+      ImagePullBackOff means Kubernetes cannot pull the container
+      image. This could be an authentication issue, wrong image
+      name, or network problem.
+    question: >
+      How do I fix ImagePullBackOff errors in Kubernetes?
+    answer: >
+      First, verify the image name and tag are correct with
+      kubectl describe pod <name>. Then check if the image exists
+      in the registry. If it is a private registry, ensure you have
+      created an imagePullSecret and referenced it in the pod spec
+      or the service account. Test pulling the image manually with
+      podman pull to isolate network vs auth issues.
+
+  - context: >
+      When nodes show NotReady status, the kubelet on that node
+      has stopped communicating with the control plane.
+    question: >
+      Several nodes are showing NotReady. What is the diagnostic process?
+    answer: >
+      SSH into the affected node and check kubelet status with
+      systemctl status kubelet. Review kubelet logs with
+      journalctl -u kubelet -f. Common causes are disk pressure
+      (check df -h), memory pressure (check free -m), certificate
+      expiration, or network connectivity to the API server.
+      Also check if the container runtime is running with
+      systemctl status containerd.
+
+  - context: >
+      DNS resolution inside pods relies on CoreDNS running in the
+      kube-system namespace.
+    question: >
+      Pods cannot resolve DNS names. How do I troubleshoot?
+    answer: >
+      First verify CoreDNS pods are running: kubectl get pods -n
+      kube-system -l k8s-app=kube-dns. Test DNS from inside a pod:
+      kubectl exec -it <pod> -- nslookup kubernetes.default. Check
+      the resolv.conf in the pod: kubectl exec <pod> -- cat
+      /etc/resolv.conf. If CoreDNS pods are crashing, check their
+      logs for configuration errors.
+
+  - context: >
+      Persistent Volume Claims stuck in Pending state usually
+      indicate no matching Persistent Volume is available.
+    question: >
+      A PVC is stuck in Pending status. What are the possible causes?
+    answer: >
+      Check if a matching PV exists with the right storage class,
+      access mode, and capacity. Run kubectl describe pvc <name>
+      to see the events. Common causes include no available PV in
+      the storage class, the storage provisioner is not running,
+      insufficient storage quota, or node affinity constraints
+      preventing scheduling.
+```
+
+## Step 3: Write a Skill Contribution
+
+Skills teach the model how to do something:
+
+```yaml
+# taxonomy/skills/coding/ansible-playbooks/qna.yaml
+created_by: luca-berton
+version: 3
+task_description: >
+  Teach the model to write production-quality Ansible playbooks
+  following Red Hat best practices with proper error handling,
+  idempotency, and FQCN module names.
+seed_examples:
+  - question: >
+      Write an Ansible playbook to deploy nginx with TLS on RHEL 9.
+    answer: >
+      ---
+      - name: Deploy Nginx with TLS
+        hosts: webservers
+        become: true
+
+        vars:
+          nginx_ssl_cert: /etc/pki/tls/certs/server.crt
+          nginx_ssl_key: /etc/pki/tls/private/server.key
+
+        tasks:
+          - name: Install nginx
+            ansible.builtin.dnf:
+              name: nginx
+              state: present
+
+          - name: Deploy TLS configuration
+            ansible.builtin.template:
+              src: nginx-tls.conf.j2
+              dest: /etc/nginx/conf.d/tls.conf
+              mode: "0644"
+              validate: nginx -t -c %s
+            notify: Restart nginx
+
+          - name: Ensure nginx is running
+            ansible.builtin.systemd:
+              name: nginx
+              state: started
+              enabled: true
+
+          - name: Open firewall ports
+            ansible.posix.firewalld:
+              service: "{{ item }}"
+              permanent: true
+              state: enabled
+              immediate: true
+            loop:
+              - http
+              - https
+
+        handlers:
+          - name: Restart nginx
+            ansible.builtin.systemd:
+              name: nginx
+              state: restarted
+
+  - question: >
+      Create an Ansible role for hardening SSH on Linux servers.
+    answer: >
+      # roles/ssh_hardening/tasks/main.yml
+      ---
+      - name: Configure SSH server
+        ansible.builtin.lineinfile:
+          path: /etc/ssh/sshd_config
+          regexp: "{{ item.regexp }}"
+          line: "{{ item.line }}"
+          validate: sshd -t -f %s
+        loop:
+          - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
+          - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+          - { regexp: '^#?X11Forwarding', line: 'X11Forwarding no' }
+          - { regexp: '^#?MaxAuthTries', line: 'MaxAuthTries 3' }
+          - { regexp: '^#?ClientAliveInterval', line: 'ClientAliveInterval 300' }
+        notify: Restart sshd
+
+      - name: Ensure sshd is running
+        ansible.builtin.systemd:
+          name: sshd
+          state: started
+          enabled: true
+
+      # roles/ssh_hardening/handlers/main.yml
+      ---
+      - name: Restart sshd
+        ansible.builtin.systemd:
+          name: sshd
+          state: restarted
+```
+
+## Step 4: Validate and Generate Synthetic Data
+
+```bash
+# Check your taxonomy changes
+ilab taxonomy diff
+
+# Output shows new additions:
+# knowledge/technology/kubernetes-troubleshooting/qna.yaml
+# skills/coding/ansible-playbooks/qna.yaml
+
+# Generate synthetic training data
+ilab data generate \
+  --model models/granite-7b-lab \
+  --num-instructions 500 \
+  --pipeline simple \
+  --output-dir generated/
+
+# This takes 30-60 minutes on an A100
+# Generates ~500 Q&A pairs from your 5 seed examples
+```
+
+### What Happens During Generation?
+
+1. InstructLab reads your seed examples
+2. The teacher model (Granite) generates variations
+3. Each generated pair is validated for quality
+4. Low-quality pairs are filtered out
+5. Output is saved as JSONL training data
+
+```bash
+# Inspect generated data
+head -5 generated/train_gen.jsonl | python3 -m json.tool
+
+# Typical output:
+# {"instruction": "A deployment has pods stuck in Pending...",
+#  "output": "Check node resources with kubectl describe node..."}
+```
+
+## Step 5: Fine-Tune the Model
+
+```bash
+# Full fine-tuning (requires 80 GB VRAM)
+ilab model train \
+  --data-path generated/train_gen.jsonl \
+  --model-path models/granite-7b-lab \
+  --num-epochs 3 \
+  --effective-batch-size 16 \
+  --learning-rate 2e-5 \
+  --output-dir models/granite-7b-custom
+
+# LoRA fine-tuning (works on 24 GB VRAM)
+ilab model train \
+  --data-path generated/train_gen.jsonl \
+  --model-path models/granite-7b-lab \
+  --strategy lab-multiphase \
+  --lora-rank 16 \
+  --num-epochs 5 \
+  --output-dir models/granite-7b-custom-lora
+```
+
+### Training Times (Approximate)
+
+| GPU | 7B Full | 7B LoRA | 34B LoRA |
+|-----|---------|---------|----------|
+| RTX 4090 (24 GB) | Not possible | 2-3 hours | Not possible |
+| A100 (80 GB) | 4-6 hours | 1-2 hours | 6-8 hours |
+| H100 (80 GB) | 2-3 hours | 30-60 min | 3-4 hours |
+
+## Step 6: Evaluate the Fine-Tuned Model
+
+```bash
+# Run the evaluation benchmark
+ilab model evaluate \
+  --model models/granite-7b-custom \
+  --benchmark mmlu
+
+# Compare base vs fine-tuned
+ilab model evaluate \
+  --model models/granite-7b-lab \
+  --benchmark mmlu
+
+# Test with your own prompts
+ilab model serve --model-path models/granite-7b-custom
+ilab model chat
+```
+
+### What to Look For
+
+- **Domain accuracy** — does it answer your specific questions correctly?
+- **General capability retention** — it should still handle general tasks
+- **Hallucination rate** — does it make up facts not in your training data?
+- **Consistency** — same question should give similar answers
+
+## Step 7: Iterate and Improve
+
+Fine-tuning is iterative. Based on evaluation:
+
+```bash
+# Add more seed examples to weak areas
+vim taxonomy/knowledge/technology/kubernetes-troubleshooting/qna.yaml
+
+# Regenerate with more instructions
+ilab data generate --num-instructions 1000
+
+# Train again with combined data
+ilab model train \
+  --data-path generated/train_gen.jsonl \
+  --model-path models/granite-7b-custom \
+  --num-epochs 2
+```
+
+## Production Deployment
+
+Once satisfied with the model, deploy with vLLM for production:
+
+```bash
+# Serve the fine-tuned model
+python3 -m vllm.entrypoints.openai.api_server \
+  --model models/granite-7b-custom \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --tensor-parallel-size 1
+```
+
+For automated deployment with Ansible, see my guide on [automating RHEL AI deployments with Ansible and GitOps](/blog/automating-rhel-ai-deployments-with-ansible-and-gitops/).
+
+## Common Fine-Tuning Mistakes
+
+1. **Too few seed examples** — write at least 5 diverse, high-quality pairs per topic
+2. **Overfitting** — if the model repeats training data verbatim, reduce epochs or increase data
+3. **Ignoring evaluation** — always compare against the base model
+4. **Wrong task framing** — knowledge for facts, skills for capabilities
+5. **Skipping validation** — run `ilab taxonomy diff` before generating
+
+## Related Guides
+
+- [RHEL AI tutorial from scratch](/blog/rhel-ai-tutorial-complete-beginners-guide-2026/)
+- [Building custom AI skills with InstructLab taxonomy](/blog/building-custom-ai-skills-with-instructlab-taxonomy/)
+- [Fine-tuning models with InstructLab on RHEL AI](/blog/fine-tuning-models-with-instructlab-on-rhel-ai/)
+- [Monitoring RHEL AI workloads](/blog/monitoring-and-observability-for-rhel-ai-workloads/)
+- [RHEL AI deployment automation](/blog/rhel-ai-deployment-guide-enterprise-production-2026/)
+- [Book: Practical RHEL AI](/practical-rhel-ai/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor and author of *Practical RHEL AI*. I help enterprises deploy and fine-tune AI models on Red Hat infrastructure. [Book a consultation](https://calendly.com/lucaberton/) to discuss your InstructLab fine-tuning project.

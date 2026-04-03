@@ -1,0 +1,337 @@
+---
+draft: false
+title: "RHEL AI Tutorial: Complete Beginner's Guide to Red Hat Enterprise Linux AI (2026)"
+snippet: "Step-by-step RHEL AI tutorial. Learn how to install, configure, and deploy AI models on Red Hat Enterprise Linux AI from scratch."
+description: "Complete RHEL AI tutorial for beginners. Install RHEL AI, set up InstructLab, deploy your first AI model with Granite, and serve inference — all step by step."
+image:
+  src: "/blog/thumbnails/rhel-ai-tutorial-complete-beginners-guide-2026.jpg"
+  alt: "RHEL AI Tutorial: Complete Beginner's Guide"
+publishDate: "2026-04-04"
+lastModified: "2026-04-04"
+author: "Luca Berton"
+category: "AI"
+tags: ["RHEL AI", "Tutorial", "InstructLab", "Red Hat", "AI", "Granite"]
+---
+
+This is the RHEL AI tutorial I wish existed when I started. No fluff, no marketing — just working commands and real explanations.
+
+I have deployed RHEL AI across bare-metal GPU servers, cloud VMs, and edge devices. This guide covers everything from first install to serving your first model.
+
+## What Is RHEL AI?
+
+Red Hat Enterprise Linux AI (RHEL AI) is an enterprise platform for developing, testing, and deploying large language models. It bundles:
+
+- **InstructLab** — open source tool for fine-tuning LLMs with synthetic data
+- **Granite models** — IBM's open source foundation models (3B, 7B, 8B, 34B)
+- **vLLM** — high-performance inference engine with PagedAttention
+- **RHEL 9** base — hardened, FIPS-validated, SELinux-enforcing
+
+Unlike assembling these pieces yourself, RHEL AI integrates them with enterprise support, security certifications, and validated hardware profiles.
+
+## Prerequisites
+
+Before starting this RHEL AI tutorial, you need:
+
+- **Hardware**: x86_64 system with NVIDIA GPU (A100, H100, L40S, or RTX 4090 for dev)
+- **GPU memory**: Minimum 16 GB VRAM for 7B models, 80 GB for 34B
+- **Storage**: 100 GB+ free disk space for models
+- **OS**: [RHEL 9](/blog/red-hat-enterprise-linux-9-for-sysadmins/) subscription (Developer subscription is free)
+- **Network**: Internet access for initial model download
+
+## Step 1: Install RHEL AI
+
+### Option A: Bootable Container Image (Recommended)
+
+RHEL AI ships as a bootable container image — the entire OS plus AI stack in one artifact:
+
+```bash
+# Download the RHEL AI bootable image
+sudo podman pull registry.redhat.io/rhel-ai/rhel-ai-nvidia-bootc:1.4
+
+# Write to disk (for bare-metal)
+sudo bootc install to-disk /dev/sda \
+  --image registry.redhat.io/rhel-ai/rhel-ai-nvidia-bootc:1.4
+```
+
+### Option B: Install on Existing RHEL 9
+
+If you already run RHEL 9:
+
+```bash
+# Register your system
+sudo subscription-manager register --auto-attach
+
+# Enable required repos
+sudo subscription-manager repos \
+  --enable rhel-9-for-x86_64-appstream-rpms \
+  --enable rhel-9-for-x86_64-baseos-rpms
+
+# Install RHEL AI packages
+sudo dnf install -y rhel-ai instructlab vllm
+
+# Verify installation
+ilab --version
+```
+
+### Verify GPU Access
+
+```bash
+# Check NVIDIA drivers
+nvidia-smi
+
+# Expected output shows your GPU(s)
+# +-----------------------------------------------------------------------------+
+# | NVIDIA-SMI 550.xx   Driver Version: 550.xx   CUDA Version: 12.4            |
+# | GPU  Name        Persistence-M| Bus-Id        Disp.A | Volatile Uncorr. ECC |
+# | 0    NVIDIA A100-SXM4-80GB On | 00000000:07:00.0 Off |                    0 |
+# +-----------------------------------------------------------------------------+
+```
+
+## Step 2: Initialize InstructLab
+
+InstructLab is the core tool for customizing AI models in RHEL AI:
+
+```bash
+# Create working directory
+mkdir -p ~/instructlab && cd ~/instructlab
+
+# Initialize InstructLab
+ilab config init
+
+# This creates:
+# ~/.config/instructlab/config.yaml
+# ~/.local/share/instructlab/taxonomy/
+```
+
+### Configuration
+
+Edit the config to match your hardware:
+
+```yaml
+# ~/.config/instructlab/config.yaml
+chat:
+  model: models/granite-7b-lab-Q4_K_M.gguf
+generate:
+  model: models/granite-7b-lab-Q4_K_M.gguf
+  num_instructions: 100
+  pipeline: simple
+serve:
+  model_path: models/granite-7b-lab-Q4_K_M.gguf
+  gpu_layers: -1  # Use all GPU layers
+```
+
+## Step 3: Download a Foundation Model
+
+```bash
+# Download Granite 7B (quantized for development)
+ilab model download \
+  --repository instructlab/granite-7b-lab-GGUF \
+  --filename granite-7b-lab-Q4_K_M.gguf
+
+# For production with full precision:
+ilab model download \
+  --repository instructlab/granite-7b-lab
+
+# Verify the model file
+ls -lh models/
+# granite-7b-lab-Q4_K_M.gguf  4.1G  (quantized)
+# granite-7b-lab/              14G   (full precision)
+```
+
+## Step 4: Serve the Model
+
+```bash
+# Start the inference server
+ilab model serve
+
+# Output:
+# INFO: Starting server on http://127.0.0.1:8000
+# INFO: Model loaded: granite-7b-lab-Q4_K_M.gguf
+# INFO: GPU layers: 35/35
+```
+
+### Test with Chat
+
+Open a new terminal:
+
+```bash
+# Interactive chat
+ilab model chat
+
+# Or use curl for API testing
+curl -s http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "granite-7b-lab",
+    "messages": [{"role": "user", "content": "Write an Ansible playbook to install nginx"}],
+    "temperature": 0.7
+  }' | python3 -m json.tool
+```
+
+## Step 5: Customize with Your Own Knowledge
+
+This is where RHEL AI shines. You can add domain-specific knowledge without training from scratch:
+
+```bash
+# Create a knowledge contribution
+mkdir -p taxonomy/knowledge/my-company/
+
+cat > taxonomy/knowledge/my-company/qna.yaml << 'EOF'
+created_by: your-name
+version: 3
+task_description: >
+  Teach the model about our internal deployment procedures
+seed_examples:
+  - question: How do we deploy to production?
+    answer: |
+      Our production deployment follows a blue-green pattern:
+      1. Build container image with podman build
+      2. Push to internal registry at registry.internal.com
+      3. Update ArgoCD application manifest
+      4. ArgoCD syncs automatically to staging
+      5. After QA approval, promote to production
+  - question: What is our incident response process?
+    answer: |
+      When an alert fires:
+      1. Acknowledge in PagerDuty within 5 minutes
+      2. Join the incident Slack channel
+      3. Run the diagnostic playbook: ansible-playbook diagnose.yml
+      4. Post status update every 30 minutes
+      5. Create post-mortem within 48 hours
+EOF
+
+# Validate the taxonomy
+ilab taxonomy diff
+```
+
+### Generate Synthetic Training Data
+
+```bash
+# Generate synthetic Q&A pairs from your knowledge
+ilab data generate \
+  --num-instructions 200 \
+  --pipeline simple
+
+# This creates training data in generated/
+ls generated/
+# train_*.jsonl  test_*.jsonl
+```
+
+### Fine-Tune the Model
+
+```bash
+# Fine-tune (requires GPU with sufficient VRAM)
+ilab model train \
+  --data-path generated/train_gen.jsonl \
+  --model-path models/granite-7b-lab \
+  --num-epochs 3 \
+  --effective-batch-size 16
+
+# Output: fine-tuned model saved to models/granite-7b-lab-trained/
+```
+
+## Step 6: Deploy for Production with vLLM
+
+For production serving, use vLLM directly for better performance:
+
+```bash
+# Serve with vLLM (higher throughput than ilab serve)
+python3 -m vllm.entrypoints.openai.api_server \
+  --model models/granite-7b-lab-trained \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --tensor-parallel-size 1 \
+  --max-model-len 4096 \
+  --gpu-memory-utilization 0.9
+
+# Or run as a container
+podman run --rm -d \
+  --name vllm-inference \
+  --device nvidia.com/gpu=all \
+  -v ./models:/models:ro,Z \
+  -p 8000:8000 \
+  registry.redhat.io/rhel-ai/vllm-runtime:latest \
+  --model /models/granite-7b-lab-trained \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+### Create a systemd Service
+
+```bash
+cat > /etc/systemd/system/rhel-ai-inference.service << 'EOF'
+[Unit]
+Description=RHEL AI Inference Server
+After=network.target
+
+[Service]
+Type=simple
+User=rhel-ai
+ExecStart=/usr/bin/podman run --rm \
+  --name vllm-server \
+  --device nvidia.com/gpu=all \
+  -v /var/lib/rhel-ai/models:/models:ro,Z \
+  -p 8000:8000 \
+  registry.redhat.io/rhel-ai/vllm-runtime:latest \
+  --model /models/granite-7b-lab-trained
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now rhel-ai-inference
+```
+
+## Step 7: Monitor Your Deployment
+
+```bash
+# Check model health
+curl http://localhost:8000/health
+
+# View metrics (Prometheus format)
+curl http://localhost:8000/metrics
+
+# Key metrics to watch:
+# vllm:num_requests_running — active requests
+# vllm:avg_generation_throughput_toks_per_s — token throughput
+# vllm:gpu_cache_usage_perc — KV cache utilization
+```
+
+For comprehensive monitoring, see my guide on [monitoring and observability for RHEL AI workloads](/blog/monitoring-and-observability-for-rhel-ai-workloads/).
+
+## RHEL AI vs DIY: Why Use It?
+
+| Aspect | DIY Stack | RHEL AI |
+|--------|-----------|---------|
+| Setup time | Days to weeks | Hours |
+| Security | Manual hardening | SELinux, FIPS, CVE patches |
+| GPU drivers | Manual install | Pre-validated |
+| Model updates | Manual | Bootc image updates |
+| Support | Community forums | Red Hat support |
+| Compliance | Build your own | STIG, FedRAMP ready |
+
+## Common Issues and Fixes
+
+**GPU not detected**: Verify NVIDIA drivers with `nvidia-smi`. If missing, install `nvidia-driver` from the CUDA repo.
+
+**Out of GPU memory**: Use a quantized model (Q4_K_M) or reduce `--max-model-len`. The 7B Q4 model needs about 6 GB VRAM.
+
+**Slow inference**: Enable tensor parallelism if you have multiple GPUs: `--tensor-parallel-size 2`
+
+**Model download fails**: Check your Red Hat subscription is active: `subscription-manager status`
+
+## Next Steps
+
+- [Fine-tune models with InstructLab](/blog/instructlab-fine-tuning-guide-rhel-ai-2026/) — deep dive into the fine-tuning workflow
+- [RHEL AI deployment automation](/blog/automating-rhel-ai-deployments-with-ansible-and-gitops/) — automate with Ansible and GitOps
+- [Building custom AI skills with InstructLab taxonomy](/blog/building-custom-ai-skills-with-instructlab-taxonomy/) — advanced taxonomy authoring
+- [Enterprise AI security hardening](/blog/enterprise-ai-security-hardening-rhel-ai-with-selinux-and-container-isolation/) — production security
+- [Monitoring RHEL AI workloads](/blog/monitoring-and-observability-for-rhel-ai-workloads/) — Prometheus + Grafana dashboards
+- [Book: Practical RHEL AI](/practical-rhel-ai/) — my complete book on production RHEL AI
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I have written 8 books including *Practical RHEL AI* and have deployed RHEL AI across enterprise environments. [Book a consultation](https://calendly.com/lucaberton/) to discuss your RHEL AI deployment.

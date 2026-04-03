@@ -1,0 +1,343 @@
+---
+draft: false
+title: "RHEL AI Deployment Guide: Enterprise Production Setup (2026)"
+snippet: "Deploy RHEL AI to production with GPU provisioning, high availability, security hardening, monitoring, and automated model updates."
+description: "Enterprise RHEL AI deployment guide. GPU provisioning, HA architecture, SELinux hardening, vLLM autoscaling, Prometheus monitoring, and zero-downtime model updates."
+image:
+  src: "/blog/thumbnails/rhel-ai-deployment-guide-enterprise-production-2026.jpg"
+  alt: "RHEL AI Deployment Guide for Enterprise Production"
+publishDate: "2026-04-04"
+lastModified: "2026-04-04"
+author: "Luca Berton"
+category: "AI"
+tags: ["RHEL AI", "Deployment", "Enterprise", "Production", "vLLM", "GPU", "Red Hat"]
+---
+
+Getting RHEL AI running on a laptop is one thing. Running it in production serving thousands of requests per second with five-nines uptime is another. This is the deployment guide I use with enterprise clients.
+
+## Production Architecture
+
+A production RHEL AI deployment needs:
+
+- **Inference tier** — vLLM instances behind a load balancer
+- **GPU nodes** — bare-metal or cloud with NVIDIA A100/H100
+- **Model storage** — shared NFS or object storage for model artifacts
+- **Monitoring** — Prometheus + Grafana for GPU metrics and SLOs
+- **CI/CD** — automated model updates with zero downtime
+
+```
+                    ┌─────────────┐
+                    │ Load Balancer│
+                    │  (HAProxy)  │
+                    └──────┬──────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+        ┌─────┴─────┐┌─────┴─────┐┌─────┴─────┐
+        │  vLLM #1  ││  vLLM #2  ││  vLLM #3  │
+        │  A100 x2  ││  A100 x2  ││  A100 x2  │
+        │  RHEL AI  ││  RHEL AI  ││  RHEL AI  │
+        └─────┬─────┘└─────┬─────┘└─────┬─────┘
+              │            │            │
+        ┌─────┴────────────┴────────────┴─────┐
+        │         Shared Model Storage         │
+        │        (NFS / S3 / MinIO)           │
+        └─────────────────────────────────────┘
+```
+
+## Step 1: GPU Node Provisioning
+
+### Hardware Requirements
+
+| Workload | Min GPU | Recommended | VRAM |
+|----------|---------|-------------|------|
+| 7B inference | 1x A100 | 2x A100 | 40-80 GB |
+| 34B inference | 2x A100 | 4x A100 | 160-320 GB |
+| Fine-tuning 7B | 1x A100 80GB | 2x A100 80GB | 80-160 GB |
+| Fine-tuning 34B | 4x A100 80GB | 8x A100 80GB | 320-640 GB |
+
+### Automated Provisioning with Ansible
+
+```yaml
+# playbooks/provision-gpu-nodes.yml
+---
+- name: Provision GPU nodes for RHEL AI
+  hosts: gpu_nodes
+  become: true
+
+  tasks:
+    - name: Install NVIDIA drivers
+      ansible.builtin.dnf:
+        name:
+          - nvidia-driver
+          - nvidia-driver-cuda
+          - cuda-toolkit-12-4
+          - nvidia-container-toolkit
+        state: present
+
+    - name: Configure nvidia-persistenced
+      ansible.builtin.systemd:
+        name: nvidia-persistenced
+        state: started
+        enabled: true
+
+    - name: Set GPU compute mode to DEFAULT
+      ansible.builtin.command:
+        cmd: nvidia-smi -c DEFAULT
+      changed_when: false
+
+    - name: Configure GPU power limit for stability
+      ansible.builtin.command:
+        cmd: "nvidia-smi -pl {{ gpu_power_limit | default(300) }}"
+      changed_when: false
+
+    - name: Verify GPU configuration
+      ansible.builtin.command:
+        cmd: nvidia-smi --query-gpu=name,memory.total,power.limit --format=csv
+      register: gpu_verify
+      changed_when: false
+
+    - name: Display GPU info
+      ansible.builtin.debug:
+        msg: "{{ gpu_verify.stdout_lines }}"
+```
+
+For a complete Ansible automation guide, see [automating RHEL AI deployments with Ansible and GitOps](/blog/automating-rhel-ai-deployments-with-ansible-and-gitops/).
+
+## Step 2: Deploy vLLM Inference Servers
+
+### Production vLLM Configuration
+
+```bash
+# /etc/rhel-ai/vllm-config.env
+MODEL_PATH=/models/granite-7b-lab-trained
+HOST=0.0.0.0
+PORT=8000
+TENSOR_PARALLEL_SIZE=2
+MAX_MODEL_LEN=8192
+GPU_MEMORY_UTILIZATION=0.92
+MAX_NUM_BATCHED_TOKENS=32768
+MAX_NUM_SEQS=256
+ENABLE_CHUNKED_PREFILL=true
+DISABLE_LOG_STATS=false
+```
+
+### systemd Service with Health Checks
+
+```ini
+# /etc/systemd/system/vllm-inference.service
+[Unit]
+Description=vLLM Inference Server - RHEL AI
+After=network-online.target nvidia-persistenced.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=rhel-ai
+EnvironmentFile=/etc/rhel-ai/vllm-config.env
+ExecStartPre=/usr/bin/nvidia-smi
+ExecStart=/usr/bin/podman run --rm \
+  --name vllm-server \
+  --device nvidia.com/gpu=all \
+  --shm-size=16g \
+  -v /var/lib/rhel-ai/models:/models:ro,Z \
+  -p ${PORT}:8000 \
+  --env-file /etc/rhel-ai/vllm-config.env \
+  registry.redhat.io/rhel-ai/vllm-runtime:latest
+ExecStop=/usr/bin/podman stop -t 30 vllm-server
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=300
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target
+```
+
+## Step 3: Load Balancer Configuration
+
+### HAProxy for vLLM
+
+```
+# /etc/haproxy/haproxy.cfg
+frontend ai_inference
+    bind *:443 ssl crt /etc/pki/tls/certs/ai.pem
+    default_backend vllm_servers
+
+    # Rate limiting
+    stick-table type ip size 100k expire 30s store http_req_rate(10s)
+    http-request deny deny_status 429 if { sc_http_req_rate(0) gt 100 }
+
+backend vllm_servers
+    balance leastconn
+    option httpchk GET /health
+    http-check expect status 200
+
+    server vllm1 192.168.1.101:8000 check inter 5s fall 3 rise 2 maxconn 100
+    server vllm2 192.168.1.102:8000 check inter 5s fall 3 rise 2 maxconn 100
+    server vllm3 192.168.1.103:8000 check inter 5s fall 3 rise 2 maxconn 100
+```
+
+## Step 4: Security Hardening
+
+### SELinux Configuration
+
+```bash
+# Ensure SELinux is enforcing
+sudo setenforce 1
+sudo sed -i 's/SELINUX=permissive/SELINUX=enforcing/' /etc/selinux/config
+
+# Set proper file contexts for model storage
+sudo semanage fcontext -a -t container_file_t "/var/lib/rhel-ai/models(/.*)?"
+sudo restorecon -Rv /var/lib/rhel-ai/models
+```
+
+### Network Isolation
+
+```bash
+# Create dedicated firewall zone for AI inference
+sudo firewall-cmd --permanent --new-zone=ai-inference
+sudo firewall-cmd --permanent --zone=ai-inference --add-port=8000/tcp
+sudo firewall-cmd --permanent --zone=ai-inference --add-source=10.0.0.0/8
+sudo firewall-cmd --reload
+```
+
+For a deep dive on security, see [enterprise AI security hardening with SELinux](/blog/enterprise-ai-security-hardening-rhel-ai-with-selinux-and-container-isolation/).
+
+## Step 5: Monitoring and SLOs
+
+### Key Metrics
+
+```yaml
+# Prometheus alert rules
+groups:
+  - name: rhel_ai_slos
+    rules:
+      - alert: InferenceLatencyHigh
+        expr: >
+          histogram_quantile(0.95,
+            rate(vllm_request_duration_seconds_bucket[5m])
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P95 inference latency above 100ms"
+
+      - alert: GPUMemoryPressure
+        expr: >
+          (gpu_memory_used_bytes / gpu_memory_total_bytes) > 0.95
+        for: 2m
+        labels:
+          severity: critical
+
+      - alert: ModelErrorRate
+        expr: >
+          rate(vllm_request_errors_total[5m])
+          / rate(vllm_requests_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+```
+
+For complete monitoring setup, see [monitoring and observability for RHEL AI workloads](/blog/monitoring-and-observability-for-rhel-ai-workloads/).
+
+## Step 6: Zero-Downtime Model Updates
+
+Rolling model updates without dropping requests:
+
+```yaml
+# playbooks/rolling-model-update.yml
+---
+- name: Rolling model update
+  hosts: inference_nodes
+  serial: 1
+  become: true
+
+  tasks:
+    - name: Drain node from load balancer
+      ansible.builtin.uri:
+        url: "http://{{ haproxy_host }}:9999/admin"
+        method: POST
+        body: "s={{ inventory_hostname }}&action=drain"
+      delegate_to: localhost
+
+    - name: Wait for active connections to finish
+      ansible.builtin.wait_for:
+        timeout: 60
+
+    - name: Pull new model version
+      ansible.builtin.command:
+        cmd: >
+          podman pull {{ model_registry }}/{{ model_name }}:{{ new_version }}
+
+    - name: Update model symlink
+      ansible.builtin.file:
+        src: "/var/lib/rhel-ai/models/{{ model_name }}-{{ new_version }}"
+        dest: "/var/lib/rhel-ai/models/current"
+        state: link
+
+    - name: Restart vLLM
+      ansible.builtin.systemd:
+        name: vllm-inference
+        state: restarted
+
+    - name: Wait for health check
+      ansible.builtin.uri:
+        url: "http://localhost:8000/health"
+        status_code: 200
+      register: health
+      until: health.status == 200
+      retries: 30
+      delay: 10
+
+    - name: Re-enable in load balancer
+      ansible.builtin.uri:
+        url: "http://{{ haproxy_host }}:9999/admin"
+        method: POST
+        body: "s={{ inventory_hostname }}&action=ready"
+      delegate_to: localhost
+```
+
+## Cost Estimation
+
+| Component | Monthly Cost (Cloud) | Monthly Cost (On-Prem) |
+|-----------|---------------------|----------------------|
+| 3x A100 80GB instances | $15,000-25,000 | $3,000-5,000 (amortized) |
+| RHEL AI subscription | $1,500 | $1,500 |
+| Storage (1 TB NVMe) | $200 | $50 |
+| Networking | $500 | $100 |
+| **Total** | **$17,200-27,200** | **$4,650-6,650** |
+
+Self-hosted on-prem is 3-4x cheaper than cloud for sustained GPU workloads.
+
+## Deployment Checklist
+
+Before going live:
+
+- GPU drivers verified with `nvidia-smi`
+- SELinux enforcing with correct file contexts
+- Firewall rules restrict inference port to internal networks
+- vLLM health checks passing
+- Prometheus scraping GPU and inference metrics
+- Grafana dashboards for P95 latency, throughput, GPU utilization
+- Alert rules for SLO violations
+- Load balancer health checks configured
+- Rolling update playbook tested
+- Model backup and rollback procedure documented
+- RHEL AI subscription active for security patches
+
+## Related Guides
+
+- [RHEL AI tutorial from scratch](/blog/rhel-ai-tutorial-complete-beginners-guide-2026/)
+- [InstructLab fine-tuning guide](/blog/instructlab-fine-tuning-guide-rhel-ai-2026/)
+- [Ansible automation for RHEL AI](/blog/automating-rhel-ai-deployments-with-ansible-and-gitops/)
+- [Security hardening for RHEL AI](/blog/enterprise-ai-security-hardening-rhel-ai-with-selinux-and-container-isolation/)
+- [Monitoring RHEL AI workloads](/blog/monitoring-and-observability-for-rhel-ai-workloads/)
+- [Book: Practical RHEL AI](/practical-rhel-ai/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I help enterprises deploy RHEL AI in production — from GPU sizing to monitoring to compliance. [Book a consultation](https://calendly.com/lucaberton/) to plan your RHEL AI deployment.

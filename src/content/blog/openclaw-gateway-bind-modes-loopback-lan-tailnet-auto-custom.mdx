@@ -1,0 +1,158 @@
+---
+draft: false
+title: "OpenClaw Gateway Bind Modes Explained: loopback, lan, tailnet, auto, custom"
+snippet: "Complete reference for OpenClaw gateway bind modes. Learn the difference between loopback, lan, tailnet, auto, and custom bind addresses with examples."
+description: "OpenClaw gateway bind modes reference covering loopback, lan, tailnet, auto, and custom options. Includes security implications and configuration examples for each mode."
+image:
+  src: "/blog/thumbnails/openclaw-gateway-bind-modes-loopback-lan-tailnet-auto-custom.jpg"
+  alt: "OpenClaw gateway bind modes: loopback, lan, tailnet, auto, custom"
+publishDate: "2026-04-03"
+lastModified: "2026-04-03"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["OpenClaw", "Gateway", "Networking", "Configuration", "Security"]
+---
+
+OpenClaw's `gateway.bind` setting controls which network interfaces the gateway listens on. Choosing the wrong mode is the number one reason people get locked out of their Control UI or accidentally expose it to the internet.
+
+Here is what each mode does, when to use it, and the security implications.
+
+## The Five Bind Modes
+
+### loopback (Default)
+
+```bash
+openclaw config set gateway.bind loopback
+```
+
+**Listens on:** `127.0.0.1:18789`
+
+**Use when:** You only access OpenClaw from the same machine. This is the safest option — no network exposure at all.
+
+**Limitation:** Cannot access Control UI from your phone, another computer, or any remote device.
+
+### lan
+
+```bash
+openclaw config set gateway.bind lan
+```
+
+**Listens on:** Your local network IP (e.g., `192.168.1.100:18789`)
+
+**Use when:** You want to access OpenClaw from other devices on your home or office network.
+
+**Requires:** Setting `gateway.controlui.allowedOrigins` with your machine's LAN IP.
+
+```bash
+openclaw config set gateway.controlui.allowedOrigins '["http://192.168.1.100:18789"]'
+```
+
+### tailnet
+
+```bash
+openclaw config set gateway.bind tailnet
+```
+
+**Listens on:** Your Tailscale interface IP (e.g., `100.x.y.z:18789`)
+
+**Use when:** You use Tailscale and want secure remote access without exposing to the local network.
+
+**Requires:** Tailscale installed and running. Set `allowedOrigins` with your Tailscale hostname:
+
+```bash
+openclaw config set gateway.controlui.allowedOrigins '["http://your-machine.tail12345.ts.net:18789"]'
+```
+
+### auto
+
+```bash
+openclaw config set gateway.bind auto
+```
+
+**Listens on:** Automatically selects the best available interface (prefers Tailscale if available, falls back to LAN).
+
+**Use when:** You want OpenClaw to figure it out. Good for laptops that switch between networks.
+
+### custom
+
+```bash
+openclaw config set gateway.bind "custom:0.0.0.0"
+```
+
+**Listens on:** Whatever address you specify.
+
+**Use when:** You need to bind to a specific interface or `0.0.0.0` (all interfaces).
+
+**Warning:** Binding to `0.0.0.0` exposes the gateway on ALL network interfaces. Always set `allowedOrigins` and consider firewall rules.
+
+## Quick Comparison
+
+| Mode | Address | Network Exposure | Requires allowedOrigins |
+|------|---------|-----------------|------------------------|
+| loopback | 127.0.0.1 | None | No |
+| lan | LAN IP | Local network | Yes |
+| tailnet | Tailscale IP | Tailscale mesh | Yes |
+| auto | Auto-detected | Varies | Yes (if non-loopback) |
+| custom | User-specified | User-controlled | Yes (if non-loopback) |
+
+## Checking Your Current Mode
+
+```bash
+# View current bind setting
+openclaw config get gateway.bind
+
+# View the actual address after resolution
+openclaw gateway status
+```
+
+## Common Mistakes
+
+### "invalid --bind" Error
+
+```
+invalid --bind (use "loopback", "lan", "tailnet", "auto", or "custom")
+```
+
+You typed an invalid value. Use one of the five modes, or `custom:IP` for a specific address.
+
+### Gateway Starts But Cannot Connect
+
+Your browser URL must match `allowedOrigins` exactly. Check:
+- Protocol: `http://` vs `https://`
+- Hostname: IP address vs DNS name
+- Port: `:18789` must be included
+
+### Changed Bind But Old Address Still Works
+
+Restart the gateway after changing bind:
+
+```bash
+openclaw gateway restart
+```
+
+## Environment Variable
+
+Set bind mode via environment variable (useful for Docker):
+
+```bash
+export OPENCLAW_GATEWAY_BIND=lan
+# or
+OPENCLAW_GATEWAY_BIND=custom:0.0.0.0
+```
+
+## Security Recommendations
+
+1. **Use `loopback`** if you only need local access
+2. **Use `tailnet`** for remote access — encrypted, authenticated, no port forwarding
+3. **Use `lan`** only on trusted networks
+4. **Avoid `custom:0.0.0.0`** unless behind a firewall or reverse proxy
+5. **Always set `allowedOrigins`** when using non-loopback modes
+6. **Never use `dangerouslyAllowHostHeaderOriginFallback`** in production
+
+## Related Articles
+
+- [OpenClaw gateway.controlui.allowedOrigins: Complete Guide](/blog/openclaw-gateway-controlui-allowedorigins-complete-configuration-guide/)
+- [Fix: OpenClaw Origin Not Allowed Error](/blog/openclaw-origin-not-allowed-fix/)
+- [Fix: OpenClaw Non-Loopback Control UI Error](/blog/openclaw-gateway-controlui-allowedorigins-fix/)
+- [Configuring OpenClaw Gateway Bind and Control UI on Azure](/blog/configuring-openclaw-gateway-bind-and-control-ui/)
+- [Security Hardening for OpenClaw on Azure](/blog/security-hardening-for-openclaw-on-azure/)

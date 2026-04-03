@@ -3,9 +3,23 @@ import Container from "@components/container.astro";
 import { getFormattedDate } from "@utils/all";
 import Layout from "./Layout.astro";
 import Breadcrumb from "@components/Breadcrumb.astro";
+import AuthorBox from "@components/AuthorBox.astro";
+import BlogPromoCard from "@components/BlogPromoCard.astro";
+import BlogRelatedPosts from "@components/BlogRelatedPosts.astro";
+import KitButton from "@components/KitButton.astro";
+import ShareButtons from "@components/ShareButtons.astro";
 import slugify from "slugify";
 
 const { frontmatter } = Astro.props;
+
+// Reading time estimation
+const rawContent = frontmatter.rawContent || "";
+const wordCount = rawContent.split(/\s+/).filter(Boolean).length || 800;
+const readingTime = Math.max(1, Math.ceil(wordCount / 238));
+
+// Current URL for sharing
+const currentUrl = `https://lucaberton.com${Astro.url.pathname}`;
+const currentSlug = Astro.url.pathname.replace(/^\/blog\//, '').replace(/\/$/, '');
 
 // Generate structured data for blog post
 const blogStructuredData = {
@@ -16,7 +30,14 @@ const blogStructuredData = {
   "author": {
     "@type": "Person",
     "name": frontmatter.author || "Luca Berton",
-    "url": "https://lucaberton.com"
+    "url": "https://lucaberton.com",
+    "jobTitle": "AI & Cloud Advisor",
+    "sameAs": [
+      "https://www.linkedin.com/in/lucaberton/",
+      "https://bsky.app/profile/lucaberton.com",
+      "https://www.youtube.com/@BertonLuca",
+      "https://github.com/lucab85"
+    ]
   },
   "publisher": {
     "@type": "Organization",
@@ -30,13 +51,15 @@ const blogStructuredData = {
   "datePublished": frontmatter.publishDate,
   "dateModified": frontmatter.lastModified || frontmatter.publishDate,
   "image": frontmatter.image?.src ? `https://lucaberton.com${frontmatter.image.src}` : "https://lucaberton.com/opengraph.jpg",
-  "url": `https://lucaberton.com/blog/${Astro.url.pathname.split('/').pop()}`,
+  "url": currentUrl,
   "mainEntityOfPage": {
     "@type": "WebPage",
-    "@id": `https://lucaberton.com/blog/${Astro.url.pathname.split('/').pop()}`
+    "@id": currentUrl
   },
   "articleSection": frontmatter.category,
-  "keywords": frontmatter.tags?.join(", ") || ""
+  "keywords": frontmatter.tags?.join(", ") || "",
+  "wordCount": wordCount,
+  "timeRequired": `PT${readingTime}M`
 };
 ---
 
@@ -47,46 +70,97 @@ const blogStructuredData = {
 >
   <!-- Blog Post Structured Data -->
   <script type="application/ld+json" set:html={JSON.stringify(blogStructuredData)}></script>
-  <Breadcrumb items={[{ name: "Blog", url: "/blog/" }, { name: frontmatter.title }]} />
+  
+  <Breadcrumb items={[
+    { name: "Blog", url: "/blog/" },
+    { name: frontmatter.category, url: `/blog/categories/${slugify(frontmatter.category, { lower: true, strict: true })}/` },
+    { name: frontmatter.title }
+  ]} />
+
   <Container>
-    <div class="mx-auto max-w-[735px] mt-14">
+    <article class="mx-auto max-w-[735px] mt-14">
+      <!-- Article Header -->
       <span class="text-blue-400 uppercase tracking-wider text-sm font-medium">
         <a href={`/blog/categories/${slugify(frontmatter.category, { lower: true, strict: true })}/`} class="hover:underline">
           {frontmatter.category}
         </a>
       </span>
-      <h1
-        class="text-4xl lg:text-5xl font-bold lg:tracking-tight mt-1 lg:leading-tight">
+      <h1 class="text-4xl lg:text-5xl font-bold lg:tracking-tight mt-1 lg:leading-tight">
         {frontmatter.title}
       </h1>
-      <div class="flex gap-2 mt-3 items-center flex-wrap md:flex-nowrap">
-        <span class="text-gray-400">
-          {frontmatter.author}
-        </span>
+      <div class="flex gap-2 mt-3 items-center flex-wrap md:flex-nowrap text-sm">
+        <a href="/about/" class="text-gray-500 hover:text-blue-600 transition-colors font-medium">
+          {frontmatter.author || "Luca Berton"}
+        </a>
         <span class="text-gray-400">•</span>
         <time class="text-gray-400" datetime={frontmatter.publishDate}>
           {getFormattedDate(frontmatter.publishDate)}
         </time>
-        <span class="text-gray-400 hidden md:block">•</span>
-        <div class="w-full md:w-auto flex flex-wrap gap-3">
-          {
-            frontmatter.tags.map((tag) => (
-              <span class="text-sm text-gray-500">#{tag}</span>
-            ))
-          }
-        </div>
+        <span class="text-gray-400">•</span>
+        <span class="text-gray-400">{readingTime} min read</span>
       </div>
-    </div>
+      
+      <!-- Tags as links -->
+      <div class="flex flex-wrap gap-2 mt-4">
+        {frontmatter.tags.map((tag: string) => (
+          <a 
+            href={`/blog/categories/${slugify(frontmatter.category, { lower: true, strict: true })}/`}
+            class="text-xs bg-gray-100 text-gray-600 px-3 py-1 rounded-full hover:bg-blue-50 hover:text-blue-700 transition-colors"
+          >
+            #{tag}
+          </a>
+        ))}
+      </div>
 
-    <div class="mx-auto prose prose-lg mt-6">
+      <!-- Hero Image with proper alt -->
+      {frontmatter.image?.src && (
+        <img
+          src={frontmatter.image.src}
+          alt={frontmatter.image.alt || frontmatter.title}
+          width="735"
+          height="386"
+          loading="eager"
+          class="w-full rounded-xl mt-6"
+        />
+      )}
+    </article>
+
+    <!-- Article Body -->
+    <div class="mx-auto prose prose-lg mt-6 max-w-[735px]">
       <slot />
     </div>
-    <div class="text-center mt-8">
-      <a
-        href="/blog/"
-        class="bg-gray-100 px-5 py-3 rounded-md hover:bg-gray-200 transition"
-        >← Back to Blog</a
-      >
+
+    <div class="mx-auto max-w-[735px]">
+      <!-- Share Buttons -->
+      <ShareButtons title={frontmatter.title} url={currentUrl} />
+      
+      <!-- Book/Course Promo -->
+      <BlogPromoCard />
+      
+      <!-- Author Box -->
+      <AuthorBox />
+      
+      <!-- Newsletter CTA -->
+      <div class="mt-8 p-6 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl border border-blue-100 text-center">
+        <h3 class="text-lg font-bold text-gray-900">Get AI & Cloud insights in your inbox</h3>
+        <p class="text-sm text-gray-600 mt-1 mb-4">Weekly insights on Kubernetes, AI infrastructure, and platform engineering. No spam.</p>
+        <KitButton />
+      </div>
+
+      <!-- Related Posts -->
+      <BlogRelatedPosts 
+        currentSlug={currentSlug}
+        category={frontmatter.category}
+        tags={frontmatter.tags}
+      />
+
+      <!-- Back to Blog -->
+      <div class="text-center mt-8 mb-12">
+        <a
+          href="/blog/"
+          class="bg-gray-100 px-5 py-3 rounded-md hover:bg-gray-200 transition"
+        >← Back to Blog</a>
+      </div>
     </div>
   </Container>
 </Layout>

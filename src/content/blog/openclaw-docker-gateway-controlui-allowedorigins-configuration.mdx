@@ -1,0 +1,163 @@
+---
+draft: false
+title: "OpenClaw Docker: Configuring gateway.controlui.allowedOrigins"
+snippet: "Fix OpenClaw origin not allowed and non-loopback errors in Docker. Complete guide with docker-compose examples, environment variables, and volume permissions."
+description: "How to configure OpenClaw gateway.controlui.allowedOrigins in Docker and docker-compose. Fix permission denied, origin not allowed, and non-loopback errors."
+image:
+  src: "/blog/thumbnails/openclaw-docker-gateway-controlui-allowedorigins-configuration.jpg"
+  alt: "OpenClaw Docker gateway.controlui.allowedOrigins configuration"
+publishDate: "2026-04-03"
+lastModified: "2026-04-03"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["OpenClaw", "Docker", "Gateway", "Configuration", "Containers"]
+---
+
+Running OpenClaw in Docker introduces networking quirks that make `gateway.controlui.allowedOrigins` configuration tricky. The container has its own network namespace, so `localhost` inside the container is not the same as `localhost` on your host.
+
+I run OpenClaw in Docker on both Azure VMs and home lab machines. Here is exactly how to get it working.
+
+## The Minimal Working docker-compose.yml
+
+```yaml
+version: "3.8"
+services:
+  openclaw:
+    image: openclaw/openclaw:latest
+    ports:
+      - "18789:18789"
+    environment:
+      - OPENCLAW_GATEWAY_BIND=0.0.0.0
+      - OPENCLAW_GATEWAY_CONTROLUI_ALLOWEDORIGINS=["http://YOUR_HOST_IP:18789"]
+    volumes:
+      - openclaw-data:/home/node/.openclaw
+
+volumes:
+  openclaw-data:
+```
+
+Replace `YOUR_HOST_IP` with your actual host machine IP address (not `localhost`, not `127.0.0.1`).
+
+## Finding Your Host IP
+
+```bash
+# Linux
+hostname -I | awk '{print $1}'
+
+# macOS
+ipconfig getifaddr en0
+
+# Windows
+ipconfig | findstr /i "IPv4"
+```
+
+## Why localhost Does Not Work
+
+When you set `allowedOrigins` to `http://localhost:18789`, it only works if you open the browser **on the same machine running Docker**. From any other device, the browser sends a different `Origin` header (the host IP), which does not match.
+
+**Fix:** Always use the actual IP address:
+
+```bash
+# Wrong
+OPENCLAW_GATEWAY_CONTROLUI_ALLOWEDORIGINS=["http://localhost:18789"]
+
+# Correct
+OPENCLAW_GATEWAY_CONTROLUI_ALLOWEDORIGINS=["http://192.168.1.50:18789"]
+```
+
+## Docker Permission Denied Errors
+
+If OpenClaw fails to start with permission errors:
+
+```
+Error: EACCES: permission denied, open '/home/node/.openclaw/openclaw.json'
+```
+
+The container runs as user `node` (UID 1000). Fix the volume permissions:
+
+```bash
+# Named volume (usually works automatically)
+docker compose down
+docker volume rm openclaw-data
+docker compose up -d
+
+# Bind mount (manual fix needed)
+sudo chown -R 1000:1000 ./openclaw-data
+sudo chmod 700 ./openclaw-data
+```
+
+## Multiple Access Methods
+
+Allow access from both your local machine and your phone:
+
+```yaml
+environment:
+  - OPENCLAW_GATEWAY_BIND=0.0.0.0
+  - OPENCLAW_GATEWAY_CONTROLUI_ALLOWEDORIGINS=["http://192.168.1.50:18789","http://localhost:18789"]
+```
+
+## Docker with Tailscale
+
+If you use Tailscale on the host:
+
+```yaml
+environment:
+  - OPENCLAW_GATEWAY_BIND=0.0.0.0
+  - OPENCLAW_GATEWAY_CONTROLUI_ALLOWEDORIGINS=["http://192.168.1.50:18789","http://my-machine.tail12345.ts.net:18789"]
+```
+
+## Docker with Reverse Proxy
+
+When running behind Nginx or Traefik:
+
+```yaml
+services:
+  openclaw:
+    image: openclaw/openclaw:latest
+    # No port mapping needed — proxy handles it
+    environment:
+      - OPENCLAW_GATEWAY_BIND=0.0.0.0
+      - OPENCLAW_GATEWAY_CONTROLUI_ALLOWEDORIGINS=["https://openclaw.yourdomain.com"]
+    networks:
+      - proxy
+
+  traefik:
+    # ... your proxy config
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
+```
+
+## Verifying Configuration
+
+After starting the container:
+
+```bash
+# Check if the gateway is running
+docker compose logs openclaw | grep -i "gateway\|bind\|origin"
+
+# Test from host
+curl -I http://YOUR_HOST_IP:18789
+
+# Check the stored config
+docker compose exec openclaw cat /home/node/.openclaw/openclaw.json
+```
+
+## Troubleshooting Checklist
+
+1. **Port mapped?** Check `docker compose ps` shows `0.0.0.0:18789->18789/tcp`
+2. **Correct IP?** The IP in `allowedOrigins` matches your browser address bar
+3. **Bind set?** `OPENCLAW_GATEWAY_BIND=0.0.0.0` (not loopback)
+4. **Volume permissions?** UID 1000 owns the data directory
+5. **Firewall?** Port 18789 is open: `sudo ufw allow 18789/tcp`
+
+## Related Articles
+
+- [OpenClaw gateway.controlui.allowedOrigins: Complete Guide](/blog/openclaw-gateway-controlui-allowedorigins-complete-configuration-guide/)
+- [OpenClaw Gateway Bind Modes Explained](/blog/openclaw-gateway-bind-modes-loopback-lan-tailnet-auto-custom/)
+- [Docker Volume Permissions for OpenClaw on Linux](/blog/docker-volume-permissions-for-openclaw-on-linux/)
+- [Troubleshooting OpenClaw Docker Deployments](/blog/troubleshooting-openclaw-docker-deployments/)
+- [Installing OpenClaw on Azure with Docker](/blog/installing-openclaw-on-azure-with-docker/)

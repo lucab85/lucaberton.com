@@ -1,0 +1,150 @@
+---
+draft: false
+title: "OpenClaw Memory Search Embedding Provider: Configuration Guide"
+snippet: "Configure OpenClaw memory search with local or API embeddings. Set up agents.defaults.memorysearch.provider, choose models, and troubleshoot embedding errors."
+description: "Complete guide to OpenClaw memory search embedding provider configuration. Set up local sentence-transformers or API-based embeddings for semantic memory search."
+image:
+  src: "/blog/thumbnails/openclaw-memory-search-embedding-provider-configuration.jpg"
+  alt: "OpenClaw memory search embedding provider configuration"
+publishDate: "2026-04-03"
+lastModified: "2026-04-03"
+author: "Luca Berton"
+category: "AI"
+tags: ["OpenClaw", "Embeddings", "Memory Search", "AI", "Configuration"]
+---
+
+OpenClaw's memory search uses embeddings to find semantically relevant memories. Without configuring an embedding provider, memory search falls back to keyword matching, which misses conceptually related content.
+
+I have tested both local and API-based embedding providers. Here is how to set each one up and which to choose.
+
+## Understanding the Architecture
+
+OpenClaw memory search has two modes:
+
+1. **Text search** — keyword/BM25 matching (always available)
+2. **Hybrid search** — combines text search with vector similarity using embeddings (requires provider)
+
+Hybrid search is significantly better at finding relevant context. It understands that "deploying containers" relates to "Kubernetes pod scheduling" even without shared keywords.
+
+## Setting Up Local Embeddings
+
+Local embeddings run on your machine. No API calls, no costs, works offline.
+
+### Step 1: Choose a Model
+
+```bash
+# Recommended: small, fast, good quality
+openclaw config set agents.defaults.memorysearch.provider local
+openclaw config set agents.defaults.memorysearch.local.modelPath "all-MiniLM-L6-v2"
+```
+
+| Model | Size | Speed | Quality |
+|-------|------|-------|---------|
+| all-MiniLM-L6-v2 | 80MB | Fast | Good |
+| all-mpnet-base-v2 | 420MB | Medium | Better |
+| bge-small-en-v1.5 | 130MB | Fast | Good |
+
+### Step 2: Verify
+
+```bash
+# Restart to load the model
+openclaw gateway restart
+
+# Test memory search
+openclaw memory search "test query"
+```
+
+### Requirements
+
+- Node.js 18+ (included in OpenClaw)
+- About 200MB-500MB RAM depending on model
+- No GPU required — CPU inference is fast for embeddings
+
+## Setting Up API Embeddings
+
+Use OpenAI, Azure, or other API providers:
+
+```bash
+# OpenAI
+openclaw config set agents.defaults.memorysearch.provider openai
+openclaw config set agents.defaults.memorysearch.openai.apiKey "sk-..."
+openclaw config set agents.defaults.memorysearch.openai.model "text-embedding-3-small"
+```
+
+### Cost Comparison
+
+| Provider | Model | Cost per 1M tokens |
+|----------|-------|--------------------|
+| Local | all-MiniLM-L6-v2 | Free |
+| OpenAI | text-embedding-3-small | $0.02 |
+| OpenAI | text-embedding-3-large | $0.13 |
+
+For personal use, local embeddings are free and fast enough. API embeddings make sense at scale or when you need the highest quality.
+
+## Hybrid Search Tuning
+
+Adjust the balance between text and vector search:
+
+```bash
+# Default: 50/50 blend
+openclaw config set agents.defaults.memorysearch.hybridWeight 0.5
+
+# More weight on semantic similarity (0.0 = text only, 1.0 = vector only)
+openclaw config set agents.defaults.memorysearch.hybridWeight 0.7
+```
+
+**My recommendation:** Start with 0.6 (slightly favoring semantic). If you find the agent missing obvious keyword matches, lower it to 0.5.
+
+## Troubleshooting
+
+### "for local embeddings: configure agents.defaults.memorysearch.provider and local model path"
+
+This means the provider is not set or the model path is invalid:
+
+```bash
+# Check current config
+openclaw config get agents.defaults.memorysearch
+
+# Set it
+openclaw config set agents.defaults.memorysearch.provider local
+openclaw config set agents.defaults.memorysearch.local.modelPath "all-MiniLM-L6-v2"
+openclaw gateway restart
+```
+
+### Memory Search Returns No Results
+
+```bash
+# Check if memory files exist
+ls ~/.openclaw/workspace/memory/
+
+# Reindex memory
+openclaw memory reindex
+
+# Verify embedding provider is working
+openclaw config get agents.defaults.memorysearch.provider
+```
+
+### High Memory Usage
+
+If the embedding model uses too much RAM:
+
+```bash
+# Switch to a smaller model
+openclaw config set agents.defaults.memorysearch.local.modelPath "all-MiniLM-L6-v2"
+openclaw gateway restart
+```
+
+## Environment Variables
+
+```bash
+export OPENCLAW_AGENTS_DEFAULTS_MEMORYSEARCH_PROVIDER=local
+export OPENCLAW_AGENTS_DEFAULTS_MEMORYSEARCH_LOCAL_MODELPATH=all-MiniLM-L6-v2
+```
+
+## Related Articles
+
+- [Setting Up OpenClaw Hybrid Memory Search with Local Embeddings](/blog/setting-up-openclaw-hybrid-memory-search-with-local-embeddings/)
+- [OpenClaw File-Backed Memory: Durable Knowledge](/blog/openclaw-file-backed-memory-durable-knowledge/)
+- [OpenClaw Memory CLI: Index, Search, and Reindex](/blog/openclaw-memory-cli-index-search-and-reindex-commands/)
+- [OpenClaw Session Memory Hooks](/blog/openclaw-session-memory-hooks-knowledge-capture/)
+- [Building a Persistent AI Agent Memory System with OpenClaw](/blog/building-a-persistent-ai-agent-memory-system-with-openclaw/)

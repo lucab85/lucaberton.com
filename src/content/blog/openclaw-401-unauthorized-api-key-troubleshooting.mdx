@@ -1,0 +1,148 @@
+---
+draft: false
+title: "Fix OpenClaw 401 Unauthorized: Invalid API Key Troubleshooting"
+snippet: "Resolve OpenClaw HTTP 401 authentication errors, invalid API key issues, and gateway token mismatches. Step-by-step fix for incorrect api key provided errors."
+description: "Troubleshoot OpenClaw 401 Unauthorized and invalid API key errors. Fix gateway token mismatches, incorrect x-api-key headers, and authentication failures."
+image:
+  src: "/blog/thumbnails/openclaw-401-unauthorized-api-key-troubleshooting.jpg"
+  alt: "Fix OpenClaw 401 Unauthorized API key error"
+publishDate: "2026-04-03"
+lastModified: "2026-04-03"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["OpenClaw", "Authentication", "Troubleshooting", "API", "Security"]
+---
+
+Getting `401 Unauthorized` or `incorrect api key provided` when connecting to your OpenClaw gateway? This is almost always a token mismatch between your client and the gateway.
+
+## Understanding OpenClaw Authentication
+
+OpenClaw uses a **gateway token** to authenticate API requests. Every request to the gateway must include this token in the `x-api-key` header or as a Bearer token.
+
+```bash
+# Check your gateway token
+openclaw config get gateway.token
+
+# Or find it in the config file
+cat ~/.openclaw/openclaw.json | grep token
+```
+
+## Common Causes and Fixes
+
+### 1. Token Changed After Restart
+
+If you regenerated the token or reinstalled OpenClaw:
+
+```bash
+# View the current token
+openclaw config get gateway.token
+
+# Use this token in your client configuration
+```
+
+### 2. Environment Variable Override
+
+An environment variable might override the config file:
+
+```bash
+# Check if OPENCLAW_GATEWAY_TOKEN is set
+env | grep OPENCLAW_GATEWAY_TOKEN
+
+# Unset if it has a stale value
+unset OPENCLAW_GATEWAY_TOKEN
+```
+
+### 3. Docker Token Mismatch
+
+In Docker, the token is stored in the volume. If you recreated the volume:
+
+```bash
+# Check the token inside the container
+docker compose exec openclaw cat /home/node/.openclaw/openclaw.json | grep token
+
+# Or set it explicitly via environment
+docker compose down
+# Add to docker-compose.yml:
+# environment:
+#   - OPENCLAW_GATEWAY_TOKEN=your-known-token
+docker compose up -d
+```
+
+### 4. Multiple Instances
+
+If you run multiple OpenClaw instances, each has its own token:
+
+```bash
+# Check which instance you are connecting to
+curl -I http://YOUR_IP:18789
+# Verify the port matches the instance with your token
+```
+
+### 5. Incorrect Header Format
+
+The API key must be sent correctly:
+
+```bash
+# Correct
+curl -H "x-api-key: YOUR_TOKEN" http://localhost:18789/v1/models
+
+# Also correct (Bearer format)
+curl -H "Authorization: Bearer YOUR_TOKEN" http://localhost:18789/v1/models
+
+# Wrong (missing header)
+curl http://localhost:18789/v1/models
+```
+
+## Testing Authentication
+
+```bash
+# Quick test — should return 200 with model list
+TOKEN=$(openclaw config get gateway.token)
+curl -s -o /dev/null -w "%{http_code}" \
+  -H "x-api-key: $TOKEN" \
+  http://localhost:18789/v1/models
+```
+
+Expected: `200`
+
+If you get `401`, the token does not match. If you get connection refused, the gateway is not running.
+
+## Resetting the Token
+
+If you cannot find the correct token:
+
+```bash
+# Generate a new token
+openclaw config set gateway.token "$(openssl rand -hex 32)"
+openclaw gateway restart
+
+# Note the new token
+openclaw config get gateway.token
+```
+
+## Control UI Authentication
+
+The Control UI uses the same gateway token. If the UI shows `401`:
+
+1. Open the Control UI in your browser
+2. It should prompt for the token
+3. Enter the token from `openclaw config get gateway.token`
+4. If it does not prompt, clear browser cache and cookies for the gateway URL
+
+## allowInsecureAuth Setting
+
+For development only, you can disable authentication:
+
+```bash
+# WARNING: Disables API key requirement — never use in production
+openclaw config set gateway.controlui.allowInsecureAuth true
+openclaw gateway restart
+```
+
+## Related Articles
+
+- [OpenClaw gateway.controlui.allowedOrigins: Complete Guide](/blog/openclaw-gateway-controlui-allowedorigins-complete-configuration-guide/)
+- [Fixing OpenClaw Gateway Token Mismatch WebSocket Errors](/blog/fixing-openclaw-gateway-token-mismatch-websocket-errors/)
+- [Security Hardening for OpenClaw on Azure](/blog/security-hardening-for-openclaw-on-azure/)
+- [Running OpenClaw Security Audit and Managing Warnings](/blog/running-openclaw-security-audit-and-managing-warnings/)
+- [OpenClaw Docker Troubleshooting](/blog/troubleshooting-openclaw-docker-deployments/)

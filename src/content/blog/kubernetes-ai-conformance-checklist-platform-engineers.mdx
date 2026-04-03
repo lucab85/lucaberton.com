@@ -1,0 +1,252 @@
+---
+draft: false
+title: "Kubernetes AI Conformance Checklist: What Platform Engineers Need to Implement"
+snippet: "Practical checklist for Kubernetes AI Conformance. GPU scheduling, DRA, network performance, storage, autoscaling, and agentic workload requirements."
+description: "Kubernetes AI Conformance implementation checklist for platform engineers. GPU device plugins, DRA, topology scheduling, inference autoscaling, and agentic patterns."
+image:
+  src: "/blog/thumbnails/kubernetes-ai-conformance-checklist-platform-engineers.jpg"
+  alt: "Kubernetes AI Conformance Checklist for Platform Engineers"
+publishDate: "2026-04-04"
+lastModified: "2026-04-04"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ["Kubernetes", "AI", "Conformance", "Platform Engineering", "GPU", "CNCF"]
+---
+
+The [CNCF Kubernetes AI Conformance Program](/blog/kubernetes-ai-conformance-program-cncf-kubecon-2026/) defines what "AI-ready" means. But what does a platform engineer actually need to implement? Here is the technical checklist.
+
+## Accelerator Management
+
+### Device Plugin Support
+
+```yaml
+# Verify GPU device plugin is running
+kubectl get pods -n kube-system -l app=nvidia-device-plugin
+
+# Check allocatable GPUs
+kubectl get nodes -o json | jq '.items[].status.allocatable["nvidia.com/gpu"]'
+```
+
+Requirements:
+- NVIDIA device plugin (or equivalent for AMD, Intel, Habana)
+- GPU resource requests and limits in pod specs
+- GPU health monitoring and automatic unhealthy node drain
+
+### Dynamic Resource Allocation (DRA)
+
+DRA is the next-generation alternative to device plugins:
+
+```yaml
+apiVersion: resource.k8s.io/v1alpha3
+kind: ResourceClaim
+metadata:
+  name: gpu-claim
+spec:
+  devices:
+    requests:
+      - name: gpu
+        deviceClassName: gpu.nvidia.com
+        count: 2
+```
+
+For a deep dive on GPU management, see [NVIDIA GPU Operator for Kubernetes](/blog/nvidia-gpu-operator-kubernetes-ai-ml/).
+
+## Scheduling
+
+### Topology-Aware Scheduling
+
+AI training jobs need GPUs that are physically close (same node, same NVLink fabric):
+
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+  resources:
+    limits:
+      nvidia.com/gpu: 4
+```
+
+### Gang Scheduling
+
+Training jobs need all pods scheduled simultaneously or not at all:
+
+```yaml
+# Using Volcano or Coscheduling plugin
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: PodGroup
+metadata:
+  name: training-job
+spec:
+  minMember: 8
+  queue: default
+```
+
+### Priority and Preemption
+
+Inference workloads should preempt batch training when capacity is tight:
+
+```yaml
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: inference-critical
+value: 1000000
+preemptionPolicy: PreemptLowerPriority
+description: "Production inference workloads"
+```
+
+## Networking
+
+### High-Bandwidth Interconnect
+
+Distributed training needs RDMA or equivalent:
+
+- InfiniBand / RoCE v2 support
+- SR-IOV for network device passthrough
+- Network policies that do not block training traffic
+- MTU 9000 (jumbo frames) for training networks
+
+For SR-IOV details, see [SR-IOV NIC Cluster Policy for Kubernetes](/blog/sriov-nicclusterpolicy-kubernetes-high-performance-networking/).
+
+### Model-Aware Load Balancing
+
+Inference endpoints need routing that understands model readiness:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: inference-route
+spec:
+  rules:
+    - matches:
+        - path:
+            value: /v1/completions
+      backendRefs:
+        - name: vllm-service
+          port: 8000
+```
+
+## Storage
+
+### Model Artifact Storage
+
+- ReadWriteMany (RWX) volumes for shared model access
+- CSI drivers with snapshot support for model versioning
+- At least 1 TB capacity for large model weights
+- SSD-backed storage for model loading performance
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-storage
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 500Gi
+  storageClassName: fast-rwx
+```
+
+### Checkpoint Storage
+
+Training checkpoints need durable, fast storage:
+
+- Periodic checkpoint writes (every N steps)
+- Fast restore for job preemption recovery
+- Lifecycle policies for checkpoint retention
+
+## Autoscaling
+
+### Inference Autoscaling
+
+```yaml
+# KEDA ScaledObject for inference queue depth
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vllm-scaler
+spec:
+  scaleTargetRef:
+    name: vllm-deployment
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus:9090
+        metricName: vllm_num_requests_waiting
+        query: sum(vllm_num_requests_waiting)
+        threshold: "10"
+```
+
+For standard HPA vs KEDA comparison, see [KEDA vs HPA](/blog/keda-vs-hpa-2026/).
+
+### Scale-to-Zero
+
+Cost optimization for inference endpoints with variable traffic:
+
+```yaml
+# KEDA with scale-to-zero
+spec:
+  minReplicaCount: 0
+  cooldownPeriod: 300
+  idleReplicaCount: 0
+```
+
+## Agentic Workload Support
+
+The newest conformance category. Requirements are still evolving but include:
+
+- **Durable execution** — workflow engines (Argo Workflows, Temporal) for multi-step agents
+- **Tool calling** — service mesh or API gateway for external tool integration
+- **State persistence** — PVCs or external state stores for agent memory
+- **Timeout management** — configurable timeouts for non-deterministic LLM calls
+
+## Implementation Checklist
+
+| Category | Requirement | Priority |
+|----------|------------|----------|
+| GPU | Device plugin installed and healthy | Critical |
+| GPU | DRA support (K8s 1.31+) | Recommended |
+| GPU | MIG or time-slicing configured | Recommended |
+| Scheduling | Topology-aware placement | Critical |
+| Scheduling | Gang scheduling plugin | Critical |
+| Scheduling | Priority classes for inference | Important |
+| Network | RDMA/RoCE for training | Important |
+| Network | SR-IOV device plugin | Recommended |
+| Storage | RWX volumes for models | Critical |
+| Storage | Checkpoint storage with snapshots | Important |
+| Autoscaling | GPU-aware HPA or KEDA | Critical |
+| Autoscaling | Scale-to-zero for inference | Recommended |
+| Monitoring | GPU metrics in Prometheus | Critical |
+| Security | GPU isolation between tenants | Critical |
+
+## Contribute to the Program
+
+The conformance requirements are open source:
+
+- **GitHub**: [cncf/k8s-ai-conformance](https://github.com/cncf/k8s-ai-conformance)
+- **Project**: [kubernetes-sigs/ai-conformance](https://github.com/kubernetes-sigs/ai-conformance)
+- **Meetings**: SIG Architecture AI Conformance meetings
+
+Agentic workload requirements need the most input. If you are building AI agent platforms on Kubernetes, your experience is valuable.
+
+## Related Resources
+
+- [Kubernetes AI Conformance Program Overview](/blog/kubernetes-ai-conformance-program-cncf-kubecon-2026/)
+- [Google at KubeCon EU 2026](/blog/google-kubecon-2026-kubernetes-ai-platform-announcements/)
+- [GPU Kubernetes Guide](/blog/gpu-kubernetes-ai-ml-workloads-guide/)
+- [NVIDIA GPU Operator](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [Kubernetes Monitoring with Prometheus](/blog/kubernetes-monitoring-prometheus-grafana-guide/)
+- [Multi-Tenant GPUs on Bare Metal](/blog/kubecon-2026-packed-room-multi-tenant-gpus-bare-metal/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I [presented on multi-tenant GPU scheduling at KubeCon EU 2026](/kubecon/) and help platform teams build AI-ready Kubernetes clusters. [Book a consultation](https://calendly.com/lucaberton/) to assess your AI platform readiness.

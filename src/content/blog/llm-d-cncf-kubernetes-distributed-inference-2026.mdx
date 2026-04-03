@@ -1,0 +1,152 @@
+---
+draft: false
+title: "llm-d Joins the CNCF: Kubernetes-Native Distributed LLM Inference"
+snippet: "llm-d is the CNCF's new sandbox project for distributed LLM inference on Kubernetes. Prefill/decode disaggregation, KV cache routing, and multi-accelerator support."
+description: "llm-d joins CNCF as a sandbox project. Kubernetes-native distributed inference with prefill/decode disaggregation, cache-aware routing, and hardware-agnostic serving."
+image:
+  src: "/blog/thumbnails/llm-d-cncf-kubernetes-distributed-inference-2026.jpg"
+  alt: "llm-d CNCF Kubernetes Distributed Inference"
+publishDate: "2026-04-04"
+lastModified: "2026-04-04"
+author: "Luca Berton"
+category: "AI"
+tags: ["llm-d", "CNCF", "Kubernetes", "LLM", "Inference", "vLLM", "KubeCon"]
+---
+
+The CNCF just accepted **llm-d** as a sandbox project, and it might be the most important AI infrastructure project of 2026. Built by IBM Research, Google, Red Hat, CoreWeave, and NVIDIA, llm-d turns Kubernetes into a state-of-the-art LLM inference platform.
+
+I saw this announced at [KubeCon Europe 2026](/kubecon/) and immediately understood why it matters.
+
+## What Problem Does llm-d Solve?
+
+LLM inference is not like serving a REST API. It is:
+
+- **Highly stateful** — KV caches must be preserved across requests for efficiency
+- **Latency-sensitive** — users wait in real time for token generation
+- **Asymmetric** — prompt processing (prefill) is compute-heavy; token generation (decode) is memory-bound
+- **Expensive** — GPU utilization directly translates to cost per token
+
+Traditional Kubernetes load balancing (round-robin, least-connections) ignores all of this. It sends requests to random pods, fragmenting KV caches, misaligning workloads with hardware, and causing unpredictable latency.
+
+llm-d fixes this by making Kubernetes inference-aware.
+
+## Key Capabilities
+
+### 1. Prefill/Decode Disaggregation
+
+The breakthrough architecture: separate prompt processing from token generation into independently scalable pods.
+
+**Why this matters:**
+- Prefill is compute-bound (needs GPU FLOPS)
+- Decode is memory-bound (needs GPU bandwidth)
+- Same hardware cannot optimally serve both
+- Disaggregation lets you scale each phase independently
+
+```
+Request → [Prefill Pods] → KV Cache Transfer → [Decode Pods] → Response
+           (GPU compute)                        (GPU memory)
+```
+
+This is the same architecture that Mistral AI uses internally. They are contributing a `DisaggregatedSet` operator for LeaderWorkerSet (LWS) back to the project.
+
+### 2. Inference-Aware Traffic Routing
+
+llm-d implements the Kubernetes Gateway API Inference Extension (GAIE) with an Endpoint Picker (EPP) that understands:
+
+- **Prefix cache locality** — route requests to pods that already have relevant KV cache entries
+- **Model readiness** — not just container health, but model loading state
+- **Queue depth** — actual inference queue, not just TCP connections
+- **Hardware topology** — route to pods on matching accelerator types
+
+### 3. Hierarchical KV Cache Management
+
+KV cache offloading across multiple tiers:
+
+```
+GPU HBM (fastest) → CPU RAM → NVMe SSD → Network Storage (cheapest)
+```
+
+Hot caches stay on GPU. Warm caches spill to CPU. Cold caches go to disk. This maximizes GPU utilization while keeping frequently used contexts accessible.
+
+### 4. Any Model, Any Accelerator, Any Cloud
+
+llm-d is hardware-agnostic by design:
+
+- NVIDIA GPUs (A100, H100, B200)
+- AMD GPUs (MI300X)
+- Intel GPUs (Gaudi)
+- Google TPUs
+- Habana accelerators
+
+The routing layer adapts request placement based on hardware characteristics — a request that benefits from high memory bandwidth goes to different hardware than one that needs compute throughput.
+
+## Architecture on Kubernetes
+
+```yaml
+# llm-d uses LeaderWorkerSet for multi-node inference
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: llm-inference
+spec:
+  replicas: 3
+  leaderWorkerTemplate:
+    leaderTemplate:
+      spec:
+        containers:
+          - name: prefill-engine
+            image: ghcr.io/llm-d/prefill:latest
+            resources:
+              limits:
+                nvidia.com/gpu: "4"
+    workerTemplate:
+      spec:
+        containers:
+          - name: decode-engine
+            image: ghcr.io/llm-d/decode:latest
+            resources:
+              limits:
+                nvidia.com/gpu: "2"
+```
+
+## Who Is Behind It
+
+The founding consortium is impressive:
+
+- **IBM Research** — core architecture and KV cache management
+- **Google Cloud** — Gateway API integration and GKE optimization
+- **Red Hat** — OpenShift integration and operator development
+- **CoreWeave** — bare-metal GPU infrastructure expertise
+- **NVIDIA** — hardware optimization and accelerator support
+- **AMD, Cisco, Intel, Lambda** — multi-accelerator support
+- **Hugging Face** — model ecosystem integration
+- **Mistral AI** — disaggregated serving operator contributions
+- **UC Berkeley and University of Chicago** — research
+
+## How It Relates to Existing CNCF Projects
+
+llm-d bridges the gap between:
+
+- **KServe** (high-level model serving control plane) and
+- **vLLM** (low-level inference engine)
+
+It also integrates with the [Kubernetes AI Conformance Program](/blog/kubernetes-ai-conformance-program-cncf-kubecon-2026/) to ensure disaggregated serving is interoperable across platforms.
+
+## My Prediction
+
+llm-d will become the standard way to serve LLMs on Kubernetes within 18 months. The combination of CNCF governance, multi-vendor backing, and solving a real technical problem (inference-aware scheduling) makes it inevitable.
+
+For platform teams currently running vLLM behind basic Kubernetes services: watch this project closely. The efficiency gains from prefill/decode disaggregation and cache-aware routing are substantial — I have seen 2-3x improvement in tokens per second per GPU in similar architectures.
+
+## Related Resources
+
+- [AI on Kubernetes in Production](/blog/ai-kubernetes-production-why-platform-teams-need-ai-strategy/)
+- [Kubernetes AI Conformance Program](/blog/kubernetes-ai-conformance-program-cncf-kubecon-2026/)
+- [GPU Kubernetes Guide](/blog/gpu-kubernetes-ai-ml-workloads-guide/)
+- [Multi-Tenant GPUs on Bare Metal](/blog/kubecon-2026-packed-room-multi-tenant-gpus-bare-metal/)
+- [NVIDIA GPU Operator](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [KEDA vs HPA Autoscaling](/blog/keda-vs-hpa-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I [presented on GPU scheduling at KubeCon EU 2026](/kubecon/) and help enterprises deploy inference infrastructure. [Book a consultation](https://calendly.com/lucaberton/) to design your LLM serving architecture.

@@ -1,0 +1,160 @@
+---
+draft: false
+title: "The AI Model Weight Problem: How Cloud Native Is Fixing Distribution at Scale"
+snippet: "Managing and distributing 100GB+ AI model weights is a hidden bottleneck. ORAS, Harbor, Dragonfly, and ModelPack bring software delivery practices to model artifacts."
+description: "AI model weight distribution on Kubernetes. OCI registries, P2P distribution with Dragonfly, Harbor model management, and ModelPack for cloud native AI delivery."
+image:
+  src: "/blog/thumbnails/ai-model-weight-distribution-kubernetes-oci-2026.jpg"
+  alt: "AI Model Weight Distribution on Kubernetes"
+publishDate: "2026-04-04"
+lastModified: "2026-04-04"
+author: "Luca Berton"
+category: "AI"
+tags: ["AI", "Kubernetes", "ORAS", "Harbor", "Dragonfly", "CNCF", "ModelPack"]
+---
+
+A quantized LLaMA-3 70B model weighs 140 GB. Frontier multimodal models exceed 1 TB. These are not files you `git push` — and the infrastructure gap between how we manage software containers and how we manage AI models is causing real production problems.
+
+The CNCF community is fixing this with projects like ORAS, Harbor, Dragonfly, and ModelPack.
+
+## The Gap
+
+Software containers are pulled from OCI registries with full versioning, security scanning, and rollback support. Model weights are:
+
+- Downloaded via ad hoc scripts
+- Copied manually between S3 buckets
+- Distributed through unsecured NFS shares
+- Version-controlled with folder names like `model-v3-final-FINAL`
+
+This creates deployment fragility, security risks, and operational overhead.
+
+## Three Approaches (None Sufficient Alone)
+
+| Approach | Pros | Cons |
+|----------|------|------|
+| **Git LFS / Hugging Face Hub** | Version control, history | Poor for cloud native, Git transport overhead |
+| **Object Storage (S3/MinIO)** | Cloud provider support, vLLM native | No structured metadata, weak versioning |
+| **Distributed FS (NFS/CephFS)** | POSIX compatible, low integration cost | No versioning, no access control |
+
+## The Cloud Native Solution: OCI Registries for Models
+
+The key insight: treat model weights like container images. Store them in OCI registries using ORAS (OCI Registry As Storage).
+
+```bash
+# Push a model to an OCI registry
+oras push registry.example.com/models/llama3-70b:v1.0 \
+  --artifact-type application/vnd.ai.model.v1 \
+  model-weights/ \
+  config.json
+
+# Pull on a GPU node
+oras pull registry.example.com/models/llama3-70b:v1.0
+```
+
+### Benefits
+
+- **Immutability** — tagged versions never change
+- **Security scanning** — same tools that scan containers
+- **Access control** — registry authentication and RBAC
+- **Content-addressable** — SHA256 integrity verification
+- **Replication** — multi-region distribution via Harbor
+
+### Harbor for Model Management
+
+Harbor (CNCF Graduated) manages model artifacts alongside container images:
+
+- Model versioning with tags
+- Vulnerability scanning of model artifacts
+- Replication across registries for multi-region deployment
+- Access control per model repository
+- Audit logging for compliance
+
+### Dragonfly for P2P Distribution
+
+Distributing 140 GB to 100 GPU nodes from a single registry is a bandwidth nightmare. Dragonfly (CNCF Incubating) adds P2P distribution:
+
+```
+Registry → Node1 → Node2 → Node3 (P2P mesh)
+                 ↘ Node4
+         Node1 → Node5
+```
+
+Instead of 100 pulls from the registry, the model propagates through the cluster peer-to-peer. First node pulls from registry, subsequent nodes pull from peers. Distribution time drops from hours to minutes.
+
+### ModelPack: The Missing Link
+
+ModelPack packages models as OCI artifacts with structured metadata:
+
+- Model architecture and hyperparameters
+- Training dataset provenance
+- Inference requirements (GPU memory, compute)
+- Compatibility matrix (vLLM, TensorRT, ONNX)
+
+This is the model equivalent of a Dockerfile — it describes not just the artifact but how to run it.
+
+## Putting It Together on Kubernetes
+
+```yaml
+# Model stored in Harbor OCI registry
+# Distributed via Dragonfly P2P
+# Cached locally with Fluid
+# Served with llm-d
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inference-server
+spec:
+  initContainers:
+    - name: model-pull
+      image: ghcr.io/oras-project/oras:latest
+      command:
+        - oras
+        - pull
+        - registry.internal/models/llama3-70b:v1.0
+        - -o
+        - /models/
+      volumeMounts:
+        - name: model-storage
+          mountPath: /models
+  containers:
+    - name: vllm
+      image: vllm/vllm-openai:latest
+      args:
+        - --model=/models/llama3-70b
+        - --tensor-parallel-size=4
+      resources:
+        limits:
+          nvidia.com/gpu: "4"
+      volumeMounts:
+        - name: model-storage
+          mountPath: /models
+  volumes:
+    - name: model-storage
+      emptyDir:
+        sizeLimit: 200Gi
+```
+
+## My Prediction
+
+Within two years, the standard enterprise AI deployment will use:
+
+1. **ORAS/Harbor** for model storage and versioning
+2. **Dragonfly** for P2P distribution to GPU clusters
+3. **Fluid** for local caching and acceleration
+4. **llm-d** for inference-aware serving
+
+The "model as OCI artifact" pattern will be as standard as "app as container image."
+
+## Related Resources
+
+- [Fluid: Data Orchestration for AI](/blog/fluid-cncf-data-orchestration-kubernetes-ai-2026/)
+- [llm-d: Distributed LLM Inference](/blog/llm-d-cncf-kubernetes-distributed-inference-2026/)
+- [Kubernetes Persistent Volumes](/blog/kubernetes-persistent-volumes-storage-guide/)
+- [Docker Multi-Stage Builds](/blog/docker-multi-stage-build-tutorial/)
+- [Container Security with Trivy](/blog/container-security-scanning-trivy-tutorial/)
+- [Kubernetes AI Conformance](/blog/kubernetes-ai-conformance-program-cncf-kubecon-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I design model delivery pipelines for enterprise AI platforms. [Book a consultation](https://calendly.com/lucaberton/).

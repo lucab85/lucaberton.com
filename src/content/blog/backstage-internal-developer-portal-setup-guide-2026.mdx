@@ -1,0 +1,220 @@
+---
+draft: false
+title: "Backstage: Build an Internal Developer Portal in 2026 (Complete Setup Guide)"
+snippet: "Backstage is the CNCF standard for internal developer portals. Complete setup guide with software catalog, templates, TechDocs, Kubernetes plugin, and ArgoCD integration."
+description: "Complete Backstage setup guide for internal developer portals. Software catalog, scaffolder templates, TechDocs, Kubernetes plugin, and CI/CD integration in 2026."
+image:
+  src: "/blog/thumbnails/backstage-internal-developer-portal-setup-guide-2026.jpg"
+  alt: "Backstage Internal Developer Portal Setup Guide 2026"
+publishDate: "2026-04-05"
+lastModified: "2026-04-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ["Backstage", "Platform Engineering", "CNCF", "Developer Portal", "DevOps"]
+---
+
+Backstage is the CNCF Incubating project for building internal developer portals. Originally created at Spotify, it has become the standard for platform engineering teams that want to give developers a single pane of glass for their services, documentation, and infrastructure.
+
+I have helped multiple enterprises deploy Backstage. Here is what works and what to avoid.
+
+## What Backstage Actually Is
+
+Backstage is three things:
+
+1. **Software Catalog** — a registry of every service, library, API, and resource in your organization
+2. **Software Templates** — self-service scaffolding for creating new projects with golden paths
+3. **TechDocs** — docs-as-code rendered inside the portal
+4. **Plugin Ecosystem** — 300+ plugins for Kubernetes, ArgoCD, PagerDuty, GitHub, and more
+
+It is NOT an orchestration tool, a CI/CD system, or a monitoring platform. It aggregates information from those tools into one interface.
+
+## Quick Start
+
+```bash
+# Create a new Backstage app
+npx @backstage/create-app@latest my-portal
+cd my-portal
+
+# Start in development mode
+yarn dev
+```
+
+Open `http://localhost:3000` — you have a running developer portal.
+
+## Setting Up the Software Catalog
+
+The catalog is the heart of Backstage. Every service gets a `catalog-info.yaml`:
+
+```yaml
+# catalog-info.yaml (in each service repo)
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: user-service
+  description: User authentication and profile management
+  annotations:
+    github.com/project-slug: myorg/user-service
+    backstage.io/techdocs-ref: dir:.
+    argocd/app-name: user-service-prod
+    pagerduty.com/service-id: PXXXXXX
+  tags:
+    - python
+    - api
+    - production
+  links:
+    - url: https://grafana.internal/d/user-service
+      title: Grafana Dashboard
+spec:
+  type: service
+  lifecycle: production
+  owner: team-auth
+  system: authentication
+  providesApis:
+    - user-api
+  dependsOn:
+    - resource:postgres-main
+    - component:notification-service
+```
+
+### Automatic Discovery
+
+Instead of manually registering every service:
+
+```yaml
+# app-config.yaml
+catalog:
+  providers:
+    github:
+      myOrg:
+        organization: 'myorg'
+        catalogPath: '/catalog-info.yaml'
+        schedule:
+          frequency: { minutes: 30 }
+          timeout: { minutes: 3 }
+```
+
+Backstage scans all repos in your GitHub org and auto-registers services that have `catalog-info.yaml`.
+
+## Software Templates (Golden Paths)
+
+Templates let developers create new services with everything pre-configured:
+
+```yaml
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: new-python-service
+  title: Create a Python Microservice
+  description: Production-ready Python service with CI/CD, monitoring, and Kubernetes manifests
+spec:
+  owner: platform-team
+  type: service
+  parameters:
+    - title: Service Details
+      properties:
+        name:
+          title: Service Name
+          type: string
+          pattern: '^[a-z][a-z0-9-]*$'
+        description:
+          title: Description
+          type: string
+        owner:
+          title: Owner Team
+          type: string
+          ui:field: OwnerPicker
+  steps:
+    - id: fetch
+      name: Fetch Template
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values:
+          name: ${{ parameters.name }}
+          description: ${{ parameters.description }}
+          owner: ${{ parameters.owner }}
+    - id: publish
+      name: Publish to GitHub
+      action: publish:github
+      input:
+        repoUrl: github.com?owner=myorg&repo=${{ parameters.name }}
+    - id: register
+      name: Register in Catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps.publish.output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
+```
+
+Developer clicks "Create," fills in three fields, and gets a production-ready service with CI/CD pipeline, Kubernetes manifests, monitoring, and documentation — in under 2 minutes.
+
+## Essential Plugins
+
+### Kubernetes Plugin
+
+Show pod status, logs, and events directly in the service page:
+
+```yaml
+# app-config.yaml
+kubernetes:
+  serviceLocatorMethod:
+    type: multiTenant
+  clusterLocatorMethods:
+    - type: config
+      clusters:
+        - url: https://k8s-prod.internal
+          name: production
+          authProvider: serviceAccount
+          serviceAccountToken: ${K8S_TOKEN}
+```
+
+### ArgoCD Plugin
+
+Show deployment status and sync state:
+
+```yaml
+argocd:
+  baseUrl: https://argocd.internal
+  appLocatorMethods:
+    - type: config
+      instances:
+        - name: production
+          url: https://argocd.internal
+          token: ${ARGOCD_TOKEN}
+```
+
+### TechDocs
+
+Render Markdown documentation inside Backstage:
+
+```yaml
+techdocs:
+  builder: 'local'
+  generator:
+    runIn: 'local'
+  publisher:
+    type: 'local'
+```
+
+## What to Avoid
+
+**Do not try to replace existing tools.** Backstage aggregates — it shows Kubernetes status from your cluster, not its own Kubernetes. It shows ArgoCD deployments, not its own deployments.
+
+**Do not launch without a catalog.** Import existing services before you invite developers. An empty portal is worse than no portal.
+
+**Do not skip templates.** The catalog is useful but templates are transformational. They encode your golden paths and eliminate "how do I set up a new service?" questions.
+
+**Do not over-customize in week one.** Start with the core plugins. Add custom plugins based on developer feedback, not assumptions.
+
+## Related Resources
+
+- [Platform Engineering Metrics](/blog/platform-engineering-metrics-measure-success-2026/)
+- [7 CNCF Predictions for 2026](/blog/cncf-cloud-native-predictions-2026-ai-kubernetes/)
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+- [Tekton CNCF CI/CD](/blog/tekton-cncf-incubating-kubernetes-cicd-2026/)
+- [GitHub Actions Tutorial](/blog/github-actions-cicd-pipeline-tutorial-2026/)
+- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I help enterprises build internal developer platforms with Backstage and Kubernetes. [Book a consultation](https://calendly.com/lucaberton/).

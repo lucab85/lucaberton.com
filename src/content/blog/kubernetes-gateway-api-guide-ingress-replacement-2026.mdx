@@ -1,0 +1,267 @@
+---
+draft: false
+title: "Kubernetes Gateway API: The Complete Guide to Replacing Ingress (2026)"
+snippet: "The Gateway API is replacing Kubernetes Ingress. HTTPRoute, GRPCRoute, TLSRoute explained with production examples, migration steps, and provider comparison."
+description: "Complete guide to Kubernetes Gateway API replacing Ingress. HTTPRoute, GRPCRoute, TLSRoute with production YAML examples and migration from Ingress resources."
+image:
+  src: "/blog/thumbnails/kubernetes-gateway-api-guide-ingress-replacement-2026.jpg"
+  alt: "Kubernetes Gateway API Guide Replacing Ingress 2026"
+publishDate: "2026-04-05"
+lastModified: "2026-04-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ["Kubernetes", "Gateway API", "Ingress", "Networking", "Envoy", "NGINX"]
+---
+
+The Kubernetes Gateway API is now GA and actively replacing the Ingress resource across production clusters. If you are still using Ingress, this guide explains why you should migrate, how the Gateway API works, and the exact YAML to get started.
+
+## Why Replace Ingress?
+
+Ingress has served Kubernetes well since v1.1, but it has fundamental limitations:
+
+- **Limited to HTTP/HTTPS** — no TCP, UDP, or gRPC-native support
+- **Annotations hell** — every provider uses different annotations for the same feature
+- **No role separation** — the same person who defines routing must manage the gateway
+- **No traffic splitting** — canary deployments require provider-specific hacks
+- **No header-based routing** — common requirement, impossible without annotations
+
+The Gateway API fixes all of these with a proper resource model.
+
+## Gateway API Resource Model
+
+```
+GatewayClass → Gateway → HTTPRoute/GRPCRoute/TLSRoute/TCPRoute
+(provider)     (infra)   (application routing)
+```
+
+**GatewayClass**: Defines the controller (Envoy, NGINX, Istio, Cilium). Set by the platform team.
+
+**Gateway**: The actual load balancer with listeners (ports, protocols, TLS). Managed by infrastructure team.
+
+**Routes**: Application-level routing rules. Managed by application teams per namespace.
+
+This separation of concerns is the key improvement — platform teams manage infrastructure, app teams manage their own routing.
+
+## Basic Setup
+
+### 1. Install a Gateway API Implementation
+
+```bash
+# Install Gateway API CRDs
+kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.2.0/standard-install.yaml
+
+# Install Envoy Gateway (example provider)
+helm install eg oci://docker.io/envoyproxy/gateway-helm \
+  --version v1.2.0 \
+  -n envoy-gateway-system --create-namespace
+```
+
+### 2. Create a Gateway
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: production
+  namespace: infrastructure
+spec:
+  gatewayClassName: eg  # Envoy Gateway
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: wildcard-cert
+            namespace: infrastructure
+      allowedRoutes:
+        namespaces:
+          from: All
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+```
+
+### 3. Create HTTPRoutes
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api-routes
+  namespace: my-app
+spec:
+  parentRefs:
+    - name: production
+      namespace: infrastructure
+  hostnames:
+    - "api.example.com"
+  rules:
+    # Version-based routing
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v2
+      backendRefs:
+        - name: api-v2
+          port: 8080
+    # Default route with traffic splitting (canary)
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: api-v1
+          port: 8080
+          weight: 90
+        - name: api-v2
+          port: 8080
+          weight: 10
+```
+
+## Advanced Features
+
+### Header-Based Routing
+
+```yaml
+rules:
+  - matches:
+      - headers:
+          - name: X-Canary
+            value: "true"
+    backendRefs:
+      - name: api-canary
+        port: 8080
+```
+
+### gRPC Routing
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: GRPCRoute
+metadata:
+  name: grpc-service
+spec:
+  parentRefs:
+    - name: production
+  hostnames:
+    - "grpc.example.com"
+  rules:
+    - matches:
+        - method:
+            service: myapp.UserService
+            method: GetUser
+      backendRefs:
+        - name: user-service
+          port: 50051
+```
+
+### Request/Response Manipulation
+
+```yaml
+rules:
+  - matches:
+      - path:
+          type: PathPrefix
+          value: /api
+    filters:
+      - type: RequestHeaderModifier
+        requestHeaderModifier:
+          add:
+            - name: X-Request-ID
+              value: "${request.id}"
+          remove:
+            - X-Internal-Header
+    backendRefs:
+      - name: api-service
+        port: 8080
+```
+
+## Provider Comparison
+
+| Provider | Type | Maturity | Best For |
+|----------|------|----------|----------|
+| **Envoy Gateway** | Standalone | GA | New clusters, full Gateway API |
+| **Istio** | Service mesh | GA | Existing Istio users |
+| **Cilium** | CNI + Gateway | GA | eBPF-based networking |
+| **NGINX Gateway Fabric** | Standalone | GA | NGINX users migrating |
+| **Traefik** | Standalone | Beta | Traefik users |
+| **Kong** | API Gateway | GA | API management needs |
+
+## Migrating from Ingress
+
+### Step 1: Audit Current Ingress Resources
+
+```bash
+kubectl get ingress --all-namespaces -o yaml > ingress-backup.yaml
+kubectl get ingress --all-namespaces --no-headers | wc -l
+```
+
+### Step 2: Convert Ingress to HTTPRoute
+
+**Before (Ingress):**
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-app
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+    - host: app.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: my-app
+                port:
+                  number: 80
+```
+
+**After (HTTPRoute):**
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: my-app
+spec:
+  parentRefs:
+    - name: production
+  hostnames:
+    - "app.example.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: my-app
+          port: 80
+```
+
+### Step 3: Run Both in Parallel
+
+Keep Ingress running while you test HTTPRoutes. Once validated, delete the Ingress resources.
+
+## The Inference Extension
+
+The Gateway API now includes an **Inference Extension** for AI workloads — routing LLM requests based on model state, KV cache locality, and queue depth. See [llm-d and GAIE](/blog/llm-d-cncf-kubernetes-distributed-inference-2026/) for details.
+
+## Related Resources
+
+- [Kubernetes Network Policies Guide](/blog/kubernetes-network-policies-guide-2026/)
+- [Istio vs Linkerd Comparison](/blog/istio-vs-linkerd-2026/)
+- [Cilium vs Calico Comparison](/blog/cilium-vs-calico-2026/)
+- [Kubernetes RBAC Guide](/blog/kubernetes-rbac-guide-roles-bindings-2026/)
+- [llm-d: Inference-Aware Routing](/blog/llm-d-cncf-kubernetes-distributed-inference-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I design Kubernetes networking architectures for enterprise platforms. [Book a consultation](https://calendly.com/lucaberton/).

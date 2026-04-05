@@ -1,0 +1,194 @@
+---
+draft: false
+title: "FinOps for AI: How to Control GPU Costs Without Killing Innovation (2026)"
+snippet: "GPU costs can bankrupt your AI initiative. FinOps practices for AI workloads: spot instances, autoscaling inference, model quantization, and cost-per-token tracking."
+description: "FinOps for AI and GPU workloads. Cost optimization strategies including spot instances, inference autoscaling, model quantization, right-sizing, and per-team chargeback."
+image:
+  src: "/blog/thumbnails/finops-ai-gpu-workloads-cost-optimization-2026.jpg"
+  alt: "FinOps AI GPU Cost Optimization 2026"
+publishDate: "2026-04-05"
+lastModified: "2026-04-05"
+author: "Luca Berton"
+category: "AI"
+tags: ["FinOps", "AI", "GPU", "Cost Optimization", "Kubernetes", "Cloud"]
+---
+
+A single H100 GPU costs $2-3 per hour on cloud. A training cluster of 64 GPUs burns $4,600 per day. An inference fleet serving production traffic can cost $50,000+ per month.
+
+AI workloads are the fastest growing line item on every enterprise cloud bill, and most teams have zero visibility into where the money goes. This is how you fix that.
+
+## The GPU Cost Problem
+
+Traditional cloud FinOps tracks CPU, memory, and storage. AI adds:
+
+- **GPU idle time** — GPUs allocated but not computing (the biggest waste)
+- **Over-provisioned inference** — 8 GPUs serving traffic that 2 could handle
+- **Training waste** — experiments that should have been stopped after 10% of training
+- **Model bloat** — serving a 70B model when a quantized 7B performs identically for your use case
+- **No chargeback** — nobody knows which team is spending what on GPU
+
+## Cost Visibility: What to Measure
+
+### Per-Workload Metrics
+
+```yaml
+# Prometheus metrics for GPU cost tracking
+- gpu_utilization_percent        # Target: >70% for training, >50% for inference
+- gpu_memory_utilization_percent # Target: >60%
+- tokens_per_second_per_gpu      # Efficiency metric for inference
+- cost_per_1000_tokens           # The metric that matters
+- gpu_idle_minutes_total         # Money on fire
+```
+
+### Dashboard Dimensions
+
+Track costs across:
+- **Team** — who is spending?
+- **Workload type** — training vs inference vs development
+- **Model** — which models cost the most to serve?
+- **Environment** — production vs staging vs experiments
+- **GPU type** — H100 vs A100 vs T4 (right GPU for right job)
+
+## Seven Cost Optimization Strategies
+
+### 1. Right-Size GPU Selection
+
+Not every workload needs an H100:
+
+| Workload | Recommended GPU | Cost/hr (Cloud) |
+|----------|----------------|-----------------|
+| LLM training (70B+) | H100 80GB | $2.50-3.00 |
+| Fine-tuning (7-13B) | A100 40GB | $1.50-2.00 |
+| Inference (large models) | A100 80GB or L40S | $1.50-2.50 |
+| Inference (small models) | T4 or L4 | $0.35-0.75 |
+| Development/testing | T4 | $0.35 |
+
+Serving a 7B model on an H100 is like driving a Ferrari to the grocery store.
+
+### 2. Spot/Preemptible for Training
+
+Training workloads can checkpoint and resume. Use spot instances:
+
+```yaml
+# Karpenter NodePool for spot GPU training
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: gpu-training-spot
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["p4d.24xlarge", "p5.48xlarge"]
+      nodeClassRef:
+        name: gpu-training
+```
+
+**Savings: 60-70%** on training compute.
+
+### 3. Autoscale Inference to Zero
+
+Inference workloads have traffic patterns. Scale to zero during off-hours:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: llm-inference
+spec:
+  scaleTargetRef:
+    name: llm-inference
+  minReplicaCount: 0      # Scale to zero!
+  maxReplicaCount: 8
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus:9090
+        metricName: inference_queue_depth
+        threshold: "5"
+        query: sum(inference_pending_requests)
+  cooldownPeriod: 300      # 5 min before scale-down
+```
+
+**Savings: 40-80%** depending on traffic patterns.
+
+### 4. Model Quantization
+
+A 70B parameter model at FP16 needs 140 GB of GPU memory (4+ GPUs). At INT4 quantization, it fits in 35 GB (1 GPU):
+
+| Precision | Memory | GPUs Needed | Quality Loss |
+|-----------|--------|-------------|--------------|
+| FP16 | 140 GB | 4x A100 40GB | Baseline |
+| INT8 | 70 GB | 2x A100 40GB | Negligible |
+| INT4 (GPTQ) | 35 GB | 1x A100 40GB | Minor |
+| INT4 (AWQ) | 35 GB | 1x A100 40GB | Minor |
+
+**Savings: 50-75%** on inference GPU costs.
+
+Always benchmark quantized models against your specific use case before deploying.
+
+### 5. Prefix Caching
+
+For workloads with shared system prompts (chatbots, RAG), prefix caching eliminates redundant computation:
+
+```
+Without caching: Every request recomputes the system prompt
+With caching: System prompt computed once, reused across requests
+
+1000 requests/hour × 2000-token system prompt
+= 2M tokens saved per hour
+= ~$2-4 saved per hour per GPU
+```
+
+See [tiered prefix caching](/blog/inference-gold-rush-ai-startups-kubernetes-2026/) for architecture details.
+
+### 6. Training Early Stopping
+
+Monitor training loss curves and stop experiments that are not converging:
+
+```python
+# Early stopping saves 30-60% of wasted training compute
+if current_loss > best_loss * 1.05 for 3 consecutive checkpoints:
+    stop_training()
+    release_gpus()
+    notify_team("Experiment stopped: loss not improving")
+```
+
+### 7. Team Chargeback
+
+Make GPU costs visible per team:
+
+```yaml
+# Kubernetes labels for cost attribution
+metadata:
+  labels:
+    team: "ml-platform"
+    project: "recommendation-engine"
+    environment: "production"
+    cost-center: "CC-1234"
+```
+
+Use [Kubecost](https://www.kubecost.com/) or [OpenCost](https://www.opencost.io/) for automated cost allocation.
+
+## The GPU Cost Calculator
+
+I built a [GPU Cost Calculator](/gpu-cost-calculator/) that compares cloud vs on-premises costs for different GPU configurations. Try it to model your specific workload.
+
+## Related Resources
+
+- [GPU Kubernetes Guide](/blog/gpu-kubernetes-ai-ml-workloads-guide/)
+- [The Inference Gold Rush](/blog/inference-gold-rush-ai-startups-kubernetes-2026/)
+- [Token Economics for AI](/blog/ai-kubernetes-production-token-economics-cost-optimization/)
+- [Autoscaling AI Inference](/blog/ai-kubernetes-production-autoscaling-inference-workloads/)
+- [NVIDIA GPU Operator](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [KEDA vs HPA](/blog/keda-vs-hpa-2026/)
+- [Multi-Tenant GPUs on Bare Metal](/blog/kubecon-2026-packed-room-multi-tenant-gpus-bare-metal/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I help enterprises optimize GPU infrastructure costs while scaling AI workloads. [Book a consultation](https://calendly.com/lucaberton/) or try the [GPU Cost Calculator](/gpu-cost-calculator/).

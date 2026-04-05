@@ -1,0 +1,212 @@
+---
+draft: false
+title: "AI Agent Security on Kubernetes: RBAC, Sandboxing, and Runtime Protection (2026)"
+snippet: "AI agents on Kubernetes need security boundaries. RBAC policies, gVisor sandboxing, network policies, and runtime detection for autonomous AI workloads."
+description: "Secure AI agents on Kubernetes with RBAC, gVisor sandboxing, network policies, and runtime threat detection. Production patterns for autonomous AI workloads in 2026."
+image:
+  src: "/blog/thumbnails/ai-agent-security-kubernetes-rbac-sandboxing-2026.jpg"
+  alt: "AI Agent Security Kubernetes RBAC Sandboxing 2026"
+publishDate: "2026-04-05"
+lastModified: "2026-04-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ["AI", "Security", "Kubernetes", "RBAC", "Sandboxing", "Zero Trust"]
+---
+
+AI agents are getting Kubernetes access. Coding agents create deployments. Monitoring agents read pod logs. Data agents access storage. The question is: what happens when an agent goes wrong?
+
+A misconfigured or compromised AI agent with cluster-admin can destroy your production environment in seconds. This guide covers the security patterns you need.
+
+## The Threat Model
+
+AI agents on Kubernetes face unique risks:
+
+1. **Prompt injection** — malicious input tricks the agent into executing harmful commands
+2. **Scope creep** — agent given broad permissions "to be safe" that it does not need
+3. **Data exfiltration** — agent sends sensitive data to external endpoints
+4. **Resource exhaustion** — agent creates unbounded pods, consuming all cluster resources
+5. **Lateral movement** — compromised agent accesses other namespaces or services
+
+## Layer 1: RBAC (Least Privilege)
+
+Every AI agent gets its own ServiceAccount with minimal permissions:
+
+```yaml
+# Dedicated namespace for AI agents
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai-agents
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+# ServiceAccount per agent
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: coding-agent
+  namespace: ai-agents
+---
+# Role: only what the agent needs
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: coding-agent-role
+  namespace: ai-agents
+rules:
+  # Can read pods and logs in its own namespace
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # Can create deployments (but only in ai-agents namespace)
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  # CANNOT delete anything
+  # CANNOT access secrets
+  # CANNOT access other namespaces
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: coding-agent-binding
+  namespace: ai-agents
+subjects:
+  - kind: ServiceAccount
+    name: coding-agent
+roleRef:
+  kind: Role
+  name: coding-agent-role
+  apiGroup: rbac.authorization.k8s.io
+```
+
+**Key principle**: No ClusterRoles for agents. Namespace-scoped roles only.
+
+## Layer 2: Pod Security
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: coding-agent
+  namespace: ai-agents
+spec:
+  serviceAccountName: coding-agent
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    fsGroup: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: agent
+      image: my-agent:latest
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+          # No GPU unless explicitly needed
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+  # gVisor sandbox for untrusted agent workloads
+  runtimeClassName: gvisor
+  volumes:
+    - name: workspace
+      emptyDir:
+        sizeLimit: 10Gi
+```
+
+## Layer 3: Network Policies
+
+Restrict what the agent can reach:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-network-policy
+  namespace: ai-agents
+spec:
+  podSelector:
+    matchLabels:
+      app: coding-agent
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    # Allow DNS
+    - to: []
+      ports:
+        - port: 53
+          protocol: UDP
+    # Allow HTTPS to LLM API providers
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+    # Block access to internal services
+    # (default deny for anything not listed)
+  ingress: []  # No inbound traffic to the agent
+```
+
+## Layer 4: Runtime Detection
+
+Use [Kubescape 4.0](/blog/kubescape-4-kubernetes-security-ai-era-2026/) for AI-aware runtime monitoring:
+
+- Detect unexpected network connections
+- Alert on file system modifications outside workspace
+- Monitor for privilege escalation attempts
+- Track API calls that exceed the agent's expected behavior
+
+## Layer 5: Audit Logging
+
+Log every action the agent takes:
+
+```yaml
+# Kubernetes audit policy for AI agents
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  - level: RequestResponse
+    users: ["system:serviceaccount:ai-agents:coding-agent"]
+    resources:
+      - group: ""
+        resources: ["pods", "services", "configmaps"]
+      - group: "apps"
+        resources: ["deployments"]
+```
+
+## The Principle: Trust, But Verify
+
+AI agents should be treated like junior developers with production access:
+
+1. **Limit blast radius** — namespace isolation, resource quotas
+2. **Log everything** — audit trail for every action
+3. **Monitor behavior** — runtime detection for anomalies
+4. **Review regularly** — periodic RBAC audits
+5. **Sandbox experiments** — gVisor for untrusted workloads
+
+## Related Resources
+
+- [Kubescape 4.0: AI Agent Security](/blog/kubescape-4-kubernetes-security-ai-era-2026/)
+- [Lima v2.1: AI Agent Sandboxing](/blog/lima-v21-ai-agent-sandboxing-macos-2026/)
+- [Kubernetes RBAC Guide](/blog/kubernetes-rbac-guide-roles-bindings-2026/)
+- [Kubernetes Network Policies](/blog/kubernetes-network-policies-guide-2026/)
+- [Container Security with Trivy](/blog/container-security-scanning-trivy-tutorial/)
+- [DevSecOps Pipeline](/blog/devsecops-pipeline-tutorial-2026/)
+- [Zero Trust Architecture](/blog/zero-trust-architecture-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I design security architectures for AI workloads on Kubernetes. [Book a consultation](https://calendly.com/lucaberton/).

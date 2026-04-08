@@ -1,0 +1,414 @@
+---
+draft: false
+title: "NVIDIA NIM Multinode Inference: Serving 400B+ Parameter Models Across GPU Nodes (2026)"
+snippet: "When a model is too large for one server, you need multinode inference. NVIDIA NIM multinode deployment with DeepSeek-R1, Llama 405B, tensor parallelism, and Kubernetes orchestration."
+description: "Complete guide to NVIDIA NIM multinode inference for models exceeding single-node GPU memory. DeepSeek-R1 671B, Llama 405B, tensor parallelism, pipeline parallelism, and Kubernetes deployment."
+image:
+  src: "/blog/thumbnails/nvidia-nim-multinode-inference-large-models-2026.jpg"
+  alt: "NVIDIA NIM Multinode Inference Large Models 2026"
+publishDate: "2026-04-08"
+lastModified: "2026-04-08"
+author: "Luca Berton"
+category: "AI"
+tags: ["NVIDIA", "NIM", "Multinode", "GPU", "Inference", "DeepSeek", "Llama", "Kubernetes"]
+---
+
+A single 8×H100 node has 640 GB of GPU memory. DeepSeek-R1 at 671 billion parameters needs over 1.2 TB in FP16. The math does not work on one machine.
+
+Multinode inference splits a model across multiple physical servers, connected via high-speed networking, serving requests as if it were a single endpoint. NVIDIA NIM makes this surprisingly straightforward — but the infrastructure requirements are serious.
+
+## When You Need Multinode
+
+The decision is simple: **if the model does not fit in one node's total GPU memory, you need multinode.**
+
+| Model | Parameters | FP16 Memory | FP8 Memory | Single 8×H100? |
+|-------|-----------|-------------|------------|-----------------|
+| Llama 3.1 70B | 70B | 140 GB | 70 GB | ✅ Yes |
+| Mixtral 8×22B | 141B (MoE) | ~90 GB active | ~45 GB | ✅ Yes |
+| Llama 3.1 405B | 405B | 810 GB | 405 GB | ❌ FP16, ✅ FP8 |
+| DeepSeek-R1 | 671B (MoE) | 1.3 TB | 671 GB | ❌ No |
+| Nemotron 340B | 340B | 680 GB | 340 GB | ❌ FP16, ✅ FP8 |
+
+The 8×H100 80GB node at 640 GB total is the reference point. Anything above that needs either quantization to fit, or multinode to spread.
+
+## Parallelism Strategies
+
+Multinode inference uses two parallelism techniques, often combined:
+
+### Tensor Parallelism (TP)
+
+Splits individual layers across GPUs. Each GPU holds a slice of every layer and they communicate during every forward pass.
+
+```
+Layer N:
+┌─────────┬─────────┬─────────┬─────────┐
+│  GPU 0  │  GPU 1  │  GPU 2  │  GPU 3  │
+│ slice 0 │ slice 1 │ slice 2 │ slice 3 │
+└────┬────┴────┬────┴────┬────┴────┬────┘
+     └─────────┼─────────┼─────────┘
+          AllReduce (every layer)
+```
+
+**Within a node**: NVLink at 900 GB/s — fast enough for TP across 8 GPUs.
+
+**Across nodes**: InfiniBand at 400 Gb/s (50 GB/s) — 18× slower than NVLink. TP across nodes works but adds latency to every single layer computation.
+
+### Pipeline Parallelism (PP)
+
+Splits the model by layers. Each node holds a contiguous block of layers. Communication only happens between pipeline stages.
+
+```
+Node 0                    Node 1
+┌──────────────────┐     ┌──────────────────┐
+│  Layers 0-39     │────▶│  Layers 40-79    │
+│  (8× H100)       │     │  (8× H100)       │
+└──────────────────┘     └──────────────────┘
+     Stage 0          ──▶      Stage 1
+              Inter-node transfer
+              (once per stage, not per layer)
+```
+
+**Key advantage**: PP sends activations between nodes once per stage, not once per layer. This makes it far more tolerant of inter-node bandwidth limitations.
+
+### The Practical Combination
+
+Most multinode deployments use **TP within nodes + PP across nodes**:
+
+```
+2-Node DeepSeek-R1 Deployment:
+─────────────────────────────
+Node 0: TP=8 across 8× H100 (layers 0-39)
+Node 1: TP=8 across 8× H100 (layers 40-79)
+PP=2 across the two nodes
+
+Total: TP=8, PP=2 → 16 GPUs
+```
+
+## NVIDIA NIM Multinode Deployment
+
+### Prerequisites
+
+- **NVIDIA NGC API key** — access to NIM container images
+- **Multiple GPU nodes** — each with 8× H100 or H200
+- **High-speed interconnect** — InfiniBand HDR/NDR (400-800 Gb/s) between nodes
+- **Shared storage** — for model weights (NFS, Lustre, or NVIDIA GPUDirect Storage)
+- **NCCL** — NVIDIA Collective Communications Library for GPU-to-GPU data transfer
+
+### Docker Deployment (2 Nodes)
+
+**Node 0 (Leader):**
+
+```bash
+docker run -d --name nim-node0 \
+  --gpus all \
+  --network host \
+  --ipc host \
+  --ulimit memlock=-1 \
+  -v /models:/models \
+  -e NGC_API_KEY="your-ngc-key" \
+  -e NIM_MODEL_NAME="deepseek-ai/deepseek-r1" \
+  -e NIM_TENSOR_PARALLEL_SIZE=8 \
+  -e NIM_PIPELINE_PARALLEL_SIZE=2 \
+  -e NIM_NODE_RANK=0 \
+  -e NIM_NUM_NODES=2 \
+  -e NIM_MASTER_ADDR="10.0.0.1" \
+  -e NIM_MASTER_PORT=29500 \
+  -e NCCL_IB_DISABLE=0 \
+  -e NCCL_SOCKET_IFNAME=ib0 \
+  -p 8000:8000 \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:1.7.3
+```
+
+**Node 1 (Worker):**
+
+```bash
+docker run -d --name nim-node1 \
+  --gpus all \
+  --network host \
+  --ipc host \
+  --ulimit memlock=-1 \
+  -v /models:/models \
+  -e NGC_API_KEY="your-ngc-key" \
+  -e NIM_MODEL_NAME="deepseek-ai/deepseek-r1" \
+  -e NIM_TENSOR_PARALLEL_SIZE=8 \
+  -e NIM_PIPELINE_PARALLEL_SIZE=2 \
+  -e NIM_NODE_RANK=1 \
+  -e NIM_NUM_NODES=2 \
+  -e NIM_MASTER_ADDR="10.0.0.1" \
+  -e NIM_MASTER_PORT=29500 \
+  -e NCCL_IB_DISABLE=0 \
+  -e NCCL_SOCKET_IFNAME=ib0 \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:1.7.3
+```
+
+The API endpoint is only exposed on Node 0. Node 1 participates in computation but does not serve HTTP requests.
+
+### Kubernetes Deployment
+
+For production, deploy multinode NIM on Kubernetes with LeaderWorkerSet:
+
+```yaml
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: deepseek-r1-nim
+  namespace: inference
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    size: 2  # 2 nodes total
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          app: deepseek-r1
+          role: leader
+      spec:
+        containers:
+          - name: nim
+            image: nvcr.io/nim/deepseek-ai/deepseek-r1:1.7.3
+            env:
+              - name: NGC_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: ngc-secret
+                    key: api-key
+              - name: NIM_MODEL_NAME
+                value: "deepseek-ai/deepseek-r1"
+              - name: NIM_TENSOR_PARALLEL_SIZE
+                value: "8"
+              - name: NIM_PIPELINE_PARALLEL_SIZE
+                value: "2"
+              - name: NIM_NUM_NODES
+                value: "2"
+              - name: NIM_NODE_RANK
+                value: "0"
+              - name: NIM_MASTER_ADDR
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.podIP
+              - name: NIM_MASTER_PORT
+                value: "29500"
+            resources:
+              limits:
+                nvidia.com/gpu: 8
+            ports:
+              - containerPort: 8000
+                name: http
+            volumeMounts:
+              - name: model-cache
+                mountPath: /models
+              - name: shm
+                mountPath: /dev/shm
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: nim-model-cache
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+        nodeSelector:
+          nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+    workerTemplate:
+      metadata:
+        labels:
+          app: deepseek-r1
+          role: worker
+      spec:
+        containers:
+          - name: nim
+            image: nvcr.io/nim/deepseek-ai/deepseek-r1:1.7.3
+            env:
+              - name: NGC_API_KEY
+                valueFrom:
+                  secretKeyRef:
+                    name: ngc-secret
+                    key: api-key
+              - name: NIM_MODEL_NAME
+                value: "deepseek-ai/deepseek-r1"
+              - name: NIM_TENSOR_PARALLEL_SIZE
+                value: "8"
+              - name: NIM_PIPELINE_PARALLEL_SIZE
+                value: "2"
+              - name: NIM_NUM_NODES
+                value: "2"
+              - name: NIM_NODE_RANK
+                value: "1"
+              - name: NIM_MASTER_ADDR
+                # Leader pod IP injected by LeaderWorkerSet
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['leaderworkerset.sigs.k8s.io/leader-address']
+              - name: NIM_MASTER_PORT
+                value: "29500"
+            resources:
+              limits:
+                nvidia.com/gpu: 8
+            volumeMounts:
+              - name: model-cache
+                mountPath: /models
+              - name: shm
+                mountPath: /dev/shm
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: nim-model-cache
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: 64Gi
+        nodeSelector:
+          nvidia.com/gpu.product: "NVIDIA-H100-80GB-HBM3"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: deepseek-r1-nim
+  namespace: inference
+spec:
+  selector:
+    app: deepseek-r1
+    role: leader
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+```
+
+### Testing the Endpoint
+
+Once both nodes are running and synchronized:
+
+```bash
+curl -X POST http://deepseek-r1-nim:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-ai/deepseek-r1",
+    "messages": [
+      {"role": "user", "content": "Explain tensor parallelism in 3 sentences."}
+    ],
+    "max_tokens": 256,
+    "temperature": 0.7
+  }'
+```
+
+The response comes from the leader node, but computation happened across both nodes transparently.
+
+## Networking: The Bottleneck
+
+Multinode inference performance lives and dies by inter-node bandwidth:
+
+| Interconnect | Bandwidth | Latency | Multinode Viable? |
+|-------------|-----------|---------|-------------------|
+| **1 GbE** | 125 MB/s | ~500 μs | ❌ Unusable |
+| **25 GbE** | 3.1 GB/s | ~10 μs | ❌ Too slow |
+| **100 GbE (RoCE)** | 12.5 GB/s | ~2 μs | ⚠️ Small models only |
+| **InfiniBand HDR** | 25 GB/s | ~1 μs | ✅ Production viable |
+| **InfiniBand NDR** | 50 GB/s | ~1 μs | ✅ Recommended |
+| **InfiniBand XDR** | 100 GB/s | under 1 μs | ✅ Optimal |
+
+**Minimum for production multinode**: InfiniBand HDR (200 Gb/s). Anything less and the inter-node communication overhead dominates inference latency.
+
+### NCCL Configuration
+
+```bash
+# Essential NCCL environment variables for multinode
+export NCCL_IB_DISABLE=0           # Enable InfiniBand
+export NCCL_SOCKET_IFNAME=ib0      # IB network interface
+export NCCL_IB_HCA=mlx5            # Mellanox HCA device
+export NCCL_IB_GID_INDEX=3         # RoCE GID index
+export NCCL_NET_GDR_LEVEL=5        # GPUDirect RDMA level
+export NCCL_DEBUG=INFO             # Debug logging (remove in prod)
+```
+
+## Performance Characteristics
+
+Multinode adds latency. Here are realistic numbers for DeepSeek-R1:
+
+| Configuration | Time to First Token | Tokens/Second | Cost/Hour |
+|--------------|-------------------|---------------|-----------|
+| 2× 8×H100 (PP=2) | ~800 ms | ~30-40 t/s | ~$60 |
+| 4× 8×H100 (PP=4) | ~500 ms | ~60-80 t/s | ~$120 |
+| 2× 8×H100 FP8 | ~600 ms | ~50-60 t/s | ~$60 |
+
+Compared to a single-node 70B model at 100+ tokens/second, multinode 671B models are significantly slower and more expensive. The trade-off is capability — DeepSeek-R1's reasoning quality justifies the infrastructure for complex tasks.
+
+## Alternatives to Multinode
+
+Before committing to multinode infrastructure, consider:
+
+### Quantization
+
+FP8 quantization halves memory requirements. Llama 405B at FP8 (405 GB) fits on a single 8×H100 node. Quality impact is measurable but often acceptable.
+
+```bash
+# NIM with FP8 quantization — single node
+docker run -d --gpus all \
+  -e NIM_MODEL_NAME="meta/llama-3.1-405b-instruct" \
+  -e NIM_QUANTIZATION="fp8" \
+  -e NIM_TENSOR_PARALLEL_SIZE=8 \
+  nvcr.io/nim/meta/llama-3.1-405b-instruct:latest
+```
+
+### Mixture-of-Experts Sparsity
+
+DeepSeek-R1 is a 671B MoE model but only activates ~37B parameters per token. Clever memory management can page inactive experts to CPU/NVMe, reducing GPU memory needs. This is an active research area (offloading frameworks like DeepSpeed-Inference).
+
+### Smaller Distilled Models
+
+DeepSeek-R1 has distilled variants (7B, 14B, 32B, 70B) that capture much of the reasoning capability on a single GPU. For many use cases, the 70B distill on one node outperforms the full 671B on cost-adjusted metrics.
+
+## NIM Models with Multinode Support
+
+As of mid-2026, the NGC catalog lists multinode support for these NIM containers:
+
+- **deepseek-ai/deepseek-r1** (671B MoE) — the flagship multinode model
+- **meta/llama-3.1-405b-instruct** — largest dense open model
+- **nvidia/nemotron-340b** — NVIDIA's own large model
+- Additional models are being added as NIM expands
+
+The "Multinode Support: Yes" badge on NGC indicates that the container includes the orchestration logic for multi-node NCCL communication, leader election, and distributed weight loading.
+
+## Cost Analysis
+
+Running multinode inference is expensive. Here is a monthly cost comparison:
+
+| Setup | GPU Cost/Month | Model | Tokens/Second |
+|-------|---------------|-------|---------------|
+| 1× 8×H100 (70B) | ~$22,000 | Llama 70B | 100+ |
+| 1× 8×H100 (405B FP8) | ~$22,000 | Llama 405B | 40-50 |
+| 2× 8×H100 (671B) | ~$44,000 | DeepSeek-R1 | 30-40 |
+| API (DeepSeek) | Pay per token | DeepSeek-R1 | Variable |
+
+**When multinode self-hosting makes sense:**
+- High volume (thousands of requests/hour amortizes fixed cost)
+- Data sovereignty requirements (cannot use API)
+- Latency requirements (co-located inference)
+- Custom fine-tuned large models
+
+**When API is better:**
+- Low-medium volume
+- Burst traffic patterns
+- No data residency constraints
+
+For a detailed cost model, try the [GPU Cost Calculator](/gpu-cost-calculator/).
+
+## Related Resources
+
+- [NVIDIA GPU Operator on Kubernetes](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [Multi-Tenant GPUs on Bare Metal](/blog/kubecon-2026-packed-room-multi-tenant-gpus-bare-metal/)
+- [The Inference Gold Rush](/blog/inference-gold-rush-ai-startups-kubernetes-2026/)
+- [FinOps for AI: GPU Cost Optimization](/blog/finops-ai-gpu-workloads-cost-optimization-2026/)
+- [Autoscaling AI Inference on Kubernetes](/blog/ai-kubernetes-production-autoscaling-inference-workloads/)
+- [Huawei Atlas 950 SuperPoD](/blog/huawei-atlas-950-ai-superpod-8192-npus/)
+- [Slurm GPU Cluster Guide](/blog/slurm-gpu-cluster-setup-guide/)
+- [GPU Kubernetes Guide](/blog/gpu-kubernetes-ai-ml-workloads-guide/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I design GPU inference infrastructure for enterprises running large language models at scale. [Book a consultation](https://calendly.com/lucaberton/) to discuss your multinode deployment.

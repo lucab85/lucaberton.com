@@ -1,0 +1,362 @@
+---
+draft: false
+title: "NVIDIA Run:ai for Distributed Inference: Platform Guide for Large Model Serving (2026)"
+snippet: "NVIDIA Run:ai orchestrates distributed inference across GPU nodes with topology-aware scheduling, dynamic autoscaling, NIM support, and Dynamo pipelines. Complete platform guide."
+description: "Complete guide to NVIDIA Run:ai distributed inference. Topology-aware scheduling, Leader-Worker Sets, Knative serving, NIM integration, Dynamo pipelines, autoscaling, and observability."
+image:
+  src: "/blog/thumbnails/nvidia-run-ai-distributed-inference-platform-2026.jpg"
+  alt: "NVIDIA Run:ai Distributed Inference Platform Guide 2026"
+publishDate: "2026-04-08"
+lastModified: "2026-04-08"
+author: "Luca Berton"
+category: "AI"
+tags: ["NVIDIA", "Run:ai", "Inference", "Distributed", "GPU", "Kubernetes", "NIM", "Dynamo"]
+---
+
+Serving a 671B parameter model is not just a GPU problem. It is a scheduling problem, a networking problem, an autoscaling problem, and an observability problem — all at once.
+
+NVIDIA Run:ai is a GPU orchestration platform that sits on top of Kubernetes and solves all of these for inference workloads. It handles single-node serverless serving through Knative and multi-node distributed inference through Leader-Worker Sets, with topology-aware scheduling that understands NVLink domains, InfiniBand fabrics, and GPU memory hierarchies.
+
+## What Run:ai Does for Inference
+
+Run:ai adds an orchestration layer between your Kubernetes cluster and your inference workloads:
+
+```
+Clients
+   │
+   ▼
+Load Balancer → NGINX Ingress → TLS Termination
+   │
+   ├─ Single-Node: → Kourier → Knative Queue Proxy → Model Pod
+   │
+   └─ Multi-Node:  → Leader Pod ──→ Worker Pod 0
+                         │          → Worker Pod 1
+                         │          → Worker Pod N
+                         └─ Aggregates results
+```
+
+The platform supports three deployment patterns:
+
+- **NVIDIA NIM** — optimized inference microservices from NGC catalog
+- **Hugging Face models** — direct deployment from HF model hub
+- **Custom containers** — any inference runtime (vLLM, TGI, Triton, etc.)
+
+## Single-Node: Knative Serverless
+
+For models that fit on one node (under ~640 GB for 8×H100), Run:ai deploys through **Knative Serving**:
+
+```yaml
+# Run:ai creates this automatically when you submit a single-node inference workload
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: llama-70b-inference
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/metric: "concurrency"
+        autoscaling.knative.dev/target: "10"
+    spec:
+      containers:
+        - image: nvcr.io/nim/meta/llama-3.1-70b-instruct:latest
+          resources:
+            limits:
+              nvidia.com/gpu: 8
+```
+
+Knative provides:
+
+- **Scale to zero** — no GPU cost when idle
+- **Request queuing** — maintains SLOs under load
+- **Concurrency management** — controls requests per replica
+- **Revision tracking** — rollback to previous model versions
+- **Traffic splitting** — canary deployments between model versions
+
+The request flow passes through Kourier (Knative's ingress) to a Queue Proxy sidecar that manages concurrency before hitting the model container. This is what makes autoscaling responsive — the queue proxy reports real-time concurrency metrics that drive scaling decisions.
+
+## Multi-Node: Leader-Worker Sets
+
+When a model exceeds single-node capacity, Run:ai deploys using **Leader-Worker Sets (LWS)** — a Kubernetes-native abstraction where one leader pod coordinates multiple worker pods:
+
+```
+Leader Pod (Node 0)
+├── Receives client requests
+├── Validates authorization
+├── Holds model layers 0-39 (TP=8 across 8 GPUs)
+├── Coordinates with workers via NCCL
+└── Aggregates and returns results
+
+Worker Pod (Node 1)
+├── Holds model layers 40-79 (TP=8 across 8 GPUs)
+├── Participates in distributed computation
+└── No external network exposure
+```
+
+Key differences from single-node:
+
+- **No Knative** — LWS replaces Knative for multi-node workloads
+- **No scale to zero** — multi-node models stay loaded (startup cost is too high)
+- **Gang scheduling** — all pods scheduled together or not at all
+- **Direct ingress** — requests go straight to the leader pod, no queue proxy
+
+### Submitting a Multi-Node Inference Workload
+
+Via the Run:ai CLI:
+
+```bash
+runai inference submit deepseek-r1 \
+  --image nvcr.io/nim/deepseek-ai/deepseek-r1:1.7.3 \
+  --gpu 8 \
+  --num-nodes 2 \
+  --distributed \
+  --env NIM_TENSOR_PARALLEL_SIZE=8 \
+  --env NIM_PIPELINE_PARALLEL_SIZE=2 \
+  --large-shm
+```
+
+Or via YAML:
+
+```yaml
+apiVersion: run.ai/v2alpha1
+kind: InferenceWorkload
+metadata:
+  name: deepseek-r1
+  namespace: runai-production
+spec:
+  image:
+    value: nvcr.io/nim/deepseek-ai/deepseek-r1:1.7.3
+  compute:
+    gpuDevicesRequest: 8
+  distributed:
+    numNodes: 2
+  environment:
+    items:
+      NIM_TENSOR_PARALLEL_SIZE:
+        value: "8"
+      NIM_PIPELINE_PARALLEL_SIZE:
+        value: "2"
+  storage:
+    largeShm: true
+```
+
+Run:ai translates this into a LeaderWorkerSet with the correct NCCL configuration, shared memory allocation, and network topology placement.
+
+## Topology-Aware Scheduling
+
+This is where Run:ai earns its keep. GPU clusters are not flat — they have hierarchies:
+
+```
+Cluster
+├── Rack 0 (InfiniBand switch)
+│   ├── Node 0 (8× H100, NVLink domain)
+│   └── Node 1 (8× H100, NVLink domain)
+├── Rack 1 (InfiniBand switch)
+│   ├── Node 2 (8× H100, NVLink domain)
+│   └── Node 3 (8× H100, NVLink domain)
+└── Spine switch (connects racks)
+```
+
+**Intra-node** (NVLink): 900 GB/s
+**Intra-rack** (InfiniBand): 50 GB/s
+**Cross-rack** (InfiniBand via spine): 25-50 GB/s with added latency
+
+Run:ai's topology-aware scheduler:
+
+1. **Detects NVLink domains** — keeps tensor parallelism within NVLink-connected GPUs
+2. **Detects InfiniBand fabric** — places pipeline parallel stages on nodes sharing the same IB switch
+3. **MNNVL awareness** — for Multi-Node NVLink systems (like NVIDIA GB200 NVL72), schedules across the full NVLink domain spanning multiple nodes
+4. **Avoids cross-rack placement** when possible, minimizing communication overhead
+
+Without topology awareness, a 2-node job could land on nodes in different racks, doubling inter-node latency. Run:ai prevents this automatically.
+
+## NVIDIA Dynamo Integration
+
+Run:ai supports **NVIDIA Dynamo** — a distributed inference framework that decomposes models into graph-based pipelines:
+
+```
+Traditional: Monolithic model on N GPUs
+Dynamo:      Disaggregated pipeline stages
+
+┌─────────────┐    ┌───────────────┐    ┌──────────────┐
+│  Prefill     │───▶│   Decode      │───▶│  Post-process│
+│  (GPU-heavy) │    │  (memory-     │    │  (CPU/light) │
+│              │    │   bound)      │    │              │
+└─────────────┘    └───────────────┘    └──────────────┘
+```
+
+Dynamo workloads are deployed as **DynamoGraphDeployments** — the Dynamo Operator manages the pipeline graph, and Run:ai handles scheduling each stage onto the right hardware.
+
+Benefits over monolithic deployment:
+
+- **Disaggregated prefill/decode** — prefill on high-compute GPUs, decode on memory-optimized GPUs
+- **Independent scaling** — scale decode nodes without adding more prefill capacity
+- **Pipeline efficiency** — overlap computation across stages
+- **Mixed hardware** — use different GPU types for different pipeline stages
+
+## Dynamic Autoscaling
+
+Run:ai autoscaling works differently for single-node and multi-node:
+
+### Single-Node (Knative-based)
+
+```yaml
+# Autoscaling configuration
+autoscaling:
+  minReplicas: 0         # Scale to zero when idle
+  maxReplicas: 16        # Maximum replicas
+  metric: "concurrency"  # or "rps", "latency", "custom"
+  target: 10             # Target concurrent requests per replica
+  scaleDownDelay: 300    # 5 minutes before scale-down
+```
+
+Metrics that trigger scaling:
+
+- **Concurrency** — active requests per replica
+- **Requests per second** — throughput-based
+- **Latency** — p95 response time exceeds threshold
+- **Custom Prometheus metrics** — any metric you expose
+
+### Multi-Node (Replica-based)
+
+Multi-node workloads scale by adding complete replica groups (leader + workers together):
+
+```yaml
+autoscaling:
+  minReplicas: 1         # Always keep at least 1 replica group
+  maxReplicas: 4         # Up to 4 complete 2-node replica groups
+  metric: "custom"
+  metricName: "inference_queue_depth"
+  target: 20
+```
+
+Each replica is an independent multi-node deployment serving the full model. Scaling adds 16 GPUs (2 nodes) per replica.
+
+## Observability
+
+Run:ai provides layered metrics for inference workloads:
+
+### Infrastructure Metrics (All Workloads)
+- GPU utilization per device
+- GPU memory utilization
+- CPU and system memory usage
+- Network throughput (inter-node NCCL traffic)
+
+### Inference Metrics (All Inference Workloads)
+- Request throughput (requests/second)
+- Request latency (p50, p95, p99)
+- Active replica count
+- Queue depth and wait time
+
+### NIM-Specific Metrics (NIM Workloads Only)
+- **Time to First Token (TTFT)** — latency until first token generated
+- **Inter-Token Latency (ITL)** — time between consecutive tokens
+- **Token throughput** — tokens/second generated
+- **KV-cache utilization** — GPU memory used for attention cache
+- **Request concurrency** — active concurrent requests
+- **Prompt/completion token counts** — input vs output token ratios
+
+These metrics feed into Run:ai's built-in dashboards and can be exported to Prometheus/Grafana for custom visualization.
+
+## Access Control
+
+Run:ai enforces authentication on inference endpoints:
+
+```
+Client → Request with Bearer Token → Load Balancer → Ingress
+  → Authorization check (Run:ai control plane)
+  → Model pod (if authorized)
+```
+
+Access can be scoped to:
+
+- **Public** — no authentication required
+- **Authenticated users** — any valid Run:ai user
+- **Specific groups** — department or team-level access
+- **Service accounts** — machine-to-machine with API keys
+- **User-specific** — individual user restrictions
+
+This is critical for multi-tenant GPU clusters where different teams serve different models on shared infrastructure.
+
+## Rolling Updates
+
+Update inference workloads without downtime:
+
+```bash
+# Update model version
+runai inference update deepseek-r1 \
+  --image nvcr.io/nim/deepseek-ai/deepseek-r1:1.8.0
+
+# Update compute resources
+runai inference update deepseek-r1 \
+  --gpu 8
+
+# Update scaling policy
+runai inference update deepseek-r1 \
+  --max-replicas 8
+```
+
+For single-node (Knative), this creates a new revision with gradual traffic shift. For multi-node (LWS), it performs a rolling replacement of replica groups.
+
+## Model Catalog Integration
+
+Run:ai integrates with two model sources:
+
+### NVIDIA NGC Catalog
+- Dynamic model list updated from NGC
+- Preconfigured NIM containers with optimized serving configs
+- One-click deployment for supported models
+
+### Hugging Face Hub
+- Browse and search the full HF catalog from Run:ai UI
+- Gated model support with HF token authentication
+- Automatic download and caching of model weights
+
+```bash
+# Deploy from Hugging Face
+runai inference submit llama-8b \
+  --image ghcr.io/huggingface/text-generation-inference:latest \
+  --gpu 1 \
+  --env MODEL_ID=meta-llama/Llama-3.1-8B-Instruct \
+  --env HUGGING_FACE_HUB_TOKEN=hf_xxx
+```
+
+## When to Use Run:ai vs DIY Kubernetes
+
+| Capability | DIY Kubernetes | Run:ai |
+|-----------|---------------|--------|
+| Basic inference serving | ✅ Manual setup | ✅ Automated |
+| Topology-aware scheduling | ❌ Not built-in | ✅ Automatic |
+| Multi-node orchestration | ⚠️ Manual LWS config | ✅ Declarative |
+| GPU sharing/fractional | ⚠️ MIG only | ✅ Dynamic fractions |
+| Autoscaling to zero | ⚠️ Knative setup | ✅ Built-in |
+| Multi-tenant quotas | ❌ Basic ResourceQuota | ✅ Hierarchical quotas |
+| NIM-specific metrics | ❌ Manual Prometheus | ✅ Built-in dashboards |
+| Gang scheduling | ❌ Needs Volcano/Coscheduling | ✅ Native |
+| MNNVL support | ❌ Manual | ✅ Automatic |
+
+Run:ai makes sense when you have:
+- Multiple teams sharing GPU clusters
+- Mix of training and inference workloads competing for GPUs
+- Large models requiring multinode with topology awareness
+- Need for enterprise access control and audit logging
+
+DIY Kubernetes is fine for:
+- Single-team GPU clusters
+- Simple single-node inference
+- Cost-sensitive environments (Run:ai has licensing costs)
+
+## Related Resources
+
+- [NVIDIA NIM Multinode Inference](/blog/nvidia-nim-multinode-inference-large-models-2026/)
+- [NVIDIA GPU Operator on Kubernetes](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [Multi-Tenant GPUs on Bare Metal](/blog/kubecon-2026-packed-room-multi-tenant-gpus-bare-metal/)
+- [The Inference Gold Rush](/blog/inference-gold-rush-ai-startups-kubernetes-2026/)
+- [FinOps for AI: GPU Cost Optimization](/blog/finops-ai-gpu-workloads-cost-optimization-2026/)
+- [Autoscaling AI Inference on Kubernetes](/blog/ai-kubernetes-production-autoscaling-inference-workloads/)
+- [Slurm GPU Cluster Guide](/blog/slurm-gpu-cluster-setup-guide/)
+- [Kubernetes Gateway API](/blog/kubernetes-gateway-api-guide-ingress-replacement-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I design GPU inference platforms for enterprises serving large language models at scale. [Book a consultation](https://calendly.com/lucaberton/) to discuss your inference architecture.

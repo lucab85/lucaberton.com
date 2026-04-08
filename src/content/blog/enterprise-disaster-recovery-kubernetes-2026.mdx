@@ -1,0 +1,154 @@
+---
+draft: false
+title: "Disaster Recovery for Kubernetes: Enterprise Patterns and Runbooks (2026)"
+snippet: "Kubernetes disaster recovery beyond Velero backups. Active-active, active-passive, pilot light patterns with RTO/RPO targets, automated failover, and tested runbooks."
+description: "Enterprise Kubernetes disaster recovery guide. Active-active, active-passive, pilot light patterns, Velero backups, automated failover, RTO/RPO targets, and runbook templates."
+image:
+  src: "/blog/thumbnails/enterprise-disaster-recovery-kubernetes-2026.jpg"
+  alt: "Disaster Recovery Kubernetes Enterprise 2026"
+publishDate: "2026-04-08"
+lastModified: "2026-04-08"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ["Kubernetes", "Disaster Recovery", "Enterprise", "Velero", "High Availability"]
+---
+
+"We have Velero backups" is not a disaster recovery plan. DR means you can recover your entire platform to a defined state within a defined time, and you have tested it.
+
+## DR Patterns
+
+### Pattern 1: Active-Passive
+
+```
+Region A (Active)           Region B (Passive)
+┌──────────────┐           ┌──────────────┐
+│ Production   │  Velero   │ Standby      │
+│ Cluster      │──backup──▶│ Cluster      │
+│ Traffic: 100%│  hourly   │ Traffic: 0%  │
+│              │           │ Scaled down  │
+└──────────────┘           └──────────────┘
+      │                          │
+      └────── Global LB ────────┘
+              (DNS failover)
+```
+
+**RTO**: 15-60 minutes (scale up standby + restore state)
+**RPO**: 1 hour (backup frequency)
+**Cost**: ~30% of production (standby runs minimal resources)
+
+### Pattern 2: Active-Active
+
+```
+Region A                    Region B
+┌──────────────┐           ┌──────────────┐
+│ Production   │◀── sync ─▶│ Production   │
+│ Cluster      │           │ Cluster      │
+│ Traffic: 50% │           │ Traffic: 50% │
+└──────────────┘           └──────────────┘
+      │                          │
+      └────── Global LB ────────┘
+              (weighted routing)
+```
+
+**RTO**: under 1 minute (traffic shifts automatically)
+**RPO**: Near-zero (synchronous or near-synchronous replication)
+**Cost**: ~100% of production (both regions run full capacity)
+
+### Pattern 3: Pilot Light
+
+```
+Region A (Active)           Region B (Pilot Light)
+┌──────────────┐           ┌──────────────┐
+│ Production   │  ArgoCD   │ Control plane│
+│ Full stack   │──sync────▶│ running      │
+│ Traffic: 100%│           │ No workers   │
+│              │           │ Data synced  │
+└──────────────┘           └──────────────┘
+```
+
+**RTO**: 5-15 minutes (add worker nodes via Cluster API/Karpenter)
+**RPO**: Minutes (continuous data replication)
+**Cost**: ~10-15% of production (control plane + storage only)
+
+## Velero Backup Strategy
+
+```yaml
+# Scheduled backup for production namespace
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: production-hourly
+spec:
+  schedule: "0 * * * *"
+  template:
+    includedNamespaces:
+      - production
+      - monitoring
+      - ingress-system
+    includedResources:
+      - deployments
+      - services
+      - configmaps
+      - secrets
+      - persistentvolumeclaims
+    storageLocation: s3-cross-region
+    volumeSnapshotLocations:
+      - ebs-cross-region
+    ttl: 720h  # 30 days retention
+```
+
+## DR Runbook Template
+
+```markdown
+# Disaster Recovery Runbook: Region A Failure
+
+## Trigger Criteria
+- Region A unreachable for > 5 minutes
+- Multiple service health checks failing
+- Cloud provider status page confirms outage
+
+## Step 1: Confirm Outage (2 minutes)
+- [ ] Verify from multiple monitoring points
+- [ ] Check cloud provider status page
+- [ ] Notify incident commander
+
+## Step 2: Activate DR (5 minutes)
+- [ ] Scale up Region B worker nodes: `kubectl scale ...`
+- [ ] Restore latest Velero backup: `velero restore create ...`
+- [ ] Verify pods are running: `kubectl get pods -A`
+
+## Step 3: Switch Traffic (2 minutes)
+- [ ] Update DNS/Global LB to route to Region B
+- [ ] Verify traffic is flowing to Region B
+- [ ] Monitor error rates for 5 minutes
+
+## Step 4: Communicate
+- [ ] Notify stakeholders: "Failover complete, RTO: X minutes"
+- [ ] Update status page
+
+## Rollback (when Region A recovers)
+- [ ] Sync data from Region B back to Region A
+- [ ] Gradually shift traffic back (10% → 50% → 100%)
+- [ ] Scale down Region B to standby
+```
+
+## Testing DR
+
+**If you have not tested it, it does not work.** Schedule quarterly DR tests:
+
+1. **Tabletop exercise** — walk through the runbook verbally
+2. **Component test** — restore a single namespace from backup
+3. **Full failover test** — simulate region failure, execute full runbook
+4. **Chaos engineering** — inject failures randomly (Chaos Mesh, Litmus)
+
+## Related Resources
+
+- [Kubernetes Multi-Cluster Management](/blog/kubernetes-multi-cluster-management-enterprise-2026/)
+- [Enterprise Kubernetes Security](/blog/enterprise-kubernetes-security-hardening-checklist-2026/)
+- [Enterprise Observability Stack](/blog/enterprise-observability-stack-kubernetes-2026/)
+- [Velero vs Kasten](/blog/velero-vs-kasten-k10-2026/)
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I design disaster recovery architectures for enterprise Kubernetes platforms. [Book a consultation](https://calendly.com/lucaberton/).

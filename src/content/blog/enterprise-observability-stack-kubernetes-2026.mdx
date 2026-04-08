@@ -1,0 +1,189 @@
+---
+draft: false
+title: "Enterprise Observability Stack on Kubernetes: Metrics, Logs, Traces, and AI (2026)"
+snippet: "Build a production observability stack with Prometheus, Grafana, Loki, Tempo, and AI-powered alerting. Kubernetes-native monitoring for enterprises at scale."
+description: "Enterprise observability on Kubernetes with Prometheus, Grafana, Loki, Tempo, OpenTelemetry, and AI-powered alerting. Production architecture, sizing, and cost optimization."
+image:
+  src: "/blog/thumbnails/enterprise-observability-stack-kubernetes-2026.jpg"
+  alt: "Enterprise Observability Stack Kubernetes 2026"
+publishDate: "2026-04-08"
+lastModified: "2026-04-08"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["Observability", "Prometheus", "Grafana", "Kubernetes", "Enterprise", "OpenTelemetry"]
+---
+
+Observability at enterprise scale is not "install Prometheus and add Grafana." It is a data engineering problem: millions of time series, terabytes of logs per day, distributed traces across hundreds of services, and alerting that does not wake people up for false positives.
+
+## The LGTM+ Stack
+
+The industry-standard open source observability stack:
+
+```
+┌─────────────────────────────────────────────┐
+│                 Grafana                       │
+│  Dashboards │ Alerting │ Explore │ SLOs      │
+├──────┬──────┬──────────┬────────────────────┤
+│ Loki │ Mimir│  Tempo   │  Pyroscope         │
+│ Logs │Metrics│ Traces  │  Profiles          │
+├──────┴──────┴──────────┴────────────────────┤
+│           OpenTelemetry Collector             │
+│  Receive │ Process │ Export │ Sample          │
+├─────────────────────────────────────────────┤
+│           Kubernetes Cluster(s)              │
+│  Pods → OTel SDK / Auto-instrumentation      │
+└─────────────────────────────────────────────┘
+```
+
+- **Mimir** — horizontally scalable Prometheus (replaces standalone Prometheus at scale)
+- **Loki** — log aggregation indexed by labels (not full-text)
+- **Tempo** — distributed tracing backend
+- **Pyroscope** — continuous profiling
+- **Grafana** — unified visualization, alerting, and exploration
+
+### Why Not Datadog/New Relic?
+
+At enterprise scale (50+ clusters, 10M+ active series, 5TB+ logs/day), commercial observability costs $500K-2M+/year. The LGTM stack on Kubernetes costs 10-20% of that in infrastructure, with full data ownership.
+
+## OpenTelemetry: The Collection Layer
+
+OTel is the CNCF standard for instrumentation. One SDK, three signal types:
+
+```yaml
+# OpenTelemetry Collector configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: 'kubernetes-pods'
+              kubernetes_sd_configs:
+                - role: pod
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 8192
+      memory_limiter:
+        limit_mib: 1024
+        spike_limit_mib: 256
+      tail_sampling:
+        decision_wait: 10s
+        policies:
+          - name: errors-only
+            type: status_code
+            status_code:
+              status_codes: [ERROR]
+          - name: slow-requests
+            type: latency
+            latency:
+              threshold_ms: 1000
+    exporters:
+      otlp/mimir:
+        endpoint: "mimir-distributor:4317"
+      otlp/loki:
+        endpoint: "loki-distributor:4317"
+      otlp/tempo:
+        endpoint: "tempo-distributor:4317"
+    service:
+      pipelines:
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, batch]
+          exporters: [otlp/mimir]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, batch]
+          exporters: [otlp/loki]
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, tail_sampling, batch]
+          exporters: [otlp/tempo]
+```
+
+**Tail sampling** is critical: only store error traces and slow requests in full. Sample normal traces at 1-5%. This reduces storage costs by 80%+ with minimal visibility loss.
+
+## Sizing Guide
+
+| Cluster Size | Active Series | Log Volume | Mimir | Loki | Storage/Month |
+|-------------|--------------|------------|-------|------|---------------|
+| Small (under 50 nodes) | under 500K | under 100 GB/day | 3 replicas | 3 replicas | 2 TB |
+| Medium (50-200 nodes) | 500K-2M | 100-500 GB/day | 6 replicas | 6 replicas | 10 TB |
+| Large (200-1000 nodes) | 2M-10M | 500 GB-2 TB/day | 12+ replicas | 12+ replicas | 50 TB |
+| XL (1000+ nodes) | 10M+ | 2+ TB/day | 24+ replicas | 24+ replicas | 200+ TB |
+
+## AI-Powered Alerting
+
+Traditional threshold alerts generate noise. AI-powered anomaly detection reduces false positives:
+
+- **Grafana ML** — built-in anomaly detection for Prometheus metrics
+- **Prophet integration** — time-series forecasting for capacity planning
+- **Adaptive thresholds** — baselines adjust for day-of-week and time-of-day patterns
+- **Alert correlation** — group related alerts into incidents automatically
+
+```yaml
+# Grafana alerting rule with anomaly detection
+apiVersion: 1
+groups:
+  - name: ai-anomaly-detection
+    rules:
+      - alert: AnomalousLatencySpike
+        expr: |
+          (
+            http_request_duration_seconds:p95 
+            > 
+            predict_linear(http_request_duration_seconds:p95[1h], 600)
+            * 1.5
+          )
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Latency anomaly detected on {{ $labels.service }}"
+```
+
+## SLO-Based Alerting
+
+Move from "is this metric above a threshold?" to "are we meeting our SLOs?"
+
+```yaml
+# Error budget-based alerting
+- alert: ErrorBudgetBurnRate
+  expr: |
+    (
+      1 - (
+        sum(rate(http_requests_total{code=~"2.."}[1h]))
+        /
+        sum(rate(http_requests_total[1h]))
+      )
+    ) > (1 - 0.999) * 14.4
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Error budget burning 14.4x faster than sustainable"
+```
+
+This fires when your error rate will exhaust the monthly error budget within 1 hour — a much more actionable signal than "error rate above 1%."
+
+## Related Resources
+
+- [Install Prometheus on Ubuntu](/blog/install-prometheus-ubuntu-2404/)
+- [Install Grafana on Ubuntu](/blog/install-grafana-ubuntu-2404/)
+- [Platform Engineering Metrics](/blog/platform-engineering-metrics-measure-success-2026/)
+- [Kubernetes Security Hardening](/blog/enterprise-kubernetes-security-hardening-checklist-2026/)
+- [FinOps for AI](/blog/finops-ai-gpu-workloads-cost-optimization-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I build observability platforms for enterprises running Kubernetes at scale. [Book a consultation](https://calendly.com/lucaberton/).

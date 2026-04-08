@@ -1,0 +1,171 @@
+---
+draft: false
+title: "MLOps on Kubernetes: Building an Enterprise ML Pipeline (2026)"
+snippet: "End-to-end MLOps pipeline on Kubernetes. Kubeflow, MLflow, feature stores, model registry, CI/CD for ML, automated retraining, A/B testing, and model monitoring."
+description: "Enterprise MLOps pipeline on Kubernetes with Kubeflow, MLflow, feature stores, model registry, CI/CD for ML, automated retraining, and production monitoring."
+image:
+  src: "/blog/thumbnails/mlops-pipeline-kubernetes-enterprise-2026.jpg"
+  alt: "MLOps Pipeline Kubernetes Enterprise 2026"
+publishDate: "2026-04-08"
+lastModified: "2026-04-08"
+author: "Luca Berton"
+category: "AI"
+tags: ["MLOps", "Kubernetes", "Enterprise", "Kubeflow", "MLflow", "Pipeline"]
+---
+
+Data scientists build models in notebooks. The platform team's job is to get those models to production reliably, repeatedly, and at scale.
+
+MLOps on Kubernetes gives you the infrastructure to automate the entire lifecycle: data ingestion, feature engineering, training, validation, deployment, monitoring, and retraining. Here is the architecture that works for enterprises.
+
+## The MLOps Stack on Kubernetes
+
+```
+┌──────────────────────────────────────────────┐
+│              Orchestration Layer               │
+│  Kubeflow Pipelines / Argo Workflows          │
+├──────────────────────────────────────────────┤
+│  Data        │ Training    │ Serving          │
+│  ─────────   │ ─────────   │ ─────────        │
+│  Feature     │ Distributed │ vLLM / NIM       │
+│  Store       │ Training    │ KServe           │
+│  (Feast)     │ (PyTorch)   │ Seldon           │
+├──────────────┼─────────────┼──────────────────┤
+│  Experiment  │ Model       │ Monitoring       │
+│  Tracking    │ Registry    │ ─────────        │
+│  (MLflow)    │ (MLflow)    │ Evidently AI     │
+│              │             │ Prometheus        │
+├──────────────────────────────────────────────┤
+│              Kubernetes Platform              │
+│  GPU Operator │ Karpenter │ ArgoCD │ Vault    │
+└──────────────────────────────────────────────┘
+```
+
+## Pipeline Definition
+
+A Kubeflow pipeline for model training and deployment:
+
+```python
+from kfp import dsl, compiler
+
+@dsl.component(base_image="python:3.11")
+def preprocess_data(input_path: str, output_path: dsl.Output[dsl.Dataset]):
+    """Feature engineering and data validation."""
+    import pandas as pd
+    df = pd.read_parquet(input_path)
+    # Validate schema, check for drift, engineer features
+    df.to_parquet(output_path.path)
+
+@dsl.component(
+    base_image="pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime",
+    accelerator_type="nvidia.com/gpu",
+    accelerator_count=4,
+)
+def train_model(
+    dataset: dsl.Input[dsl.Dataset],
+    model: dsl.Output[dsl.Model],
+    epochs: int = 10,
+):
+    """Distributed training with PyTorch on 4 GPUs."""
+    import torch
+    # Training logic here
+    torch.save(model_state, model.path)
+
+@dsl.component(base_image="python:3.11")
+def evaluate_model(
+    model: dsl.Input[dsl.Model],
+    test_data: dsl.Input[dsl.Dataset],
+) -> float:
+    """Evaluate model quality. Returns accuracy score."""
+    # Evaluation logic
+    return accuracy
+
+@dsl.component(base_image="python:3.11")
+def deploy_model(model: dsl.Input[dsl.Model], accuracy: float):
+    """Deploy to KServe if accuracy exceeds threshold."""
+    if accuracy >= 0.95:
+        # Create/update KServe InferenceService
+        pass
+
+@dsl.pipeline(name="ml-training-pipeline")
+def training_pipeline(input_data: str):
+    preprocess = preprocess_data(input_path=input_data)
+    train = train_model(dataset=preprocess.outputs["output_path"])
+    evaluate = evaluate_model(
+        model=train.outputs["model"],
+        test_data=preprocess.outputs["output_path"],
+    )
+    deploy_model(
+        model=train.outputs["model"],
+        accuracy=evaluate.output,
+    )
+```
+
+## Feature Store
+
+Feast on Kubernetes provides consistent features for training and serving:
+
+```yaml
+# feature_store.yaml
+project: enterprise_ml
+provider: local
+registry: s3://ml-platform/feast/registry.db
+online_store:
+  type: redis
+  connection_string: "redis.ml-platform.svc.cluster.local:6379"
+offline_store:
+  type: file  # or bigquery, redshift, spark
+```
+
+## Model Registry
+
+MLflow tracks experiments and versions models:
+
+```python
+import mlflow
+
+mlflow.set_tracking_uri("http://mlflow.ml-platform.svc.cluster.local:5000")
+
+with mlflow.start_run():
+    mlflow.log_params({"learning_rate": 0.001, "epochs": 10})
+    mlflow.log_metrics({"accuracy": 0.96, "f1_score": 0.94})
+    mlflow.pytorch.log_model(model, "model", registered_model_name="recommendation-v2")
+```
+
+## Automated Retraining
+
+Trigger retraining when model performance degrades:
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: model-drift-check
+spec:
+  schedule: "0 6 * * *"  # Daily at 6 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: drift-detector
+              image: ml-platform/drift-detector:latest
+              env:
+                - name: MODEL_ENDPOINT
+                  value: "http://model-serving:8080"
+                - name: DRIFT_THRESHOLD
+                  value: "0.05"
+                - name: RETRAIN_PIPELINE_URL
+                  value: "http://kubeflow-pipelines:8888/api/v1/runs"
+```
+
+## Related Resources
+
+- [GPU Kubernetes Guide](/blog/gpu-kubernetes-ai-ml-workloads-guide/)
+- [NVIDIA GPU Operator](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [Platform Engineering Metrics](/blog/platform-engineering-metrics-measure-success-2026/)
+- [Autoscaling AI Inference](/blog/ai-kubernetes-production-autoscaling-inference-workloads/)
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I build MLOps platforms for enterprises running machine learning at scale. [Book a consultation](https://calendly.com/lucaberton/).

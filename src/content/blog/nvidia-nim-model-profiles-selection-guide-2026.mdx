@@ -1,0 +1,255 @@
+---
+draft: false
+title: "NVIDIA NIM Model Profiles: How Profile Selection Actually Works (2026)"
+snippet: "NIM model profiles control which precision, parallelism, and backend your LLM uses. Profile naming, memory classification, selection chain priority, and vLLM CLI overrides explained."
+description: "Complete guide to NVIDIA NIM model profiles and selection. Profile naming convention, memory-based classification, 4-priority selection chain, explicit vs automatic selection, and vLLM CLI argument overrides."
+image:
+  src: "/blog/thumbnails/nvidia-nim-model-profiles-selection-guide-2026.jpg"
+  alt: "NVIDIA NIM Model Profiles Selection Guide 2026"
+publishDate: "2026-04-09"
+lastModified: "2026-04-09"
+author: "Luca Berton"
+category: "AI"
+tags: ["NVIDIA", "NIM", "Model Profiles", "GPU", "LLM", "Inference", "vLLM"]
+---
+
+Every NIM LLM container ships with a **model manifest** — a catalog of pre-validated configurations called profiles. When the container starts, NIM selects exactly one profile. That profile determines which model files get downloaded and how the inference backend launches.
+
+Getting this right matters. Pick the wrong profile and you waste GPU memory, hit OOM errors, or run at half the throughput your hardware can deliver.
+
+## Profile Naming Convention
+
+Profiles follow a predictable naming pattern:
+
+```
+vllm-<precision>-tp<N>-pp1[-lora]
+```
+
+| Component | Values | Meaning |
+|-----------|--------|---------|
+| **Backend** | `vllm`, `sglang` | Inference engine |
+| **Precision** | `bf16`, `fp8`, `mxfp4`, `nvfp4` | Quantization format |
+| **tp** | `1`, `2`, `4`, `8` | Tensor parallelism (number of GPUs) |
+| **pp** | `1`, `2` | Pipeline parallelism stages |
+| **-lora** | present/absent | LoRA adapter support |
+
+Examples:
+
+- `vllm-bf16-tp1-pp1` — BF16 on 1 GPU, no LoRA
+- `vllm-fp8-tp4-pp1-lora` — FP8 quantized across 4 GPUs with LoRA
+- `sglang-h100-bf16-tp8-pp2` — SGLang on 8 GPUs with 2-stage pipeline (used for DeepSeek-R1 multinode)
+
+The naming tells you exactly what you are getting: precision, GPU count, and capabilities.
+
+## Listing Available Profiles
+
+Before deploying, check which profiles your container supports and which are compatible with your hardware:
+
+```bash
+docker run --rm --gpus=all \
+  nvcr.io/nim/meta/llama-3.1-70b-instruct:latest \
+  list-model-profiles
+```
+
+Output groups profiles into three categories:
+
+```
+MODEL PROFILES
+- Compatible with system and runnable:
+  - dcec66a5... (vllm-bf16-tp1-pp1) [requires >=18 GB/gpu]
+  - With LoRA support:
+    - d66193b8... (vllm-bf16-tp1-pp1-feat_lora) [requires >=22 GB/gpu]
+
+- Compatible with system but low memory:
+  - a1b2c3d4... (vllm-bf16-tp1-pp1) [requires >=45 GB/gpu,
+    try --max-model-len=4096 to reduce to >=30 GB/gpu]
+
+- Incompatible with system:
+  - 27af459c... (vllm-bf16-tp2-pp1)
+  - 30d16624... (vllm-bf16-tp4-pp1)
+```
+
+Each profile shows:
+- **Profile ID** — a unique 64-character SHA hash (deterministic, version-safe)
+- **Description** — the human-readable name (`vllm-bf16-tp1-pp1`)
+- **Memory annotation** — estimated VRAM requirement per GPU
+
+## Memory-Based Classification
+
+NIM estimates GPU VRAM for each profile by analyzing model weights, KV cache, activations, and overhead. Then classifies:
+
+| Category | What It Means | What To Do |
+|----------|--------------|-----------|
+| **Compatible** | Estimated VRAM fits in available GPU memory | Deploy normally |
+| **Low memory** | Weights fit, but full context length exceeds VRAM | Reduce `--max-model-len` (suggestion provided) |
+| **Incompatible** | Weights alone exceed GPU memory | Use higher TP or quantized precision |
+
+For low-memory profiles, NIM tells you exactly what to do:
+
+```
+[requires >=45 GB/gpu, try --max-model-len=4096 to reduce to >=30 GB/gpu]
+```
+
+Apply the suggestion:
+
+```bash
+docker run --rm -it --gpus=all \
+  -p 8000:8000 \
+  nvcr.io/nim/meta/llama-3.1-70b-instruct:latest \
+  --max-model-len 4096
+```
+
+Reducing `--max-model-len` limits the maximum sequence length (input + output tokens) per request. A 70B model at BF16 with 4096 context fits on a single A100 80GB. At 128K context, it needs 4+ GPUs.
+
+## The Selection Chain
+
+NIM uses a **priority-ordered selection chain**. The first selector that produces a match wins:
+
+| Priority | Selector | Trigger | Behavior |
+|----------|----------|---------|----------|
+| **1 (highest)** | Default profile | `NIM_MODEL_PROFILE="default"` | Picks best compatible profile using backend priority |
+| **2** | Explicit profile | `NIM_MODEL_PROFILE=<id-or-name>` | Matches exact profile by SHA or description |
+| **3** | Memory-aware | *(automatic)* | Filters profiles by VRAM fit, prefers non-LoRA unless LoRA enabled |
+| **4 (lowest)** | Manifest | *(no env var)* | Uses `profile_selection_criteria` from manifest based on hardware |
+
+### Automatic Selection (Most Common)
+
+If you do not set `NIM_MODEL_PROFILE`, NIM automatically picks the best profile for your hardware:
+
+```bash
+docker run --rm -it --gpus=all \
+  -p 8000:8000 \
+  nvcr.io/nim/meta/llama-3.1-70b-instruct:latest
+```
+
+NIM evaluates GPU device, available VRAM, and parallelism constraints. For most deployments, this is sufficient.
+
+### Intelligent Default
+
+Setting `NIM_MODEL_PROFILE="default"` triggers a slightly different path — it uses backend priority ordering:
+
+```bash
+docker run --rm -it --gpus=all \
+  -e NIM_MODEL_PROFILE="default" \
+  -p 8000:8000 \
+  nvcr.io/nim/meta/llama-3.1-70b-instruct:latest
+```
+
+### Explicit Selection by Profile ID
+
+For production, pin to a specific profile ID. This is **deterministic and version-safe** — the profile is guaranteed to match even if tags change in a future release:
+
+```bash
+docker run --rm -it --gpus=all \
+  -e NIM_MODEL_PROFILE="70edb8bb9f8511ce2ea195e3caebcc3c7191dc27fea0c8d4acf9c0d9a69e43cd" \
+  -p 8000:8000 \
+  nvcr.io/nim/meta/llama-3.1-70b-instruct:latest
+```
+
+### Explicit Selection by Description
+
+If the value is not a valid profile ID, NIM tries to match it against descriptions:
+
+```bash
+docker run --rm -it --gpus=all \
+  -e NIM_MODEL_PROFILE="vllm-fp8-tp4-pp1" \
+  -p 8000:8000 \
+  nvcr.io/nim/meta/llama-3.1-70b-instruct:latest
+```
+
+This is what we use in the [Run:ai distributed inference tutorial](/blog/nvidia-run-ai-nim-distributed-inference-tutorial-2026/) with `NIM_MODEL_PROFILE=sglang-h100-bf16-tp8-pp2` for DeepSeek-R1.
+
+## Configuration Precedence
+
+Backend-native arguments **always override** profile settings:
+
+```
+Backend CLI args (highest) > NIM_MODEL_PROFILE (lower)
+```
+
+If a profile specifies `tp=2` but you pass `--tensor-parallel-size 4`, the backend launches with TP=4. NIM resolves the overridden values **before** model download, so the downloaded model files always match the actual launch configuration.
+
+### Common vLLM CLI Overrides
+
+| Argument | Purpose | Default |
+|----------|---------|---------|
+| `--tensor-parallel-size` | Number of tensor-parallel GPUs | 1 |
+| `--pipeline-parallel-size` | Number of pipeline-parallel stages | 1 |
+| `--max-model-len` | Maximum sequence length | Model default |
+| `--enable-lora` | Enable LoRA adapter support | Disabled |
+
+Example — override tensor parallelism:
+
+```bash
+docker run --rm -it --gpus=all \
+  -p 8000:8000 \
+  nvcr.io/nim/meta/llama-3.1-70b-instruct:latest \
+  --tensor-parallel-size 2
+```
+
+## Precision Selection Guide
+
+Choosing the right precision is a tradeoff between quality, memory, and throughput:
+
+| Precision | Memory | Quality | Throughput | When to Use |
+|-----------|--------|---------|-----------|-------------|
+| **bf16** | Baseline | Best | Baseline | Quality-critical, enough VRAM |
+| **fp8** | ~50% of bf16 | Near-identical | 1.5-2x faster | **Default for production** — best balance |
+| **mxfp4** | ~25% of bf16 | Slight degradation | 2-3x faster | High throughput, quality-tolerant |
+| **nvfp4** | ~25% of bf16 | Better than mxfp4 | 2-3x faster | NVIDIA's optimized 4-bit format |
+
+**Recommendation**: Use FP8 for production. It halves memory requirements with negligible quality loss, effectively doubling the models you can serve per GPU.
+
+## Practical Decision Tree
+
+```
+Do you need LoRA adapters?
+├── Yes → Select a -lora profile
+└── No → Continue
+
+How many GPUs per node?
+├── 1 GPU → tp1
+├── 2 GPUs → tp2
+├── 4 GPUs → tp4
+└── 8 GPUs → tp8
+
+Does the model fit at bf16?
+├── Yes (comfortable) → bf16
+├── Yes (tight) → fp8 for headroom
+└── No → fp8 or fp4
+
+Multi-node needed? (model exceeds single node)
+├── Yes → Set pp>1 + NIM_MULTI_NODE=1
+└── No → pp1
+
+Production deployment?
+├── Yes → Pin profile by ID
+└── Dev/test → Automatic selection is fine
+```
+
+## Changes from NIM 1.x
+
+If you are migrating from NIM LLM 1.x, these features are **removed**:
+
+| Removed Feature | 1.x Usage |
+|----------------|-----------|
+| Custom profile selectors | `NIM_CUSTOM_SELECTOR_CLASSES="my_selector.MyCustomSelector"` |
+| Backend priority chain | Automatic TensorRT-LLM > vLLM > SGLang |
+| Tag-based selector | `NIM_TAGS_SELECTOR="llm_engine=vllm,tp=1"` |
+
+Replace all of these with `NIM_MODEL_PROFILE` using a profile ID or description.
+
+## Related Resources
+
+- [NVIDIA NIM Multinode Inference](/blog/nvidia-nim-multinode-inference-large-models-2026/)
+- [Run:ai Distributed Inference Tutorial](/blog/nvidia-run-ai-nim-distributed-inference-tutorial-2026/)
+- [Run:ai Platform Guide](/blog/nvidia-run-ai-distributed-inference-platform-2026/)
+- [NVIDIA GPU Operator on Kubernetes](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [The Inference Gold Rush](/blog/inference-gold-rush-ai-startups-kubernetes-2026/)
+- [On-Premises LLM Deployment](/blog/enterprise-llm-deployment-patterns-on-premises-2026/)
+- [FinOps for AI GPU Workloads](/blog/finops-ai-gpu-workloads-cost-optimization-2026/)
+- [Official NVIDIA Docs: Model Profiles](https://docs.nvidia.com/nim/large-language-models/latest/deployment/model-profiles-and-selection.html)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I design GPU inference platforms for enterprises deploying large language models. [Book a consultation](https://calendly.com/lucaberton/).

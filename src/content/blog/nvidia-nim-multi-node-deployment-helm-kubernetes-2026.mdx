@@ -1,0 +1,374 @@
+---
+draft: false
+title: "NVIDIA NIM Multi-Node Deployment on Kubernetes: Helm, Ray, and LeaderWorkerSet (2026)"
+snippet: "Deploy 400B+ parameter models across multiple GPU nodes with NIM's Helm chart. Ray cluster formation, LeaderWorkerSet, shared storage, profile selection, and NCCL troubleshooting."
+description: "Complete guide to NVIDIA NIM multi-node deployment on Kubernetes using Helm. Ray cluster architecture, LeaderWorkerSet, shared PVC storage, TP/PP configuration, model-free deployments, and troubleshooting."
+image:
+  src: "/blog/thumbnails/nvidia-nim-multi-node-deployment-helm-kubernetes-2026.jpg"
+  alt: "NVIDIA NIM Multi-Node Deployment Helm Kubernetes 2026"
+publishDate: "2026-04-09"
+lastModified: "2026-04-09"
+author: "Luca Berton"
+category: "AI"
+tags: ["NVIDIA", "NIM", "Multi-Node", "Kubernetes", "Helm", "Ray", "GPU", "Distributed Inference"]
+---
+
+When a model does not fit on a single node, you need multi-node deployment. NIM LLM uses **Ray** for cluster formation and **vLLM** for distributed execution across nodes. The Helm chart wraps all of this into a LeaderWorkerSet that you deploy with one command.
+
+This guide covers the official NIM multi-node deployment on Kubernetes — the Helm-native approach using Ray, as distinct from the [Run:ai orchestrated approach](/blog/nvidia-run-ai-nim-distributed-inference-tutorial-2026/) or [bare Docker deployment](/blog/nvidia-nim-multinode-inference-large-models-2026/).
+
+## Architecture
+
+NIM multi-node uses a leader/worker model:
+
+```
+┌────────────────────────────┐
+│  Leader Node               │
+│  ┌──────────┐ ┌──────────┐│
+│  │ Ray Head │ │ vLLM     ││
+│  │ :6379    │ │ Server   ││
+│  └──────────┘ │ :8000    ││
+│               └──────────┘│
+│  8× GPU (TP=8, stage 0)   │
+└─────────┬──────────────────┘
+          │ Ray cluster + NCCL
+┌─────────▼──────────────────┐
+│  Worker Node 1             │
+│  ┌──────────┐              │
+│  │Ray Worker│              │
+│  └──────────┘              │
+│  8× GPU (TP=8, stage 1)   │
+└────────────────────────────┘
+```
+
+The **same container image** runs on both leader and worker. The role is determined by the command injected at deployment time via the LeaderWorkerSet controller.
+
+**Leader** starts a Ray head node, downloads the model, and launches vLLM with distributed execution. **Workers** join the Ray cluster and provide GPU resources. vLLM spawns execution actors on worker nodes for model parallelism.
+
+## Parallelism Strategies
+
+Two strategies split model weights across nodes:
+
+| Strategy | What It Splits | Communication | Best For |
+|----------|---------------|---------------|----------|
+| **Pipeline Parallelism (PP)** | Model stages (layers) across nodes | Lower bandwidth, higher latency tolerance | Cross-node (default) |
+| **Tensor Parallelism (TP)** | Individual layers across GPUs | High bandwidth, low latency required | Within-node (default) |
+
+The standard configuration: **TP = GPUs per node, PP = number of nodes**.
+
+For Llama 3.1 405B on two 8-GPU nodes:
+- TP = 8 (split layers across 8 GPUs per node)
+- PP = 2 (split model into 2 pipeline stages, one per node)
+- Total: 16 GPUs
+
+### Multi-Node Tensor Parallelism
+
+In some cases, you can use TP across nodes instead of PP:
+- TP = 16, PP = 1
+- One tensor-parallel group spans 2 nodes
+
+This requires **InfiniBand with RDMA** — the continuous cross-node GPU communication demands high bandwidth and low latency that Ethernet cannot deliver.
+
+## Prerequisites
+
+1. **Kubernetes cluster** with GPU nodes (same GPU type and count per node)
+
+2. **LeaderWorkerSet CRD** installed:
+```bash
+kubectl apply --server-side -f \
+  https://github.com/kubernetes-sigs/lws/releases/latest/download/manifests.yaml
+```
+
+3. **Shared storage** — PVC with `ReadWriteMany` access mode (recommended)
+
+4. **High-speed networking** — InfiniBand or RoCE for optimal NCCL performance
+
+5. **NGC API key** as Kubernetes secret:
+```bash
+kubectl create secret generic ngc-api \
+  --from-literal=NGC_API_KEY=<your-key>
+```
+
+## Deploy with Helm
+
+### Minimal Configuration
+
+Create `values.yaml`:
+
+```yaml
+image:
+  repository: nvcr.io/nim/meta/llama-3.1-405b-instruct
+  tag: "latest"
+
+model:
+  ngcAPISecret: ngc-api
+  jsonLogging: false  # REQUIRED: JSON logging breaks Ray workers
+
+multiNode:
+  enabled: true
+  workers: 1                  # Worker pods (total nodes = workers + 1 leader)
+  tensorParallelSize: 8       # GPUs per tensor-parallel group
+  pipelineParallelSize: 2     # Pipeline stages (typically = number of nodes)
+
+resources:
+  limits:
+    nvidia.com/gpu: 8
+  requests:
+    nvidia.com/gpu: 8
+
+persistence:
+  enabled: true
+  size: 200Gi
+  accessMode: ReadWriteMany   # REQUIRED for multi-node shared storage
+  storageClass: <your-rwx-storage-class>
+
+imagePullSecrets:
+  - name: nvcr-imagepull
+```
+
+Install:
+
+```bash
+helm install nim-llm nim-llm/ -f values.yaml
+```
+
+**Critical**: Set `model.jsonLogging: false`. The NIM JSON log formatter is not available in vLLM Ray worker processes and **causes worker initialization to fail**.
+
+### Profile Selection
+
+Two approaches — pick one:
+
+**Option A: TP/PP Values (Recommended)**
+
+Set `tensorParallelSize` and `pipelineParallelSize`. The Helm chart injects `NIM_TENSOR_PARALLEL_SIZE` and `NIM_PIPELINE_PARALLEL_SIZE` environment variables. The correct [model profile](/blog/nvidia-nim-model-profiles-selection-guide-2026/) is selected automatically.
+
+```bash
+helm install nim-llm nim-llm/ \
+  --set multiNode.enabled=true \
+  --set multiNode.workers=1 \
+  --set multiNode.tensorParallelSize=8 \
+  --set multiNode.pipelineParallelSize=2
+```
+
+**Option B: Explicit Profile**
+
+Set `model.profile` to a profile name or hash. The chart injects `NIM_MODEL_PROFILE`:
+
+```bash
+helm install nim-llm nim-llm/ \
+  --set multiNode.enabled=true \
+  --set multiNode.workers=1 \
+  --set model.profile=vllm-fp16-tp8-pp2
+```
+
+You **must** use one of these approaches. The chart will fail to render if neither TP/PP nor `model.profile` is set.
+
+## Helm Values Reference
+
+| Parameter | Description | Default |
+|-----------|-------------|---------|
+| `multiNode.enabled` | Enable multi-node mode | `false` |
+| `multiNode.workers` | Number of worker pods per replica | `1` |
+| `multiNode.tensorParallelSize` | GPUs per TP group (sets `NIM_TENSOR_PARALLEL_SIZE`) | `0` |
+| `multiNode.pipelineParallelSize` | Pipeline stages (sets `NIM_PIPELINE_PARALLEL_SIZE`) | `0` |
+| `multiNode.ray.port` | Ray head node communication port | `6379` |
+| `model.profile` | Explicit profile name or hash (sets `NIM_MODEL_PROFILE`) | `""` |
+| `model.ngcAPISecret` | K8s secret name with `NGC_API_KEY` | required |
+| `model.hfTokenSecret` | K8s secret name with `HF_TOKEN` (for HuggingFace models) | `""` |
+| `model.jsonLogging` | Enable JSON structured logging | `true` (set to `false`!) |
+
+## Model Storage
+
+### Shared Storage (Recommended)
+
+With a `ReadWriteMany` PVC or NFS:
+1. Leader downloads model once to shared volume
+2. Workers detect cached blobs and materialize a local workspace at `/tmp/nim_workspace` — **no network download**
+
+Two backends:
+
+**PVC with `existingClaim`** — pre-create a RWX PVC. It survives `helm uninstall`, so the model cache persists across deployments:
+
+```yaml
+persistence:
+  enabled: true
+  existingClaim: nim-model-cache
+  accessMode: ReadWriteMany
+```
+
+**NFS direct mount:**
+
+```yaml
+nfs:
+  enabled: true
+  server: nfs-server.internal
+  path: /exports/nim-models
+```
+
+### Independent Downloads (Not Recommended)
+
+Without shared storage, each node downloads the model independently to `emptyDir`. This works but wastes time and bandwidth — Llama 405B is ~400 GB, downloaded N+1 times instead of once.
+
+## Model-Free Multi-Node
+
+Deploy any HuggingFace model across nodes using model-free NIM:
+
+```yaml
+image:
+  repository: nvcr.io/nim/nim-llm
+  tag: "latest"
+
+model:
+  modelPath: "hf://meta-llama/Llama-3.1-405B-Instruct"
+  ngcAPISecret: ngc-api
+  hfTokenSecret: hf-token
+  jsonLogging: false
+
+multiNode:
+  enabled: true
+  workers: 1
+  tensorParallelSize: 8
+  pipelineParallelSize: 2
+
+persistence:
+  enabled: true
+  size: 200Gi
+  accessMode: ReadWriteMany
+  storageClass: local-nfs
+```
+
+This uses the generic NIM container (`nim-llm`) instead of a model-specific container, and generates profiles at runtime.
+
+## NIM Operator Deployment
+
+The [NIM Operator](https://docs.nvidia.com/nim-operator/) provides a fully automated alternative:
+
+- Manages `NIMService` custom resource
+- Automatically generates leader/worker pod specs
+- Injects Ray startup commands
+- Handles PVC setup through `NIMCache`
+- Manages probes, networking, and secrets
+
+If you are running NIM at scale across multiple models, the Operator reduces operational overhead compared to managing individual Helm releases.
+
+## Common Configurations
+
+### Llama 3.1 405B — 2 Nodes (TP=8, PP=2)
+
+The standard configuration. Two 8-GPU nodes, 16 GPUs total:
+
+```yaml
+multiNode:
+  enabled: true
+  workers: 1
+  tensorParallelSize: 8
+  pipelineParallelSize: 2
+```
+
+### DeepSeek-R1 671B — 2 Nodes (TP=8, PP=2)
+
+Same parallelism but larger model, needs more storage:
+
+```yaml
+image:
+  repository: nvcr.io/nim/deepseek-ai/deepseek-r1
+  tag: "latest"
+
+persistence:
+  size: 500Gi  # DeepSeek-R1 is ~650 GB
+```
+
+### Multi-Node TP — 2 Nodes (TP=16, PP=1)
+
+Single TP group spanning both nodes. Requires InfiniBand:
+
+```yaml
+multiNode:
+  enabled: true
+  workers: 1
+  tensorParallelSize: 16
+  pipelineParallelSize: 1
+```
+
+### 4-Node Deployment (TP=8, PP=4)
+
+Four nodes for extremely large models or higher throughput:
+
+```yaml
+multiNode:
+  enabled: true
+  workers: 3           # 3 workers + 1 leader = 4 nodes
+  tensorParallelSize: 8
+  pipelineParallelSize: 4
+
+resources:
+  limits:
+    nvidia.com/gpu: 8
+```
+
+## Troubleshooting
+
+### Workers Cannot Join Ray Cluster
+
+```bash
+# Check worker logs for Ray connection errors
+kubectl logs <worker-pod-name>
+
+# Verify Ray port (6379) is accessible between pods
+kubectl exec <leader-pod> -- nc -zv <worker-pod-ip> 6379
+
+# Check LWS_LEADER_ADDRESS injection
+kubectl get pods -o yaml | grep LWS_LEADER_ADDRESS
+```
+
+Common causes: network policies blocking port 6379, LWS controller not running, DNS resolution issues.
+
+### Model Download Failures
+
+```bash
+# Verify NGC secret
+kubectl get secret ngc-api -o jsonpath='{.data.NGC_API_KEY}' | base64 -d
+
+# Check PVC is bound with correct access mode
+kubectl get pvc
+```
+
+### NCCL Communication Errors
+
+```bash
+# Enable NCCL debug logging
+env:
+  - name: NCCL_DEBUG
+    value: "INFO"
+  - name: NCCL_IB_DISABLE
+    value: "0"  # Ensure InfiniBand is enabled
+```
+
+For multi-node TP, InfiniBand/RoCE is effectively required. Ethernet will work but with severe performance degradation.
+
+### JSON Logging Crash
+
+If workers crash immediately at startup, check if `jsonLogging` is enabled:
+
+```yaml
+model:
+  jsonLogging: false  # MUST be false for multi-node
+```
+
+The NIM JSON log formatter does not exist in vLLM Ray worker processes.
+
+## Related Resources
+
+- [NIM Model Profiles Guide](/blog/nvidia-nim-model-profiles-selection-guide-2026/)
+- [NIM Multinode Inference (Docker)](/blog/nvidia-nim-multinode-inference-large-models-2026/)
+- [Run:ai Distributed Inference Tutorial](/blog/nvidia-run-ai-nim-distributed-inference-tutorial-2026/)
+- [Run:ai Platform Guide](/blog/nvidia-run-ai-distributed-inference-platform-2026/)
+- [NVIDIA GPU Operator on Kubernetes](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [The Inference Gold Rush](/blog/inference-gold-rush-ai-startups-kubernetes-2026/)
+- [On-Premises LLM Deployment](/blog/enterprise-llm-deployment-patterns-on-premises-2026/)
+- [FinOps for AI GPU Workloads](/blog/finops-ai-gpu-workloads-cost-optimization-2026/)
+- [Official Docs: Multi-Node Deployment](https://docs.nvidia.com/nim/large-language-models/latest/deployment/multi-node-deployment.html)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I design multi-node GPU inference architectures for enterprises. [Book a consultation](https://calendly.com/lucaberton/).

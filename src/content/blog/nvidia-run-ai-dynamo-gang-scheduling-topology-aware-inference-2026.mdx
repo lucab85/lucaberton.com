@@ -1,0 +1,219 @@
+---
+draft: false
+title: "Run:ai + Dynamo: Gang Scheduling and Topology-Aware Placement for Multi-Node LLM Inference (2026)"
+snippet: "NVIDIA Run:ai v2.23 integrates with Dynamo for gang scheduling and topology-aware placement. Deploy disaggregated prefill/decode workloads atomically on the right GPUs."
+description: "Step-by-step guide to deploying NVIDIA Dynamo on Run:ai v2.23. Gang scheduling eliminates partial deployments, topology-aware placement reduces cross-node latency, and disaggregated inference maximizes GPU utilization."
+image:
+  src: "/blog/thumbnails/nvidia-run-ai-dynamo-gang-scheduling-topology-aware-inference-2026.jpg"
+  alt: "NVIDIA Run:ai Dynamo Gang Scheduling Topology-Aware Inference 2026"
+publishDate: "2026-04-09"
+lastModified: "2026-04-09"
+author: "Luca Berton"
+category: "AI"
+tags: ["NVIDIA", "Run:ai", "Dynamo", "Gang Scheduling", "Kubernetes", "GPU", "Inference", "LLM"]
+---
+
+Running [NVIDIA Dynamo](/blog/nvidia-dynamo-inference-framework-distributed-serving-2026/) across multiple nodes creates an orchestration problem: prefill workers, decode workers, routers, and control planes must all start together and land on the right hardware. If decode pods run while prefill pods are still pending, you have idle GPUs burning money. If components scatter across racks, cross-node latency kills throughput.
+
+**NVIDIA Run:ai v2.23** solves both problems through native Dynamo integration: **gang scheduling** ensures all components launch atomically, and **topology-aware placement** co-locates them for minimum latency.
+
+## The Coordination Problem
+
+A Dynamo disaggregated inference deployment has multiple tightly coupled components:
+
+```
+Router → Prefill Workers (compute-bound)
+       → Decode Workers (memory-bound)
+       → Control Plane
+```
+
+Without coordination, standard Kubernetes scheduling creates:
+
+- **Partial deployments** — decode pods running while prefill pods are pending (GPUs idle, no inference happening)
+- **Resource fragmentation** — partially deployed workloads consuming cluster resources while waiting for missing components
+- **Poor placement** — leaders and workers spread across distant nodes, cross-rack communication bottlenecks
+
+## Gang Scheduling: All-or-Nothing
+
+Run:ai treats a Dynamo deployment as a **single scheduling unit**. Either all components (prefill leaders/workers, decode leaders/workers, router) are placed simultaneously, or the entire deployment waits until sufficient resources are available.
+
+Benefits:
+
+- **No partial deployments** — eliminates idle GPU waste from half-started workloads
+- **Higher cluster utilization** — no resource fragmentation from pending components
+- **Reduced cold start** — entire workloads launch atomically when resources free up
+- **Zero configuration** — the scheduler manages coordination automatically
+
+## Topology-Aware Placement: Right GPUs, Right Location
+
+Administrators define the cluster physical topology in the Run:ai UI using Kubernetes node labels:
+
+```
+topology.kubernetes.io/region: eu-west
+topology.kubernetes.io/zone: eu-west-1a
+topology.kubernetes.io/rack: rack-42
+```
+
+The scheduler then co-locates Dynamo components at the **closest available tier**:
+
+1. **Preferred**: Try same rack first (lowest latency)
+2. **Fallback**: Same zone if rack placement is not possible
+3. **Last resort**: Same region
+
+For disaggregated inference, this is critical — NIXL transfers between prefill and decode GPUs benefit enormously from NVLink or same-rack InfiniBand versus cross-rack Ethernet.
+
+## Step-by-Step Deployment
+
+### Prerequisites
+
+- Kubernetes cluster with **Run:ai v2.23** installed
+- A project (e.g., `runai-project-a`) initialized
+- Helm installed
+- HuggingFace token as K8s secret:
+
+```bash
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN='<your-token>' \
+  -n runai-project-a
+```
+
+### Step 1: Configure Network Topology
+
+Label your nodes with proximity indicators:
+
+```bash
+kubectl label node gpu-node-01 topology.kubernetes.io/zone=eu-west-1a
+kubectl label node gpu-node-02 topology.kubernetes.io/zone=eu-west-1a
+kubectl label node gpu-node-03 topology.kubernetes.io/zone=eu-west-1b
+```
+
+In the Run:ai UI:
+1. Open cluster settings
+2. Add label keys (`topology.kubernetes.io/zone`, `topology.kubernetes.io/region`)
+3. Create a topology ordering keys from closest to farthest
+4. Attach the topology to the relevant node pool(s)
+
+### Step 2: Install Dynamo CRDs and Platform
+
+```bash
+export DYNAMO_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.5.1
+export NAMESPACE=dynamo-cloud
+export RELEASE_VERSION=0.5.1
+
+kubectl create namespace $NAMESPACE
+
+# CRDs
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-$RELEASE_VERSION.tgz
+helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz \
+  --namespace dynamo-cloud
+
+# Platform
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-$RELEASE_VERSION.tgz
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz \
+  --namespace ${NAMESPACE} \
+  --set dynamo-operator.namespaceRestriction.enabled=false
+```
+
+Verify:
+
+```bash
+kubectl -n $NAMESPACE get pods
+```
+
+### Step 3: Deploy Disaggregated vLLM
+
+Download the [example YAML from Dynamo](https://github.com/ai-dynamo/dynamo/blob/v0.5.1/components/backends/vllm/deploy/disagg.yaml) and add Run:ai annotations:
+
+```yaml
+metadata:
+  namespace: runai-project-a
+  annotations:
+    kai.scheduler/topology-preferred-placement: "topology.kubernetes.io/zone"
+    kai.scheduler/topology: "topology-1"
+```
+
+For **strict co-location** (pods must be in the same zone or deployment fails):
+
+```yaml
+annotations:
+  kai.scheduler/topology-required-placement: "topology.kubernetes.io/zone"
+  kai.scheduler/topology: "topology-1"
+```
+
+Apply:
+
+```bash
+kubectl apply -f disagg.yaml
+```
+
+### Step 4: Verify Deployment
+
+All components should be running, with prefill and decode pods scheduled in the same zone:
+
+```
+NAME                                              READY  STATUS   AGE
+vllm-disagg-frontend-79f459c95-57fm6              1/1    Running  30m
+vllm-disagg-vllmdecodeworker-6c8d64f569-56phf     1/1    Running  30m
+vllm-disagg-vllmprefillworker-755cb88fcf-pflb5    1/1    Running  30m
+```
+
+### Step 5: Test
+
+Port-forward and send a request:
+
+```bash
+kubectl -n runai-project-a port-forward \
+  pod/vllm-disagg-frontend-79f459c95-57fm6 8000:8000
+
+curl localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [{"role": "user", "content": "What is Kubernetes?"}],
+    "max_tokens": 100
+  }'
+```
+
+The endpoint is OpenAI-compatible — any client that works with OpenAI's API works here.
+
+## Preferred vs Required Placement
+
+| Strategy | Annotation | Behavior |
+|----------|-----------|----------|
+| **Preferred** | `topology-preferred-placement` | Best-effort co-location; relaxes to broader tiers if needed |
+| **Required** | `topology-required-placement` | Strict; deployment waits until all pods fit in the same tier |
+
+**Recommendation**: Start with `preferred` for production. Use `required` only when latency requirements are absolute (multi-node tensor parallelism over InfiniBand).
+
+## How It All Fits Together
+
+```
+Run:ai v2.23
+├── Gang Scheduler → All Dynamo pods launch atomically
+├── Topology Awareness → Pods co-located on nearest nodes
+└── KAI Scheduler → Open source scheduler engine
+         │
+    NVIDIA Dynamo
+    ├── SLO Planner → Dynamic GPU reallocation
+    ├── KV-aware Router → Route to cached data
+    ├── NIXL → Low-latency KV cache transfer
+    └── Disaggregated Prefill/Decode
+```
+
+Run:ai handles **where and when** pods run. Dynamo handles **how** inference executes within those pods. Together: predictable latency, maximum GPU utilization, zero partial deployments.
+
+## Related Resources
+
+- [NVIDIA Dynamo Framework Guide](/blog/nvidia-dynamo-inference-framework-distributed-serving-2026/)
+- [Run:ai Distributed Inference Platform](/blog/nvidia-run-ai-distributed-inference-platform-2026/)
+- [Run:ai Distributed Inference Tutorial](/blog/nvidia-run-ai-nim-distributed-inference-tutorial-2026/)
+- [NIM Multi-Node Deployment on K8s](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/)
+- [NIM Support Matrix](/blog/nvidia-nim-support-matrix-models-gpus-profiles-2026/)
+- [The Inference Gold Rush](/blog/inference-gold-rush-ai-startups-kubernetes-2026/)
+- [NVIDIA GPU Operator on Kubernetes](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [Official Blog: Run:ai + Dynamo](https://developer.nvidia.com/blog/smart-multi-node-scheduling-for-fast-and-efficient-llm-inference-with-nvidia-runai-and-nvidia-dynamo/)
+- [KAI Scheduler (GitHub)](https://github.com/NVIDIA/KAI-Scheduler)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I architect multi-node GPU inference platforms with Run:ai and Dynamo for enterprise workloads. [Book a consultation](https://calendly.com/lucaberton/).

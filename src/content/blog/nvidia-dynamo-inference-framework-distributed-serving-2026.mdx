@@ -1,0 +1,254 @@
+---
+draft: false
+title: "NVIDIA Dynamo: The Open Source Inference Framework That Replaces Triton (2026)"
+snippet: "NVIDIA Dynamo is the open source successor to Triton Inference Server. Disaggregated serving, KV-cache-aware routing, NIXL transfers, Grove on Kubernetes, and SLO-driven autoscaling."
+description: "Complete guide to NVIDIA Dynamo, the open source inference framework for distributed LLM serving. Disaggregated prefill/decode, KV-cache routing, NIXL low-latency transfers, Grove for Kubernetes, and SLO planning."
+image:
+  src: "/blog/thumbnails/nvidia-dynamo-inference-framework-distributed-serving-2026.jpg"
+  alt: "NVIDIA Dynamo Inference Framework Distributed Serving 2026"
+publishDate: "2026-04-09"
+lastModified: "2026-04-09"
+author: "Luca Berton"
+category: "AI"
+tags: ["NVIDIA", "Dynamo", "Inference", "Distributed Serving", "GPU", "Kubernetes", "LLM", "vLLM"]
+---
+
+NVIDIA just replaced Triton Inference Server. The successor is **NVIDIA Dynamo** — an open source, low-latency inference framework purpose-built for distributed generative AI serving.
+
+Where Triton was a general-purpose model server, Dynamo is designed from the ground up for the reality of 2026 inference: models too large for one GPU, MoE architectures, disaggregated prefill/decode, and fleets of GPUs that need intelligent request routing.
+
+Independent benchmarks show GB300 NVL72 combined with Dynamo improves MoE model throughput by **up to 50x** compared to Hopper-based systems.
+
+## Why Dynamo Exists
+
+The inference landscape has changed fundamentally:
+
+1. **Models no longer fit on one GPU** — Llama 405B, DeepSeek-R1, GPT-OSS 120B require multi-node deployments
+2. **MoE models dominate** — routing experts across GPUs demands coordination that Triton was not designed for
+3. **Disaggregated serving is the norm** — prefill and decode have different compute profiles and should run on different hardware
+4. **KV cache is the bottleneck** — transferring cache between GPUs efficiently determines latency
+
+Triton standardized model deployment. Dynamo solves the **distributed orchestration** problem that comes after.
+
+## Architecture: Six Core Components
+
+```
+┌─────────────────────────────────────────────┐
+│                 SLO Planner                  │
+│  Monitors capacity, adjusts GPU allocation   │
+└──────────────┬──────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────┐
+│              KV-aware Router                 │
+│  Routes requests to GPUs with cached KV data │
+└──────────────┬──────────────────────────────┘
+               │
+┌──────────────▼──────────┐  ┌────────────────┐
+│  Prefill GPUs           │  │  Decode GPUs   │
+│  (compute-intensive)    │◄─┤  (memory-bound)│
+└──────────────┬──────────┘  └────────────────┘
+               │ NIXL
+┌──────────────▼──────────────────────────────┐
+│           KV Block Manager                   │
+│  Tiered caching: GPU → CPU → SSD/NVMe       │
+└─────────────────────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────┐
+│          Grove (Kubernetes)                   │
+│  Gang-scheduled, topology-aware deployment   │
+└─────────────────────────────────────────────┘
+```
+
+### 1. SLO Planner
+
+The brain of the system. It monitors GPU capacity and prefill activity across multi-node deployments, then **dynamically adjusts GPU resources** to consistently meet Service Level Objectives.
+
+Instead of static allocation (N GPUs for prefill, M for decode), the SLO Planner shifts resources based on real-time demand. During a burst of new requests, it allocates more prefill capacity. When the queue drains, it shifts GPUs back to decode.
+
+### 2. KV-Aware Router
+
+The most impactful component for latency. When a request arrives, the router checks which GPUs already have relevant KV cache data and routes the request there — **avoiding redundant recomputation**.
+
+In a multi-turn conversation, the KV cache from previous turns may already exist on a specific GPU. Without KV-aware routing, the system recomputes the entire context. With it, only the new tokens need processing.
+
+For a fleet of 64 GPUs serving thousands of concurrent users, this eliminates massive amounts of duplicate work.
+
+### 3. NIXL (Low-Latency Communication Library)
+
+Point-to-point inference data transfer library that accelerates KV cache movement between GPUs and across heterogeneous memory and storage types.
+
+NIXL is critical for disaggregated serving: when a prefill GPU computes the KV cache but a different decode GPU generates tokens, NIXL transfers the cache with minimal latency. It supports:
+
+- GPU-to-GPU (NVLink, InfiniBand)
+- GPU-to-CPU memory
+- GPU-to-NVMe storage
+
+### 4. KV Block Manager
+
+A cost-aware caching engine that extends GPU memory by transferring KV cache across memory hierarchies:
+
+```
+GPU HBM (fastest, most expensive)
+    ↓ overflow
+CPU DRAM (larger, cheaper)
+    ↓ overflow
+NVMe SSD (largest, cheapest)
+```
+
+When GPU memory fills up, cold KV cache blocks move to CPU or SSD instead of being evicted. When needed again, they are fetched back — still faster than recomputing from scratch.
+
+### 5. Grove (Kubernetes Orchestration)
+
+Grove bridges Dynamo and Kubernetes scheduling. It enables:
+
+- **Gang scheduling** — all pods for a model deploy together or not at all
+- **Topology awareness** — pods land on nodes with optimal GPU/network topology
+- **Declarative startup ordering** — leader pods start before workers
+- **Hierarchical workloads** — complex multi-component inference pipelines
+
+Grove replaces the manual LeaderWorkerSet configuration used in [NIM multi-node deployments](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/) with a higher-level abstraction.
+
+### 6. AI Perf
+
+Comprehensive benchmarking tool that measures performance of models served by SGLang, TensorRT-LLM, and vLLM. Provides standardized metrics for comparing backends and configurations.
+
+## Disaggregated Serving: The Key Innovation
+
+Traditional inference runs prefill and decode on the same GPU:
+
+```
+Request → [Prefill + Decode on GPU 0] → Response
+```
+
+Disaggregated serving splits them:
+
+```
+Request → [Prefill on GPU 0] → KV cache via NIXL → [Decode on GPU 1] → Response
+```
+
+Why this matters:
+
+| Phase | Compute Profile | GPU Utilization |
+|-------|----------------|-----------------|
+| **Prefill** | Compute-bound, processes all input tokens at once | High FLOPS, short duration |
+| **Decode** | Memory-bound, generates one token at a time | Low FLOPS, long duration |
+
+Mixing both on the same GPU wastes resources — prefill needs compute power while decode needs memory bandwidth. Disaggregation lets you:
+
+- Use high-compute GPUs for prefill (fewer, faster)
+- Use high-memory GPUs for decode (more, cheaper)
+- Scale each phase independently based on workload
+
+## Supported Backends
+
+Dynamo is backend-agnostic. It works with:
+
+- **vLLM** — most popular open source serving engine
+- **SGLang** — optimized for structured generation
+- **TensorRT-LLM** — NVIDIA's optimized inference library
+
+You can mix backends in the same deployment — use TensorRT-LLM for prefill (maximum throughput) and vLLM for decode (flexibility).
+
+## Getting Started
+
+### Docker Quick Start
+
+```bash
+# Clone the repo
+git clone https://github.com/ai-dynamo/dynamo.git
+cd dynamo
+
+# Follow the quick-start guide for disaggregated serving
+# with a router, prefill workers, and decode workers
+```
+
+### Kubernetes with Grove
+
+Grove provides custom resources for multi-node deployment:
+
+```yaml
+apiVersion: dynamo.nvidia.com/v1
+kind: DynamoService
+metadata:
+  name: llama-70b-disaggregated
+spec:
+  model: meta-llama/Llama-3.3-70b-instruct
+  backend: vllm
+  prefill:
+    replicas: 2
+    resources:
+      nvidia.com/gpu: 4
+  decode:
+    replicas: 4
+    resources:
+      nvidia.com/gpu: 2
+  router:
+    type: kv-aware
+  sloPlanner:
+    enabled: true
+    targetLatency: 200ms
+```
+
+This deploys:
+- 2 prefill workers (4 GPUs each, 8 total)
+- 4 decode workers (2 GPUs each, 8 total)
+- KV-aware router
+- SLO planner targeting 200ms latency
+
+## Dynamo vs Triton vs NIM
+
+| Feature | Triton | NIM | Dynamo |
+|---------|--------|-----|--------|
+| **Focus** | General model serving | Turnkey LLM deployment | Distributed LLM orchestration |
+| **Disaggregated serving** | ❌ | ❌ | ✅ |
+| **KV-cache routing** | ❌ | ❌ | ✅ |
+| **SLO-driven scaling** | ❌ | ❌ | ✅ |
+| **Multi-backend** | ✅ (many) | vLLM/TRT-LLM | vLLM/SGLang/TRT-LLM |
+| **Kubernetes native** | Triton K8s | NIM Operator | Grove |
+| **Best for** | CV, NLP, tabular | Single-model deployment | Fleet-scale LLM inference |
+| **License** | Open source | Enterprise | Open source |
+
+**They are complementary**, not replacements:
+- Use **NIM** when you want a turnkey container for a [supported model](/blog/nvidia-nim-support-matrix-models-gpus-profiles-2026/)
+- Use **Dynamo** when you need fleet-scale orchestration with disaggregated serving
+- Use **Triton** for non-LLM models (computer vision, speech, tabular)
+
+## GB300 NVL72: The Hardware Match
+
+Dynamo is co-designed with NVIDIA's latest hardware:
+
+- **72 Blackwell Ultra GPUs** connected via NVLink
+- Low-latency expert communication for MoE models
+- NVFP4 precision for maximum throughput
+- **50x throughput improvement** over Hopper for MoE inference
+
+The GB300 NVL72 + Dynamo stack is purpose-built for reasoning models (DeepSeek-R1 class) that use Mixture of Experts architectures.
+
+## When to Use Dynamo
+
+**Use Dynamo when:**
+- Serving models across multiple GPUs/nodes
+- Running MoE models that benefit from disaggregated serving
+- Operating a fleet of GPUs with varying workloads
+- SLO compliance matters (latency targets per request)
+- You want to optimize GPU utilization beyond simple tensor parallelism
+
+**Stick with NIM/vLLM when:**
+- Single-node, single-model deployment
+- You need a turnkey solution without infrastructure complexity
+- Model fits on available GPUs without disaggregation
+
+## Related Resources
+
+- [NIM Support Matrix](/blog/nvidia-nim-support-matrix-models-gpus-profiles-2026/)
+- [NIM Model Profiles Guide](/blog/nvidia-nim-model-profiles-selection-guide-2026/)
+- [NIM Multi-Node Deployment](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/)
+- [The Inference Gold Rush](/blog/inference-gold-rush-ai-startups-kubernetes-2026/)
+- [NVIDIA GPU Operator on Kubernetes](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [FinOps for AI GPU Workloads](/blog/finops-ai-gpu-workloads-cost-optimization-2026/)
+- [Dynamo GitHub](https://github.com/ai-dynamo/dynamo)
+- [Dynamo Documentation](https://docs.nvidia.com/dynamo/latest/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I design distributed inference architectures for enterprises scaling LLM workloads. [Book a consultation](https://calendly.com/lucaberton/).

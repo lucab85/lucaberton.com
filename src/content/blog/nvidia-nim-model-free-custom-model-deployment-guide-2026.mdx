@@ -1,0 +1,403 @@
+---
+draft: false
+title: "How to Deploy Any Model with NVIDIA NIM: Model-Free and Custom Model Guide (2026)"
+snippet: "Deploy your own fine-tuned or custom model with NVIDIA NIM. Model-free NIM supports HuggingFace, NGC, S3, local paths, and air-gapped environments with one generic container."
+description: "Step-by-step guide to deploying custom and fine-tuned models with NVIDIA NIM. Model-free deployment from HuggingFace, NGC, S3, Google Cloud Storage, local directories, and air-gapped environments."
+image:
+  src: "/blog/thumbnails/nvidia-nim-model-free-custom-model-deployment-guide-2026.jpg"
+  alt: "NVIDIA NIM Model-Free Custom Model Deployment Guide 2026"
+publishDate: "2026-04-09"
+lastModified: "2026-04-09"
+author: "Luca Berton"
+category: "AI"
+tags: ["NVIDIA", "NIM", "Custom Model", "Fine-Tuning", "GPU", "LLM", "Inference", "vLLM"]
+---
+
+You fine-tuned a model. Now you need to serve it. NVIDIA NIM's model-free mode lets you deploy **any supported model** using a single generic container — no model-specific NIM image required.
+
+One container image passes security review. It serves Llama, Mistral, your fine-tuned variant, or any model with a vLLM-supported architecture. Point it at HuggingFace, S3, NGC, or a local directory.
+
+## When to Use Model-Free NIM
+
+| Scenario | Model-Free NIM | Model-Specific NIM |
+|----------|---------------|-------------------|
+| Fine-tuned custom model | ✅ Best choice | ❌ Not available |
+| Day-zero newly released model | ✅ Immediate | ❌ Wait for NVIDIA to publish |
+| One container for all models | ✅ Single image | ❌ Different image per model |
+| Pre-optimized TensorRT-LLM | ❌ vLLM only | ✅ May include TRT-LLM profiles |
+| NGC-curated profiles | ❌ Generic profiles | ✅ Pre-validated for specific hardware |
+
+**Key limitation**: Model-free NIM uses vLLM as the backend. If a model architecture is unsupported by vLLM, it will not work with model-free NIM either.
+
+## Step 1: Set Up the NIM Container Image
+
+Pull the generic NIM LLM container:
+
+```bash
+export NIM_LLM_IMAGE=nvcr.io/nim/nim-llm:latest
+
+docker pull $NIM_LLM_IMAGE
+```
+
+Create a local cache directory to avoid re-downloading models on restart:
+
+```bash
+export LOCAL_NIM_CACHE=~/.cache/nim
+mkdir -p $LOCAL_NIM_CACHE
+```
+
+## Step 2: Choose Your Model Source
+
+Model-free NIM supports six model sources:
+
+| Prefix | Source | Example | Authentication |
+|--------|--------|---------|---------------|
+| `hf://` | HuggingFace Hub | `hf://meta-llama/Llama-3.1-8B-Instruct` | `HF_TOKEN` |
+| `ngc://` | NVIDIA NGC | `ngc://nim/meta/llama-3.3-70b-instruct:hf` | `NGC_API_KEY` |
+| `s3://` | AWS S3 / S3-compatible | `s3://my-bucket/my-org/my-model` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+| `modelscope://` | ModelScope Hub | `modelscope://LLM-Research/Llama-3.2-1B-Instruct:d3e55134` | `MODELSCOPE_API_TOKEN` |
+| `gs://` | Google Cloud Storage | `gs://my-bucket/my-org/my-model` | `GOOGLE_APPLICATION_CREDENTIALS` |
+| `/absolute/path` | Local directory | `/mnt/models/my-fine-tuned-llama` | None |
+
+### HuggingFace (Most Common)
+
+```bash
+export MODEL=hf://meta-llama/Llama-3.1-8B-Instruct
+
+docker run --gpus=all \
+  -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \
+  -e HF_TOKEN=<your-token> \
+  -e NIM_MODEL_PATH=$MODEL \
+  -p 8000:8000 \
+  $NIM_LLM_IMAGE
+```
+
+### Your Fine-Tuned Model from S3
+
+```bash
+export MODEL=s3://my-bucket/ml-models/my-fine-tuned-llama-70b
+
+docker run --gpus=all \
+  -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \
+  -e NIM_MODEL_PATH=$MODEL \
+  -e AWS_ACCESS_KEY_ID=<your-key> \
+  -e AWS_SECRET_ACCESS_KEY=<your-secret> \
+  -e AWS_REGION=us-east-1 \
+  -p 8000:8000 \
+  $NIM_LLM_IMAGE
+```
+
+For S3-compatible storage (MinIO, Ceph):
+
+```bash
+docker run --gpus=all \
+  -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \
+  -e NIM_MODEL_PATH=s3://nim-models/my-model \
+  -e AWS_ACCESS_KEY_ID=<key> \
+  -e AWS_SECRET_ACCESS_KEY=<secret> \
+  -e AWS_ENDPOINT_URL=http://minio.internal:9000 \
+  -e AWS_S3_USE_PATH_STYLE=true \
+  -e AWS_REGION=us-east-1 \
+  -p 8000:8000 \
+  $NIM_LLM_IMAGE
+```
+
+### Local Directory (Pre-Downloaded)
+
+```bash
+export MODEL=/mnt/models/my-fine-tuned-llama
+
+docker run --gpus=all \
+  -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \
+  -v /mnt/models:/mnt/models \
+  -e NIM_MODEL_PATH=$MODEL \
+  -p 8000:8000 \
+  $NIM_LLM_IMAGE
+```
+
+No network access required. No credentials needed.
+
+### NGC Registry
+
+```bash
+export MODEL=ngc://nim/meta/llama-3.3-70b-instruct:hf
+
+docker run --gpus=all \
+  -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \
+  -e NIM_MODEL_PATH=$MODEL \
+  -e NGC_API_KEY=<your-key> \
+  -p 8000:8000 \
+  $NIM_LLM_IMAGE
+```
+
+## Step 3: Configure Model Profile
+
+Model-free NIM generates profiles at runtime for your model. List them first:
+
+```bash
+docker run --gpus=all \
+  -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \
+  -e HF_TOKEN=<token> \
+  -e NIM_MODEL_PATH=hf://meta-llama/Llama-3.1-8B-Instruct \
+  $NIM_LLM_IMAGE \
+  list-model-profiles
+```
+
+Output:
+
+```
+- Compatible with system and runnable:
+  - c214460d... (vllm-tp1-pp1-0bdd169f...) [requires >=13 GB/gpu]
+  - With LoRA support:
+    - 289b03eb... (vllm-tp1-pp1-feat_lora-0bdd169f...) [requires >=13 GB/gpu]
+```
+
+Two ways to select a profile:
+
+### Option A: Set NIM_MODEL_PROFILE
+
+```bash
+docker run --gpus=all \
+  -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \
+  -e HF_TOKEN=<token> \
+  -e NIM_MODEL_PROFILE=vllm-bf16-tp2-pp1 \
+  -e NIM_MODEL_PATH=hf://meta-llama/Llama-3.1-8B-Instruct \
+  -p 8000:8000 \
+  $NIM_LLM_IMAGE
+```
+
+### Option B: vLLM CLI Arguments (Takes Precedence)
+
+```bash
+docker run --gpus=all \
+  -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \
+  -e HF_TOKEN=<token> \
+  -p 8000:8000 \
+  $NIM_LLM_IMAGE \
+  hf://meta-llama/Llama-3.1-8B-Instruct \
+  --tensor-parallel-size 2
+```
+
+The vLLM positional argument (`hf://...`) can also replace `NIM_MODEL_PATH`. If both are provided, the CLI argument wins.
+
+For detailed profile selection mechanics, see the [NIM Model Profiles Guide](/blog/nvidia-nim-model-profiles-selection-guide-2026/).
+
+## Step 4: Test the Endpoint
+
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "meta-llama/Llama-3.1-8B-Instruct",
+    "messages": [{"role": "user", "content": "What is Kubernetes?"}],
+    "max_tokens": 256
+  }'
+```
+
+The endpoint is OpenAI-compatible. Any client that works with OpenAI's API works with NIM.
+
+## Step 5: Deploy on Kubernetes
+
+### Single Node with Helm
+
+```yaml
+# values.yaml
+image:
+  repository: nvcr.io/nim/nim-llm
+  tag: "latest"
+
+model:
+  modelPath: "hf://meta-llama/Llama-3.1-8B-Instruct"
+  hfTokenSecret: hf-token
+
+resources:
+  limits:
+    nvidia.com/gpu: 1
+  requests:
+    nvidia.com/gpu: 1
+
+persistence:
+  enabled: true
+  size: 50Gi
+  accessMode: ReadWriteOnce
+```
+
+```bash
+kubectl create secret generic hf-token --from-literal=HF_TOKEN=<your-token>
+helm install nim-llm nim-llm/ -f values.yaml
+```
+
+### Multi-Node with Custom Model
+
+For models that need multiple nodes, combine model-free with multi-node deployment:
+
+```yaml
+# values.yaml
+image:
+  repository: nvcr.io/nim/nim-llm
+  tag: "latest"
+
+model:
+  modelPath: "hf://meta-llama/Llama-3.1-405B-Instruct"
+  hfTokenSecret: hf-token
+  ngcAPISecret: ngc-api
+  jsonLogging: false  # Required for multi-node
+
+multiNode:
+  enabled: true
+  workers: 1
+  tensorParallelSize: 8
+  pipelineParallelSize: 2
+
+resources:
+  limits:
+    nvidia.com/gpu: 8
+  requests:
+    nvidia.com/gpu: 8
+
+persistence:
+  enabled: true
+  size: 500Gi
+  accessMode: ReadWriteMany
+  storageClass: <rwx-storage-class>
+```
+
+See the [NIM Multi-Node Deployment Guide](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/) for full details.
+
+## Air-Gapped Deployment
+
+Model-free NIM supports air-gapped environments in two ways:
+
+### Local Path (Simplest)
+
+Pre-stage the model and mount it:
+
+```bash
+# On a connected machine
+huggingface-cli download meta-llama/Llama-3.1-70B-Instruct \
+  --local-dir /mnt/models/llama-70b
+
+# Transfer to air-gapped environment, then run
+docker run --gpus=all \
+  -v /mnt/models:/mnt/models \
+  -e NIM_MODEL_PATH=/mnt/models/llama-70b \
+  -p 8000:8000 \
+  $NIM_LLM_IMAGE
+```
+
+No network access, no credentials, no manifest generation needed.
+
+### Cached Manifest (Remote URI Redeployment)
+
+If you first deployed with a remote URI, NIM caches the manifest:
+
+1. **First deploy** (network-connected): Run with credentials and remote URI. NIM downloads model, generates manifest, saves to `NIM_CACHE_PATH`
+
+2. **Transfer**: Move the cache volume to the air-gapped environment
+
+3. **Redeploy** (air-gapped): Mount the same cache. NIM finds the cached `nim_runtime_manifest.yaml` and skips regeneration. No credentials or network required
+
+To force manifest regeneration after an upstream model update, delete `nim_runtime_manifest.yaml` from the cache directory before restarting.
+
+## S3 Environment Variables Reference
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `AWS_ACCESS_KEY_ID` | Yes | AWS access key |
+| `AWS_SECRET_ACCESS_KEY` | Yes | AWS secret key |
+| `AWS_REGION` | Yes | AWS region (e.g., `us-east-1`) |
+| `AWS_ENDPOINT_URL` | S3-compatible only | Custom endpoint (MinIO, Ceph) |
+| `AWS_S3_USE_PATH_STYLE` | S3-compatible only | Set `true` for path-style endpoints |
+
+## Complete Workflow: Fine-Tuned Model to Production
+
+Here is the end-to-end process:
+
+```
+1. Fine-tune model (InstructLab, LoRA, full fine-tune)
+       │
+2. Upload to storage (S3, HuggingFace, NFS)
+       │
+3. List profiles: list-model-profiles
+       │
+4. Test locally: docker run with NIM_MODEL_PATH
+       │
+5. Deploy to Kubernetes: Helm chart with model.modelPath
+       │
+6. (Optional) Multi-node: Enable multiNode for large models
+       │
+7. Monitor: OpenAI-compatible health + metrics endpoints
+```
+
+### Example: Fine-Tuned Llama 70B from S3
+
+```bash
+# Step 1: Upload fine-tuned model to S3
+aws s3 sync ./my-fine-tuned-llama-70b s3://ml-models/llama-70b-ft-v2/
+
+# Step 2: List profiles
+docker run --gpus=all \
+  -e NIM_MODEL_PATH=s3://ml-models/llama-70b-ft-v2 \
+  -e AWS_ACCESS_KEY_ID=$AWS_KEY \
+  -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET \
+  -e AWS_REGION=us-east-1 \
+  $NIM_LLM_IMAGE list-model-profiles
+
+# Step 3: Deploy with TP=4 for 4× A100
+docker run --gpus=all \
+  -v "$LOCAL_NIM_CACHE:/opt/nim/.cache" \
+  -e NIM_MODEL_PATH=s3://ml-models/llama-70b-ft-v2 \
+  -e AWS_ACCESS_KEY_ID=$AWS_KEY \
+  -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET \
+  -e AWS_REGION=us-east-1 \
+  -p 8000:8000 \
+  $NIM_LLM_IMAGE \
+  --tensor-parallel-size 4
+
+# Step 4: Test
+curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"llama-70b-ft-v2","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+## Troubleshooting
+
+### "Architecture not supported"
+
+The model architecture must be supported by vLLM. Check the [vLLM supported models list](https://docs.vllm.ai/en/latest/models/supported_models.html).
+
+### Model download hangs
+
+- Verify credentials (`HF_TOKEN`, `NGC_API_KEY`, `AWS_*`)
+- Check network connectivity from the container
+- For large models, initial download can take 30+ minutes — check container logs for progress
+
+### Profile not found
+
+If `NIM_MODEL_PROFILE` does not match any generated profile:
+- Run `list-model-profiles` to see available profiles
+- Use vLLM CLI arguments instead: `--tensor-parallel-size N`
+
+### Cache issues after model update
+
+Delete the cached manifest to force regeneration:
+
+```bash
+rm $LOCAL_NIM_CACHE/nim_runtime_manifest.yaml
+```
+
+## Related Resources
+
+- [NIM Model Profiles Guide](/blog/nvidia-nim-model-profiles-selection-guide-2026/)
+- [NIM Multi-Node Deployment on Kubernetes](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/)
+- [NIM Multinode Inference (Docker)](/blog/nvidia-nim-multinode-inference-large-models-2026/)
+- [Run:ai Distributed Inference Tutorial](/blog/nvidia-run-ai-nim-distributed-inference-tutorial-2026/)
+- [On-Premises LLM Deployment](/blog/enterprise-llm-deployment-patterns-on-premises-2026/)
+- [NVIDIA GPU Operator on Kubernetes](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [InstructLab Fine-Tuning Guide](/blog/instructlab-fine-tuning-guide-rhel-ai-2026/)
+- [RHEL AI Tutorial](/blog/rhel-ai-tutorial-complete-beginners-guide-2026/)
+- [Official Docs: Model-Free NIM](https://docs.nvidia.com/nim/large-language-models/latest/deployment/model-free-nim.html)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I help enterprises deploy custom and fine-tuned models into production with NVIDIA NIM. [Book a consultation](https://calendly.com/lucaberton/).

@@ -1,0 +1,226 @@
+---
+draft: false
+title: "Run:ai Topology-Aware Scheduling: How to Place GPU Workloads on the Right Nodes (2026)"
+snippet: "Run:ai topology-aware scheduling places distributed workloads on nodes that are close in the network hierarchy. Configure topology labels, preferred vs required placement, and LeaderWorkerSet behavior."
+description: "Complete guide to NVIDIA Run:ai topology-aware scheduling. Configure network topology from node labels, automatic and fine-tuned placement for distributed GPU workloads, LeaderWorkerSet per-replica scheduling, and pod affinity comparison."
+image:
+  src: "/blog/thumbnails/nvidia-run-ai-topology-aware-scheduling-gpu-placement-2026.jpg"
+  alt: "NVIDIA Run:ai Topology-Aware Scheduling GPU Placement 2026"
+publishDate: "2026-04-10"
+lastModified: "2026-04-10"
+author: "Luca Berton"
+category: "AI"
+tags: ["NVIDIA", "Run:ai", "Topology", "Scheduling", "Kubernetes", "GPU", "Distributed Training", "Inference"]
+---
+
+When a distributed workload spans multiple nodes, where those nodes sit in the network determines performance. Pods in the same rack communicate over high-speed switches. Pods across racks hit bandwidth bottlenecks. Pods across zones add milliseconds of latency that compound across thousands of gradient synchronization steps.
+
+NVIDIA Run:ai's topology-aware scheduling solves this by using knowledge of your cluster's physical network layout to place workload pods on nodes that minimize communication overhead.
+
+## Why Topology Matters
+
+A modern GPU cluster has a hierarchy:
+
+```
+Region (eu-west)
+└── Zone (eu-west-1a)
+    └── Block (block-3)
+        └── Rack (rack-42)
+            └── Node (gpu-node-07)
+                └── GPU (NVLink domain)
+```
+
+Each level has different bandwidth and latency characteristics:
+
+| Level | Interconnect | Bandwidth | Latency |
+|-------|-------------|-----------|---------|
+| Same NVLink domain | NVLink | 900 GB/s (NVL72) | Nanoseconds |
+| Same rack | InfiniBand HDR/NDR | 200-400 Gb/s | Microseconds |
+| Same block | Spine switch | 100-400 Gb/s | Low milliseconds |
+| Cross-rack | Leaf-spine fabric | Shared | Higher milliseconds |
+| Cross-zone | WAN or provider fabric | Variable | Significant |
+
+A workload placed entirely within one rack gets 10-100x better inter-node bandwidth than one scattered across racks. For distributed training with all-reduce operations or [disaggregated inference with NIXL transfers](/blog/nvidia-dynamo-inference-framework-distributed-serving-2026/), this difference is enormous.
+
+## How It Works
+
+### 1. Label Your Nodes
+
+Topology-aware scheduling relies on Kubernetes node labels that describe physical location. These can be:
+
+- **Manual**: Apply labels with `kubectl`
+- **Automatic (cloud)**: Cloud providers often set zone/region labels automatically
+- **Discovery tools**: [NVIDIA Topograph](https://github.com/NVIDIA/topograph) can detect topology from hardware, optionally integrating with NVIDIA NetQ for on-prem environments
+
+```bash
+# Manual labeling example
+kubectl label node gpu-node-01 \
+  topology.kubernetes.io/region=eu-west \
+  topology.kubernetes.io/zone=eu-west-1a \
+  cloud.provider.com/topology-block=block-3 \
+  cloud.provider.com/topology-rack=rack-42
+```
+
+### 2. Define Network Topology in Run:ai
+
+Create a topology that maps label keys from farthest to closest:
+
+```json
+{
+  "levels": [
+    "topology.kubernetes.io/region",
+    "topology.kubernetes.io/zone",
+    "cloud.provider.com/topology-block",
+    "cloud.provider.com/topology-rack",
+    "kubernetes.io/hostname"
+  ],
+  "name": "default-topology",
+  "clusterId": "<CLUSTER_ID>"
+}
+```
+
+**Order matters**: First label = farthest (region), last label = closest (hostname).
+
+### 3. Attach Topology to Node Pools
+
+- **Single node pool**: Attach topology to the default pool
+- **Multiple pools with same topology**: Link the same topology to all pools
+- **Different hardware, different topology**: Each pool gets its own topology definition
+
+### 4. Automatic Scheduling
+
+Once configured, distributed workloads **automatically** get topology-aware placement. No annotations needed. Run:ai applies a **Preferred** constraint at the lowest topology level and escalates upward if placement is not possible:
+
+```
+Try: Same hostname → Same rack → Same block → Same zone → Same region
+```
+
+## Fine-Tuning Placement per Workload
+
+Override the automatic behavior with annotations:
+
+### Preferred (Soft Constraint)
+
+Best-effort co-location. Scheduler tries the specified level but relaxes if needed:
+
+```yaml
+metadata:
+  annotations:
+    kai.scheduler/topology: "default-topology"
+    kai.scheduler/topology-preferred-placement: "cloud.provider.com/topology-rack"
+```
+
+### Required (Hard Constraint)
+
+Strict placement. All pods must be in the same topology level or the workload waits:
+
+```yaml
+metadata:
+  annotations:
+    kai.scheduler/topology: "default-topology"
+    kai.scheduler/topology-required-placement: "topology.kubernetes.io/zone"
+```
+
+### Combined (Required + Preferred)
+
+Enforce a broad constraint while preferring a tighter one:
+
+```yaml
+metadata:
+  annotations:
+    kai.scheduler/topology: "default-topology"
+    kai.scheduler/topology-required-placement: "topology.kubernetes.io/zone"
+    kai.scheduler/topology-preferred-placement: "cloud.provider.com/topology-rack"
+```
+
+This means: all pods **must** be in the same zone, and the scheduler **tries** to put them in the same rack within that zone.
+
+**Important**: A Preferred constraint at the same level or higher than Required has no effect. Preferred only works at a **lower** (more specific) level.
+
+## LeaderWorkerSet Behavior
+
+For [LeaderWorkerSet workloads](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/) (used by NIM multi-node, Dynamo), topology-aware scheduling is applied **per replica**:
+
+```yaml
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  annotations:
+    kai.scheduler/topology: "cluster-topology"
+    kai.scheduler/topology-required-placement: "cloud.provider.com/topology-block"
+    kai.scheduler/topology-preferred-placement: "cloud.provider.com/topology-rack"
+  labels:
+    runai/queue: production
+  namespace: runai-production
+  name: llm-inference
+spec:
+  replicas: 2
+  leaderWorkerTemplate:
+    size: 2
+```
+
+Each replica (leader + workers) is:
+1. **Gang scheduled** — all pods in a replica launch together
+2. **Topology constrained** — leader and worker pods land on the same rack/block
+
+With 2 replicas of size 2, you get 4 pods total. Each pair of 2 is co-located, but the two replicas may be on different racks.
+
+## Pod Affinity vs Topology-Aware Scheduling
+
+Standard Kubernetes pod affinity has a fundamental flaw for distributed workloads: it places pods **one by one**, checking closeness to already-placed pods without seeing the full picture.
+
+**Example**: Two racks, some nodes already occupied. A workload needs 6 nodes.
+
+| Approach | Result |
+|----------|--------|
+| **Pod Affinity** | Starts placing in Rack A, runs out of space, splits to Rack B. Cross-rack communication. |
+| **Topology-Aware** | Evaluates full 6-node requirement upfront, finds Rack A has enough space, places all 6 together. |
+
+Topology-aware scheduling evaluates the **entire workload** against available resources before making any placement decision. Pod affinity is greedy and local.
+
+## Practical Recommendations
+
+### For Distributed Training
+
+```yaml
+# Strict same-rack, all GPUs need high-bandwidth all-reduce
+annotations:
+  kai.scheduler/topology: "cluster-topology"
+  kai.scheduler/topology-required-placement: "cloud.provider.com/topology-rack"
+```
+
+### For Disaggregated Inference (Dynamo)
+
+```yaml
+# Same zone required, same rack preferred
+# Prefill and decode need fast NIXL transfers but can tolerate rack-level latency
+annotations:
+  kai.scheduler/topology: "cluster-topology"
+  kai.scheduler/topology-required-placement: "topology.kubernetes.io/zone"
+  kai.scheduler/topology-preferred-placement: "cloud.provider.com/topology-rack"
+```
+
+### For GB200 NVL72
+
+For multi-node NVLink domains, see the [GB200 and Multi-Node NVLink guide](https://run-ai-docs.nvidia.com/self-hosted/platform-management/aiinitiatives/resources/using-gb200). The topology must reflect NVLink domain boundaries.
+
+## Known Limitations
+
+- Detaching a topology from a node pool does not affect running workloads (they continue using it)
+- Deleting a topology while workloads reference it: running workloads continue, but suspended/unbound workloads become **unschedulable** (Pending)
+- Submitting a workload to **multiple node pools with different topologies** is not supported — workloads will fail or remain pending
+
+## Related Resources
+
+- [Run:ai + Dynamo Integration](/blog/nvidia-run-ai-dynamo-gang-scheduling-topology-aware-inference-2026/)
+- [NVIDIA Dynamo Framework](/blog/nvidia-dynamo-inference-framework-distributed-serving-2026/)
+- [Run:ai Distributed Inference Platform](/blog/nvidia-run-ai-distributed-inference-platform-2026/)
+- [NIM Multi-Node Deployment on K8s](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/)
+- [NVIDIA GPU Operator on Kubernetes](/blog/nvidia-gpu-operator-kubernetes-ai-ml/)
+- [Multi-Tenant GPUs on Bare Metal](/blog/kubecon-europe-2026-multi-tenant-gpus-bare-metal-talk/)
+- [NVIDIA Topograph (GitHub)](https://github.com/NVIDIA/topograph)
+- [Official Docs: Topology-Aware Scheduling](https://run-ai-docs.nvidia.com/self-hosted/platform-management/aiinitiatives/resources/topology-aware-scheduling)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I design GPU cluster topologies and scheduling strategies for distributed AI workloads. [Book a consultation](https://calendly.com/lucaberton/).

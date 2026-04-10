@@ -79,27 +79,29 @@ export default defineConfig({
         // Include all other pages
         return true;
       },
-      // Custom serialization to ensure all URLs are canonical (https, no www, with trailing slash)
+      // Custom serialization to ensure all URLs are canonical with lastmod
       serialize: (item) => {
-        // Normalize the URL to canonical form
         let url = item.url;
-        
-        // Replace http with https
         url = url.replace(/^http:\/\//, 'https://');
-        
-        // Remove www prefix
         url = url.replace('://www.', '://');
+        if (!url.endsWith('/')) url = url + '/';
         
-        // Ensure trailing slash for all URLs
-        if (!url.endsWith('/')) {
-          url = url + '/';
-        }
+        // Set lastmod to today for all pages (build date = freshness signal)
+        const now = new Date().toISOString();
+        
+        // Set priority based on URL depth
+        let priority = 0.5;
+        if (url === 'https://lucaberton.com/') priority = 1.0;
+        else if (url.match(/\/blog\/[^/]+\/$/)) priority = 0.8;
+        else if (url.match(/\/(about|services|contact|kubecon|book-signing|talk)\//)) priority = 0.9;
+        else if (url.match(/\/blog\/\d+\//)) priority = 0.3; // pagination
+        else if (url.match(/\/blog\/categories\//)) priority = 0.4;
         
         return {
           url: url,
-          lastmod: item.lastmod,
-          changefreq: item.changefreq,
-          priority: item.priority
+          lastmod: item.lastmod || now,
+          changefreq: priority >= 0.8 ? 'weekly' : 'monthly',
+          priority: priority
         };
       }
     }),

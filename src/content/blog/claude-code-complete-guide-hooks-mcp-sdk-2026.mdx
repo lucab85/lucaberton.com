@@ -1,0 +1,254 @@
+---
+draft: false
+title: "Claude Code: The Complete Guide to AI-Powered Development with Hooks, MCP, and the SDK"
+snippet: "Deep dive into Claude Code — the AI coding assistant built on tool use. Covers context management, Plan and Thinking modes, custom commands, MCP server integration, hooks for automated guardrails, the SDK for pipeline integration, and GitHub Actions CI/CD."
+description: "Comprehensive guide to Claude Code covering how tool use works under the hood, context management with Claude.md files, Plan and Thinking modes, custom slash commands, MCP server integration for browser automation, hooks for pre and post tool-use guardrails, the TypeScript and Python SDK, and GitHub Actions integration for automated PR reviews."
+image:
+  src: "/blog/thumbnails/claude-code-complete-guide-hooks-mcp-sdk-2026.jpg"
+  alt: "Claude Code Complete Guide Hooks MCP SDK 2026"
+publishDate: "2026-04-10"
+lastModified: "2026-04-10"
+author: "Luca Berton"
+category: "AI"
+tags: ["Claude Code", "Anthropic", "AI", "Developer Tools", "MCP", "Coding Assistant", "Hooks", "SDK"]
+---
+
+Claude Code is not just another AI coding assistant. It is a tool-use engine that can read files, run commands, control browsers, review pull requests, and integrate into your CI/CD pipeline. Here is everything you need to know to use it effectively.
+
+## How Claude Code Actually Works
+
+Every AI coding assistant follows the same core process:
+
+1. **Receives a task** — fix a bug, implement a feature, analyze data
+2. **Gathers context** — reads files, understands the codebase structure
+3. **Formulates a plan** — determines what needs to change
+4. **Takes action** — updates files, runs tests, verifies the result
+
+The key limitation is that language models only process text input and output. They cannot directly read files, run commands, or interact with external systems. This is where **tool use** comes in.
+
+### The Tool Use System
+
+Claude Code uses a structured system where:
+
+- The assistant appends instructions specifying how to request actions
+- The language model responds with formatted action requests (e.g., "read file: filename")
+- Claude Code executes the actual action and returns the result
+- The language model processes the result and continues
+
+Claude's advantage over other models is superior tool use capabilities — it is better at understanding tool functions and combining them for complex multi-step tasks. This directly impacts coding assistant effectiveness because every non-trivial task requires chaining multiple tools together.
+
+## Context Management: The Make-or-Break Factor
+
+Too much irrelevant context decreases performance. Too little context means Claude misses important details. Getting this right is critical.
+
+### Claude.md Files
+
+The `/init` command analyzes your entire codebase and creates a `Claude.md` file with a project summary, architecture overview, and key file references. This file is included in every request.
+
+Three levels of Claude.md files:
+
+- **Project level** — shared with your team, committed to source control
+- **Local level** — personal instructions, not committed (`.claude/settings.local.json`)
+- **Machine level** — global instructions applied to all projects
+
+### The @ Symbol
+
+Use `@filename` to mention specific files in your requests. This provides targeted context instead of forcing Claude to search the codebase. For critical files like database schemas, reference them in Claude.md so they are always available.
+
+### Memory Mode
+
+Type `#` followed by a natural language instruction to edit Claude.md files. For example: `# Always run tests after modifying API endpoints`. This builds up institutional knowledge over time.
+
+## Plan Mode and Thinking Mode
+
+Two modes that boost Claude's performance on complex tasks:
+
+### Plan Mode (Shift + Tab twice)
+
+Makes Claude research more files and create a detailed implementation plan before executing. This handles **breadth** — useful for multi-step tasks that require understanding across the codebase.
+
+### Thinking Mode ("Ultra think")
+
+Gives Claude an extended reasoning budget for complex logic. This handles **depth** — useful for tricky debugging, intricate algorithms, or subtle architectural decisions.
+
+You can combine both modes for complex tasks. Both consume additional tokens, so use them intentionally.
+
+## Custom Commands
+
+Create reusable automation commands accessible via `/commandname`:
+
+1. Create a `.claude/commands/` folder in your project
+2. Add markdown files — the filename becomes the command name
+3. Write instructions for Claude to follow when the command is invoked
+4. Use `$arguments` as a placeholder for runtime parameters
+5. Restart Claude Code to activate
+
+Example: `.claude/commands/audit.md` creates the `/audit` command. Run it with `/audit src/api/` to audit a specific directory.
+
+Use cases include dependency auditing, test generation, security scans, and code style enforcement.
+
+## MCP Servers: Extending Claude's Capabilities
+
+MCP (Model Context Protocol) servers are external tools that give Claude new capabilities beyond file editing and command execution.
+
+### Adding an MCP Server
+
+```bash
+claude mcp add playwright npx @anthropic/mcp-playwright
+```
+
+This adds the Playwright MCP server, enabling Claude to control a browser — navigate pages, take screenshots, click elements, and fill forms.
+
+### Permission Management
+
+Initial tool usage requires approval. Auto-approve specific MCP tools by adding them to your `settings.local.json` allow array:
+
+```json
+{
+  "allowTools": ["MCP__playwright"]
+}
+```
+
+### Practical Example
+
+Claude used Playwright to:
+1. Navigate to `localhost:3000`
+2. Take a screenshot of a UI component
+3. Analyze styling quality
+4. Update generation prompts based on visual feedback
+5. Iterate until the design met quality standards
+
+This transforms Claude from a code editor into a full development automation tool.
+
+## Hooks: Automated Guardrails
+
+Hooks are commands that run before or after Claude executes tools. They are the mechanism for enforcing rules, catching errors, and providing automated feedback.
+
+### Hook Types
+
+- **Pre-tool use hooks** — run before tool execution, can inspect and **block** operations
+- **Post-tool use hooks** — run after tool execution, provide feedback but cannot block
+
+### Configuration
+
+Add hooks to your Claude settings file:
+
+```json
+{
+  "hooks": {
+    "preToolUse": [
+      {
+        "matcher": "read|grep",
+        "command": "node ./hooks/read_hook.js"
+      }
+    ],
+    "postToolUse": [
+      {
+        "matcher": "edit",
+        "command": "node ./hooks/type_check.js"
+      }
+    ]
+  }
+}
+```
+
+### Example: Blocking Sensitive File Access
+
+Prevent Claude from reading `.env` files:
+
+```javascript
+// hooks/read_hook.js
+const stdin = await readStdin();
+const data = JSON.parse(stdin);
+
+if (data.tool_input?.path?.includes('.env')) {
+  console.error('Blocked: cannot read .env files');
+  process.exit(2); // Exit code 2 = block
+}
+
+process.exit(0); // Exit code 0 = allow
+```
+
+Exit codes:
+- **0** — allow the tool call to proceed
+- **2** — block the tool call (pre-tool use only), stderr output sent as feedback to Claude
+
+### Practical Hooks for Production
+
+**TypeScript Type Checker Hook**: Run `tsc --no-emit` after file edits. When Claude changes a function signature but misses call sites, the hook catches type errors and feeds them back for automatic correction.
+
+**Duplicate Code Prevention Hook**: Monitor critical directories (like `queries/`) for new additions. Launch a separate Claude instance via the SDK to compare against existing code. If duplicates are found, block and redirect Claude to reuse existing implementations.
+
+Both patterns use post-tool-use hooks to create automated feedback loops that catch common weaknesses.
+
+## The Claude Code SDK
+
+The SDK provides a programmatic interface for integrating Claude Code into larger pipelines and workflows. Available as CLI, TypeScript, and Python libraries.
+
+Key characteristics:
+
+- **Default permissions are read-only** — files, directories, grep operations
+- **Write permissions must be explicitly enabled** via `options.allowTools` or settings files
+- **Output is conversational** — shows the full message exchange with the final response as the last message
+
+Best suited for helper commands, scripts, hooks within existing projects, and CI/CD integration.
+
+## GitHub Actions Integration
+
+Claude Code has an official GitHub integration that runs inside GitHub Actions:
+
+### Setup
+
+1. Run `/install GitHub app` in Claude Code
+2. Install the Claude Code app on your GitHub repository
+3. Add your API key
+4. An auto-generated pull request adds two GitHub Actions workflows
+
+### Default Actions
+
+- **Mention support** — `@claude` in issues and PRs to assign tasks
+- **PR review** — automatic code review on new pull requests
+
+### Advanced: MCP in CI/CD
+
+You can integrate MCP servers into GitHub Actions. For example, adding Playwright enables Claude to:
+- Start a development server
+- Visit the app in a browser
+- Test functionality visually
+- Create checklists for verification
+- Verify fixes before approving PRs
+
+All permissions must be explicitly listed — there are no shortcuts for MCP server tools in Actions.
+
+## Context Control: Staying on Track
+
+Long conversations accumulate noise. Use these techniques to stay focused:
+
+| Command | Effect | When to Use |
+|---|---|---|
+| **Escape** | Stop current response | Redirect mid-output |
+| **Escape + #** | Stop and add memory | Prevent repeated mistakes |
+| **Double Escape** | Rewind conversation | Skip irrelevant debugging history |
+| **Compact** | Summarize history | Long conversations with accumulated clutter |
+| **Clear** | Delete all history | Switching to unrelated tasks |
+
+The **Compact** command is particularly powerful — it summarizes the entire conversation while preserving Claude's learned knowledge about the current task.
+
+## My Take
+
+Claude Code represents a shift from "AI that writes code" to "AI that participates in the full development lifecycle." The combination of tool use, MCP servers, hooks, and the SDK creates a system that can be shaped to fit any team's workflow.
+
+The hooks system is where it gets really interesting for enterprises. Being able to enforce security policies (block sensitive file access), maintain code quality (type checking), and prevent technical debt (duplicate detection) — all automatically, without relying on developer discipline — is a significant operational improvement.
+
+For teams already running [AI workloads on Kubernetes](/blog/ai-kubernetes-production-first-90-days/) and building [agentic workflows](/blog/zenml-kitaru-kubecon-europe-2026-durable-ai-agents/), Claude Code's extensibility model through MCP and hooks maps well to the [Agent Client Protocol](/blog/agent-client-protocol-acp-standardizing-ai-coding-agents-2026/) vision of composable, interoperable AI tooling.
+
+## Related Posts
+
+- [Agent Client Protocol (ACP): The LSP Moment for AI Coding Agents](/blog/agent-client-protocol-acp-standardizing-ai-coding-agents-2026/)
+- [ZenML and Kitaru: Building Durable AI Agents](/blog/zenml-kitaru-kubecon-europe-2026-durable-ai-agents/)
+- [Clemens Scholz: AI as Your Second Brain](/blog/clemens-scholz-kubecon-2026-ai-second-brain-digital-companion/)
+- [Qodo at KubeCon EU 2026: AI Code Reviews](/blog/qodo-community-meetup-kubecon-amsterdam-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I help enterprises integrate AI tools into their development workflows for measurable productivity gains. [Book a consultation](https://calendly.com/lucaberton/).

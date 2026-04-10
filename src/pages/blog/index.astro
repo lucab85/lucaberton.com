@@ -2,7 +2,7 @@
 import { getCollection } from "astro:content";
 import Layout from "@layouts/Layout.astro";
 import Container from "@components/container.astro";
-import BlogSearch from "@components/BlogSearch.astro";
+
 import Pagination from "@components/Pagination.astro";
 import Breadcrumb from "@components/Breadcrumb.astro";
 import { Picture } from "astro:assets";
@@ -54,13 +54,26 @@ const topTags = [...tagMap.entries()]
       </p>
     </div>
 
-    <!-- Search + navigation -->
-    <div class="mt-10 flex flex-col sm:flex-row items-center justify-between gap-4">
-      <BlogSearch />
-      <div class="flex gap-4">
-        <a href="/blog/search/" class="text-blue-600 hover:text-blue-800 font-medium text-sm">🔍 Search</a>
-        <a href="/blog/categories/" class="text-blue-600 hover:text-blue-800 font-medium text-sm">📂 Categories</a>
+    <!-- Instant search -->
+    <div class="mt-10 max-w-2xl mx-auto">
+      <div class="relative">
+        <input
+          type="text"
+          id="blog-instant-search"
+          placeholder="Search 800+ articles by keyword, topic, or technology..."
+          class="w-full px-5 py-4 pl-14 rounded-2xl border-2 border-gray-200 focus:border-blue-500 focus:ring-4 focus:ring-blue-100 outline-none transition text-lg"
+          autocomplete="off"
+        />
+        <svg class="absolute left-5 top-1/2 -translate-y-1/2 w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+        </svg>
+        <kbd class="absolute right-5 top-1/2 -translate-y-1/2 hidden sm:inline-block px-2 py-1 text-xs text-gray-400 bg-gray-100 rounded border border-gray-200">/</kbd>
       </div>
+      <div id="instant-results" class="hidden mt-4 bg-white border border-gray-200 rounded-xl shadow-xl max-h-[70vh] overflow-y-auto z-50 relative"></div>
+    </div>
+    <div class="mt-4 flex gap-4 justify-center">
+      <a href="/blog/search/" class="text-blue-600 hover:text-blue-800 font-medium text-sm">🔍 Advanced Search</a>
+      <a href="/blog/categories/" class="text-blue-600 hover:text-blue-800 font-medium text-sm">📂 Categories</a>
     </div>
 
     <!-- Category filter pills -->
@@ -187,7 +200,53 @@ const topTags = [...tagMap.entries()]
   </Container>
 </Layout>
 
+<script define:vars={{ searchData: sortedPosts.map(p => ({ s: p.slug, t: p.data.title, n: p.data.snippet, c: p.data.category, g: (p.data.tags || []).join(' '), i: p.data.image?.src || '', d: p.data.publishDate.toDateString() })) }}>
+  const input = document.getElementById('blog-instant-search');
+  const resultsDiv = document.getElementById('instant-results');
+  if (input && resultsDiv) {
+    // "/" keyboard shortcut
+    document.addEventListener('keydown', (e) => {
+      if (e.key === '/' && document.activeElement !== input && !['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)) {
+        e.preventDefault();
+        input.focus();
+      }
+      if (e.key === 'Escape') {
+        resultsDiv.classList.add('hidden');
+        input.blur();
+      }
+    });
+    let timer;
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const q = input.value.trim().toLowerCase();
+        if (q.length < 2) { resultsDiv.classList.add('hidden'); return; }
+        const words = q.split(/\s+/);
+        const hits = searchData.filter(p => {
+          const hay = (p.t + ' ' + p.n + ' ' + p.c + ' ' + p.g).toLowerCase();
+          return words.every(w => hay.includes(w));
+        }).slice(0, 15);
+        if (hits.length === 0) {
+          resultsDiv.innerHTML = '<div class="p-6 text-center text-gray-500">No results found. Try different keywords.</div>';
+        } else {
+          resultsDiv.innerHTML = hits.map(p => `<a href="/blog/${p.s}/" class="flex items-start gap-4 p-4 hover:bg-blue-50 transition border-b border-gray-100 last:border-0"><img src="${p.i}" alt="" class="w-20 h-14 rounded object-cover flex-shrink-0" loading="lazy"/><div class="min-w-0"><div class="font-semibold text-sm leading-tight line-clamp-1">${esc(p.t)}</div><div class="text-xs text-gray-500 mt-1 line-clamp-1">${esc(p.n)}</div><div class="text-xs text-gray-400 mt-1"><span class="text-blue-500">${esc(p.c)}</span> · ${p.d}</div></div></a>`).join('') + `<div class="p-3 text-center border-t"><a href="/blog/search/?q=${encodeURIComponent(input.value)}" class="text-blue-600 text-sm font-medium hover:underline">See all results →</a></div>`;
+        }
+        resultsDiv.classList.remove('hidden');
+      }, 150);
+    });
+    input.addEventListener('focus', () => { if (input.value.trim().length >= 2) resultsDiv.classList.remove('hidden'); });
+    document.addEventListener('click', (e) => { if (!e.target.closest('#blog-instant-search') && !e.target.closest('#instant-results')) resultsDiv.classList.add('hidden'); });
+    function esc(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
+  }
+</script>
+
 <style>
+  .line-clamp-1 {
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
   .line-clamp-2 {
     display: -webkit-box;
     -webkit-line-clamp: 2;

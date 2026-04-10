@@ -2,7 +2,6 @@ import { defineConfig } from "astro/config";
 import tailwindcss from "@tailwindcss/vite";
 import mdx from "@astrojs/mdx";
 import sitemap from "@astrojs/sitemap";
-import sitemapLastmod from "./src/integrations/sitemap-lastmod.mjs";
 import icon from "astro-icon";
 import react from '@astrojs/react';
 import partytown from "@astrojs/partytown"; // Corrected import
@@ -15,7 +14,6 @@ export default defineConfig({
   integrations: [
     mdx(),
     react(),
-    sitemapLastmod(),
     sitemap({
       // Filter out redirect pages and problematic URLs
       filter: (page) => {
@@ -88,24 +86,22 @@ export default defineConfig({
         url = url.replace('://www.', '://');
         if (!url.endsWith('/')) url = url + '/';
         
-        // Look up lastmod from blog frontmatter
-        const dateMap = globalThis.__sitemapDateMap || new Map();
-        const slug = url.match(/\/blog\/([^/]+)\/$/)?.[1];
-        const lastmod = (slug && dateMap.get(slug)) || new Date().toISOString();
+        const now = new Date().toISOString();
         
         let priority = 0.5;
         if (url === 'https://lucaberton.com/') priority = 1.0;
-        else if (slug && !slug.match(/^\d+$/)) priority = 0.8; // blog posts
+        else if (url.match(/\/blog\/[^/]+\//) && !url.match(/\/blog\/\d+\//)) priority = 0.8;
         else if (url.match(/\/(about|services|contact|kubecon|book-signing|talk)\//)) priority = 0.9;
         else if (url.match(/\/blog\/\d+\//)) priority = 0.3;
         else if (url.match(/\/blog\/categories\//)) priority = 0.4;
         
         return {
           url,
-          lastmod,
+          lastmod: now,
           changefreq: priority >= 0.8 ? 'weekly' : 'monthly',
           priority
         };
+      };
       }
     }),
     icon(),

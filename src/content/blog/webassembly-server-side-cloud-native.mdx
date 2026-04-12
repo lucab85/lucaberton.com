@@ -18,9 +18,148 @@ image:
   src: "/blog/thumbnails/webassembly-server-side-cloud-native.jpg"
   alt: "WebAssembly Server-Side Cloud Native Future"
 ---
+WebAssembly (Wasm) is escaping the browser. Server-side Wasm is emerging as a lightweight alternative to containers for specific cloud-native workloads — offering faster startup, smaller footprint, and stronger sandboxing.
 
-## Related Articles
+## Why Wasm on the Server
 
-- [OpenTelemetry on Kubernetes: The 2026 Observability Stack](/blog/opentelemetry-kubernetes-observability-2026/)
-- [The Recipe Mindset: From Dev Patterns to Strategy](/blog/kubernetes-recipes-mindset-cto-platform-strategy/)
-- [KubeCon Europe 2026 Leaders: The People Shaping Cloud Native](/blog/kubecon-europe-2026-leaders-cloud-native/)
+### Containers vs Wasm
+
+| Dimension | Container (Docker) | Wasm (wasmtime/wasmedge) |
+|-----------|-------------------|-------------------------|
+| Cold start | 500ms - 5s | 1-10ms |
+| Image size | 50MB - 2GB | 1-50MB |
+| Memory overhead | 50-200MB | 1-50MB |
+| Isolation | Linux namespaces | Capability-based sandbox |
+| Portability | Linux only (native) | Any OS, any architecture |
+| Language support | Any language | Rust, C/C++, Go, JS, Python |
+| Security model | Root by default | Deny by default |
+
+### When Wasm Makes Sense
+
+- **Edge functions**: Sub-millisecond cold starts for serverless edge
+- **Plugin systems**: Safe execution of untrusted user code
+- **Sidecar proxies**: Envoy/Istio WASM filters for custom networking logic
+- **Embedded functions**: UDFs in databases, stream processors
+- **Lightweight microservices**: Services that do not need full OS capabilities
+
+### When Containers Are Still Better
+
+- **Complex applications**: Full OS, filesystem, networking
+- **GPU workloads**: Wasm has no GPU access (yet)
+- **Existing ecosystems**: Most tools assume containers
+- **Database servers**: Need direct disk, network, and memory access
+
+## Wasm on Kubernetes
+
+### SpinKube: Wasm-Native Kubernetes
+
+SpinKube (formerly Fermyon) brings Wasm workloads to Kubernetes as a first-class citizen:
+
+```yaml
+apiVersion: core.spinoperator.dev/v1alpha1
+kind: SpinApp
+metadata:
+  name: hello-wasm
+spec:
+  image: "ghcr.io/my-org/hello-wasm:v1"
+  replicas: 3
+  executor: containerd-shim-spin
+```
+
+### runwasi: Container Runtime for Wasm
+
+runwasi enables containerd to run Wasm workloads alongside containers:
+
+```toml
+# containerd config
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.spin]
+  runtime_type = "io.containerd.spin.v2"
+
+[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.wasmtime]
+  runtime_type = "io.containerd.wasmtime.v2"
+```
+
+### Mixed Workloads
+
+Run containers and Wasm side by side:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mixed-workload
+spec:
+  runtimeClassName: wasmtime  # For Wasm containers
+  containers:
+    - name: wasm-app
+      image: ghcr.io/my-org/wasm-app:v1
+    
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: traditional-app
+spec:
+  containers:  # Normal container runtime
+    - name: api
+      image: ghcr.io/my-org/api:v1
+```
+
+## Building Wasm Applications
+
+### Rust (Best Wasm Support)
+
+```rust
+use spin_sdk::http::{IntoResponse, Request, Response};
+use spin_sdk::http_component;
+
+#[http_component]
+fn handle_request(req: Request) -> anyhow::Result<impl IntoResponse> {
+    Ok(Response::builder()
+        .status(200)
+        .header("content-type", "application/json")
+        .body(r#"{"message": "Hello from Wasm!"}"#)
+        .build())
+}
+```
+
+### Go (TinyGo)
+
+```go
+package main
+
+import (
+    "net/http"
+    "github.com/http-wasm/http-wasm-guest-tinygo/handler"
+)
+
+func main() {
+    handler.HandleRequestFn = handleRequest
+}
+
+func handleRequest(req http.Request, resp http.ResponseWriter) {
+    resp.Header().Set("Content-Type", "application/json")
+    resp.Write([]byte(`{"message": "Hello from Wasm!"}`))
+}
+```
+
+## The WASI Standard
+
+WebAssembly System Interface (WASI) is what makes server-side Wasm possible:
+
+- **WASI Preview 1**: Basic filesystem, environment variables, clocks
+- **WASI Preview 2**: Component model, HTTP, sockets, key-value stores
+- **WASI Preview 3** (upcoming): Async I/O, threading, GPU access
+
+## Production Use Cases
+
+1. **Shopify Functions**: Custom discount and shipping logic runs as Wasm
+2. **Cloudflare Workers**: Edge compute platform built on V8 isolates and Wasm
+3. **Fastly Compute**: Wasm-native edge platform
+4. **Envoy WASM filters**: Custom proxy logic in Istio service mesh
+5. **Database UDFs**: SingleStore, Redpanda support Wasm user-defined functions
+
+## Related Reading
+
+- [Kubernetes Gateway API Guide](/blog/kubernetes-gateway-api-guide-ingress-replacement-2026/)
+- [Edge AI Deployment Strategies](/blog/edge-ai-deployment-strategies-kubernetes-k3s/)

@@ -18,9 +18,166 @@ image:
   src: "/blog/thumbnails/ml-platform-kubernetes-kubeflow-mlflow.jpg"
   alt: "ML Platform on Kubernetes with Kubeflow MLflow"
 ---
+Building an ML platform on Kubernetes means choosing between Kubeflow, MLflow, or a combination of both. Each solves different problems, and most production setups use elements of both.
 
-## Related Articles
+## Kubeflow vs MLflow: Different Tools for Different Problems
 
-- [OpenTelemetry on Kubernetes: The 2026 Observability Stack](/blog/opentelemetry-kubernetes-observability-2026/)
-- [The Recipe Mindset: From Dev Patterns to Strategy](/blog/kubernetes-recipes-mindset-cto-platform-strategy/)
-- [KubeCon Europe 2026 Leaders: The People Shaping Cloud Native](/blog/kubecon-europe-2026-leaders-cloud-native/)
+| Capability | Kubeflow | MLflow |
+|-----------|----------|--------|
+| **Primary focus** | ML workflows on K8s | Experiment tracking & model registry |
+| **Pipeline orchestration** | Native (KFP) | Via integrations |
+| **Experiment tracking** | Limited | Excellent |
+| **Model registry** | Basic | Excellent |
+| **Serving** | KServe, Seldon | MLflow Serving (basic) |
+| **Notebook environment** | JupyterHub integration | Not included |
+| **Kubernetes native** | Yes (designed for K8s) | No (runs anywhere) |
+| **Complexity** | High | Low-medium |
+| **Setup time** | Days-weeks | Hours |
+
+## Architecture: Kubeflow + MLflow Together
+
+The best ML platform uses both:
+
+```
+┌─────────── ML Platform on Kubernetes ───────────┐
+│                                                   │
+│  ┌──────────┐  ┌──────────┐  ┌───────────────┐  │
+│  │ Jupyter  │  │ Kubeflow │  │ MLflow        │  │
+│  │ Notebooks│→ │ Pipelines│→ │ Tracking +    │  │
+│  │          │  │ (KFP)    │  │ Model Registry│  │
+│  └──────────┘  └──────────┘  └───────────────┘  │
+│                      ↓                            │
+│              ┌──────────────┐                     │
+│              │ KServe       │                     │
+│              │ (Model       │                     │
+│              │  Serving)    │                     │
+│              └──────────────┘                     │
+│                                                   │
+│  Storage: MinIO (artifacts) + PostgreSQL (metadata)│
+└───────────────────────────────────────────────────┘
+```
+
+## Kubeflow Setup on Kubernetes
+
+### Installation with kustomize
+
+```bash
+# Clone Kubeflow manifests
+git clone https://github.com/kubeflow/manifests.git
+cd manifests
+
+# Install (requires kustomize)
+while ! kustomize build example | kubectl apply -f -; do
+  echo "Retrying..."
+  sleep 10
+done
+```
+
+### Kubeflow Pipeline Example
+
+```python
+from kfp import dsl, compiler
+
+@dsl.component(base_image="python:3.11")
+def preprocess(data_path: str) -> str:
+    import pandas as pd
+    df = pd.read_csv(data_path)
+    processed = df.dropna().reset_index(drop=True)
+    output_path = "/tmp/processed.csv"
+    processed.to_csv(output_path, index=False)
+    return output_path
+
+@dsl.component(base_image="python:3.11-slim")
+def train(data_path: str, model_name: str) -> str:
+    import mlflow
+    from sklearn.ensemble import RandomForestClassifier
+    
+    mlflow.set_tracking_uri("http://mlflow-server:5000")
+    with mlflow.start_run():
+        # Train model
+        model = RandomForestClassifier(n_estimators=100)
+        # ... training code ...
+        mlflow.sklearn.log_model(model, model_name)
+    return model_name
+
+@dsl.pipeline(name="ml-training-pipeline")
+def training_pipeline(data_path: str = "s3://data/train.csv"):
+    preprocess_task = preprocess(data_path=data_path)
+    train_task = train(
+        data_path=preprocess_task.output,
+        model_name="fraud-detector"
+    )
+
+compiler.Compiler().compile(training_pipeline, "pipeline.yaml")
+```
+
+## MLflow Setup on Kubernetes
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      containers:
+        - name: mlflow
+          image: ghcr.io/mlflow/mlflow:2.14.0
+          command: ["mlflow", "server"]
+          args:
+            - "--backend-store-uri=postgresql://mlflow:password@postgres:5432/mlflow"
+            - "--default-artifact-root=s3://mlflow-artifacts/"
+            - "--host=0.0.0.0"
+            - "--port=5000"
+          ports:
+            - containerPort: 5000
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: minio-credentials
+                  key: access-key
+```
+
+## Model Serving with KServe
+
+```yaml
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: fraud-detector
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: mlflow
+      storageUri: "s3://mlflow-artifacts/fraud-detector/latest"
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+```
+
+## Production Checklist
+
+- [ ] Centralized experiment tracking (MLflow)
+- [ ] Reproducible pipelines (Kubeflow Pipelines)
+- [ ] Model versioning and registry
+- [ ] A/B testing infrastructure for model comparison
+- [ ] GPU scheduling and resource quotas
+- [ ] Data versioning (DVC or LakeFS)
+- [ ] Monitoring for model drift
+- [ ] Automated retraining triggers
+
+## Related Reading
+
+- [MLOps Pipeline on Kubernetes](/blog/mlops-pipeline-kubernetes-enterprise-2026/)
+- [Operationalizing ML Models](/blog/operationalizing-ml-models/)
+- [GPU Cluster Architecture](/blog/gpu-cluster-architecture-training-inference/)

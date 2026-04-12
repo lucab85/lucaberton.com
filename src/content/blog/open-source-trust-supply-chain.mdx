@@ -18,9 +18,124 @@ image:
   src: "/blog/thumbnails/open-source-trust-supply-chain.jpg"
   alt: "Open Source Trust and Supply Chain Security"
 ---
+Every modern application is built on open-source dependencies. The average project has hundreds of transitive dependencies, each one a potential attack vector. Software supply chain security is not about trusting open source less — it is about verifying more.
 
-## Related Articles
+## The Supply Chain Attack Surface
 
-- [openEuler: The Enterprise Linux Distribution You Have Not Heard Of — And Why It Matters](/blog/openeuler-enterprise-linux-china-cloud/)
-- [Speaking at Conferences: From Ansible Berlin to FOSDEM and KubeCon](/blog/conference-speaking-journey-kubecon-fosdem/)
-- [FOSDEM 2026: Open Source, RISC-V & Community Energy in...](/blog/fosdem-2026/)
+Recent high-profile attacks:
+
+- **SolarWinds (2020)**: Build system compromised, malicious code injected into updates
+- **Codecov (2021)**: CI/CD tool compromised, credentials harvested
+- **Log4Shell (2021)**: Critical vulnerability in ubiquitous logging library
+- **xz Utils (2024)**: Maintainer social engineering — malicious code inserted over 2 years
+- **PyPI/npm malware**: Thousands of typosquatting packages published monthly
+
+## The SLSA Framework
+
+Supply chain Levels for Software Artifacts (SLSA, pronounced "salsa") provides a maturity model:
+
+| Level | Requirements | Protection |
+|-------|-------------|-----------|
+| SLSA 1 | Build process documented | Know how artifacts were built |
+| SLSA 2 | Hosted build service, signed provenance | Prevent tampering after build |
+| SLSA 3 | Hardened build platform, non-falsifiable provenance | Prevent tampering during build |
+| SLSA 4 | Two-party review, hermetic builds | Prevent insider threats |
+
+## Implementing Supply Chain Security
+
+### Step 1: Software Bill of Materials (SBOM)
+
+Generate an SBOM for every build:
+
+```bash
+# Generate SBOM with Syft
+syft dir:. -o spdx-json > sbom.spdx.json
+
+# Or with Trivy
+trivy fs . --format spdx-json --output sbom.spdx.json
+
+# For container images
+syft myapp:latest -o cyclonedx-json > sbom.cdx.json
+```
+
+### Step 2: Vulnerability Scanning
+
+Scan dependencies continuously:
+
+```yaml
+# GitHub Actions: scan on every PR
+- name: Trivy vulnerability scan
+  uses: aquasecurity/trivy-action@master
+  with:
+    scan-type: 'fs'
+    scan-ref: '.'
+    format: 'sarif'
+    output: 'trivy-results.sarif'
+    severity: 'CRITICAL,HIGH'
+```
+
+### Step 3: Artifact Signing
+
+Sign all build artifacts with Sigstore:
+
+```bash
+# Sign a container image
+cosign sign --key cosign.key ghcr.io/my-org/myapp:v1.0.0
+
+# Verify a signed image
+cosign verify --key cosign.pub ghcr.io/my-org/myapp:v1.0.0
+```
+
+### Step 4: Admission Control
+
+Only allow signed, scanned images in your cluster:
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-image-signatures
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: check-signature
+      match:
+        resources:
+          kinds: [Pod]
+      verifyImages:
+        - imageReferences: ["ghcr.io/my-org/*"]
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      ...
+                      -----END PUBLIC KEY-----
+```
+
+### Step 5: Dependency Review
+
+Before merging dependency updates:
+
+```yaml
+# GitHub Actions: dependency review
+- name: Dependency Review
+  uses: actions/dependency-review-action@v4
+  with:
+    fail-on-severity: high
+    deny-licenses: AGPL-3.0, GPL-3.0
+    allow-dependencies-licenses: MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause
+```
+
+## Kubernetes-Specific Supply Chain
+
+- **Image provenance**: Require SLSA provenance attestations for all images
+- **Base image management**: Maintain curated, scanned base images
+- **Helm chart verification**: Sign and verify Helm charts
+- **Operator trust**: Verify operator images from OperatorHub
+
+## Related Reading
+
+- [Container Security Scanning with Trivy](/blog/container-security-scanning-trivy-tutorial/)
+- [Trivy vs Grype Comparison](/blog/trivy-vs-grype-2026/)
+- [Kyverno CNCF Graduation](/blog/kyverno-cncf-graduation-ai-governance/)

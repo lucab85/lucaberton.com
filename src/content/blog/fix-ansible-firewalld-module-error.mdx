@@ -12,29 +12,146 @@ author: "Luca Berton"
 category: "Automation"
 tags: ["Ansible", "Troubleshooting", "Error Fix", "Automation", "DevOps"]
 ---
-
 If you are seeing `firewalld module error` when running Ansible, here is how to fix it.
 
 ## What This Error Means
 
-The firewalld module requires the python3-firewall package and a running firewalld service.
+The firewalld module requires the python3-firewall package and a running firewalld service on the target host. When either is missing, you get errors like:
 
-## Quick Diagnosis
-
-```bash
-ansible-playbook playbook.yml -vvv
-ansible-playbook playbook.yml --syntax-check
-ansible-playbook playbook.yml --check --diff
+```
+TASK [Open port 80/tcp in firewalld] ******************
+fatal: [server1]: FAILED! => {
+    "msg": "Python module firewall is not installed"
+}
 ```
 
-## How to Fix It
+Or:
 
-The firewalld module requires the python3-firewall package and a running firewalld service.
+```
+fatal: [server1]: FAILED! => {
+    "msg": "firewalld is not running"
+}
+```
 
-Review your playbook, inventory, and variable files. Test with `--check` before applying.
+## Fix 1: Install the Python Firewall Package
 
-## Related Resources
+```bash
+# RHEL/CentOS/Rocky/Alma
+sudo dnf install python3-firewall firewalld
 
-- [Ansible Playbook Examples](/blog/ansible-playbook-examples-beginners-to-advanced/)
-- [Ansible Tutorial for Beginners](/blog/ansible-tutorial-beginners-guide-2026/)
-- [RHCE Exam Prep](/blog/rhce-exam-preparation-guide-2026/)
+# Ubuntu/Debian
+sudo apt install python3-firewall firewalld
+```
+
+Or fix it with Ansible itself (run before your firewalld tasks):
+
+```yaml
+- name: Ensure firewalld dependencies are installed
+  ansible.builtin.package:
+    name:
+      - firewalld
+      - python3-firewall
+    state: present
+
+- name: Ensure firewalld is running
+  ansible.builtin.service:
+    name: firewalld
+    state: started
+    enabled: true
+```
+
+## Fix 2: Start the Firewalld Service
+
+```bash
+sudo systemctl start firewalld
+sudo systemctl enable firewalld
+sudo systemctl status firewalld
+```
+
+## Fix 3: Check Python Interpreter
+
+If you have multiple Python versions, Ansible might use the wrong one:
+
+```yaml
+# In your inventory or playbook
+vars:
+  ansible_python_interpreter: /usr/bin/python3
+```
+
+Or in `ansible.cfg`:
+
+```ini
+[defaults]
+interpreter_python = auto_silent
+```
+
+## Fix 4: Virtual Environment Issues
+
+If you are running Ansible in a virtualenv, the system `python3-firewall` package may not be available:
+
+```yaml
+# Use the system Python for firewalld tasks
+- name: Open HTTP port
+  ansible.posix.firewalld:
+    port: 80/tcp
+    permanent: true
+    immediate: true
+    state: enabled
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+```
+
+## Complete Working Example
+
+```yaml
+---
+- name: Configure firewall
+  hosts: webservers
+  become: true
+  
+  tasks:
+    - name: Install firewalld
+      ansible.builtin.dnf:
+        name:
+          - firewalld
+          - python3-firewall
+        state: present
+
+    - name: Start and enable firewalld
+      ansible.builtin.service:
+        name: firewalld
+        state: started
+        enabled: true
+
+    - name: Open HTTP and HTTPS ports
+      ansible.posix.firewalld:
+        service: "{{ item }}"
+        permanent: true
+        immediate: true
+        state: enabled
+      loop:
+        - http
+        - https
+
+    - name: Open custom port
+      ansible.posix.firewalld:
+        port: 8080/tcp
+        permanent: true
+        immediate: true
+        state: enabled
+```
+
+## Common Variations
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Python module firewall is not installed` | Missing python3-firewall package | `dnf install python3-firewall` |
+| `firewalld is not running` | Service not started | `systemctl start firewalld` |
+| `No module named 'firewall'` | Wrong Python interpreter | Set `ansible_python_interpreter` |
+| `firewalld package is not available` | firewalld not in repos | Enable EPEL or AppStream repo |
+
+## Related Reading
+
+- [Red Hat Ansible Automation Platform](/blog/red-hat-ansible-automation/)
+- [RHEL 9 Administration Guide](/blog/red-hat-enterprise-linux-9-for-sysadmins/)
+- [Install Ansible on RHEL 9](/blog/install-ansible-rhel-9/)

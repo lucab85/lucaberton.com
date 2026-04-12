@@ -12,39 +12,83 @@ author: "Luca Berton"
 category: "Platform Engineering"
 tags: ["Comparison", "Platform Engineering", "DevOps", "2026"]
 ---
+A quick reference for etcdctl — the etcd command-line client. Bookmark this page.
 
-Choosing the right tool matters. Here is my comparison based on real production experience.
+This is a companion to the [etcd Cheat Sheet](/blog/etcd-cheat-sheet-2026/), focused on etcdctl commands specifically for Kubernetes cluster administration.
 
-## Quick Comparison
+## Setup
 
-Both tools have their strengths. The right choice depends on your team, infrastructure, and requirements.
+```bash
+# Set API version (always use v3)
+export ETCDCTL_API=3
 
-## Key Differences
+# For Kubernetes clusters
+export ETCDCTL_ENDPOINTS=https://127.0.0.1:2379
+export ETCDCTL_CACERT=/etc/kubernetes/pki/etcd/ca.crt
+export ETCDCTL_CERT=/etc/kubernetes/pki/etcd/server.crt
+export ETCDCTL_KEY=/etc/kubernetes/pki/etcd/server.key
 
-The most important differences come down to:
-- **Learning curve** — how quickly can your team be productive?
-- **Ecosystem** — community, plugins, integrations
-- **Scalability** — how well does it handle growth?
-- **Cost** — open source vs enterprise licensing
+# Or pass inline
+etcdctl --endpoints=https://127.0.0.1:2379 \
+  --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+  --cert=/etc/kubernetes/pki/etcd/server.crt \
+  --key=/etc/kubernetes/pki/etcd/server.key \
+  endpoint health
+```
 
-## When to Use Each
+## Health and Status
 
-### Use Case 1: Small Teams
-For small teams, prefer the simpler tool with less operational overhead.
+```bash
+etcdctl endpoint health
+etcdctl endpoint health --cluster
+etcdctl endpoint status --write-out=table
+etcdctl member list --write-out=table
+```
 
-### Use Case 2: Enterprise
-For enterprise, consider support contracts, security features, and compliance certifications.
+## Backup and Restore
 
-### Use Case 3: Multi-Cloud
-For multi-cloud, choose the tool with broader platform support.
+```bash
+# Backup
+etcdctl snapshot save /backup/etcd-$(date +%Y%m%d-%H%M).db
 
-## My Recommendation
+# Verify backup
+etcdctl snapshot status /backup/etcd-20260413.db --write-out=table
 
-There is no universally "better" tool — only the right tool for your context. I have used both in production and they each excel in different scenarios.
+# Restore (stop etcd first!)
+etcdctl snapshot restore /backup/etcd-20260413.db \
+  --data-dir=/var/lib/etcd-restored
+```
+
+## Key Operations
+
+```bash
+etcdctl get / --prefix --keys-only | head -20
+etcdctl get /registry/pods/default --prefix --keys-only
+etcdctl get /registry/deployments --prefix --keys-only | wc -l
+```
+
+## Maintenance
+
+```bash
+# Check DB size
+etcdctl endpoint status --write-out=json | python3 -m json.tool
+
+# Compact and defrag
+rev=$(etcdctl endpoint status --write-out=json | python3 -c "import sys,json; print(json.load(sys.stdin)[0]['Status']['header']['revision'])")
+etcdctl compact $rev
+etcdctl defrag --cluster
+```
+
+## Tips and Tricks
+
+- Schedule daily etcd backups — it is the single source of truth for your cluster
+- Monitor etcd disk latency: `etcdctl check perf`
+- Use `--write-out=table` for human-readable output
+- Keep etcd data on fast SSD/NVMe storage
+- Set alarms: `etcdctl alarm list` and `etcdctl alarm disarm`
 
 ## Related Resources
 
-- [DevOps Roadmap 2026](/blog/devops-roadmap-2026-skills-tools-career/)
+- [etcd Cheat Sheet](/blog/etcd-cheat-sheet-2026/)
 - [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Terraform vs Ansible](/blog/terraform-vs-ansible-when-to-use-which-2026/)
-- [Book a Consultation](/contact/)
+- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)

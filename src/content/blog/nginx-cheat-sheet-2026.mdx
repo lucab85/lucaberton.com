@@ -12,39 +12,138 @@ author: "Luca Berton"
 category: "DevOps"
 tags: ["Comparison", "DevOps", "DevOps", "2026"]
 ---
+A quick reference for Nginx — web server and reverse proxy. Bookmark this page.
 
-Choosing the right tool matters. Here is my comparison based on real production experience.
+## Commands
 
-## Quick Comparison
+```bash
+# Start/stop/restart
+sudo systemctl start nginx
+sudo systemctl stop nginx
+sudo systemctl restart nginx
+sudo systemctl reload nginx   # Reload config (no downtime)
 
-Both tools have their strengths. The right choice depends on your team, infrastructure, and requirements.
+# Test configuration
+sudo nginx -t
+sudo nginx -T                 # Test and print full config
 
-## Key Differences
+# Show version and modules
+nginx -v                      # Version
+nginx -V                      # Version + compile options
+```
 
-The most important differences come down to:
-- **Learning curve** — how quickly can your team be productive?
-- **Ecosystem** — community, plugins, integrations
-- **Scalability** — how well does it handle growth?
-- **Cost** — open source vs enterprise licensing
+## Basic Server Block
 
-## When to Use Each
+```nginx
+server {
+    listen 80;
+    server_name example.com www.example.com;
+    root /var/www/example;
+    index index.html;
 
-### Use Case 1: Small Teams
-For small teams, prefer the simpler tool with less operational overhead.
+    location / {
+        try_files $uri $uri/ =404;
+    }
 
-### Use Case 2: Enterprise
-For enterprise, consider support contracts, security features, and compliance certifications.
+    location /images/ {
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
 
-### Use Case 3: Multi-Cloud
-For multi-cloud, choose the tool with broader platform support.
+    error_page 404 /404.html;
+    error_page 500 502 503 504 /50x.html;
+}
+```
 
-## My Recommendation
+## Reverse Proxy
 
-There is no universally "better" tool — only the right tool for your context. I have used both in production and they each excel in different scenarios.
+```nginx
+upstream backend {
+    server 10.0.0.1:8080 weight=3;
+    server 10.0.0.2:8080;
+    server 10.0.0.3:8080 backup;
+}
+
+server {
+    listen 80;
+    server_name api.example.com;
+
+    location / {
+        proxy_pass http://backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;
+    }
+}
+```
+
+## HTTPS with Let's Encrypt
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name example.com;
+
+    ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
+    ssl_prefer_server_ciphers off;
+
+    add_header Strict-Transport-Security "max-age=63072000" always;
+}
+
+server {
+    listen 80;
+    server_name example.com;
+    return 301 https://$server_name$request_uri;
+}
+```
+
+## Common Patterns
+
+```nginx
+# Rate limiting
+limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+
+location /api/ {
+    limit_req zone=api burst=20 nodelay;
+    proxy_pass http://backend;
+}
+
+# Gzip compression
+gzip on;
+gzip_types text/plain text/css application/json application/javascript text/xml;
+gzip_min_length 256;
+
+# Security headers
+add_header X-Frame-Options "SAMEORIGIN" always;
+add_header X-Content-Type-Options "nosniff" always;
+add_header X-XSS-Protection "1; mode=block" always;
+
+# WebSocket proxy
+location /ws {
+    proxy_pass http://backend;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
+
+## Tips and Tricks
+
+- Always run `nginx -t` before reloading to catch syntax errors
+- Use `reload` instead of `restart` for zero-downtime config changes
+- Use `try_files $uri $uri/ /index.html` for SPA applications
+- Use `access_log off` for static assets to reduce I/O
+- Use `worker_processes auto` to match CPU cores
 
 ## Related Resources
 
-- [DevOps Roadmap 2026](/blog/devops-roadmap-2026-skills-tools-career/)
-- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Terraform vs Ansible](/blog/terraform-vs-ansible-when-to-use-which-2026/)
-- [Book a Consultation](/contact/)
+- [OpenSSL Cheat Sheet](/blog/openssl-cheat-sheet-2026/)
+- [Linux Cheat Sheet](/blog/linux-cheat-sheet-2026/)
+- [curl Cheat Sheet](/blog/curl-cheat-sheet-2026/)

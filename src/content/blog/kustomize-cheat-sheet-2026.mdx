@@ -12,41 +12,183 @@ author: "Luca Berton"
 category: "DevOps"
 tags: ["Cheat Sheet", "Reference", "DevOps", "2026"]
 ---
+A quick reference for Kustomize — template-free Kubernetes configuration. Bookmark this page.
 
-A quick reference for daily use. Bookmark this page.
-
-## Essential Commands
+## Basic Commands
 
 ```bash
-# Most-used commands at a glance
-# Refer to sections below for details
+# Build (render final YAML)
+kustomize build .
+kustomize build overlays/production
+
+# Apply directly
+kubectl apply -k .
+kubectl apply -k overlays/production
+
+# Preview diff
+kubectl diff -k overlays/production
+
+# Delete
+kubectl delete -k .
 ```
 
-## Configuration
+## Kustomization File Structure
 
-```bash
-# Common configuration patterns
+```yaml
+# kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+namespace: my-app
+
+commonLabels:
+  app: my-app
+  team: backend
+
+commonAnnotations:
+  owner: backend-team
+
+namePrefix: prod-
+nameSuffix: -v2
+
+images:
+  - name: nginx
+    newName: my-registry.com/nginx
+    newTag: "1.25"
 ```
 
-## Troubleshooting
+## Patches
 
-```bash
-# Debugging and diagnostic commands
+```yaml
+# Strategic merge patch (partial overlay)
+patches:
+  - path: increase-replicas.yaml
+    target:
+      kind: Deployment
+      name: my-app
+
+# JSON patch
+patches:
+  - target:
+      kind: Deployment
+      name: my-app
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 5
+
+# Inline patch
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: my-app
+      spec:
+        replicas: 5
+```
+
+## Overlay Pattern
+
+```
+├── base/
+│   ├── kustomization.yaml
+│   ├── deployment.yaml
+│   └── service.yaml
+├── overlays/
+│   ├── development/
+│   │   └── kustomization.yaml
+│   ├── staging/
+│   │   └── kustomization.yaml
+│   └── production/
+│       ├── kustomization.yaml
+│       └── increase-replicas.yaml
+```
+
+```yaml
+# overlays/production/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+namespace: production
+
+patches:
+  - path: increase-replicas.yaml
+
+images:
+  - name: my-app
+    newTag: "v2.1.0"
+```
+
+## ConfigMap and Secret Generators
+
+```yaml
+configMapGenerator:
+  - name: app-config
+    literals:
+      - DATABASE_HOST=postgres.production.svc
+      - LOG_LEVEL=info
+    files:
+      - config.properties
+
+secretGenerator:
+  - name: app-secrets
+    literals:
+      - DB_PASSWORD=supersecret
+    type: Opaque
+
+generatorOptions:
+  disableNameSuffixHash: true
+```
+
+## Components (Reusable Mixins)
+
+```yaml
+# components/monitoring/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - servicemonitor.yaml
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: my-app
+      spec:
+        template:
+          metadata:
+            annotations:
+              prometheus.io/scrape: "true"
+              prometheus.io/port: "8080"
+```
+
+```yaml
+# Use in overlay
+components:
+  - ../../components/monitoring
 ```
 
 ## Tips and Tricks
 
-- Use tab completion for faster workflows
-- Create aliases for frequently used commands
-- Set up shell integration for better productivity
+- Use `kubectl kustomize .` as an alias for `kustomize build .`
+- Use `--enable-helm` flag to render Helm charts within Kustomize
+- Use components for cross-cutting concerns (monitoring, security)
+- Use `replacements` (not `vars`) for field cross-references in newer versions
+- Combine with ArgoCD for GitOps: point ArgoCD at your overlay directory
 
 ## Related Resources
 
-- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Docker Cheat Sheet](/blog/docker-cheat-sheet-2026/)
-- [Ansible Cheat Sheet](/blog/ansible-cheat-sheet-2026/)
-- [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
-
-## About the Author
-
-I am Luca Berton, AI and Cloud Advisor with 8 published books. [Book a consultation](https://calendly.com/lucaberton/) for infrastructure help.
+- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+- [YAML Cheat Sheet](/blog/yaml-cheat-sheet-2026/)

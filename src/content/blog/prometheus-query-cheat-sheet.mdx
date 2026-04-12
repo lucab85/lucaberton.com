@@ -12,41 +12,167 @@ author: "Luca Berton"
 category: "DevOps"
 tags: ["Cheat Sheet", "Reference", "DevOps", "2026"]
 ---
+A quick reference for PromQL — the Prometheus query language. Bookmark this page.
 
-A quick reference for daily use. Bookmark this page.
+## Basic Queries
 
-## Essential Commands
+```yaml
+# Instant vector (current value)
+up
+node_cpu_seconds_total
+container_memory_usage_bytes
 
-```bash
-# Most-used commands at a glance
-# Refer to sections below for details
+# Label filtering
+up{job="kubernetes-nodes"}
+node_cpu_seconds_total{mode="idle", instance="node1:9100"}
+http_requests_total{method=~"GET|POST"}     # Regex match
+http_requests_total{status!="200"}           # Not equal
+http_requests_total{path=~"/api/.*"}         # Regex
 ```
 
-## Configuration
+## Range Vectors and Rates
 
-```bash
-# Common configuration patterns
+```yaml
+# Range vector (values over time)
+http_requests_total[5m]          # Last 5 minutes of samples
+
+# Rate (per-second increase of counter)
+rate(http_requests_total[5m])
+
+# Increase (total increase over period)
+increase(http_requests_total[1h])
+
+# irate (instant rate — last two samples)
+irate(http_requests_total[5m])
 ```
 
-## Troubleshooting
+## Aggregation
 
-```bash
-# Debugging and diagnostic commands
+```yaml
+# Sum across all instances
+sum(rate(http_requests_total[5m]))
+
+# Sum by label
+sum by (method) (rate(http_requests_total[5m]))
+sum by (namespace, pod) (container_memory_usage_bytes)
+
+# Without (exclude label)
+sum without (instance) (rate(http_requests_total[5m]))
+
+# Other aggregations
+avg(node_load1)
+min(node_filesystem_avail_bytes)
+max(container_cpu_usage_seconds_total)
+count(up == 1)
+topk(5, rate(http_requests_total[5m]))
+bottomk(3, node_filesystem_avail_bytes)
+quantile(0.95, http_request_duration_seconds)
+```
+
+## Common Patterns
+
+```yaml
+# CPU usage percentage per pod
+sum by (pod) (rate(container_cpu_usage_seconds_total[5m])) * 100
+
+# Memory usage percentage per node
+(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100
+
+# Disk usage percentage
+(1 - node_filesystem_avail_bytes / node_filesystem_size_bytes) * 100
+
+# HTTP error rate
+sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) * 100
+
+# Request latency P99
+histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
+
+# Request latency P95 by endpoint
+histogram_quantile(0.95, sum by (le, path) (rate(http_request_duration_seconds_bucket[5m])))
+
+# Pod restart count
+sum by (pod, namespace) (kube_pod_container_status_restarts_total)
+```
+
+## Operators
+
+```yaml
+# Arithmetic
+node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes
+container_cpu_usage_seconds_total / 1e9
+
+# Comparison (filter)
+up == 0                           # Only down targets
+node_load1 > 4                    # Overloaded nodes
+http_requests_total > 1000
+
+# Logical
+up == 1 and on(instance) node_load1 > 2
+
+# Group operations
+sum by (namespace) (kube_pod_info) > 50   # Namespaces with 50+ pods
+```
+
+## Functions
+
+```yaml
+# Math
+abs(delta(temperature[1h]))
+ceil(value)
+floor(value)
+round(value, 0.5)
+
+# Time
+time()                             # Current Unix timestamp
+timestamp(up)                      # Timestamp of last sample
+day_of_week()                      # 0=Sunday
+hour()                             # 0-23
+
+# Label manipulation
+label_replace(up, "short_instance", "$1", "instance", "(.*):.*")
+label_join(up, "full", "-", "job", "instance")
+
+# Absent (alerting on missing metrics)
+absent(up{job="critical-service"})
+absent_over_time(up{job="api"}[5m])
+
+# Changes and resets
+changes(process_start_time_seconds[1h])
+resets(http_requests_total[1h])
+
+# Predictions
+predict_linear(node_filesystem_avail_bytes[6h], 24*3600)  # Predict 24h ahead
+```
+
+## Alerting Patterns
+
+```yaml
+# Service down
+up == 0
+
+# High error rate (over 5% for 5 minutes)
+sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+
+# Disk will fill in 24 hours
+predict_linear(node_filesystem_avail_bytes[6h], 24*3600) < 0
+
+# Pod CrashLooping
+increase(kube_pod_container_status_restarts_total[1h]) > 5
+
+# High memory usage
+container_memory_usage_bytes / container_spec_memory_limit_bytes > 0.9
 ```
 
 ## Tips and Tricks
 
-- Use tab completion for faster workflows
-- Create aliases for frequently used commands
-- Set up shell integration for better productivity
+- Use `rate()` for counters, never use raw counter values
+- Use `5m` rate window minimum for stable graphs
+- Use `sum by (label)` to aggregate meaningfully
+- Use `histogram_quantile` for latency percentiles
+- Test queries in Grafana Explore before building dashboards
 
 ## Related Resources
 
+- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)
 - [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Docker Cheat Sheet](/blog/docker-cheat-sheet-2026/)
-- [Ansible Cheat Sheet](/blog/ansible-cheat-sheet-2026/)
-- [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
-
-## About the Author
-
-I am Luca Berton, AI and Cloud Advisor with 8 published books. [Book a consultation](https://calendly.com/lucaberton/) for infrastructure help.
+- [jq Cheat Sheet](/blog/jq-cheat-sheet-2026/)

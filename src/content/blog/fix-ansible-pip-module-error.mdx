@@ -12,29 +12,150 @@ author: "Luca Berton"
 category: "Automation"
 tags: ["Ansible", "Troubleshooting", "Error Fix", "Automation", "DevOps"]
 ---
+If you are seeing errors with the `pip` module in Ansible, here is how to fix them.
 
-If you are seeing `pip module error` when running Ansible, here is how to fix it.
+## Common Errors
 
-## What This Error Means
+### Error: No module named pip
 
-The pip module fails to install Python packages. Wrong Python path, missing pip, or virtualenv issues.
-
-## Quick Diagnosis
-
-```bash
-ansible-playbook playbook.yml -vvv
-ansible-playbook playbook.yml --syntax-check
-ansible-playbook playbook.yml --check --diff
+```
+fatal: [server1]: FAILED! => {
+    "msg": "Unable to find any of pip3 to use. pip needs to be installed."
+}
 ```
 
-## How to Fix It
+### Error: pip not found for the target Python
 
-The pip module fails to install Python packages. Wrong Python path, missing pip, or virtualenv issues.
+```
+fatal: [server1]: FAILED! => {
+    "msg": "Unable to find pip3 in PATH"
+}
+```
 
-Review your playbook, inventory, and variable files. Test with `--check` before applying.
+## Fix 1: Install pip on the Target Host
 
-## Related Resources
+```yaml
+- name: Ensure pip3 is installed (RHEL/CentOS)
+  ansible.builtin.dnf:
+    name:
+      - python3-pip
+      - python3-setuptools
+    state: present
+  become: true
 
-- [Ansible Playbook Examples](/blog/ansible-playbook-examples-beginners-to-advanced/)
-- [Ansible Tutorial for Beginners](/blog/ansible-tutorial-beginners-guide-2026/)
-- [RHCE Exam Prep](/blog/rhce-exam-preparation-guide-2026/)
+- name: Ensure pip3 is installed (Ubuntu/Debian)
+  ansible.builtin.apt:
+    name:
+      - python3-pip
+      - python3-setuptools
+    state: present
+  become: true
+```
+
+## Fix 2: Specify the Correct Python Interpreter
+
+```yaml
+# In your playbook or inventory
+vars:
+  ansible_python_interpreter: /usr/bin/python3
+```
+
+Or in `ansible.cfg`:
+
+```ini
+[defaults]
+interpreter_python = auto_silent
+```
+
+## Fix 3: Virtual Environment Issues
+
+If you need pip inside a virtualenv:
+
+```yaml
+- name: Create virtualenv and install packages
+  ansible.builtin.pip:
+    name: flask
+    virtualenv: /opt/myapp/venv
+    virtualenv_python: python3
+```
+
+## Fix 4: Using pip with become
+
+When running pip as root, Ansible may use a different Python:
+
+```yaml
+- name: Install package with explicit pip executable
+  ansible.builtin.pip:
+    name: requests
+    executable: pip3
+  become: true
+```
+
+## Fix 5: Broken pip Installation
+
+If pip itself is corrupted:
+
+```bash
+# Reinstall pip using ensurepip
+python3 -m ensurepip --upgrade
+
+# Or bootstrap pip
+curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
+python3 get-pip.py
+```
+
+Ansible task:
+
+```yaml
+- name: Ensure pip is bootstrapped
+  ansible.builtin.command:
+    cmd: python3 -m ensurepip --upgrade
+  become: true
+  register: result
+  changed_when: "'Successfully installed' in result.stdout"
+```
+
+## Complete Working Example
+
+```yaml
+---
+- name: Configure Python environment
+  hosts: all
+  become: true
+  
+  tasks:
+    - name: Install Python and pip
+      ansible.builtin.package:
+        name:
+          - python3
+          - python3-pip
+          - python3-setuptools
+        state: present
+
+    - name: Upgrade pip
+      ansible.builtin.pip:
+        name: pip
+        state: latest
+        executable: pip3
+
+    - name: Install application dependencies
+      ansible.builtin.pip:
+        requirements: /opt/myapp/requirements.txt
+        virtualenv: /opt/myapp/venv
+        virtualenv_python: python3
+```
+
+## Error Reference
+
+| Error | Cause | Fix |
+|-------|-------|-----|
+| `Unable to find any of pip3` | pip not installed | Install `python3-pip` package |
+| `No module named pip` | pip missing for that Python version | Install pip for the correct Python |
+| `pip not found in PATH` | Wrong interpreter or broken PATH | Set `ansible_python_interpreter` |
+| `Permission denied` | Missing `become: true` | Add `become: true` to task |
+
+## Related Reading
+
+- [Install Ansible on RHEL 9](/blog/install-ansible-rhel-9/)
+- [Red Hat Ansible Automation Platform](/blog/red-hat-ansible-automation/)
+- [Fix Ansible Firewalld Module Error](/blog/fix-ansible-firewalld-module-error/)

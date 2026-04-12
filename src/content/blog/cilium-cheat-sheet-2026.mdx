@@ -12,41 +12,146 @@ author: "Luca Berton"
 category: "DevOps"
 tags: ["Cheat Sheet", "Reference", "DevOps", "2026"]
 ---
+A quick reference for Cilium — eBPF-based Kubernetes networking and security. Bookmark this page.
 
-A quick reference for daily use. Bookmark this page.
-
-## Essential Commands
+## Installation and Status
 
 ```bash
-# Most-used commands at a glance
-# Refer to sections below for details
+# Install Cilium CLI
+CILIUM_CLI_VERSION=$(curl -s https://raw.githubusercontent.com/cilium/cilium-cli/main/stable.txt)
+curl -L --fail --remote-name-all https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-amd64.tar.gz
+sudo tar xzvf cilium-linux-amd64.tar.gz -C /usr/local/bin
+
+# Install Cilium on a cluster
+cilium install
+cilium install --version 1.16.0
+
+# Check status
+cilium status
+cilium status --wait
+
+# Run connectivity test
+cilium connectivity test
+
+# Enable Hubble (observability)
+cilium hubble enable --ui
+cilium hubble port-forward &
+hubble observe
 ```
 
-## Configuration
+## Network Policies
+
+```yaml
+# L3/L4 policy (allow ingress from specific pods)
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-frontend-to-backend
+spec:
+  endpointSelector:
+    matchLabels:
+      app: backend
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: frontend
+      toPorts:
+        - ports:
+            - port: "8080"
+              protocol: TCP
+
+---
+# L7 policy (HTTP-aware)
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-get-only
+spec:
+  endpointSelector:
+    matchLabels:
+      app: api
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: frontend
+      toPorts:
+        - ports:
+            - port: "80"
+          rules:
+            http:
+              - method: GET
+                path: "/api/v1/.*"
+
+---
+# DNS-based egress policy
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-external-api
+spec:
+  endpointSelector:
+    matchLabels:
+      app: worker
+  egress:
+    - toFQDNs:
+        - matchName: "api.external.com"
+      toPorts:
+        - ports:
+            - port: "443"
+```
+
+## Hubble Observability
 
 ```bash
-# Common configuration patterns
+# Observe all traffic
+hubble observe
+
+# Filter by namespace
+hubble observe --namespace production
+
+# Filter by pod
+hubble observe --pod default/frontend-xyz
+
+# Filter by verdict
+hubble observe --verdict DROPPED
+hubble observe --verdict FORWARDED
+
+# Filter by protocol
+hubble observe --protocol http
+hubble observe --protocol dns
+
+# JSON output for scripting
+hubble observe -o json
 ```
 
 ## Troubleshooting
 
 ```bash
-# Debugging and diagnostic commands
+# Check endpoint status
+cilium endpoint list
+kubectl exec -n kube-system ds/cilium -- cilium endpoint list
+
+# Check BPF maps
+kubectl exec -n kube-system ds/cilium -- cilium bpf ct list global
+kubectl exec -n kube-system ds/cilium -- cilium bpf policy get --all
+
+# Monitor drops in real-time
+cilium monitor --type drop
+
+# Debug identity resolution
+cilium identity list
 ```
 
 ## Tips and Tricks
 
-- Use tab completion for faster workflows
-- Create aliases for frequently used commands
-- Set up shell integration for better productivity
+- Use Hubble UI for visual network topology: `cilium hubble ui`
+- Use `CiliumClusterwideNetworkPolicy` for cluster-wide defaults
+- Enable Wireguard encryption: `cilium install --set encryption.enabled=true --set encryption.type=wireguard`
+- Use Cilium's built-in Kubernetes NetworkPolicy support (no need for Calico)
+- Use `toServices` for service-based policies instead of pod labels
 
 ## Related Resources
 
+- [Istio Cheat Sheet](/blog/istio-cheat-sheet-2026/)
+- [iptables Cheat Sheet](/blog/iptables-cheat-sheet-2026/)
 - [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Docker Cheat Sheet](/blog/docker-cheat-sheet-2026/)
-- [Ansible Cheat Sheet](/blog/ansible-cheat-sheet-2026/)
-- [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
-
-## About the Author
-
-I am Luca Berton, AI and Cloud Advisor with 8 published books. [Book a consultation](https://calendly.com/lucaberton/) for infrastructure help.

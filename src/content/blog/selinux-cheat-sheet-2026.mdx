@@ -12,41 +12,147 @@ author: "Luca Berton"
 category: "DevOps"
 tags: ["Cheat Sheet", "Reference", "DevOps", "2026"]
 ---
+A quick reference for SELinux — mandatory access control for Linux. Bookmark this page.
 
-A quick reference for daily use. Bookmark this page.
-
-## Essential Commands
+## Status and Modes
 
 ```bash
-# Most-used commands at a glance
-# Refer to sections below for details
+# Check current status
+getenforce                   # Enforcing, Permissive, or Disabled
+sestatus                     # Detailed status
+
+# Change mode temporarily (until reboot)
+sudo setenforce 1            # Enforcing
+sudo setenforce 0            # Permissive
+
+# Change mode permanently
+sudo vi /etc/selinux/config
+# Set: SELINUX=enforcing
 ```
 
-## Configuration
+## File Contexts
 
 ```bash
-# Common configuration patterns
+# View file context
+ls -Z /var/www/html/
+ls -Zd /var/www/html/
+
+# Restore default context
+sudo restorecon -v /var/www/html/index.html
+sudo restorecon -Rv /var/www/html/       # Recursive
+
+# Change file context temporarily
+sudo chcon -t httpd_sys_content_t /var/www/html/index.html
+
+# Set default context permanently
+sudo semanage fcontext -a -t httpd_sys_content_t "/srv/web(/.*)?"
+sudo restorecon -Rv /srv/web/
+
+# List all file context rules
+sudo semanage fcontext -l | grep httpd
+```
+
+## Booleans
+
+```bash
+# List all booleans
+getsebool -a
+getsebool -a | grep httpd
+
+# Check specific boolean
+getsebool httpd_can_network_connect
+
+# Set boolean temporarily
+sudo setsebool httpd_can_network_connect on
+
+# Set boolean permanently
+sudo setsebool -P httpd_can_network_connect on
+sudo setsebool -P httpd_can_network_connect_db on
+```
+
+## Port Contexts
+
+```bash
+# List port contexts
+sudo semanage port -l
+sudo semanage port -l | grep http
+
+# Add custom port for a service
+sudo semanage port -a -t http_port_t -p tcp 8443
+sudo semanage port -a -t ssh_port_t -p tcp 2222
+
+# Delete custom port mapping
+sudo semanage port -d -t http_port_t -p tcp 8443
 ```
 
 ## Troubleshooting
 
 ```bash
-# Debugging and diagnostic commands
+# View denied actions in audit log
+sudo ausearch -m AVC -ts recent
+sudo ausearch -m AVC -ts today
+
+# Human-readable denials
+sudo sealert -a /var/log/audit/audit.log
+
+# Generate policy module from denials
+sudo ausearch -m AVC -ts recent | audit2allow -M mypolicy
+sudo semodule -i mypolicy.pp
+
+# Watch denials in real-time
+sudo tail -f /var/log/audit/audit.log | grep AVC
 ```
+
+## Process Contexts
+
+```bash
+# View process context
+ps -eZ | grep httpd
+ps -eZ | grep nginx
+
+# View user context
+id -Z
+```
+
+## Policy Modules
+
+```bash
+# List installed modules
+sudo semodule -l
+
+# Install custom module
+sudo semodule -i mypolicy.pp
+
+# Remove module
+sudo semodule -r mypolicy
+
+# Generate module from denials (quick fix)
+sudo grep nginx /var/log/audit/audit.log | audit2allow -M nginx_custom
+sudo semodule -i nginx_custom.pp
+```
+
+## Common SELinux Types
+
+| Type | Used For |
+|------|----------|
+| `httpd_sys_content_t` | Web server static content |
+| `httpd_sys_rw_content_t` | Web server writable content |
+| `container_file_t` | Container volumes (Podman/Docker) |
+| `ssh_port_t` | SSH ports |
+| `http_port_t` | HTTP/HTTPS ports |
+| `user_home_t` | User home directories |
+| `var_log_t` | Log files |
 
 ## Tips and Tricks
 
-- Use tab completion for faster workflows
-- Create aliases for frequently used commands
-- Set up shell integration for better productivity
+- Never `setenforce 0` in production — use `audit2allow` to fix denials properly
+- Use `restorecon -Rv` after copying files to web directories
+- Use `:Z` or `:z` volume flags with Podman/Docker for SELinux labels
+- Check booleans first — most "SELinux blocking" issues are a missing boolean
+- Use `matchpathcon` to check expected context: `matchpathcon /var/www/html`
 
 ## Related Resources
 
-- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Docker Cheat Sheet](/blog/docker-cheat-sheet-2026/)
-- [Ansible Cheat Sheet](/blog/ansible-cheat-sheet-2026/)
-- [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
-
-## About the Author
-
-I am Luca Berton, AI and Cloud Advisor with 8 published books. [Book a consultation](https://calendly.com/lucaberton/) for infrastructure help.
+- [Linux Cheat Sheet](/blog/linux-cheat-sheet-2026/)
+- [RHEL 9 Administration Guide](/blog/red-hat-enterprise-linux-9-for-sysadmins/)
+- [iptables Cheat Sheet](/blog/iptables-cheat-sheet-2026/)

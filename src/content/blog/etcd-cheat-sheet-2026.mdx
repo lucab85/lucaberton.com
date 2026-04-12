@@ -12,41 +12,122 @@ author: "Luca Berton"
 category: "DevOps"
 tags: ["Cheat Sheet", "Reference", "DevOps", "2026"]
 ---
+A quick reference for etcd — the distributed key-value store behind Kubernetes. Bookmark this page.
 
-A quick reference for daily use. Bookmark this page.
-
-## Essential Commands
+## CLI Setup
 
 ```bash
-# Most-used commands at a glance
-# Refer to sections below for details
+# Set endpoints
+export ETCDCTL_API=3
+export ETCDCTL_ENDPOINTS=https://127.0.0.1:2379
+export ETCDCTL_CACERT=/etc/kubernetes/pki/etcd/ca.crt
+export ETCDCTL_CERT=/etc/kubernetes/pki/etcd/server.crt
+export ETCDCTL_KEY=/etc/kubernetes/pki/etcd/server.key
 ```
 
-## Configuration
+## Key-Value Operations
 
 ```bash
-# Common configuration patterns
+# Put a key
+etcdctl put mykey "myvalue"
+etcdctl put /config/database/host "postgres.svc"
+
+# Get a key
+etcdctl get mykey
+etcdctl get mykey --print-value-only
+
+# Get with prefix (list all under a path)
+etcdctl get /config/ --prefix
+etcdctl get /config/ --prefix --keys-only
+
+# Delete
+etcdctl del mykey
+etcdctl del /config/ --prefix    # Delete all under prefix
+
+# Watch for changes
+etcdctl watch mykey
+etcdctl watch /config/ --prefix
 ```
 
-## Troubleshooting
+## Cluster Health
 
 ```bash
-# Debugging and diagnostic commands
+# Check cluster health
+etcdctl endpoint health
+etcdctl endpoint health --cluster
+
+# Check cluster status
+etcdctl endpoint status
+etcdctl endpoint status --cluster --write-out=table
+
+# List members
+etcdctl member list --write-out=table
+
+# Check leader
+etcdctl endpoint status --write-out=table | grep true
+```
+
+## Backup and Restore
+
+```bash
+# Take snapshot backup
+etcdctl snapshot save /backup/etcd-$(date +%Y%m%d).db
+
+# Check snapshot status
+etcdctl snapshot status /backup/etcd-20260412.db --write-out=table
+
+# Restore from snapshot
+etcdctl snapshot restore /backup/etcd-20260412.db \
+  --data-dir=/var/lib/etcd-restore \
+  --name=etcd-node1 \
+  --initial-cluster=etcd-node1=https://10.0.0.1:2380 \
+  --initial-advertise-peer-urls=https://10.0.0.1:2380
+```
+
+## Kubernetes-Specific
+
+```bash
+# List all Kubernetes keys
+etcdctl get / --prefix --keys-only
+
+# Get specific Kubernetes resource
+etcdctl get /registry/pods/default/my-pod
+
+# Count resources
+etcdctl get /registry/pods --prefix --keys-only | wc -l
+
+# Check etcd size
+etcdctl endpoint status --write-out=json | jq '.[] | {endpoint: .Endpoint, dbSize: .Status.dbSize}'
+
+# Compact and defrag (maintenance)
+rev=$(etcdctl endpoint status --write-out=json | jq '.[0].Status.header.revision')
+etcdctl compact $rev
+etcdctl defrag
+```
+
+## Member Management
+
+```bash
+# Add member
+etcdctl member add etcd-node3 --peer-urls=https://10.0.0.3:2380
+
+# Remove member
+etcdctl member remove MEMBER_ID
+
+# Update member peer URLs
+etcdctl member update MEMBER_ID --peer-urls=https://new-ip:2380
 ```
 
 ## Tips and Tricks
 
-- Use tab completion for faster workflows
-- Create aliases for frequently used commands
-- Set up shell integration for better productivity
+- Always use `ETCDCTL_API=3` — v2 API is deprecated
+- Schedule automatic backups: etcd is the single source of truth for K8s
+- Monitor etcd performance: leader elections, disk fsync latency
+- Keep etcd cluster size at 3 or 5 members (odd numbers for quorum)
+- Use dedicated SSD/NVMe for etcd data directory
 
 ## Related Resources
 
 - [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Docker Cheat Sheet](/blog/docker-cheat-sheet-2026/)
-- [Ansible Cheat Sheet](/blog/ansible-cheat-sheet-2026/)
-- [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
-
-## About the Author
-
-I am Luca Berton, AI and Cloud Advisor with 8 published books. [Book a consultation](https://calendly.com/lucaberton/) for infrastructure help.
+- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)
+- [Linux Cheat Sheet](/blog/linux-cheat-sheet-2026/)

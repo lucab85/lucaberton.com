@@ -12,41 +12,148 @@ author: "Luca Berton"
 category: "DevOps"
 tags: ["Cheat Sheet", "Reference", "DevOps", "2026"]
 ---
+A quick reference for ArgoCD — GitOps continuous delivery for Kubernetes. Bookmark this page.
 
-A quick reference for daily use. Bookmark this page.
-
-## Essential Commands
+## CLI Setup
 
 ```bash
-# Most-used commands at a glance
-# Refer to sections below for details
+# Install ArgoCD CLI
+curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+chmod +x argocd && sudo mv argocd /usr/local/bin/
+
+# Login
+argocd login argocd.example.com
+argocd login argocd.example.com --grpc-web  # If gRPC blocked
+
+# Get admin password (initial)
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d
 ```
 
-## Configuration
+## Application Management
 
 ```bash
-# Common configuration patterns
+# Create an application
+argocd app create my-app \
+  --repo https://github.com/org/repo.git \
+  --path k8s/overlays/production \
+  --dest-server https://kubernetes.default.svc \
+  --dest-namespace production \
+  --sync-policy automated \
+  --auto-prune \
+  --self-heal
+
+# List applications
+argocd app list
+argocd app list -o wide
+
+# Get application details
+argocd app get my-app
+argocd app get my-app --hard-refresh  # Force manifest refresh
+
+# Sync (deploy)
+argocd app sync my-app
+argocd app sync my-app --prune       # Remove deleted resources
+argocd app sync my-app --force       # Force sync
+argocd app sync my-app --dry-run     # Preview changes
+
+# Delete application
+argocd app delete my-app
+argocd app delete my-app --cascade   # Delete app resources too
+```
+
+## Application YAML
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: my-app
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/org/repo.git
+    targetRevision: main
+    path: k8s/overlays/production
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        maxDuration: 3m
+```
+
+## Projects
+
+```bash
+# List projects
+argocd proj list
+
+# Create project with restrictions
+argocd proj create team-a \
+  --src https://github.com/org/* \
+  --dest https://kubernetes.default.svc,team-a-* \
+  --allow-cluster-resource Namespace
+
+# Add allowed namespace
+argocd proj add-destination team-a https://kubernetes.default.svc team-a-staging
+```
+
+## Cluster and Repo Management
+
+```bash
+# Add external cluster
+argocd cluster add my-cluster-context
+
+# List clusters
+argocd cluster list
+
+# Add private repo
+argocd repo add https://github.com/org/private-repo.git --username git --password $TOKEN
+
+# Add Helm repo
+argocd repo add https://charts.bitnami.com/bitnami --type helm --name bitnami
 ```
 
 ## Troubleshooting
 
 ```bash
-# Debugging and diagnostic commands
+# View application logs
+argocd app logs my-app
+
+# View sync history
+argocd app history my-app
+
+# View resource tree
+argocd app resources my-app
+
+# Diff between desired and live state
+argocd app diff my-app
+
+# Refresh application (re-read Git)
+argocd app get my-app --refresh
+argocd app get my-app --hard-refresh  # Clear cache
 ```
 
 ## Tips and Tricks
 
-- Use tab completion for faster workflows
-- Create aliases for frequently used commands
-- Set up shell integration for better productivity
+- Use ApplicationSets for multi-cluster/multi-env deployments
+- Enable `selfHeal: true` to auto-correct manual changes
+- Use `ignoreDifferences` for fields managed by controllers
+- Set resource hooks for pre/post-sync jobs
+- Use `argocd app wait my-app` in CI/CD to wait for healthy state
 
 ## Related Resources
 
-- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Docker Cheat Sheet](/blog/docker-cheat-sheet-2026/)
-- [Ansible Cheat Sheet](/blog/ansible-cheat-sheet-2026/)
-- [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
-
-## About the Author
-
-I am Luca Berton, AI and Cloud Advisor with 8 published books. [Book a consultation](https://calendly.com/lucaberton/) for infrastructure help.
+- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)
+- [Kustomize Cheat Sheet](/blog/kustomize-cheat-sheet-2026/)
+- [Flux Cheat Sheet](/blog/flux-cheat-sheet-2026/)

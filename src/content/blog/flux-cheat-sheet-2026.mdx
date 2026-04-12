@@ -12,41 +12,186 @@ author: "Luca Berton"
 category: "DevOps"
 tags: ["Cheat Sheet", "Reference", "DevOps", "2026"]
 ---
+A quick reference for Flux — GitOps for Kubernetes. Bookmark this page.
 
-A quick reference for daily use. Bookmark this page.
-
-## Essential Commands
+## Installation
 
 ```bash
-# Most-used commands at a glance
-# Refer to sections below for details
+# Install Flux CLI
+curl -s https://fluxcd.io/install.sh | sudo bash
+
+# Bootstrap Flux on a cluster with GitHub
+flux bootstrap github \
+  --owner=my-org \
+  --repository=fleet-infra \
+  --branch=main \
+  --path=clusters/production \
+  --personal
+
+# Check Flux status
+flux check
+flux check --pre  # Pre-installation check
 ```
 
-## Configuration
+## Source Management
 
 ```bash
-# Common configuration patterns
+# Create Git source
+flux create source git my-app \
+  --url=https://github.com/org/app \
+  --branch=main \
+  --interval=1m
+
+# Create Helm repository source
+flux create source helm bitnami \
+  --url=https://charts.bitnami.com/bitnami \
+  --interval=10m
+
+# Create OCI source
+flux create source oci my-app \
+  --url=oci://ghcr.io/org/manifests/my-app \
+  --tag=latest
+
+# List sources
+flux get sources all
+flux get sources git
+flux get sources helm
 ```
 
-## Troubleshooting
+## Kustomization (GitOps)
 
 ```bash
-# Debugging and diagnostic commands
+# Create Kustomization
+flux create kustomization my-app \
+  --source=GitRepository/my-app \
+  --path=./k8s/overlays/production \
+  --prune=true \
+  --interval=5m
+
+# With health checks
+flux create kustomization my-app \
+  --source=GitRepository/my-app \
+  --path=./k8s \
+  --prune=true \
+  --health-check="Deployment/my-app.default" \
+  --health-check-timeout=3m
+
+# List Kustomizations
+flux get kustomizations
+```
+
+## Helm Releases
+
+```bash
+# Create HelmRelease
+flux create helmrelease nginx \
+  --source=HelmRepository/bitnami \
+  --chart=nginx \
+  --target-namespace=web \
+  --values=./values/nginx-prod.yaml
+
+# List Helm releases
+flux get helmreleases
+flux get helmreleases -A
+```
+
+## Operations
+
+```bash
+# Force reconciliation
+flux reconcile source git my-app
+flux reconcile kustomization my-app
+flux reconcile helmrelease nginx
+
+# Suspend/resume
+flux suspend kustomization my-app
+flux resume kustomization my-app
+
+# Export resources
+flux export source git my-app > source.yaml
+flux export kustomization my-app > kustomization.yaml
+
+# Delete
+flux delete kustomization my-app
+flux delete source git my-app
+```
+
+## Monitoring and Debugging
+
+```bash
+# View events
+flux events
+flux events --for Kustomization/my-app
+
+# View logs
+flux logs
+flux logs --kind=Kustomization --name=my-app
+
+# Check all resources
+flux get all -A
+
+# Tree view of resources
+flux tree kustomization my-app
+```
+
+## Image Automation
+
+```yaml
+# ImageRepository — scan for new tags
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImageRepository
+metadata:
+  name: my-app
+spec:
+  image: ghcr.io/org/my-app
+  interval: 5m
+
+---
+# ImagePolicy — select latest semver tag
+apiVersion: image.toolkit.fluxcd.io/v1beta2
+kind: ImagePolicy
+metadata:
+  name: my-app
+spec:
+  imageRepositoryRef:
+    name: my-app
+  policy:
+    semver:
+      range: ">=1.0.0"
+
+---
+# ImageUpdateAutomation — commit tag updates to Git
+apiVersion: image.toolkit.fluxcd.io/v1beta1
+kind: ImageUpdateAutomation
+metadata:
+  name: my-app
+spec:
+  interval: 5m
+  sourceRef:
+    kind: GitRepository
+    name: fleet-infra
+  git:
+    checkout:
+      ref:
+        branch: main
+    commit:
+      author:
+        name: fluxbot
+        email: flux@example.com
+    push:
+      branch: main
 ```
 
 ## Tips and Tricks
 
-- Use tab completion for faster workflows
-- Create aliases for frequently used commands
-- Set up shell integration for better productivity
+- Use `flux diff kustomization my-app` to preview changes before apply
+- Use `dependsOn` to order Kustomizations (infra before apps)
+- Use `postBuild.substituteFrom` for variable substitution from ConfigMaps/Secrets
+- Use multi-tenancy with `--tenant` flag for team isolation
+- Enable notifications: Flux can send alerts to Slack, Teams, Discord
 
 ## Related Resources
 
-- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Docker Cheat Sheet](/blog/docker-cheat-sheet-2026/)
-- [Ansible Cheat Sheet](/blog/ansible-cheat-sheet-2026/)
-- [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
-
-## About the Author
-
-I am Luca Berton, AI and Cloud Advisor with 8 published books. [Book a consultation](https://calendly.com/lucaberton/) for infrastructure help.
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+- [Kustomize Cheat Sheet](/blog/kustomize-cheat-sheet-2026/)
+- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)

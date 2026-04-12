@@ -101,7 +101,6 @@ export default defineConfig({
           changefreq: priority >= 0.8 ? 'weekly' : 'monthly',
           priority
         };
-      };
       }
     }),
     icon(),

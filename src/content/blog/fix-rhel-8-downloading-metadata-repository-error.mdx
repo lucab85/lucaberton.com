@@ -1,0 +1,201 @@
+---
+draft: false
+title: "Fix RHEL 8 \"Errors During Downloading Metadata for Repository\" (2026)"
+snippet: "Fix the RHEL 8 errors during downloading metadata for repository rhel-8-for-x86_64-baseos-rpms and appstream-rpms. Step-by-step troubleshooting for expired subscriptions, CDN 403 errors, and repo configuration issues."
+description: "Complete troubleshooting guide for RHEL 8 errors during downloading metadata for repository rhel-8-for-x86_64-baseos-rpms and rhel-8-for-x86_64-appstream-rpms. Covers subscription registration, CDN 403 errors, SSL certificate issues, proxy configuration, and alternative repos."
+image:
+  src: "/blog/thumbnails/fix-rhel-8-downloading-metadata-repository-error.jpg"
+  alt: "Fix RHEL 8 downloading metadata for repository error"
+publishDate: "2026-04-12"
+lastModified: "2026-04-12"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["RHEL", "Linux", "Red Hat", "Troubleshooting", "Subscription Manager"]
+---
+
+If you are seeing this error on RHEL 8:
+
+```
+Errors during downloading metadata for repository 'rhel-8-for-x86_64-baseos-rpms':
+  - Status code: 403 for https://cdn.redhat.com/content/dist/rhel8/8/x86_64/baseos/os/repodata/repomd.xml
+```
+
+Or the appstream variant:
+
+```
+Errors during downloading metadata for repository 'rhel-8-for-x86_64-appstream-rpms':
+  - Cannot download repomd.xml: All mirrors were tried
+```
+
+This guide covers every cause and fix.
+
+## Quick Diagnosis
+
+Run these commands first to identify the root cause:
+
+```bash
+# Check subscription status
+sudo subscription-manager status
+
+# Check repo list
+sudo subscription-manager repos --list-enabled
+
+# Test CDN connectivity
+curl -v https://cdn.redhat.com
+```
+
+## Fix 1: Register or Re-register Subscription
+
+The most common cause is an expired or unregistered subscription:
+
+```bash
+# Unregister first (if previously registered)
+sudo subscription-manager unregister
+
+# Register with your Red Hat account
+sudo subscription-manager register --username=YOUR_USERNAME --password=YOUR_PASSWORD
+
+# Auto-attach a subscription
+sudo subscription-manager attach --auto
+
+# Verify
+sudo subscription-manager status
+```
+
+If you see `Overall Status: Current`, your subscription is active.
+
+## Fix 2: Refresh Subscription Data
+
+Sometimes the local subscription cache is stale:
+
+```bash
+# Refresh subscription data
+sudo subscription-manager refresh
+
+# Clean yum/dnf cache
+sudo dnf clean all
+sudo rm -rf /var/cache/dnf
+
+# Retry
+sudo dnf makecache
+```
+
+## Fix 3: Fix SSL Certificate Issues
+
+The 403 error often means the entitlement certificates are missing or expired:
+
+```bash
+# Check if entitlement certs exist
+ls /etc/pki/entitlement/
+
+# If empty, the subscription is not properly attached
+sudo subscription-manager remove --all
+sudo subscription-manager attach --auto
+
+# Verify certs are present
+ls /etc/pki/entitlement/
+```
+
+You should see `.pem` and `-key.pem` files.
+
+## Fix 4: CDN Connectivity and Proxy Issues
+
+If you are behind a corporate proxy:
+
+```bash
+# Configure subscription-manager proxy
+sudo subscription-manager config --server.proxy_hostname=proxy.example.com \
+  --server.proxy_port=8080 \
+  --server.proxy_user=proxyuser \
+  --server.proxy_password=proxypass
+
+# Configure dnf proxy
+echo "proxy=http://proxy.example.com:8080" | sudo tee -a /etc/dnf/dnf.conf
+```
+
+Test direct CDN access:
+
+```bash
+# Test with curl (should return 200)
+curl -I --cert /etc/pki/entitlement/*.pem \
+  --key /etc/pki/entitlement/*-key.pem \
+  https://cdn.redhat.com/content/dist/rhel8/8/x86_64/baseos/os/repodata/repomd.xml
+```
+
+## Fix 5: Reset Repository Configuration
+
+If repos are misconfigured:
+
+```bash
+# Disable all repos and re-enable the defaults
+sudo subscription-manager repos --disable="*"
+sudo subscription-manager repos \
+  --enable=rhel-8-for-x86_64-baseos-rpms \
+  --enable=rhel-8-for-x86_64-appstream-rpms
+
+# Verify
+sudo dnf repolist
+```
+
+## Fix 6: RHEL 8 End of Life Considerations
+
+RHEL 8 reaches End of Maintenance Support on **May 31, 2029**, but some minor versions may no longer receive updates. If you are on an older point release:
+
+```bash
+# Check your current version
+cat /etc/redhat-release
+
+# If locked to an old release, unlock
+sudo subscription-manager release --unset
+
+# Update to latest RHEL 8
+sudo dnf update
+```
+
+## Fix 7: Use CentOS Stream 8 Repos (Alternative)
+
+If you are running RHEL 8 without an active subscription (e.g., development):
+
+```bash
+# Note: CentOS Stream 8 reached EOL June 2024
+# Consider migrating to RHEL 9 or CentOS Stream 9
+
+# For RHEL 9, see our complete administration guide:
+```
+
+Consider upgrading to [RHEL 9](/blog/red-hat-enterprise-linux-9-for-sysadmins/) for continued support and modern features.
+
+## Fix 8: Clean and Rebuild Cache
+
+After applying any fix above:
+
+```bash
+# Nuclear option: clean everything
+sudo dnf clean all
+sudo rm -rf /var/cache/dnf
+sudo subscription-manager clean
+sudo subscription-manager register --username=YOUR_USERNAME --password=YOUR_PASSWORD
+sudo subscription-manager attach --auto
+sudo dnf makecache
+sudo dnf update
+```
+
+## Common Error Variants
+
+All of these errors have the same root causes:
+
+- `Status code: 403 for https://cdn.redhat.com/.../baseos/os/repodata/repomd.xml`
+- `Status code: 403 for https://cdn.redhat.com/.../appstream/os/repodata/repomd.xml`
+- `Cannot download repomd.xml: All mirrors were tried`
+- `Failed to download metadata for repo 'rhel-8-for-x86_64-baseos-rpms'`
+- `Error: Failed to download metadata for repo 'rhel-8-for-x86_64-baseos-rpms': Cannot download repomd.xml`
+
+## Related Posts
+
+- [RHEL 9 Administration Guide](/blog/red-hat-enterprise-linux-9-for-sysadmins/)
+- [Red Hat Ansible Automation Platform](/blog/red-hat-ansible-automation/)
+- [RHCE Exam 2026 Study Guide](/blog/mastering-the-red-hat-certified-engineer-rhce-exam/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor with deep Linux expertise. [Book a consultation](https://calendly.com/lucaberton/).

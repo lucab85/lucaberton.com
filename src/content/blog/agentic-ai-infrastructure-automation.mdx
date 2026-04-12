@@ -18,4 +18,95 @@ image:
   src: "/blog/thumbnails/agentic-ai-infrastructure-automation.jpg"
   alt: "Agentic AI Infrastructure Automation Guide"
 ---
+The shift from reactive runbooks to autonomous AI agents is one of the most significant changes in infrastructure management. Instead of waiting for alerts and manually executing playbooks, agentic AI systems can diagnose issues, evaluate options, and take corrective action — all within defined safety boundaries.
 
+## What Makes an Agent "Agentic"
+
+Traditional automation is imperative: you define every step. Agentic automation is goal-oriented: you define the desired state and let the agent figure out how to get there.
+
+The key difference is the **decision loop**:
+
+1. **Observe** — collect metrics, logs, and cluster state
+2. **Reason** — use an LLM or rule engine to diagnose the root cause
+3. **Plan** — generate a remediation strategy
+4. **Act** — execute the fix (with approval gates if configured)
+5. **Verify** — confirm the fix worked and the system is healthy
+
+## Architecture Patterns
+
+### Pattern 1: Observer-Actor with Human-in-the-Loop
+
+The safest starting point. The agent monitors infrastructure, diagnoses issues, and proposes fixes — but a human must approve before execution.
+
+```yaml
+# Example: Agent detects high memory pod
+observation: "Pod api-server memory at 95%"
+diagnosis: "Memory leak in connection pool — not releasing idle connections"
+proposed_action: "Restart pod api-server-7d8f9 with rolling strategy"
+approval_required: true
+blast_radius: "single pod, zero downtime with rolling restart"
+```
+
+### Pattern 2: Bounded Autonomous Action
+
+For well-understood failure modes, let the agent act autonomously within strict boundaries:
+
+- **Scaling**: Agent can scale replicas between 2 and 20
+- **Restarts**: Agent can restart individual pods (not deployments)
+- **DNS**: Agent can update DNS weights for traffic shifting
+- **Blocked**: Anything touching persistent storage, secrets, or network policies requires human approval
+
+### Pattern 3: Multi-Agent Collaboration
+
+Multiple specialized agents that collaborate:
+
+- **Monitoring Agent** — watches metrics and detects anomalies
+- **Diagnosis Agent** — correlates signals and identifies root cause
+- **Remediation Agent** — executes fixes within its authorized scope
+- **Audit Agent** — logs everything and flags policy violations
+
+## Implementation with Kubernetes
+
+The Kubernetes controller pattern is a natural fit for agentic AI. A custom controller that:
+
+1. Watches cluster events via the API server
+2. Sends context to an LLM for analysis
+3. Creates or modifies resources based on the LLM's recommendation
+4. Records decisions in a custom resource for audit
+
+```python
+# Simplified agentic controller loop
+async def reconcile(event):
+    context = gather_cluster_context(event)
+    diagnosis = await llm.analyze(context)
+    
+    if diagnosis.confidence > 0.9 and diagnosis.blast_radius == "low":
+        await execute_remediation(diagnosis.action)
+    else:
+        await notify_human(diagnosis)
+```
+
+## Safety First
+
+Agentic AI without guardrails is a recipe for disaster. Every agentic system needs:
+
+- **Blast radius limits** — maximum scope of any single action
+- **Rate limiting** — prevent runaway remediation loops
+- **Rollback triggers** — automatic undo if health degrades after action
+- **Audit logging** — every decision and action recorded immutably
+- **Kill switch** — instant human override
+
+## Getting Started
+
+1. Start with **observability only** — let the agent diagnose but not act
+2. Add **notification actions** — agent alerts humans with proposed fixes
+3. Enable **bounded actions** — small, safe, reversible operations
+4. Expand gradually — as trust is earned through correct diagnoses
+
+The goal is not to replace SRE teams but to handle the routine 80% of incidents automatically, freeing engineers for the complex 20% that require human judgment.
+
+## Related Reading
+
+- [AI Agents as Kubernetes Operators](/blog/building-ai-agents-kubernetes-operators/)
+- [Guardrails for AI Agents in Production](/blog/ai-agent-guardrails-production/)
+- [AIOps and SRE That Actually Works](/blog/aiops-sre-that-actually-works/)

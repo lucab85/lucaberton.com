@@ -18,4 +18,139 @@ image:
   src: "/blog/thumbnails/data-residency-multi-cloud-kubernetes.jpg"
   alt: "Data Residency Multi-Cloud Kubernetes Patterns"
 ---
+Data residency requirements dictate where data can be stored and processed. For organizations running multi-cloud Kubernetes, this creates complex placement constraints that go far beyond simple region selection.
 
+## Why Data Residency Matters
+
+Regulations like GDPR (EU), LGPD (Brazil), PIPL (China), and sector-specific rules (financial, healthcare) require:
+
+- **Data at rest**: Must be stored within specific geographic boundaries
+- **Data in transit**: May not traverse certain jurisdictions
+- **Data processing**: Computation must happen where the data resides
+- **Data sovereignty**: Government access laws vary by jurisdiction
+
+Violating these requirements carries fines up to 4% of global revenue (GDPR) or criminal penalties (PIPL).
+
+## Architecture Patterns
+
+### Pattern 1: Regional Clusters
+
+Deploy separate Kubernetes clusters per region:
+
+```yaml
+clusters:
+  eu-west:
+    provider: AWS
+    region: eu-west-1
+    data_classification: [EU-PII, GDPR]
+    
+  us-east:
+    provider: Azure
+    region: eastus
+    data_classification: [US-PII, HIPAA]
+    
+  ap-southeast:
+    provider: GCP
+    region: asia-southeast1
+    data_classification: [APAC-PII, PDPA]
+```
+
+### Pattern 2: Namespace-Level Isolation
+
+Single cluster with namespace-based data boundaries:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: eu-data
+  labels:
+    data-residency: eu
+    compliance: gdpr
+  annotations:
+    scheduler.alpha.kubernetes.io/node-selector: topology.kubernetes.io/region=eu-west-1
+```
+
+### Pattern 3: Policy-as-Code Enforcement
+
+Use OPA/Gatekeeper or Kyverno to enforce residency:
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: enforce-data-residency
+spec:
+  rules:
+    - name: eu-data-stays-in-eu
+      match:
+        resources:
+          kinds: [Pod]
+          namespaces: ["eu-*"]
+      validate:
+        message: "EU data workloads must run on EU nodes"
+        pattern:
+          spec:
+            nodeSelector:
+              topology.kubernetes.io/region: "eu-*"
+```
+
+## Multi-Cloud Considerations
+
+### Cross-Region Communication
+
+When services in different regions need to communicate:
+
+1. **Data minimization**: Send only necessary fields, strip PII before cross-region calls
+2. **Tokenization**: Replace sensitive data with tokens, keep token-to-data mapping in the origin region
+3. **Edge processing**: Process and aggregate data locally, send only anonymized results
+
+### Database Strategy
+
+- **Per-region databases**: Each region has its own database instance. Simplest for compliance, hardest for global queries.
+- **CockroachDB or YugabyteDB**: Distributed SQL with row-level geo-partitioning.
+- **Vitess**: MySQL-compatible sharding with region-aware routing.
+
+### Service Mesh for Residency
+
+Istio or Linkerd can enforce cross-region traffic policies:
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: eu-data-locality
+spec:
+  host: user-service
+  trafficPolicy:
+    outlierDetection:
+      consecutiveErrors: 3
+    connectionPool:
+      http:
+        h2UpgradePolicy: UPGRADE
+  subsets:
+    - name: eu
+      labels:
+        region: eu
+      trafficPolicy:
+        loadBalancer:
+          localityLbSetting:
+            enabled: true
+            failover:
+              - from: eu-west-1
+                to: eu-central-1
+```
+
+## Compliance Monitoring
+
+Continuous verification that data stays where it should:
+
+1. **Network flow logs**: Monitor all cross-region traffic
+2. **Storage audits**: Verify data locations match policies
+3. **Certificate pinning**: Ensure TLS connections stay within approved regions
+4. **Regular penetration testing**: Validate that residency controls hold under adversarial conditions
+
+## Related Reading
+
+- [Digital Sovereignty and EU Cloud Strategy](/blog/digital-sovereignty-eu-cloud-strategy/)
+- [Kubernetes Multi-Cluster Management](/blog/kubernetes-multi-cluster-management-enterprise-2026/)

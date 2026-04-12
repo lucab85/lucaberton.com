@@ -18,9 +18,148 @@ image:
   src: "/blog/thumbnails/gpu-cluster-architecture-training-inference.jpg"
   alt: "GPU Cluster Architecture Training and Inference"
 ---
+GPU clusters for AI workloads come in two fundamentally different architectures: training clusters optimized for throughput and collective communication, and inference clusters optimized for latency and cost efficiency. Getting this wrong wastes hundreds of thousands of dollars.
 
-## Related Articles
+## Training vs Inference: Different Requirements
 
-- [Architecture to Scale AI in the Enterprise](/blog/architecture-scale-ai-enterprise-platform/)
-- [GPU Sharing on Kubernetes Guide](/blog/gpu-sharing-kubernetes-mig-mps/)
-- [Packed Room at KubeCon Europe 2026: Multi-Tenant GPUs on Bare Metal](/blog/kubecon-2026-talk-multi-tenant-gpus-recap/)
+| Dimension | Training Cluster | Inference Cluster |
+|-----------|-----------------|-------------------|
+| Priority | Throughput (tokens/second) | Latency (ms per request) |
+| GPU utilization target | 95%+ sustained | 50-70% (headroom for bursts) |
+| Network | InfiniBand 400Gbps (RDMA) | Standard 100GbE sufficient |
+| Storage | High-throughput parallel FS | Fast model loading, minimal storage |
+| Batch size | Large (thousands) | Small (1-64) |
+| Scaling pattern | All GPUs active simultaneously | Scale up/down with demand |
+| Cost model | $/training run | $/1000 tokens served |
+| Failure tolerance | Checkpoint and resume | Redundancy and failover |
+
+## Training Cluster Architecture
+
+### Network Topology
+
+Training clusters need all-reduce communication across all GPUs. The network is the bottleneck:
+
+```
+┌──── Spine Switch (InfiniBand 400G) ────┐
+│                                         │
+├─── Leaf ───┤  ├─── Leaf ───┤  ├─── Leaf ───┤
+│   Switch   │  │   Switch   │  │   Switch   │
+│            │  │            │  │            │
+│ ┌──┐ ┌──┐ │  │ ┌──┐ ┌──┐ │  │ ┌──┐ ┌──┐ │
+│ │N1│ │N2│ │  │ │N3│ │N4│ │  │ │N5│ │N6│ │
+│ │8G│ │8G│ │  │ │8G│ │8G│ │  │ │8G│ │8G│ │
+│ └──┘ └──┘ │  │ └──┘ └──┘ │  │ └──┘ └──┘ │
+└────────────┘  └────────────┘  └────────────┘
+         48 GPUs total (6 nodes × 8 GPUs)
+```
+
+### Storage Architecture
+
+Training data needs high-throughput parallel access:
+
+- **GPFS/Lustre/WekaFS**: Parallel filesystem for dataset access
+- **Throughput target**: 100+ GB/s aggregate read for large clusters
+- **NVMe cache**: Local NVMe on each node for checkpoint writes
+- **Object storage**: S3/MinIO for long-term dataset and checkpoint storage
+
+### NCCL Configuration
+
+```bash
+# Essential NCCL environment variables for training clusters
+export NCCL_IB_HCA=mlx5_0,mlx5_1    # InfiniBand adapters
+export NCCL_SOCKET_IFNAME=eth0        # Fallback interface
+export NCCL_DEBUG=INFO                # Debugging
+export NCCL_TIMEOUT=1800              # 30 min timeout for large all-reduce
+export NCCL_ALGO=Ring                 # or Tree for different topologies
+export NCCL_PROTO=Simple              # or LL128 for low latency
+```
+
+## Inference Cluster Architecture
+
+### Autoscaling Architecture
+
+Inference clusters must scale with demand:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: inference-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: llm-inference
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: inference_queue_depth
+        target:
+          type: AverageValue
+          averageValue: "5"  # Scale when queue > 5 per pod
+```
+
+### Multi-Model Serving
+
+Run multiple models on shared GPU infrastructure:
+
+- **Time-slicing**: Multiple models share one GPU via time division
+- **MIG (Multi-Instance GPU)**: Hardware partitioning on A100/H100
+- **MPS (Multi-Process Service)**: Concurrent model execution
+- **KV-cache sharing**: Models share KV-cache across requests (vLLM, NVIDIA Dynamo)
+
+### Cost Optimization
+
+Inference cost optimization strategies:
+
+1. **Right-size GPUs**: Use L4 for small models, A100 for medium, H100 for large
+2. **Quantization**: INT8/INT4 reduces GPU memory and increases throughput 2-4x
+3. **Batching**: Dynamic batching increases GPU utilization significantly
+4. **Spot/preemptible instances**: Use for non-latency-sensitive batch inference
+5. **Model routing**: Route simple queries to smaller/cheaper models
+
+## Hybrid Cluster Design
+
+Some organizations run both training and inference on shared infrastructure:
+
+- **Partition by time**: Training at night (cheap electricity), inference during business hours
+- **Partition by node**: Dedicated training nodes (InfiniBand) + inference nodes (Ethernet)
+- **Partition by GPU**: MIG slices for inference on some GPUs, full GPUs for training
+
+## Sizing Guide
+
+### Training Cluster Sizing
+
+```
+GPUs needed = Model Parameters / (GPU Memory × Parallelism Efficiency)
+
+Example: Training a 70B model
+  - Model: 70B parameters × 4 bytes (FP32) = 280 GB
+  - With mixed precision: ~140 GB
+  - Per H100 (80GB): Need at least 2 GPUs for model weights
+  - With optimizer states: 4-8× model size = 560 GB - 1.1 TB
+  - Minimum: 8× H100 (one node)
+  - For reasonable training time: 32-64× H100
+```
+
+### Inference Cluster Sizing
+
+```
+GPUs needed = (Peak QPS × Latency Target) / Throughput per GPU
+
+Example: Serving a 70B model
+  - Target: 100 QPS, under 2s latency
+  - Per H100 with vLLM: ~30 QPS at 2s latency
+  - GPUs needed: ceil(100/30) = 4 GPUs
+  - With redundancy (N+1): 5 GPUs
+  - Plus 50% headroom for burst: 8 GPUs (1 node)
+```
+
+## Related Reading
+
+- [Multi-GPU Training on RHEL AI](/blog/multi-gpu-training-strategies-for-rhel-ai/)
+- [NVIDIA NIM Multi-Node Deployment](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/)
+- [NVIDIA Dynamo Inference Framework](/blog/nvidia-dynamo-disaggregated-inference-framework-2026/)

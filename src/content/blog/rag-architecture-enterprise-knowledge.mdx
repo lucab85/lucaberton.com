@@ -18,9 +18,147 @@ image:
   src: "/blog/thumbnails/rag-architecture-enterprise-knowledge.jpg"
   alt: "Enterprise RAG Architecture Patterns"
 ---
+Retrieval-Augmented Generation (RAG) bridges the gap between general-purpose LLMs and your organization's proprietary knowledge. Instead of fine-tuning a model on your data (expensive, slow, goes stale), RAG retrieves relevant context at query time and feeds it to the LLM.
 
-## Related Articles
+## How RAG Works
 
-- [Architecture to Scale AI in the Enterprise](/blog/architecture-scale-ai-enterprise-platform/)
-- [GPU Sharing on Kubernetes Guide](/blog/gpu-sharing-kubernetes-mig-mps/)
-- [Packed Room at KubeCon Europe 2026: Multi-Tenant GPUs on Bare Metal](/blog/kubecon-2026-talk-multi-tenant-gpus-recap/)
+```
+User Query → Embedding → Vector Search → Top-K Documents → LLM + Context → Answer
+```
+
+1. **User asks a question**: "What is our SLA for tier-1 customers?"
+2. **Query embedding**: Convert the question to a vector (1536 dimensions with OpenAI, 768 with open models)
+3. **Vector search**: Find the most similar document chunks in the vector database
+4. **Context assembly**: Combine the top-K results into a prompt
+5. **LLM generation**: The model answers using the retrieved context, not its training data
+
+## Architecture Components
+
+### Document Ingestion Pipeline
+
+```
+Raw Documents → Chunking → Embedding → Vector Store
+     ↓              ↓           ↓           ↓
+  PDF, Docs,    Split into   Convert to   Store in
+  Confluence,   overlapping  vectors via  Qdrant,
+  Slack, Git    chunks       embedding    Weaviate,
+                (512-1024    model        Milvus,
+                 tokens)                  pgvector
+```
+
+### Chunking Strategy
+
+The most important decision in RAG. Poor chunking = poor retrieval = poor answers.
+
+```python
+# Bad: Fixed-size chunks break mid-sentence
+chunks = [text[i:i+500] for i in range(0, len(text), 500)]
+
+# Better: Semantic chunking with overlap
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
+splitter = RecursiveCharacterTextSplitter(
+    chunk_size=512,
+    chunk_overlap=50,
+    separators=["
+
+", "
+", ". ", " "]
+)
+chunks = splitter.split_text(text)
+
+# Best: Document-structure-aware chunking
+# Split on headings, preserve sections, keep tables intact
+```
+
+### Vector Database Selection
+
+| Database | Type | Strengths | Weaknesses |
+|----------|------|-----------|------------|
+| pgvector | Extension | Uses existing Postgres, simple | Limited scale |
+| Qdrant | Purpose-built | Fast, rich filtering | Another service to manage |
+| Weaviate | Purpose-built | Multi-modal, GraphQL API | Complex setup |
+| Milvus | Purpose-built | Massive scale, GPU-accelerated | Operational overhead |
+| Pinecone | Managed SaaS | Zero ops, fast | Vendor lock-in, cost at scale |
+| ChromaDB | Embedded | Simple, great for prototyping | Not for production scale |
+
+### Embedding Models
+
+| Model | Dimensions | Speed | Quality |
+|-------|-----------|-------|---------|
+| OpenAI text-embedding-3-large | 3072 | API latency | Excellent |
+| OpenAI text-embedding-3-small | 1536 | API latency | Very good |
+| BGE-large-en-v1.5 | 1024 | Self-hosted | Very good |
+| E5-large-v2 | 1024 | Self-hosted | Good |
+| all-MiniLM-L6-v2 | 384 | Very fast | Acceptable |
+
+For enterprise use, self-hosted models (BGE, E5) avoid sending data to external APIs.
+
+## Advanced RAG Patterns
+
+### Hybrid Search
+
+Combine vector search with keyword search for better retrieval:
+
+```python
+# Vector search finds semantically similar documents
+vector_results = vector_db.search(query_embedding, top_k=10)
+
+# BM25 keyword search finds exact term matches
+keyword_results = bm25_index.search(query_text, top_k=10)
+
+# Reciprocal Rank Fusion combines both
+final_results = reciprocal_rank_fusion(vector_results, keyword_results)
+```
+
+### Multi-Query RAG
+
+Generate multiple search queries from a single user question:
+
+```python
+# User asks: "How does our authentication work?"
+# Generate search queries:
+queries = [
+    "authentication system architecture",
+    "login flow and OAuth implementation",
+    "user session management",
+    "SSO and identity provider integration"
+]
+# Search with all queries, deduplicate results
+```
+
+### Parent Document Retrieval
+
+Store small chunks for precise retrieval, but return the full parent document for context:
+
+```python
+# Index small chunks (256 tokens) for precise matching
+# But return the parent section (2000 tokens) for full context
+# This gives the LLM enough surrounding context to answer well
+```
+
+## Production Considerations
+
+1. **Freshness**: Schedule re-ingestion for frequently updated sources (Confluence, Git)
+2. **Access control**: Filter results based on user permissions — do not let RAG bypass document ACLs
+3. **Evaluation**: Measure retrieval quality (recall@k) and answer quality (faithfulness, relevance)
+4. **Caching**: Cache common query embeddings and their results
+5. **Monitoring**: Track retrieval latency, cache hit rate, LLM token usage, and answer quality scores
+
+## Cost Estimation
+
+```
+Monthly RAG cost for 10K documents, 1K queries/day:
+
+Embedding (one-time): 10K docs × avg 2K tokens = 20M tokens → $2.60
+Vector DB: Qdrant cloud small instance → $25/month
+LLM inference: 1K queries × 2K context tokens × 30 days = 60M tokens → ~$90/month
+Re-embedding (weekly): $0.65/week → $2.60/month
+
+Total: ~$120/month for 30K queries
+```
+
+## Related Reading
+
+- [Building Your First AI Chatbot with RHEL AI](/blog/building-your-first-ai-chatbot-with-rhel-ai-and-instructlab/)
+- [Enterprise LLM Deployment Patterns](/blog/enterprise-llm-deployment-patterns-on-premises-2026/)

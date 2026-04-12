@@ -18,4 +18,114 @@ image:
   src: "/blog/thumbnails/ai-agent-guardrails-production.jpg"
   alt: "AI Agent Guardrails for Production Systems"
 ---
+Deploying AI agents in production without guardrails is like giving a new intern root access on day one. They might be brilliant, but without boundaries, the blast radius of a mistake is unlimited.
 
+## The Guardrail Stack
+
+Production AI agents need five layers of protection:
+
+### Layer 1: Input Validation
+
+Every piece of data the agent receives must be validated:
+
+```python
+def validate_agent_input(observation):
+    # Reject inputs that could cause prompt injection
+    if contains_injection_patterns(observation):
+        raise SecurityError("Suspicious input pattern detected")
+    
+    # Verify data freshness
+    if observation.timestamp < now() - timedelta(minutes=5):
+        raise StaleDataError("Observation too old for action")
+    
+    # Check data source authenticity
+    if not verify_source_signature(observation):
+        raise AuthError("Unverified data source")
+```
+
+### Layer 2: Action Scope Limits
+
+Define exactly what the agent can and cannot do:
+
+```yaml
+agent_permissions:
+  allowed_actions:
+    - restart_pod
+    - scale_deployment (min: 1, max: 20)
+    - update_configmap
+    - create_alert
+  
+  blocked_actions:
+    - delete_namespace
+    - modify_secrets
+    - change_network_policies
+    - modify_rbac
+  
+  requires_approval:
+    - scale_deployment (above 10 replicas)
+    - restart_statefulset
+    - modify_service_mesh_config
+```
+
+### Layer 3: Blast Radius Controls
+
+Every action must declare its potential impact:
+
+- **Low**: Single pod restart, config reload
+- **Medium**: Deployment rollout, HPA adjustment
+- **High**: Namespace-wide changes, storage modifications
+- **Critical**: Cross-cluster operations, data migrations
+
+Agents can autonomously execute Low actions, need one approval for Medium, two approvals for High, and manual execution only for Critical.
+
+### Layer 4: Rollback Triggers
+
+Automatic rollback if things go wrong:
+
+```python
+async def execute_with_rollback(action, health_check):
+    snapshot = capture_state()
+    
+    await execute(action)
+    await asyncio.sleep(30)  # Observation window
+    
+    if not health_check():
+        await rollback(snapshot)
+        await alert("Auto-rollback triggered", action, snapshot)
+```
+
+### Layer 5: Audit and Compliance
+
+Every agent decision must be recorded:
+
+- What was observed
+- What was diagnosed
+- What action was proposed
+- Whether it was approved (and by whom)
+- What was executed
+- What the outcome was
+
+This creates an audit trail that satisfies SOC 2, ISO 27001, and internal compliance requirements.
+
+## Common Failure Modes
+
+1. **Remediation loops** — Agent detects issue, fixes it, fix causes new issue, agent "fixes" that, repeat. Solution: circuit breakers and rate limits.
+2. **Cascading actions** — Agent acts on multiple issues simultaneously, overwhelming the system. Solution: action queuing with concurrency limits.
+3. **Stale data decisions** — Agent acts on outdated metrics. Solution: freshness checks and real-time data validation.
+4. **Prompt injection** — Malicious log entries trick the agent. Solution: input sanitization and separate reasoning context.
+
+## Implementation Checklist
+
+- [ ] Define action allowlist and blocklist
+- [ ] Implement blast radius classification
+- [ ] Set up automatic rollback with health checks
+- [ ] Configure rate limiting (max actions per hour)
+- [ ] Enable comprehensive audit logging
+- [ ] Create kill switch (disable agent in under 30 seconds)
+- [ ] Test failure modes in staging
+- [ ] Run in observe-only mode for 2 weeks before enabling actions
+
+## Related Reading
+
+- [Agentic AI for Infrastructure Automation](/blog/agentic-ai-infrastructure-automation/)
+- [AI Agents as Kubernetes Operators](/blog/building-ai-agents-kubernetes-operators/)

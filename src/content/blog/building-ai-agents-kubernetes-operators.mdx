@@ -18,4 +18,162 @@ image:
   src: "/blog/thumbnails/building-ai-agents-kubernetes-operators.jpg"
   alt: "AI Agents as Kubernetes Operators"
 ---
+The Kubernetes operator pattern — a custom controller that watches resources and reconciles state — is a natural fit for AI-powered agents. Instead of hardcoded reconciliation logic, the controller consults an LLM to decide what action to take.
 
+## Why Operators Make Good Agents
+
+Kubernetes operators already implement the core agent loop:
+
+1. **Watch** — observe cluster events via the API server
+2. **Analyze** — determine if current state matches desired state
+3. **Act** — create, update, or delete resources to reconcile
+
+Adding an LLM to step 2 transforms a rigid operator into an adaptive agent that can handle situations the developer did not anticipate.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│  AI Agent Operator                          │
+│                                             │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
+│  │ Watcher  │→ │ LLM      │→ │ Executor │  │
+│  │ (K8s API)│  │ Reasoner │  │ (kubectl) │  │
+│  └──────────┘  └──────────┘  └──────────┘  │
+│                     ↑                       │
+│              ┌──────────┐                   │
+│              │ Context  │                   │
+│              │ Gatherer │                   │
+│              └──────────┘                   │
+└─────────────────────────────────────────────┘
+```
+
+## Implementation Example
+
+Using Python with kopf (Kubernetes Operator Framework):
+
+```python
+import kopf
+import openai
+from kubernetes import client
+
+@kopf.on.event('', 'v1', 'pods')
+async def handle_pod_event(event, logger, **kwargs):
+    pod = event['object']
+    
+    # Only act on unhealthy pods
+    if not is_unhealthy(pod):
+        return
+    
+    # Gather context
+    context = {
+        "pod_name": pod['metadata']['name'],
+        "namespace": pod['metadata']['namespace'],
+        "status": pod['status'],
+        "events": get_recent_events(pod),
+        "logs": get_pod_logs(pod, tail=50),
+        "node_metrics": get_node_metrics(pod),
+    }
+    
+    # Ask LLM for diagnosis and action
+    response = await openai.chat.completions.create(
+        model="gpt-4",
+        messages=[{
+            "role": "system",
+            "content": AGENT_SYSTEM_PROMPT
+        }, {
+            "role": "user", 
+            "content": f"Diagnose this pod issue: {json.dumps(context)}"
+        }],
+        response_format={"type": "json_object"}
+    )
+    
+    diagnosis = json.loads(response.choices[0].message.content)
+    
+    # Execute within guardrails
+    if diagnosis['action'] in ALLOWED_ACTIONS:
+        await execute_action(diagnosis)
+        logger.info(f"Executed: {diagnosis['action']}")
+    else:
+        await notify_human(diagnosis)
+```
+
+## The System Prompt
+
+The system prompt defines the agent's personality and constraints:
+
+```python
+AGENT_SYSTEM_PROMPT = """
+You are a Kubernetes SRE agent. You diagnose pod issues and recommend actions.
+
+ALLOWED ACTIONS:
+- restart_pod: Restart a single pod
+- scale_deployment: Scale replicas (2-20 range only)  
+- cordon_node: Mark node as unschedulable
+- create_alert: Send alert to ops team
+
+NEVER:
+- Delete namespaces or persistent volumes
+- Modify RBAC or network policies
+- Act on multiple pods simultaneously
+
+Respond in JSON:
+{
+  "diagnosis": "string",
+  "confidence": 0.0-1.0,
+  "action": "string", 
+  "parameters": {},
+  "reasoning": "string"
+}
+"""
+```
+
+## Custom Resource Definition
+
+Define a CRD to track agent decisions:
+
+```yaml
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: agentdecisions.ai.example.com
+spec:
+  group: ai.example.com
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                observation:
+                  type: string
+                diagnosis:
+                  type: string
+                action:
+                  type: string
+                confidence:
+                  type: number
+                approved:
+                  type: boolean
+                executed:
+                  type: boolean
+```
+
+## Production Considerations
+
+1. **Rate limit LLM calls** — cache common diagnoses, batch observations
+2. **Fallback logic** — if the LLM is unavailable, fall back to rule-based decisions
+3. **Cost management** — GPT-4 calls add up; use smaller models for common patterns
+4. **Testing** — replay historical incidents to validate agent behavior
+5. **Observability** — log every decision with full context for audit
+
+## Related Reading
+
+- [Agentic AI for Infrastructure Automation](/blog/agentic-ai-infrastructure-automation/)
+- [AI Agent Guardrails in Production](/blog/ai-agent-guardrails-production/)
+- [AI on Kubernetes in Production](/blog/ai-kubernetes-production-first-90-days/)

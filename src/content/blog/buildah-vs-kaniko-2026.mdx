@@ -12,38 +12,68 @@ author: "Luca Berton"
 category: "Platform Engineering"
 tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
 ---
-
 This is a practical comparison based on real production use, not vendor marketing.
 
 ## Quick Comparison
 
-| Feature | Tool A | Tool B |
-|---------|--------|--------|
-| Learning curve | Medium | Medium |
-| Community | Large | Growing |
-| Enterprise support | Yes | Yes |
-| Kubernetes native | Yes | Yes |
+| Feature | Buildah | Kaniko |
+|---------|---------|--------|
+| Daemon required | No | No |
+| Rootless builds | Yes | Yes (in container) |
+| Runs in | Any Linux host | Container only |
+| Dockerfile support | Yes | Yes |
+| Scripted builds | Yes (Buildah CLI) | No (Dockerfile only) |
+| Multi-stage | Yes | Yes |
+| Layer caching | Local | Registry-based |
+| CI/CD use | Podman/Buildah pods | Kubernetes Jobs |
 
-## When to Use Each
+## When to Use Buildah
 
-### Choose Tool A When
+- **Podman ecosystem**: Buildah is the build engine behind `podman build` — if you use Podman, you already have Buildah
+- **Scripted builds**: Build images without Dockerfiles using CLI commands for maximum control
+- **Local development**: Build and test on your workstation without Docker daemon
+- **Fine-grained control**: Mount filesystems, run commands, commit layers individually
 
-- You need a mature, well-documented solution
-- Enterprise support is important
-- Integration with existing tools matters
+```bash
+# Buildah scripted build (no Dockerfile needed)
+ctr=$(buildah from fedora:39)
+buildah run $ctr -- dnf install -y nginx
+buildah config --port 80 $ctr
+buildah commit $ctr my-nginx:v1
+```
 
-### Choose Tool B When
+## When to Use Kaniko
 
-- You want a simpler setup
-- Lightweight operation is priority
-- Newer features matter more
+- **Kubernetes-native CI/CD**: Kaniko runs as a container — perfect for Kubernetes Jobs in Tekton, Argo Workflows, or GitLab CI
+- **No privileged containers**: Build images inside unprivileged Kubernetes pods
+- **Registry caching**: Kaniko caches layers in a container registry, speeding up builds across distributed CI runners
+- **GitOps pipelines**: Standard choice for building images in GitOps workflows
+
+```yaml
+# Kaniko in Kubernetes Job
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: build-image
+spec:
+  template:
+    spec:
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --dockerfile=Dockerfile
+            - --context=git://github.com/org/app
+            - --destination=registry.example.com/app:v1
+            - --cache=true
+```
 
 ## My Recommendation
 
-Both tools are production-ready. The choice depends on your team's experience and existing stack. I have deployed both for enterprise clients — [book a consultation](https://calendly.com/lucaberton/) to discuss your specific needs.
+Use **Buildah** for local development and VM-based CI/CD (Jenkins, GitLab runners on VMs). Use **Kaniko** for Kubernetes-native CI/CD pipelines where you cannot run privileged containers. For most teams, the choice follows their CI/CD platform. [Book a consultation](https://calendly.com/lucaberton/) to optimize your container build pipeline.
 
 ## Related Resources
 
-- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Docker vs Kubernetes](/blog/docker-vs-kubernetes-when-you-need-which/)
-- [Terraform vs Ansible](/blog/terraform-vs-ansible-when-to-use-which-2026/)
+- [Buildah Cheat Sheet](/blog/buildah-cheat-sheet-2026/)
+- [Podman Cheat Sheet](/blog/podman-cheat-sheet-2026/)
+- [Tekton vs GitHub Actions](/blog/tekton-vs-github-actions-2026/)

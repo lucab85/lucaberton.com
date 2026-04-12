@@ -12,38 +12,88 @@ author: "Luca Berton"
 category: "Platform Engineering"
 tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
 ---
-
 This is a practical comparison based on real production use, not vendor marketing.
 
 ## Quick Comparison
 
-| Feature | Tool A | Tool B |
+| Feature | Cilium | Calico |
 |---------|--------|--------|
-| Learning curve | Medium | Medium |
-| Community | Large | Growing |
-| Enterprise support | Yes | Yes |
-| Kubernetes native | Yes | Yes |
+| Data plane | eBPF | iptables/eBPF/eBPF XDP |
+| Network policy | L3/L4/L7 | L3/L4 (L7 via Envoy) |
+| Encryption | WireGuard or IPsec | WireGuard or IPsec |
+| Observability | Hubble (built-in) | Enterprise only |
+| Service mesh | Built-in (no sidecar) | Calico + Envoy |
+| Performance | High (bypasses iptables) | Good (eBPF mode) |
+| Maturity | CNCF Graduated | Widely deployed |
+| Bandwidth management | Yes | No |
 
-## When to Use Each
+## When to Use Cilium
 
-### Choose Tool A When
+- **L7 network policies**: HTTP method/path-aware policies without a sidecar
+- **Observability**: Hubble provides real-time network flow visibility out of the box
+- **Performance-critical clusters**: eBPF bypasses iptables entirely, reducing latency and CPU overhead
+- **Service mesh without sidecars**: Cilium can replace Istio/Linkerd for basic service mesh features
 
-- You need a mature, well-documented solution
-- Enterprise support is important
-- Integration with existing tools matters
+```yaml
+# Cilium L7 policy — allow only GET /api
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: allow-api-reads
+spec:
+  endpointSelector:
+    matchLabels:
+      app: backend
+  ingress:
+    - fromEndpoints:
+        - matchLabels:
+            app: frontend
+      toPorts:
+        - ports:
+            - port: "8080"
+          rules:
+            http:
+              - method: GET
+                path: "/api/.*"
+```
 
-### Choose Tool B When
+## When to Use Calico
 
-- You want a simpler setup
-- Lightweight operation is priority
-- Newer features matter more
+- **Established environments**: Calico has been the default CNI for many managed Kubernetes platforms
+- **Hybrid networking**: Strong support for BGP peering with existing network infrastructure
+- **Windows nodes**: Calico supports Windows containers natively
+- **Existing investment**: If your team already knows Calico, the eBPF mode gives you performance parity
+
+```yaml
+# Calico GlobalNetworkPolicy
+apiVersion: projectcalico.org/v3
+kind: GlobalNetworkPolicy
+metadata:
+  name: deny-all-default
+spec:
+  selector: all()
+  types:
+    - Ingress
+    - Egress
+  ingress:
+    - action: Deny
+  egress:
+    - action: Deny
+```
+
+## Performance
+
+In benchmark tests with large clusters (1000+ pods):
+- **Cilium** shows lower latency due to eBPF-native packet processing
+- **Calico eBPF mode** closes the gap significantly vs iptables mode
+- Both handle 10 Gbps+ throughput in production
 
 ## My Recommendation
 
-Both tools are production-ready. The choice depends on your team's experience and existing stack. I have deployed both for enterprise clients — [book a consultation](https://calendly.com/lucaberton/) to discuss your specific needs.
+Choose **Cilium** for greenfield clusters, especially if you want built-in observability (Hubble) and L7 policies without sidecars. Choose **Calico** if you need BGP peering, Windows node support, or have an existing Calico deployment. Both are excellent. I help teams migrate between CNI plugins — [book a consultation](https://calendly.com/lucaberton/) to plan your network architecture.
 
 ## Related Resources
 
-- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Docker vs Kubernetes](/blog/docker-vs-kubernetes-when-you-need-which/)
-- [Terraform vs Ansible](/blog/terraform-vs-ansible-when-to-use-which-2026/)
+- [Cilium Cheat Sheet](/blog/cilium-cheat-sheet-2026/)
+- [Istio Cheat Sheet](/blog/istio-cheat-sheet-2026/)
+- [iptables Cheat Sheet](/blog/iptables-cheat-sheet-2026/)

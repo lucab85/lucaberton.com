@@ -12,38 +12,83 @@ author: "Luca Berton"
 category: "Platform Engineering"
 tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
 ---
-
 This is a practical comparison based on real production use, not vendor marketing.
 
 ## Quick Comparison
 
-| Feature | Tool A | Tool B |
-|---------|--------|--------|
-| Learning curve | Medium | Medium |
-| Community | Large | Growing |
-| Enterprise support | Yes | Yes |
-| Kubernetes native | Yes | Yes |
+| Feature | KEDA | HPA (Horizontal Pod Autoscaler) |
+|---------|------|------|
+| Metrics sources | 60+ scalers (Kafka, SQS, Prometheus, etc.) | CPU, memory, custom metrics |
+| Scale to zero | Yes | No (minimum 1 replica) |
+| Event-driven | Yes (queue length, cron, external events) | No (metric threshold only) |
+| Built-in | No (install separately) | Yes (Kubernetes core) |
+| Complexity | Medium | Low |
+| CNCF status | Graduated | Core Kubernetes |
 
-## When to Use Each
+## When to Use HPA
 
-### Choose Tool A When
+- **Simple scaling**: CPU and memory-based scaling is sufficient for most web applications
+- **No additional dependencies**: HPA is built into every Kubernetes cluster
+- **Predictable workloads**: Request-based services with gradual traffic changes
 
-- You need a mature, well-documented solution
-- Enterprise support is important
-- Integration with existing tools matters
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web-app
+  minReplicas: 2
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+```
 
-### Choose Tool B When
+## When to Use KEDA
 
-- You want a simpler setup
-- Lightweight operation is priority
-- Newer features matter more
+- **Queue-based workloads**: Scale workers based on Kafka lag, RabbitMQ queue depth, or AWS SQS messages
+- **Scale to zero**: Save costs by scaling idle workloads to zero replicas
+- **External metrics**: Scale based on Prometheus queries, Datadog metrics, or any custom source
+- **Cron-based scaling**: Pre-scale before expected traffic spikes
+- **Event-driven architectures**: Serverless-like scaling on Kubernetes
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: kafka-consumer
+spec:
+  scaleTargetRef:
+    name: kafka-consumer
+  minReplicaCount: 0          # Scale to zero!
+  maxReplicaCount: 50
+  triggers:
+    - type: kafka
+      metadata:
+        bootstrapServers: kafka:9092
+        consumerGroup: my-group
+        topic: events
+        lagThreshold: "100"
+```
+
+## KEDA Works With HPA
+
+KEDA does not replace HPA — it creates HPA resources under the hood and extends them with external metrics. You can use both: KEDA for event-driven scaling and HPA for CPU/memory.
 
 ## My Recommendation
 
-Both tools are production-ready. The choice depends on your team's experience and existing stack. I have deployed both for enterprise clients — [book a consultation](https://calendly.com/lucaberton/) to discuss your specific needs.
+Start with **HPA** for web applications and request-based services. Add **KEDA** when you need queue-based scaling, scale-to-zero, or external metric sources. They are complementary. [Book a consultation](https://calendy.com/lucaberton/) to design your autoscaling strategy.
 
 ## Related Resources
 
 - [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Docker vs Kubernetes](/blog/docker-vs-kubernetes-when-you-need-which/)
-- [Terraform vs Ansible](/blog/terraform-vs-ansible-when-to-use-which-2026/)
+- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)
+- [Prometheus PromQL Cheat Sheet](/blog/prometheus-query-cheat-sheet/)

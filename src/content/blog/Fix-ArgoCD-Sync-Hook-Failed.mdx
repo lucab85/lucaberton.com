@@ -17,67 +17,76 @@ image:
   src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
   alt: "Fix ArgoCD Sync Hook Failed"
 ---
-
 ## The Problem
 
-```
-sync hook failed
-```
+ArgoCD shows `Sync Hook Failed`. This prevents normal GitOps operations.
 
-This is a common ArgoCD issue. Let's walk through the diagnosis and fix.
-
-## Root Cause Analysis
-
-### 1. Configuration
-
-Check your ArgoCD configuration files for:
-- Typos or syntax errors
-- Missing required fields
-- Version incompatibilities
-
-### 2. Environment
+## Diagnosis
 
 ```bash
-# Check ArgoCD version
+# Check application status
+argocd app get my-app
+
+# Check ArgoCD controller logs
+kubectl logs -n argocd deployment/argocd-application-controller --tail=100
+
+# Check repo-server logs
+kubectl logs -n argocd deployment/argocd-repo-server --tail=100
+
+# Check ArgoCD server logs
+kubectl logs -n argocd deployment/argocd-server --tail=100
+```
+
+## Common Causes and Fixes
+
+### 1. Check ArgoCD Version
+
+```bash
 argocd version
-
-# Check system resources
-df -h && free -m
+# Ensure client and server versions match
 ```
 
-### 3. Dependencies
-
-Verify all dependencies are installed and accessible.
-
-## Step-by-Step Fix
-
-### Step 1: Diagnose
+### 2. Restart ArgoCD Components
 
 ```bash
-# Get verbose output
-argocd --help
+kubectl rollout restart deployment/argocd-application-controller -n argocd
+kubectl rollout restart deployment/argocd-repo-server -n argocd
+kubectl rollout restart deployment/argocd-server -n argocd
 ```
 
-### Step 2: Fix Configuration
+### 3. Clear Application Cache
 
-Update your configuration based on the diagnosis.
+```bash
+# Hard refresh clears the manifest cache
+argocd app get my-app --hard-refresh
+```
 
-### Step 3: Verify
+### 4. Check RBAC Permissions
 
-Run the command again and confirm the error is resolved.
+```bash
+# Verify ArgoCD has permissions in target namespace
+kubectl auth can-i create deployments --as=system:serviceaccount:argocd:argocd-application-controller -n target-namespace
+```
+
+### 5. Validate Manifests
+
+```bash
+# Test manifests locally
+kubectl apply --dry-run=client -f manifests/
+
+# Check for Kustomize/Helm errors
+argocd app manifests my-app
+```
 
 ## Prevention
 
-1. **Pin versions** in your configuration
-2. **Test in staging** before production
-3. **Use CI/CD** for automated validation
-4. **Monitor** for drift and issues
-5. **Document** your setup and decisions
+- Pin ArgoCD version and test upgrades in staging first
+- Use health checks and sync windows for production applications
+- Monitor ArgoCD metrics with Prometheus
+- Set resource limits on ArgoCD components to prevent OOM
 
 ## Related Resources
 
-- [ArgoCD Documentation](https://argo-cd.readthedocs.io/)
-
----
-
-*Level up your ArgoCD skills with [Luca Berton's courses](https://www.copypastelearn.com/) — hands-on DevOps and cloud engineering training.*
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+- [Install ArgoCD on Kubernetes](/blog/install-argocd-kubernetes/)
+- [ArgoCD vs Flux](/blog/argocd-vs-flux-2026/)

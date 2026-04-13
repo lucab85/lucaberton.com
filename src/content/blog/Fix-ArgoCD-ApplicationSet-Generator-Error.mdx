@@ -17,67 +17,61 @@ image:
   src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
   alt: "Fix ArgoCD ApplicationSet Generator Error"
 ---
-
 ## The Problem
 
-```
-ApplicationSet error
-```
+ArgoCD ApplicationSet fails with generator errors. Applications are not created or are created incorrectly.
 
-This is a common ArgoCD issue. Let's walk through the diagnosis and fix.
+## Root Cause
 
-## Root Cause Analysis
+ApplicationSet generators fail when:
+- Git repository is unreachable
+- Directory path does not exist
+- Template variables are undefined
+- Generator produces empty results
 
-### 1. Configuration
+## Fix
 
-Check your ArgoCD configuration files for:
-- Typos or syntax errors
-- Missing required fields
-- Version incompatibilities
-
-### 2. Environment
+### Check ApplicationSet Controller Logs
 
 ```bash
-# Check ArgoCD version
-argocd version
-
-# Check system resources
-df -h && free -m
+kubectl logs -n argocd deployment/argocd-applicationset-controller --tail=100
 ```
 
-### 3. Dependencies
+### Common Fixes
 
-Verify all dependencies are installed and accessible.
+**Git generator — repository not found:**
+```yaml
+spec:
+  generators:
+    - git:
+        repoURL: https://github.com/org/repo.git
+        revision: HEAD
+        directories:
+          - path: "apps/*"   # Ensure this path exists
+```
 
-## Step-by-Step Fix
+**List generator — validate entries:**
+```yaml
+spec:
+  generators:
+    - list:
+        elements:
+          - cluster: production
+            url: https://kubernetes.default.svc
+          - cluster: staging
+            url: https://staging-cluster:6443
+```
 
-### Step 1: Diagnose
+**Matrix generator — check both sub-generators independently first.**
+
+### Validate Before Applying
 
 ```bash
-# Get verbose output
-argocd --help
+# Dry-run to see what applications would be created
+kubectl apply --dry-run=server -f applicationset.yaml
 ```
-
-### Step 2: Fix Configuration
-
-Update your configuration based on the diagnosis.
-
-### Step 3: Verify
-
-Run the command again and confirm the error is resolved.
-
-## Prevention
-
-1. **Pin versions** in your configuration
-2. **Test in staging** before production
-3. **Use CI/CD** for automated validation
-4. **Monitor** for drift and issues
-5. **Document** your setup and decisions
 
 ## Related Resources
 
-- [ArgoCD Documentation](https://argo-cd.readthedocs.io/)
-
----
-
-*Level up your ArgoCD skills with [Luca Berton's courses](https://www.copypastelearn.com/) — hands-on DevOps and cloud engineering training.*
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+- [Fix ArgoCD App of Apps Sync Issues](/blog/Fix-ArgoCD-App-of-Apps-Sync-Issues/)

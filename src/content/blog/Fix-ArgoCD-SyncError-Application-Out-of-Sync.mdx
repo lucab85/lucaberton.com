@@ -17,67 +17,66 @@ image:
   src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
   alt: "Fix ArgoCD SyncError Application Out of Sync"
 ---
-
 ## The Problem
 
-```
-SyncError
-```
+Your ArgoCD application shows `OutOfSync` status even after syncing. The application never reaches `Synced` state.
 
-This is a common ArgoCD issue. Let's walk through the diagnosis and fix.
+## Root Cause
 
-## Root Cause Analysis
+OutOfSync means the live cluster state differs from the desired state in Git. Persistent OutOfSync usually means:
 
-### 1. Configuration
+1. **Mutating webhooks or controllers** modify resources after ArgoCD deploys them
+2. **Default values** added by Kubernetes that are not in your manifests
+3. **Ignore differences not configured** for fields that legitimately differ
 
-Check your ArgoCD configuration files for:
-- Typos or syntax errors
-- Missing required fields
-- Version incompatibilities
+## Fix
 
-### 2. Environment
+### Identify What Is Different
 
 ```bash
-# Check ArgoCD version
-argocd version
+# Show the diff
+argocd app diff my-app
 
-# Check system resources
-df -h && free -m
+# Detailed diff
+argocd app diff my-app --local ./manifests
 ```
 
-### 3. Dependencies
+### Ignore Expected Differences
 
-Verify all dependencies are installed and accessible.
+```yaml
+# In your ArgoCD Application spec
+spec:
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas    # HPA manages replicas
+    - group: ""
+      kind: Service
+      jqPathExpressions:
+        - .metadata.annotations."cloud.google.com/neg-status"
+```
 
-## Step-by-Step Fix
+### Common Fields to Ignore
 
-### Step 1: Diagnose
+| Field | Reason |
+|-------|--------|
+| `/spec/replicas` | HPA or KEDA manages scaling |
+| `/metadata/annotations` | Controllers add annotations |
+| `/metadata/labels` | Admission webhooks add labels |
+| `/status` | Kubernetes updates status |
+
+### Force Sync
 
 ```bash
-# Get verbose output
-argocd --help
+# Sync with prune
+argocd app sync my-app --prune
+
+# Sync specific resources only
+argocd app sync my-app --resource apps:Deployment:my-deploy
 ```
-
-### Step 2: Fix Configuration
-
-Update your configuration based on the diagnosis.
-
-### Step 3: Verify
-
-Run the command again and confirm the error is resolved.
-
-## Prevention
-
-1. **Pin versions** in your configuration
-2. **Test in staging** before production
-3. **Use CI/CD** for automated validation
-4. **Monitor** for drift and issues
-5. **Document** your setup and decisions
 
 ## Related Resources
 
-- [ArgoCD Documentation](https://argo-cd.readthedocs.io/)
-
----
-
-*Level up your ArgoCD skills with [Luca Berton's courses](https://www.copypastelearn.com/) — hands-on DevOps and cloud engineering training.*
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+- [Fix ArgoCD Showing False Diffs](/blog/Fix-ArgoCD-Showing-False-Diffs/)

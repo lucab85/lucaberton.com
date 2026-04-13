@@ -17,67 +17,53 @@ image:
   src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
   alt: "Fix ArgoCD Application Stuck in OutOfSync"
 ---
-
 ## The Problem
 
-```
-OutOfSync stuck
-```
+Your ArgoCD application is permanently stuck in `OutOfSync` status regardless of how many times you sync.
 
-This is a common ArgoCD issue. Let's walk through the diagnosis and fix.
+## Root Cause
 
-## Root Cause Analysis
+This is different from a temporary sync issue. The application is stuck because:
 
-### 1. Configuration
+1. **Mutating admission webhooks** change resources after deployment
+2. **Kubernetes defaulting** adds fields not in your manifests
+3. **Another controller** (HPA, Istio, Kyverno) modifies the resource
 
-Check your ArgoCD configuration files for:
-- Typos or syntax errors
-- Missing required fields
-- Version incompatibilities
+## Fix
 
-### 2. Environment
+### Step 1: Find the Diff
 
 ```bash
-# Check ArgoCD version
-argocd version
-
-# Check system resources
-df -h && free -m
+argocd app diff my-app
 ```
 
-### 3. Dependencies
+### Step 2: Add ignoreDifferences
 
-Verify all dependencies are installed and accessible.
-
-## Step-by-Step Fix
-
-### Step 1: Diagnose
-
-```bash
-# Get verbose output
-argocd --help
+```yaml
+spec:
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+    - group: networking.istio.io
+      kind: VirtualService
+      jqPathExpressions:
+        - .metadata.generation
 ```
 
-### Step 2: Fix Configuration
+### Step 3: Use Server-Side Apply
 
-Update your configuration based on the diagnosis.
+```yaml
+spec:
+  syncPolicy:
+    syncOptions:
+      - ServerSideApply=true
+```
 
-### Step 3: Verify
-
-Run the command again and confirm the error is resolved.
-
-## Prevention
-
-1. **Pin versions** in your configuration
-2. **Test in staging** before production
-3. **Use CI/CD** for automated validation
-4. **Monitor** for drift and issues
-5. **Document** your setup and decisions
+Server-side apply lets Kubernetes handle field ownership conflicts, often resolving persistent OutOfSync issues.
 
 ## Related Resources
 
-- [ArgoCD Documentation](https://argo-cd.readthedocs.io/)
-
----
-
-*Level up your ArgoCD skills with [Luca Berton's courses](https://www.copypastelearn.com/) — hands-on DevOps and cloud engineering training.*
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+- [Fix ArgoCD SyncError Application Out of Sync](/blog/Fix-ArgoCD-SyncError-Application-Out-of-Sync/)

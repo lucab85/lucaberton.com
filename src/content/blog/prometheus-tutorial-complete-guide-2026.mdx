@@ -12,45 +12,150 @@ author: "Luca Berton"
 category: "DevOps"
 tags: ["prometheus tutorial", "Tutorial", "2026", "DevOps", "DevOps"]
 ---
+This is a complete guide to running Prometheus in production on Kubernetes.
 
-You cannot fix what you cannot see. Observability is the foundation of reliable systems.
+## Install Prometheus on Kubernetes
 
-## The Three Pillars
+The fastest path is the kube-prometheus-stack Helm chart:
 
-1. **Metrics** — Prometheus for numeric time-series data
-2. **Logs** — Loki or Elasticsearch for structured events
-3. **Traces** — Jaeger or Tempo for request flow
+```bash
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
 
-### Prometheus Setup
-
-```yaml
-# prometheus.yml
-global:
-  scrape_interval: 15s
-
-scrape_configs:
-  - job_name: kubernetes-pods
-    kubernetes_sd_configs:
-      - role: pod
-    relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
-        action: keep
-        regex: true
+helm install monitoring prometheus-community/kube-prometheus-stack \
+  --namespace monitoring --create-namespace \
+  --set grafana.enabled=true \
+  --set alertmanager.enabled=true
 ```
 
-### Key Metrics to Track
+This installs Prometheus, Grafana, AlertManager, and node exporters.
 
-- **RED method**: Rate, Errors, Duration (for services)
-- **USE method**: Utilization, Saturation, Errors (for infrastructure)
-- **SLI/SLO**: Service level indicators tied to user experience
+## Architecture
+
+```
+┌─────────────┐     scrape     ┌────────────────┐
+│ Your Apps    │ ◄──────────── │   Prometheus    │
+│ (metrics)   │                │   Server        │
+└─────────────┘                └───────┬────────┘
+                                       │ evaluate
+┌─────────────┐     alerts     ┌───────▼────────┐
+│ Slack/PD    │ ◄──────────── │  AlertManager   │
+└─────────────┘                └────────────────┘
+                                       │ query
+                               ┌───────▼────────┐
+                               │    Grafana      │
+                               └────────────────┘
+```
+
+## ServiceMonitor (Kubernetes-Native Discovery)
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: my-app
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: my-app
+  endpoints:
+    - port: metrics
+      interval: 15s
+      path: /metrics
+```
+
+## Writing PromQL Queries
+
+```yaml
+# Request rate per second
+rate(http_requests_total[5m])
+
+# Error percentage
+sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) * 100
+
+# P99 latency
+histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))
+
+# CPU usage per pod
+sum(rate(container_cpu_usage_seconds_total[5m])) by (pod) * 100
+```
+
+## AlertManager Configuration
+
+```yaml
+# alertmanager.yml
+route:
+  receiver: slack-critical
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - match:
+        severity: critical
+      receiver: pagerduty
+    - match:
+        severity: warning
+      receiver: slack-warnings
+
+receivers:
+  - name: slack-critical
+    slack_configs:
+      - channel: "#alerts-critical"
+        send_resolved: true
+  - name: pagerduty
+    pagerduty_configs:
+      - service_key: YOUR_PD_KEY
+```
+
+## Alert Rules
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: app-alerts
+spec:
+  groups:
+    - name: app.rules
+      rules:
+        - alert: HighErrorRate
+          expr: sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "High error rate detected"
+            description: "Error rate is {{ $value | humanizePercentage }}"
+
+        - alert: PodCrashLooping
+          expr: increase(kube_pod_container_status_restarts_total[1h]) > 5
+          for: 10m
+          labels:
+            severity: warning
+```
+
+## Long-Term Storage
+
+Prometheus local storage is not designed for long retention. For production, add one of:
+
+| Solution | Approach | Best For |
+|----------|----------|----------|
+| **Thanos** | Sidecar + object storage | Multi-cluster, global view |
+| **Grafana Mimir** | Horizontally scalable | High-cardinality, multi-tenant |
+| **VictoriaMetrics** | Drop-in replacement | Performance, compression |
+
+## Tips and Tricks
+
+- Use `rate()` for counters, never raw counter values
+- Set scrape interval to 15-30s (not 1s — it wastes resources)
+- Use recording rules for expensive queries that dashboards run frequently
+- Monitor Prometheus itself: `prometheus_tsdb_head_series` for cardinality
+- Use `relabel_configs` to drop high-cardinality labels before ingestion
 
 ## Related Resources
 
-- [Kubernetes Monitoring with Prometheus and Grafana](/blog/kubernetes-monitoring-prometheus-grafana-guide/)
-- [Prometheus Query Cheat Sheet](/blog/prometheus-query-cheat-sheet/)
-- [Prometheus vs Datadog](/blog/prometheus-vs-datadog/)
-- [Grafana vs Datadog](/blog/grafana-vs-datadog/)
-
-## About the Author
-
-I am Luca Berton, AI and Cloud Advisor with 8 published books on automation, Kubernetes, and AI. [Book a consultation](https://calendly.com/lucaberton/) to discuss your prometheus tutorial strategy.
+- [Prometheus PromQL Cheat Sheet](/blog/prometheus-query-cheat-sheet/)
+- [Grafana Dashboard Tutorial](/blog/grafana-dashboard-tutorial-2026/)
+- [Prometheus vs InfluxDB](/blog/prometheus-vs-influxdb-2026/)

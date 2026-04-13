@@ -12,66 +12,140 @@ author: "Luca Berton"
 category: "DevOps"
 tags: ["devsecops", "Tutorial", "2026", "DevOps", "DevOps"]
 ---
+This tutorial shows you how to build a complete DevSecOps pipeline that integrates security scanning at every stage.
 
-Security is not a feature you bolt on — it is a practice you build in from day one.
+## Pipeline Architecture
 
-## Step-by-Step Guide
-
-### Shift Left: Security in CI/CD
-
-Catch vulnerabilities before they reach production:
-
-```bash
-# Scan container images
-trivy image myapp:latest
-
-# Scan IaC files
-trivy config ./terraform/
-
-# Scan for secrets
-gitleaks detect --source . --verbose
+```
+Code → SAST → Build → Image Scan → Deploy to Staging → DAST → Deploy to Production
 ```
 
-### Container Security Basics
+Every stage gates on security — if vulnerabilities are found above your threshold, the pipeline stops.
 
-```dockerfile
-# Run as non-root
-FROM node:22-alpine
-RUN addgroup -S app && adduser -S app -G app
-USER app
+## Stage 1: Static Analysis (SAST)
 
-# Read-only filesystem
-# docker run --read-only --tmpfs /tmp myapp:latest
-```
-
-### Kubernetes Security
+Scan source code before building:
 
 ```yaml
-apiVersion: v1
-kind: Pod
-metadata:
-  name: secure-pod
-spec:
-  securityContext:
-    runAsNonRoot: true
-    seccompProfile:
-      type: RuntimeDefault
-  containers:
-    - name: app
-      securityContext:
-        allowPrivilegeEscalation: false
-        capabilities:
-          drop: ["ALL"]
-        readOnlyRootFilesystem: true
+# GitHub Actions
+- name: Run Semgrep SAST
+  uses: returntocorp/semgrep-action@v1
+  with:
+    config: p/owasp-top-ten p/security-audit
+
+- name: Run Trivy filesystem scan
+  run: |
+    trivy fs --severity HIGH,CRITICAL --exit-code 1 .
 ```
+
+## Stage 2: Dependency Scanning
+
+```yaml
+- name: Check dependencies for vulnerabilities
+  run: |
+    trivy fs --scanners vuln --severity HIGH,CRITICAL .
+
+- name: Check for secret leaks
+  uses: trufflesecurity/trufflehog@main
+  with:
+    extra_args: --only-verified
+```
+
+## Stage 3: Container Image Scanning
+
+```yaml
+- name: Build image
+  run: docker build -t myapp:${{ github.sha }} .
+
+- name: Scan image
+  run: |
+    trivy image --severity HIGH,CRITICAL --exit-code 1 myapp:${{ github.sha }}
+```
+
+## Stage 4: Infrastructure as Code Scanning
+
+```yaml
+- name: Scan Terraform
+  run: |
+    trivy config --severity HIGH,CRITICAL terraform/
+
+- name: Scan Kubernetes manifests
+  run: |
+    trivy config --severity HIGH,CRITICAL k8s/
+```
+
+## Stage 5: Dynamic Analysis (DAST)
+
+After deploying to staging, run DAST against the live application:
+
+```yaml
+- name: OWASP ZAP Scan
+  uses: zaproxy/action-full-scan@v0.10.0
+  with:
+    target: "https://staging.example.com"
+    fail_action: "warn"
+```
+
+## Stage 6: Runtime Security
+
+Once deployed, monitor for runtime threats:
+
+```yaml
+# Falco runtime security
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: falco
+  namespace: security
+# Detects: shell in container, sensitive file access,
+# unexpected network connections, privilege escalation
+```
+
+## Complete GitHub Actions Pipeline
+
+```yaml
+name: DevSecOps Pipeline
+on: [push, pull_request]
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: SAST - Semgrep
+        uses: returntocorp/semgrep-action@v1
+      - name: Secret scanning
+        run: trivy fs --scanners secret .
+      - name: Dependency scan
+        run: trivy fs --scanners vuln .
+      - name: Build image
+        run: docker build -t myapp:ci .
+      - name: Image scan
+        run: trivy image --exit-code 1 --severity CRITICAL myapp:ci
+      - name: IaC scan
+        run: trivy config k8s/
+```
+
+## Security Gates
+
+Define your thresholds:
+
+| Severity | Development | Staging | Production |
+|----------|------------|---------|------------|
+| Critical | Block | Block | Block |
+| High | Warn | Block | Block |
+| Medium | Info | Warn | Block |
+| Low | Info | Info | Warn |
+
+## Tips and Tricks
+
+- Start with `--exit-code 0` (warn only) then gradually tighten to `--exit-code 1` (block)
+- Use `.trivyignore` for accepted risks with documented justification
+- Run SAST on every PR, full DAST on staging deploys only
+- Generate SBOM (Software Bill of Materials) for every production image
+- Sign images with Cosign for supply chain integrity
 
 ## Related Resources
 
-- [Trivy vs Grype](/blog/trivy-vs-grype-2026/)
-- [Vault vs AWS Secrets Manager](/blog/vault-vs-aws-secrets-manager/)
-- [SELinux Cheat Sheet](/blog/selinux-cheat-sheet-2026/)
-- [Kubernetes RBAC Guide](/blog/kubernetes-rbac-guide-roles-bindings-2026/)
-
-## About the Author
-
-I am Luca Berton, AI and Cloud Advisor with 8 published books on automation, Kubernetes, and AI. [Book a consultation](https://calendly.com/lucaberton/) to discuss your devsecops strategy.
+- [Trivy Cheat Sheet](/blog/trivy-cheat-sheet-2026/)
+- [Container Security Scanning Tutorial](/blog/container-security-scanning-trivy-tutorial/)
+- [Git Cheat Sheet](/blog/git-cheat-sheet-2026/)

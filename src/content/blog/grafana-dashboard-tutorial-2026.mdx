@@ -12,45 +12,122 @@ author: "Luca Berton"
 category: "DevOps"
 tags: ["grafana tutorial", "Tutorial", "2026", "DevOps", "DevOps"]
 ---
+You cannot fix what you cannot see. This tutorial walks you through building production-grade Grafana dashboards from scratch.
 
-You cannot fix what you cannot see. Observability is the foundation of reliable systems.
+## Prerequisites
 
-## The Three Pillars
+- Grafana 11+ running (Helm: `helm install grafana grafana/grafana`)
+- Prometheus as a data source
+- Kubernetes cluster with metrics
 
-1. **Metrics** — Prometheus for numeric time-series data
-2. **Logs** — Loki or Elasticsearch for structured events
-3. **Traces** — Jaeger or Tempo for request flow
+## Creating Your First Dashboard
 
-### Prometheus Setup
+### Step 1: Add Prometheus Data Source
 
+Navigate to **Connections > Data Sources > Add data source > Prometheus**. Set the URL to `http://prometheus-server:9090` and click **Save & Test**.
+
+### Step 2: Create a Dashboard
+
+Click **Dashboards > New Dashboard > Add visualization**. Select Prometheus as the data source.
+
+### Step 3: Build Key Panels
+
+**CPU Usage Panel:**
 ```yaml
-# prometheus.yml
-global:
-  scrape_interval: 15s
-
-scrape_configs:
-  - job_name: kubernetes-pods
-    kubernetes_sd_configs:
-      - role: pod
-    relabel_configs:
-      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
-        action: keep
-        regex: true
+# PromQL query
+sum(rate(container_cpu_usage_seconds_total{namespace="production"}[5m])) by (pod)
 ```
 
-### Key Metrics to Track
+Set visualization to **Time series**, title to "CPU Usage by Pod".
 
-- **RED method**: Rate, Errors, Duration (for services)
-- **USE method**: Utilization, Saturation, Errors (for infrastructure)
-- **SLI/SLO**: Service level indicators tied to user experience
+**Memory Usage Panel:**
+```yaml
+sum(container_memory_usage_bytes{namespace="production"}) by (pod) / 1024 / 1024
+```
+
+**HTTP Request Rate:**
+```yaml
+sum(rate(http_requests_total[5m])) by (status)
+```
+
+## Variables (Template Variables)
+
+Variables make dashboards reusable across namespaces, clusters, and services.
+
+```yaml
+# Add variable: namespace
+Type: Query
+Data source: Prometheus
+Query: label_values(kube_pod_info, namespace)
+```
+
+Then use `$namespace` in your queries:
+```yaml
+sum(rate(container_cpu_usage_seconds_total{namespace="$namespace"}[5m])) by (pod)
+```
+
+## Annotations
+
+Mark deployments, incidents, and maintenance windows on your graphs:
+
+```yaml
+# Deployment annotation query
+changes(kube_deployment_status_observed_generation{namespace="$namespace"}[5m]) > 0
+```
+
+## Alerting
+
+Create alerts directly from panels:
+
+1. Edit panel > **Alert** tab > **Create alert rule**
+2. Set condition: `WHEN avg() OF query(A) IS ABOVE 0.8`
+3. Set evaluation interval: `1m`
+4. Configure notification channel (Slack, PagerDuty, email)
+
+## Dashboard Design Patterns
+
+### The RED Dashboard (Services)
+
+| Row | Panels |
+|-----|--------|
+| Request Rate | `sum(rate(http_requests_total[5m]))` |
+| Error Rate | `sum(rate(http_requests_total{status=~"5.."}[5m])) / sum(rate(http_requests_total[5m]))` |
+| Duration P99 | `histogram_quantile(0.99, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))` |
+
+### The USE Dashboard (Infrastructure)
+
+| Row | Panels |
+|-----|--------|
+| CPU Utilization | `1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))` |
+| Memory Saturation | `node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes` |
+| Disk Errors | `rate(node_disk_io_time_seconds_total[5m])` |
+
+## Dashboard as Code (Provisioning)
+
+```yaml
+# grafana/provisioning/dashboards/dashboard.yml
+apiVersion: 1
+providers:
+  - name: default
+    orgId: 1
+    folder: Production
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards
+```
+
+Export dashboards as JSON and store in Git for version control.
+
+## Tips and Tricks
+
+- Use variables for every label you might filter on (namespace, service, cluster)
+- Set meaningful Y-axis units (bytes, percent, requests/sec)
+- Use the **Repeat** feature to auto-generate panels per variable value
+- Use **Library panels** to share common panels across dashboards
+- Export dashboards to JSON and commit to Git for version-controlled dashboards
 
 ## Related Resources
 
-- [Kubernetes Monitoring with Prometheus and Grafana](/blog/kubernetes-monitoring-prometheus-grafana-guide/)
-- [Prometheus Query Cheat Sheet](/blog/prometheus-query-cheat-sheet/)
-- [Prometheus vs Datadog](/blog/prometheus-vs-datadog/)
+- [Prometheus PromQL Cheat Sheet](/blog/prometheus-query-cheat-sheet/)
+- [Loki vs Elasticsearch](/blog/loki-vs-elasticsearch-2026/)
 - [Grafana vs Datadog](/blog/grafana-vs-datadog/)
-
-## About the Author
-
-I am Luca Berton, AI and Cloud Advisor with 8 published books on automation, Kubernetes, and AI. [Book a consultation](https://calendly.com/lucaberton/) to discuss your grafana tutorial strategy.

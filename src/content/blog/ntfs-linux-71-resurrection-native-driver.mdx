@@ -1,0 +1,143 @@
+---
+draft: false
+title: "NTFS on Linux 7.1: The NTFS Resurrection Brings Native Read/Write Support Back to the Kernel"
+snippet: "Linux 7.1 merges a completely overhauled NTFS driver with native read/write support, replacing the stagnated NTFS3 driver. Four years of development by Namjae Jeon deliver a cleaner codebase, better reliability, and modern features for dual-boot and enterprise mixed-OS environments."
+description: "Linux 7.1 merges a completely overhauled NTFS driver with native read/write support, replacing the stagnated NTFS3 driver. Four years of development by Namjae Jeon deliver a cleaner codebase, better reliability, and modern features for dual-boot and enterprise mixed-OS environments."
+image: { src: "/blog/thumbnails/ntfs-linux-71-resurrection-native-driver.jpg", alt: "NTFS on Linux 7.1 — the NTFS resurrection" }
+publishDate: "2026-04-18"
+lastModified: "2026-04-18"
+category: "Open Source"
+author: "Luca Berton"
+tags: ["linux", "ntfs", "kernel", "filesystem", "dual boot", "enterprise storage"]
+---
+
+## The NTFS Resurrection
+
+Linus Torvalds called it the **"NTFS resurrection"** — and that is exactly what it is. Linux kernel 7.1 has officially merged a completely overhauled NTFS driver that brings native read/write support back to the mainline kernel, with a cleaner codebase and modern features that the existing NTFS3 driver never delivered.
+
+This matters for anyone running dual-boot systems, managing mixed Windows/Linux environments, or working with NTFS-formatted external drives in enterprise settings.
+
+## The Problem with NTFS3
+
+The Paragon **NTFS3** driver was merged into the mainline Linux kernel a few years ago with great fanfare. It promised native NTFS read/write support without needing FUSE-based solutions like `ntfs-3g`. But after the initial merge, development largely **stagnated**:
+
+- Bug fixes slowed to a trickle
+- Edge cases around file permissions and extended attributes remained unresolved
+- The codebase was difficult for other kernel developers to maintain and review
+- Community contributions were not being actively integrated
+
+Meanwhile, the older read-only NTFS kernel driver remained in-tree but offered no write capability — making it useless for most practical workflows.
+
+## Four Years of Quiet Work
+
+Linux developer **Namjae Jeon** took a different approach. Rather than patching NTFS3, he spent **four years overhauling the original NTFS kernel driver** — the one with the cleaner, more reviewable codebase. His work added:
+
+- **Full read/write support** — create, modify, and delete files on NTFS volumes
+- **Better reliability** — cleaner error handling and recovery paths
+- **Modern filesystem features** — proper support for extended attributes, security descriptors, and large files
+- **Maintainable code** — structured for long-term kernel community maintenance
+
+The result is a driver that does what NTFS3 promised but never fully delivered.
+
+## The Merge Drama
+
+The path to merging was not entirely smooth. When Namjae Jeon submitted the initial pull request for Linux 7.1, Linus Torvalds initially **un-pulled the code** after discovering issues in how the pull request was structured in Git. This is classic Torvalds — the code quality standards extend to the Git history itself, not just the source.
+
+Jeon quickly submitted a revised pull request that met Torvalds' standards, and the merge went through. The commit is now in the mainline kernel tree.
+
+## How to Enable It
+
+The new driver is available behind the **`NTFS_FS`** Kconfig switch. On most distributions shipping kernel 7.1+, you will either get it automatically or can enable it by:
+
+```bash
+# Check if the module is available
+modinfo ntfs
+
+# Load the module
+sudo modprobe ntfs
+
+# Mount an NTFS volume
+sudo mount -t ntfs /dev/sdb1 /mnt/ntfs
+
+# Verify read/write mode
+mount | grep ntfs
+```
+
+For custom kernel builds:
+
+```bash
+# In kernel configuration
+make menuconfig
+# Navigate to: File systems → DOS/FAT/NTFS Filesystems → NTFS file system support
+# Enable as module (M) or built-in (Y)
+
+CONFIG_NTFS_FS=m
+```
+
+## NTFS3 vs New NTFS Driver
+
+| Feature | NTFS3 (Paragon) | New NTFS Driver |
+|---------|-----------------|-----------------|
+| Read support | Yes | Yes |
+| Write support | Yes (buggy edge cases) | Yes (4 years of testing) |
+| Codebase quality | Complex, hard to review | Clean, maintainable |
+| Active development | Stagnated | Actively maintained |
+| Kernel config | `CONFIG_NTFS3_FS` | `CONFIG_NTFS_FS` |
+| In-tree status | Staying (for now) | Newly merged in 7.1 |
+
+Both drivers coexist in the kernel tree for now. The expectation is that the new driver will eventually supersede NTFS3, but the transition will be gradual to avoid breaking existing setups.
+
+## Who Benefits
+
+### Dual-Boot Users
+
+If you run Windows alongside Linux, you no longer need to rely on FUSE-based `ntfs-3g` (which has performance overhead) or trust the stagnated NTFS3 driver. The new driver provides native kernel-level performance for reading and writing your Windows partitions.
+
+### Enterprise Mixed-OS Environments
+
+Organizations running Windows file servers with Linux clients — or Linux NAS appliances serving NTFS-formatted volumes — get a more reliable foundation. This matters for:
+
+- **Samba servers** accessing NTFS volumes directly
+- **Backup systems** writing to NTFS-formatted external drives
+- **Data migration** between Windows and Linux systems
+- **Forensics and recovery** tools that need reliable NTFS access
+
+### Container and Virtualization Workloads
+
+Kubernetes nodes that need to mount NTFS volumes (common in hybrid Windows/Linux clusters) benefit from a more stable driver. The same applies to hypervisors passing through NTFS storage to Linux VMs.
+
+## What About ntfs-3g?
+
+The FUSE-based `ntfs-3g` driver is not going away. It remains the most battle-tested option and works on kernels that do not include the new driver. However, FUSE introduces overhead:
+
+- **Context switches** between kernel and userspace for every I/O operation
+- **Higher latency** compared to native kernel drivers
+- **CPU overhead** that matters on high-throughput workloads
+
+For most users, the native kernel driver will be the better choice once distributions ship it by default.
+
+## Timeline
+
+- **2022**: NTFS3 merged into mainline kernel — initial excitement
+- **2023-2025**: NTFS3 development stagnates, community frustration grows
+- **2022-2026**: Namjae Jeon quietly overhauls the original NTFS driver
+- **April 2026**: Pull request submitted for Linux 7.1
+- **April 2026**: Initial pull un-merged by Torvalds (Git structure issues)
+- **April 2026**: Revised pull request accepted — **"NTFS resurrection"** merged
+
+## My Take
+
+This is how open source should work. When one approach stagnates, the community does not wait — someone picks up the cleaner codebase and makes it better. Namjae Jeon spent four years on this, largely under the radar, and delivered a driver that the ecosystem genuinely needs.
+
+For enterprise environments managing mixed Windows/Linux infrastructure, this is a meaningful improvement. For dual-boot users, it is the native NTFS support that Linux should have had years ago.
+
+If you are building [Kubernetes platforms](/services/kubernetes-consulting/) that interact with Windows storage, or managing [hybrid infrastructure](/services/ai-integration/) across operating systems, reliable NTFS support at the kernel level matters more than you might think.
+
+---
+
+**Related Resources:**
+
+- [Linux Kernel Git Merge Commit](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=cdd4dc3aebeab43a72ce0bc2b5bab6f0a80b97a5)
+- [Ubuntu 25.10 Subiquity Installer Troubleshooting Guide](/blog/ubuntu-2510-subiquity-installer-troubleshooting-autoinstall/)
+- [openEuler: The Linux Distribution Powering Huawei and Beyond](/blog/openeuler-linux-distribution-huawei-enterprise/)
+- [Book a Free Infrastructure Assessment](https://calendly.com/lucaberton/)

@@ -1,0 +1,183 @@
+---
+draft: false
+title: "Weft: The Programming Language Where LLMs, Agents, and Humans Are First-Class Primitives"
+snippet: "Weft is a new open-source programming language designed specifically for AI systems. It makes LLMs, human-in-the-loop workflows, and durable execution native language constructs rather than library imports. Built in Rust with Restate for crash-resilient execution, it raises a fundamental question: should AI orchestration live in the language or in libraries?"
+description: "Weft is a new open-source programming language designed specifically for AI systems. It makes LLMs, human-in-the-loop workflows, and durable execution native language constructs rather than library imports. Built in Rust with Restate for crash-resilient execution, it raises a fundamental question: should AI orchestration live in the language or in libraries?"
+image: { src: "/blog/thumbnails/weft-programming-language-ai-agents-durable-execution.jpg", alt: "Weft programming language for AI agents and durable execution" }
+publishDate: "2026-04-18"
+lastModified: "2026-04-18"
+category: "AI"
+author: "Luca Berton"
+tags: ["weft", "programming languages", "AI agents", "durable execution", "restate", "LLM", "rust"]
+---
+
+## What Is Weft?
+
+**Weft** is an open-source programming language built from scratch for AI systems. Instead of importing libraries to call LLMs, wait for human input, or orchestrate agents, Weft makes these **language-level primitives** — the same way Python has `for` loops and Rust has `async`.
+
+The pitch: in 2026, real software calls LLMs, spins up databases, waits for humans, browses the web, and coordinates agents. Why are developers still writing plumbing code for things that should be one line?
+
+A poem generator in Weft looks like this:
+
+```yaml
+topic = Text {
+  label: "Topic"
+  value: "the silence between stars"
+}
+
+llm_config = LlmConfig {
+  label: "Config"
+  model: "anthropic/claude-sonnet-4.6"
+  systemPrompt: "Write a short, beautiful poem about the given topic."
+  temperature: "0.8"
+}
+
+poet = LlmInference -> (response: String) {
+  label: "Poet"
+}
+poet.prompt = topic.value
+poet.config = llm_config.config
+
+output = Debug { label: "Poem" }
+output.data = poet.response
+```
+
+Four nodes, four edges. The compiler validates every connection and type before anything runs.
+
+## The Architecture
+
+Weft is built on a few key technical decisions:
+
+**Rust core** — the compiler, type system, executor, and node runner are all Rust. This gives you performance and safety guarantees that matter when you are orchestrating long-running AI workflows.
+
+**Restate for durable execution** — this is arguably the most interesting part. Programs survive crashes and restarts. A human approval that takes three days uses the exact same code as one that takes three seconds. No webhooks, no polling, no state management. [Restate](https://restate.dev) handles the durability layer.
+
+**Node-based architecture** — every capability is a "node": LLM inference, HTTP calls, Discord/Slack/Telegram messaging, PostgreSQL queries, human input forms, cron triggers. Nodes are defined in Rust (backend) and TypeScript (dashboard UI).
+
+**Dual representation** — the same program renders as dense code for developers and as a visual graph for non-technical stakeholders. Edit either view, the other updates automatically.
+
+**Typed end-to-end** — generics, unions, type variables, null propagation. The compiler catches missing connections, type mismatches, and broken architecture before anything runs.
+
+## What Makes It Interesting
+
+### Durable Execution Is Genuinely Novel
+
+This is the standout feature. Most AI orchestration frameworks handle the happy path well — call an LLM, get a response, move on. But real-world AI workflows involve:
+
+- **Human approvals** that might take hours or days
+- **Multi-step agent chains** where step 5 fails and you need to resume from step 4
+- **Long-running processes** that must survive server restarts and deployments
+- **Exactly-once guarantees** for side effects like sending emails or updating databases
+
+Weft delegates all of this to Restate, which provides durable execution as infrastructure. Your program literally pauses mid-execution, persists its state, and resumes exactly where it left off — even across process restarts. This is a genuine innovation that most library-based approaches cannot replicate cleanly.
+
+### First-Class Human-in-the-Loop
+
+Want to pause a program, send a form to a human, wait days for their response, and resume? In Weft, that is one node:
+
+```yaml
+approval = HumanQuery {
+  label: "Manager Approval"
+  prompt: "Approve this $50K purchase order?"
+}
+```
+
+No webhooks. No callback URLs. No state serialization. The durable executor handles everything.
+
+### Recursive Folding
+
+Any group of nodes collapses into a single node with a described interface. A 100-node system looks like 5 blocks at the top level. This is how you manage complexity in visual programming without drowning in spaghetti.
+
+## The Debate: Language vs Library
+
+The conversation Weft has sparked is as interesting as the language itself. The core question:
+
+**Should AI agent primitives be language-level constructs, or should they be library features?**
+
+The argument *for* language-level:
+- LLM calls, human interactions, and durable execution are fundamentally different from function calls — they are long-running, fallible, and stateful
+- A compiler that understands these primitives can check architecture correctness, not just type correctness
+- Visual representation is natural when the language is node-based
+
+The argument *against*:
+- Languages like Rust do not even have resizable arrays as primitives — `Vec` is a library type. If arrays can be library-level, why can agents not be?
+- Baking specific AI vendor integrations into a language creates coupling that ages poorly
+- The history of "domain-specific languages" is littered with abandoned projects that could not keep up with their ecosystem
+- Library-based approaches (LangChain, CrewAI, AutoGen) let you use the language you already know
+
+This is a legitimate design tension. Weft's bet is that AI orchestration is different enough from traditional programming that it deserves its own syntax and compiler. The counter-argument is that good abstractions should compose within existing languages, not require new ones.
+
+## The Node Catalog
+
+Weft ships with built-in nodes across several categories:
+
+- **AI** — LLM config, LLM inference (via OpenRouter)
+- **Code** — Python execution
+- **Communication** — Discord, Slack, Telegram, WhatsApp, Email, X
+- **Data** — Text, Number, Dict, List, Pack/Unpack
+- **Enrichment** — Apollo, Web Search, Speech-to-Text
+- **Flow** — Gate, Human Query, Human Trigger
+- **Storage** — PostgreSQL
+- **Triggers** — Cron, webhooks, polling
+
+The catalog is intentionally small right now. The long-term vision is for projects to define custom nodes in the language itself — but that capability is not built yet.
+
+## Technical Stack
+
+| Component | Technology |
+|-----------|-----------|
+| Compiler and executor | Rust |
+| Durable execution | Restate |
+| Dashboard | SvelteKit + Svelte 5 |
+| Database | PostgreSQL (auto-provisioned via Docker) |
+| Infrastructure nodes | Kubernetes (optional, via kind for local dev) |
+| License | O'Saasy (MIT + SaaS restriction) |
+| Browser extension | WXT (human-in-the-loop) |
+
+## Getting Started
+
+```bash
+git clone https://github.com/WeaveMindAI/weft.git
+cd weft
+cp .env.example .env
+# Edit .env with your API keys (OpenRouter, Tavily, etc.)
+
+# Terminal 1: backend
+./dev.sh server
+
+# Terminal 2: dashboard
+./dev.sh dashboard
+```
+
+Open `http://localhost:5173` and you are in. Infrastructure nodes (like PostgreSQL provisioning) optionally use Kubernetes — projects that do not need them skip it entirely.
+
+## My Assessment
+
+Weft is **early and honest about it**. The README explicitly says "treat it as a foundation to build on, not a finished product." Breaking changes are expected. The node catalog is small.
+
+What is impressive:
+
+- **Durable execution via Restate** is a genuine differentiator — this is hard to replicate in library-based frameworks
+- **The type system catches architectural errors** at compile time, not runtime
+- **Human-in-the-loop as a primitive** is the right abstraction level for enterprise AI workflows
+- **Rust core** means performance will not be the bottleneck
+
+What gives me pause:
+
+- **New language adoption is brutally hard** — even great languages struggle to build ecosystems
+- **The node catalog is too small for production use** — you will hit walls quickly
+- **O'Saasy license** (MIT with SaaS restriction) may limit enterprise adoption compared to pure MIT/Apache
+- **The "language vs library" question is not settled** — it is entirely possible that Temporal + Python or Restate + TypeScript deliver 90% of the value without learning a new language
+
+For teams building complex AI agent workflows with human-in-the-loop requirements and durability constraints, Weft is worth watching. For everyone else, the library-based approaches in your existing language are probably the pragmatic choice — at least until Weft's ecosystem matures.
+
+---
+
+**Related Resources:**
+
+- [Weft on GitHub](https://github.com/WeaveMindAI/weft)
+- [Weft Documentation](https://weavemind.ai/docs)
+- [Restate — Durable Execution](https://restate.dev)
+- [Agentic AI in Enterprise: Patterns, Pitfalls, and Production Readiness](/blog/agentic-ai-enterprise-patterns-pitfalls-production-readiness/)
+- [AI on Kubernetes in Production: Architecture Decisions](/blog/ai-kubernetes-production-architecture-decisions/)
+- [Book a Free AI Architecture Assessment](https://calendly.com/lucaberton/)

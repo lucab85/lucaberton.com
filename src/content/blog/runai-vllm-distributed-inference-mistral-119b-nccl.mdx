@@ -1,0 +1,333 @@
+---
+draft: false
+title: "Distributed vLLM Inference on Run:ai: Deploying Mistral 119B with NCCL, NVLink, and GPU Direct RDMA"
+snippet: "A real-world walkthrough of deploying Mistral-Small-4-119B across 2 GPUs using Run:ai distributed inference, vLLM 0.18.0, NCCL 2.27.5, and Mellanox ConnectX 400G RoCE. Covers the exact CLI command, NCCL topology analysis, NVLink bandwidth, GPU Direct RDMA verification, air-gapped model loading, and production tuning for enterprise Kubernetes clusters."
+description: "A real-world walkthrough of deploying Mistral-Small-4-119B across 2 GPUs using Run:ai distributed inference, vLLM 0.18.0, NCCL 2.27.5, and Mellanox ConnectX 400G RoCE. Covers the exact CLI command, NCCL topology analysis, NVLink bandwidth, GPU Direct RDMA verification, air-gapped model loading, and production tuning for enterprise Kubernetes clusters."
+image: { src: "/blog/thumbnails/runai-vllm-distributed-inference-mistral-119b-nccl.jpg", alt: "Distributed vLLM inference on Run:ai with Mistral 119B" }
+publishDate: "2026-04-20"
+lastModified: "2026-04-20"
+category: "AI"
+author: "Luca Berton"
+tags: ["Run:ai", "vLLM", "distributed inference", "NCCL", "NVLink", "GPU Direct RDMA", "Mellanox", "Mistral", "kubernetes", "tensor parallelism"]
+---
+
+## The Setup: Mistral 119B on 2 GPUs
+
+Deploying a 119-billion parameter model for production inference requires splitting the model across multiple GPUs. This is a real-world deployment of **Mistral-Small-4-119B** (a multimodal Pixtral architecture) using **Run:ai distributed inference**, **vLLM 0.18.0**, and **NCCL 2.27.5** on an enterprise Kubernetes cluster.
+
+The infrastructure:
+- **2x GPUs** connected via **NVLink at 123.6 GB/s**
+- **Mellanox ConnectX** (mlx5) at **400 Gbps RoCE** for inter-node NCCL communication
+- **GPU Direct RDMA** enabled for zero-copy GPU-to-network transfers
+- **OpenShift** with **Multus** CNI for secondary network interfaces
+- **Air-gapped deployment** — no internet access, model loaded from persistent volume
+- **96 CPU cores** available, non-root execution (UID/GID 2000)
+
+## The Run:ai CLI Command
+
+Here is the exact command to submit a distributed inference workload on Run:ai:
+
+```bash
+runai inference distributed submit mistral-119b-dist-nccl \
+  -p my-ai-project \
+  -i registry.internal.example.com/ai-platform/vllm-openai:latest \
+  --existing-pvc claimname=my-ai-project,path=/data \
+  --workers 2 \
+  -g 2 \
+  --serving-port container=8000,authorization-type=authenticatedUsers \
+  --environment-variable TRANSFORMERS_OFFLINE=1 \
+  --environment-variable HF_HUB_OFFLINE=1 \
+  --environment-variable NCCL_DEBUG=INFO \
+  --environment-variable NCCL_DEBUG_SUBSYS=ALL \
+  --environment-variable NCCL_SOCKET_IFNAME=net1 \
+  --extended-resource "openshift.io/mellanoxnics=1" \
+  --annotation "k8s.v1.cni.cncf.io/networks=secondary-network" \
+  --run-as-uid 2000 \
+  --run-as-gid 2000 \
+  --run-as-non-root \
+  --preemptibility preemptible \
+  -- --model /data/input/Models/Mistral-Small-4-119B \
+  --served-model-name mistral4 \
+  --tensor-parallel-size 2 \
+  --port 8000
+```
+
+Let me break down every flag.
+
+### Run:ai Distributed Inference Flags
+
+| Flag | Purpose |
+|------|---------|
+| `distributed submit` | Creates a distributed inference workload (master + workers) |
+| `-p my-ai-project` | Run:ai project for resource quotas and RBAC |
+| `-i registry.internal.example.com/.../vllm-openai:latest` | Internal container registry (air-gapped, no DockerHub) |
+| `--existing-pvc` | Mounts a pre-provisioned PVC with the model weights |
+| `--workers 2` | Number of worker pods (including master) |
+| `-g 2` | 2 GPUs per worker |
+| `--serving-port container=8000,authorization-type=authenticatedUsers` | Exposes OpenAI-compatible API with authentication |
+| `--run-as-uid 2000 --run-as-gid 2000 --run-as-non-root` | Security: non-root execution required by OpenShift SCC |
+| `--preemptibility preemptible` | Workload can be preempted by higher-priority jobs |
+
+### NCCL Environment Variables
+
+| Variable | Value | Purpose |
+|----------|-------|---------|
+| `NCCL_DEBUG=INFO` | Full NCCL logging for topology and performance analysis |
+| `NCCL_DEBUG_SUBSYS=ALL` | All NCCL subsystems logged |
+| `NCCL_SOCKET_IFNAME=net1` | Use Multus secondary interface for NCCL bootstrap |
+| `NCCL_IB_DISABLE=1` | Disable InfiniBand (use RoCE instead) — optional |
+| `NCCL_P2P_DISABLE=0` | Enable P2P (NVLink) between GPUs |
+
+For InfiniBand-enabled clusters, replace with:
+
+```bash
+--environment-variable NCCL_NET=IB \
+--environment-variable NCCL_IB_HCA=mlx5_0:1 \
+--environment-variable NCCL_SOCKET_IFNAME=eth1
+```
+
+### vLLM Arguments (After `--`)
+
+| Argument | Value | Purpose |
+|----------|-------|---------|
+| `--model` | `/data/input/Models/Mistral-Small-4-119B` | Path to model on PVC |
+| `--served-model-name` | `mistral4` | OpenAI API model name |
+| `--tensor-parallel-size` | `2` | Split model across 2 GPUs |
+| `--port` | `8000` | Serving port |
+
+### Air-Gapped Model Loading
+
+Two critical environment variables ensure no internet access is attempted:
+
+```bash
+TRANSFORMERS_OFFLINE=1
+HF_HUB_OFFLINE=1
+```
+
+The model weights (in `consolidated*.safetensors` format) are pre-downloaded to the PVC at `/data/input/Models/Mistral-Small-4-119B`. vLLM infers `torch.bfloat16` dtype from the safetensors files and automatically applies **fp8 quantization** for efficient inference.
+
+## What the NCCL Logs Tell You
+
+The NCCL debug output is a goldmine of information about your GPU topology, interconnect performance, and communication patterns. Here is how to read it.
+
+### GPU Topology
+
+```
+=== System : maxBw 123.6 totalBw 123.6 ===
+CPU/0-1 (1/1/3)
++ PCI[48.0] - PCI/0-115000
+              + PCI[48.0] - GPU/0-118000 (0)
+                            + NVL[123.6] - GPU/0-1b3000
+              + PCI[48.0] - NIC/0-119000
++ PCI[48.0] - PCI/0-1b0000
+              + PCI[48.0] - GPU/0-1b3000 (1)
+                            + NVL[123.6] - GPU/0-118000
+```
+
+**What this tells you:**
+- **2 GPUs** (bus IDs `118000` and `1b3000`) connected via **NVLink at 123.6 GB/s**
+- **1 Mellanox NIC** (bus ID `119000`) on the same PCI tree as GPU 0
+- **PCI bandwidth**: 48.0 GB/s per link
+- Both GPUs sit under the **same CPU socket** (CPU/0-1)
+
+### GPU Distance Matrix
+
+```
+GPU/0-118000 : GPU/0-118000 (0/5000.0/LOC) GPU/0-1b3000 (1/123.6/NVL) CPU/0-1 (2/48.0/PHB)
+GPU/0-1b3000 : GPU/0-118000 (1/123.6/NVL) GPU/0-1b3000 (0/5000.0/LOC) CPU/0-1 (2/48.0/PHB)
+```
+
+- **LOC** (distance 0): GPU to itself — 5 TB/s (local memory bandwidth)
+- **NVL** (distance 1): GPU-to-GPU via NVLink — 123.6 GB/s
+- **PHB** (distance 2): GPU to CPU via PCI Host Bridge — 48.0 GB/s
+
+NVLink at 123.6 GB/s means **tensor parallelism is viable** — the AllReduce operations that synchronize activations across GPUs will not bottleneck inference.
+
+### Network Detection
+
+```
+NET/IB: [0] mlx5_130:uverbs132:1/RoCE provider=Mlx5 speed=400000
+NET/IB : Using [0]mlx5_130:1/RoCE [RO]; OOB net1:10.x.x.x
+GPU Direct RDMA Enabled for HCA 0 'mlx5_130'
+GPU Direct RDMA Enabled for GPU 0 / HCA 0 (distance 4 <= 5), read 0 mode Default
+GPU Direct RDMA Enabled for GPU 1 / HCA 0 (distance 4 <= 5), read 0 mode Default
+```
+
+**Key takeaways:**
+- **mlx5_130** — Mellanox ConnectX adapter at **400 Gbps** RoCE
+- **GPU Direct RDMA enabled** for both GPUs — data flows directly from GPU memory to the NIC without CPU involvement
+- **Distance 4** from GPU to NIC (PCIe hops) — within the threshold of 5 for RDMA
+- **Bootstrap on net1** — the Multus secondary interface handles NCCL coordination
+
+### Communication Channels
+
+```
+8 coll channels, 8 collnet channels, 0 nvls channels, 8 p2p channels per peer
+Pattern 4: nChannels 4, bw 30.0/30.0, type NVL/PIX
+Pattern 1: nChannels 4, bw 60.0/60.0, type NVL/PIX
+```
+
+NCCL selected **8 communication channels** with:
+- **AllReduce bandwidth**: 60 GB/s (Pattern 1, Ring algorithm)
+- **AllGather/ReduceScatter**: 120-240 GB/s (Ring, Simple protocol)
+- **P2P transport**: `P2P/CUMEM` (CUDA memory direct transfers via NVLink)
+
+### Ring and Tree Topology
+
+```
+Ring 00 : 0 -> 1 -> 0
+Ring 01 : 0 -> 1 -> 0
+...
+Trees [0] 1/-1/-1->0->-1  [2] -1/-1/-1->0->1
+```
+
+With only 2 GPUs, the ring is trivial (0→1→0). The tree topology alternates roots between GPU 0 and GPU 1 across the 8 channels for balanced bandwidth.
+
+## vLLM Engine Configuration
+
+```
+model: Mistral-Small-4-119B
+architecture: PixtralForConditionalGeneration
+dtype: torch.bfloat16
+quantization: fp8
+max_seq_len: 1048576
+tensor_parallel_size: 2
+pipeline_parallel_size: 1
+chunked_prefill: enabled (max_num_batched_tokens=8192)
+enable_prefix_caching: True
+```
+
+**Notable details:**
+- **Pixtral architecture** — this is a multimodal model (vision + language), not just text
+- **FP8 quantization** applied automatically — reduces memory footprint by ~50% vs BF16
+- **1M token context window** — Mistral's sliding window attention architecture supports extreme context lengths
+- **Chunked prefill enabled** — batches up to 8192 tokens per chunk to avoid blocking decode operations
+- **Prefix caching** — repeated prompts skip recomputation of cached KV states
+
+### vLLM 0.18.0 Deprecation Warning
+
+```
+WARNING: With `vllm serve`, you should provide the model as a
+positional argument instead of via the `--model` option.
+The `--model` option will be removed in v0.13.
+```
+
+Starting with vLLM 0.13+, use `vllm serve /data/input/Models/Mistral-Small-4-119B` instead of `--model`. Run:ai's distributed inference passes arguments after `--` directly to the container entrypoint.
+
+## NCCL Init Performance
+
+```
+Init timings - ncclCommInitRank: rank 0 nranks 2 total 0.33
+  (kernels 0.19, alloc 0.11, bootstrap 0.00, topo 0.01,
+   graphs 0.00, connections 0.01)
+```
+
+NCCL initialization completed in **0.33 seconds** for the first communicator — this is fast, indicating the NVLink topology was detected cleanly. The second communicator (for vLLM's internal pipeline) initialized in **0.05 seconds** using cached topology.
+
+## OpenShift and Multus Integration
+
+### Secondary Network for NCCL
+
+The annotation `k8s.v1.cni.cncf.io/networks=secondary-network` tells Multus to attach a second network interface (net1) to each pod. NCCL uses this interface for:
+
+- **Bootstrap**: Initial peer discovery and rank assignment
+- **Inter-node communication**: If workers span multiple nodes, NCCL AllReduce goes over this 400G RoCE fabric
+
+### Mellanox NIC as Extended Resource
+
+```bash
+--extended-resource "openshift.io/mellanoxnics=1"
+```
+
+This requests one Mellanox NIC from the SR-IOV device plugin. Each pod gets a dedicated VF (Virtual Function) for line-rate network access without sharing with other tenants.
+
+### Non-Root Execution
+
+```bash
+--run-as-uid 2000 --run-as-gid 2000 --run-as-non-root
+```
+
+Required by OpenShift's restricted SCC. The vLLM container must be built to run as non-root — model files on the PVC must be readable by UID 2000.
+
+## Production Tuning Checklist
+
+Based on the NCCL logs, here is what to verify for production:
+
+### Confirm NVLink Is Used (Not PCIe Fallback)
+
+```bash
+# In NCCL logs, look for:
+# NVL[123.6] — good, NVLink active
+# PIX or PHB — fallback to PCIe, investigate
+```
+
+### Verify GPU Direct RDMA
+
+```bash
+# In NCCL logs:
+# "GPU Direct RDMA Enabled for GPU X / HCA Y" — good
+# "GPU Direct RDMA Disabled" — check NVIDIA peer memory module
+```
+
+### Check for Missing libnccl-net.so
+
+```
+NET/Plugin: Could not find: libnccl-net.so.
+```
+
+This means NCCL is using its built-in IB verbs path instead of an optimized plugin. For most deployments this is fine, but for maximum multi-node performance, install the NCCL network plugin matching your NCCL version.
+
+### Monitor NCCL AllReduce Performance
+
+```bash
+# Expected bandwidth for 2 GPUs on NVLink:
+# Ring AllReduce: ~60 GB/s
+# If significantly lower, check:
+# - NCCL_SOCKET_IFNAME pointing to correct interface
+# - PFC enabled on the RoCE fabric
+# - GPU affinity settings
+```
+
+### Torch Thread Count
+
+```
+WARNING: Reducing Torch parallelism from 96 threads to 1
+to avoid unnecessary CPU contention.
+```
+
+NCCL automatically reduces PyTorch threads from 96 (matching CPU cores) to 1 for the executor to avoid lock contention. This is correct behavior — set `OMP_NUM_THREADS` only if you need specific threading.
+
+## Architecture Decision: When to Use This Pattern
+
+This deployment pattern — Run:ai distributed inference with vLLM and tensor parallelism — is the right choice when:
+
+- **Model exceeds single-GPU memory** — Mistral 119B in BF16 needs ~238 GB; even with FP8, it needs ~119 GB, exceeding a single 80 GB GPU
+- **Low-latency inference required** — tensor parallelism splits each forward pass across GPUs, reducing latency (unlike pipeline parallelism which adds latency per stage)
+- **Air-gapped enterprise environment** — no cloud API calls, all inference on-premise
+- **Multi-tenant GPU cluster** — Run:ai handles scheduling, quotas, and preemption across teams
+
+For models that fit in a single GPU (under ~70B parameters with FP8), skip distributed inference and use a standard `runai inference submit` — the NCCL overhead is not worth it.
+
+## Quick Reference: Essential NCCL Variables
+
+| Variable | Recommended | Purpose |
+|----------|-------------|---------|
+| `NCCL_SOCKET_IFNAME` | `net1` | Multus secondary interface |
+| `NCCL_DEBUG` | `INFO` (debug) / `WARN` (prod) | Log verbosity |
+| `NCCL_IB_DISABLE` | `0` (if IB available) | Use InfiniBand/RoCE |
+| `NCCL_P2P_DISABLE` | `0` | Enable NVLink P2P |
+| `NCCL_NET` | `IB` | Force IB/RoCE network |
+| `NCCL_IB_HCA` | `mlx5_0:1` | Pin to specific HCA port |
+| `NCCL_ALGO` | `Ring` or `Tree` | Force collective algorithm |
+| `NCCL_PROTO` | `Simple` or `LL128` | Force protocol |
+
+---
+
+**Related Resources:**
+
+- [Enable Priority Flow Control (PFC) on Mellanox for Lossless RDMA](/blog/mellanox-priority-flow-control-pfc-rdma/)
+- [Linux NIC Tuning: Ring Buffers, Coalescing, Offloads, IRQ Affinity](/blog/linux-nic-tuning-client-performance/)
+- [NVIDIA Run:ai Distributed Inference Platform Guide](/blog/nvidia-runai-distributed-inference-platform/)
+- [NVIDIA NIM Multi-Node Inference on Kubernetes](/blog/nvidia-nim-multi-node-kubernetes-deployment/)
+- [NVIDIA NIM Model Profiles: Memory Classification and Selection](/blog/nvidia-nim-model-profiles-memory-classification/)
+- [Book a Free AI Infrastructure Assessment](https://calendly.com/lucaberton/)

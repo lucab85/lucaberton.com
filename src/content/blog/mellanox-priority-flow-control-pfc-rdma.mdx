@@ -1,0 +1,425 @@
+---
+draft: false
+title: "How to Enable Priority Flow Control (PFC) on Mellanox ConnectX NICs for Lossless RDMA Networking"
+snippet: "A complete guide to configuring Priority Flow Control (PFC) on Mellanox/NVIDIA ConnectX adapters. Covers mlnx_qos, lldptool, switch-side configuration, RoCEv2 traffic class mapping, and troubleshooting — essential for AI training clusters and HPC workloads that require lossless Ethernet."
+description: "A complete guide to configuring Priority Flow Control (PFC) on Mellanox/NVIDIA ConnectX adapters. Covers mlnx_qos, lldptool, switch-side configuration, RoCEv2 traffic class mapping, and troubleshooting — essential for AI training clusters and HPC workloads that require lossless Ethernet."
+image: { src: "/blog/thumbnails/mellanox-priority-flow-control-pfc-rdma.jpg", alt: "Enable Priority Flow Control on Mellanox ConnectX for lossless RDMA" }
+publishDate: "2026-04-20"
+lastModified: "2026-04-20"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["mellanox", "RDMA", "RoCEv2", "PFC", "networking", "NVIDIA", "ConnectX", "HPC", "AI infrastructure", "lossless ethernet"]
+---
+
+## Why Priority Flow Control Matters
+
+**Priority Flow Control (PFC)** is a Layer 2 mechanism (IEEE 802.1Qbb) that prevents packet loss on specific traffic classes by sending pause frames when buffer thresholds are reached. Without PFC, Ethernet is a lossy fabric — packets get dropped when buffers overflow, and upper-layer protocols must retransmit.
+
+For most workloads, TCP retransmission handles this transparently. But for **RDMA over Converged Ethernet (RoCEv2)**, packet loss is catastrophic. RDMA bypasses the kernel networking stack entirely — there is no TCP to save you. A single dropped packet can stall an entire RDMA queue pair, killing throughput for GPU-to-GPU communication in AI training clusters.
+
+**Bottom line:** if you are running RoCEv2 for AI training, distributed inference, or HPC, you need PFC enabled on both the NIC and the switch. No exceptions.
+
+## Prerequisites
+
+- **NVIDIA/Mellanox ConnectX-4 or later** (ConnectX-5, ConnectX-6, ConnectX-7)
+- **MLNX_OFED drivers installed** (or inbox drivers with `mlnx_qos` available)
+- **Managed switch that supports PFC** (Mellanox Spectrum, Cisco Nexus, Arista, etc.)
+- **Root access** on the host
+
+Verify your NIC and driver:
+
+```bash
+# Check NIC model
+lspci | grep Mellanox
+
+# Check driver version
+ethtool -i ens1f0 | grep -E "driver|version"
+
+# Verify OFED installation
+ofed_info -s
+```
+
+## Step 1: Identify Your Interfaces
+
+```bash
+# List Mellanox interfaces
+ibdev2netdev
+# Output example:
+# mlx5_0 port 1 ==> ens1f0 (Up)
+# mlx5_1 port 1 ==> ens1f1 (Up)
+
+# Or use rdma tool
+rdma link show
+```
+
+For the rest of this guide, we will use `ens1f0` as the interface. Replace with your actual interface name.
+
+## Step 2: Enable DCBX and PFC with mlnx_qos
+
+`mlnx_qos` is the primary tool for configuring Data Center Bridging (DCB) parameters on Mellanox NICs.
+
+### Check Current PFC Status
+
+```bash
+mlnx_qos -i ens1f0
+```
+
+You will see output like:
+
+```
+Priority trust state: pcp
+PFC configuration:
+        priority    0   1   2   3   4   5   6   7
+        enabled     0   0   0   0   0   0   0   0
+```
+
+All priorities are disabled by default. You need to enable PFC on the priority that carries your RoCEv2 traffic.
+
+### Enable PFC on Priority 3 (Default RoCEv2)
+
+By convention, RoCEv2 traffic uses **priority 3** (or priority 4 in some configurations). Check your switch configuration to confirm which priority your DSCP/PCP mapping uses.
+
+```bash
+# Enable PFC on priority 3
+mlnx_qos -i ens1f0 --pfc 0,0,0,1,0,0,0,0
+```
+
+Verify:
+
+```bash
+mlnx_qos -i ens1f0
+# PFC configuration:
+#         priority    0   1   2   3   4   5   6   7
+#         enabled     0   0   0   1   0   0   0   0
+```
+
+### Set Trust Mode to DSCP
+
+For RoCEv2, you want the NIC to classify traffic based on **DSCP** values in the IP header, not PCP tags in the VLAN header. This is critical — if trust mode is set to PCP but your traffic is untagged, PFC will never trigger.
+
+```bash
+# Set trust mode to DSCP
+mlnx_qos -i ens1f0 --trust dscp
+```
+
+Verify:
+
+```bash
+mlnx_qos -i ens1f0 | grep trust
+# Priority trust state: dscp
+```
+
+### Map DSCP to Traffic Class and Priority
+
+RoCEv2 uses DSCP 26 (AF31) by default. Map it to traffic class 3 and priority 3:
+
+```bash
+# Map DSCP 26 to traffic class 3
+mlnx_qos -i ens1f0 --dscp2prio set,26,3
+```
+
+Verify the mapping:
+
+```bash
+mlnx_qos -i ens1f0 --dscp2prio show
+```
+
+## Step 3: Configure Traffic Classes
+
+Allocate bandwidth across traffic classes. You want to guarantee bandwidth for your RoCEv2 traffic class while allowing best-effort traffic on the remaining classes.
+
+```bash
+# Configure 8 traffic classes
+# TC 0-2: best effort (shared)
+# TC 3: RoCEv2 (strict priority or guaranteed bandwidth)
+# TC 4-7: best effort (shared)
+
+mlnx_qos -i ens1f0 \
+  --tc_bw 12,12,12,52,3,3,3,3 \
+  --tsa ets,ets,ets,ets,ets,ets,ets,ets
+```
+
+This gives TC 3 (RoCEv2) 52% of bandwidth, with the rest distributed across other traffic classes.
+
+For strict priority (RoCEv2 always gets served first):
+
+```bash
+mlnx_qos -i ens1f0 \
+  --tc_bw 12,12,12,52,3,3,3,3 \
+  --tsa ets,ets,ets,strict,ets,ets,ets,ets
+```
+
+## Step 4: Configure PFC via lldptool (Alternative Method)
+
+If you are using DCBX negotiation with your switch, `lldptool` configures PFC through LLDP/DCBX protocol exchange:
+
+```bash
+# Enable DCBX on the interface
+lldptool -T -i ens1f0 -V CEE-DCBX enableTx=yes
+lldptool -T -i ens1f0 -V IEEE-DCBX enableTx=yes
+
+# Enable PFC on priority 3
+lldptool -T -i ens1f0 -V PFC enabled=3
+
+# Verify PFC status
+lldptool -t -i ens1f0 -V PFC
+```
+
+**Note:** `mlnx_qos` and `lldptool` can conflict. Use one method consistently. For most AI clusters, `mlnx_qos` with manual configuration is preferred over DCBX negotiation.
+
+## Step 5: Switch-Side Configuration
+
+PFC must be enabled on **both ends** — the NIC and the switch port. Here are examples for common switch platforms:
+
+### Mellanox/NVIDIA Spectrum (Cumulus/NVOS)
+
+```bash
+# /etc/cumulus/datapath/qos/qos_features.conf
+pfc.port_group.roce.pfc_enable = 3
+pfc.port_group.roce.port_set = swp1-48
+pfc.port_group.roce.cos_list = [3]
+pfc.port_group.roce.buffer_size = 100000
+
+# Apply
+sudo systemctl restart switchd
+```
+
+### Cisco Nexus
+
+```
+! Enable PFC on priority 3
+interface Ethernet1/1
+  priority-flow-control mode on
+  priority-flow-control priority 3 no-drop
+
+! QoS policy
+policy-map type qos roce-qos
+  class class-default
+    set qos-group 0
+  class roce-traffic
+    set qos-group 3
+
+policy-map type queuing roce-queuing
+  class type queuing c-out-8q-q3
+    priority level 1
+    no-drop
+```
+
+### Arista EOS
+
+```
+! QoS map
+qos map dscp 26 traffic-class 3
+
+! PFC on priority 3
+interface Ethernet1
+  priority-flow-control priority 3 no-drop
+  priority-flow-control on
+```
+
+## Step 6: Verify PFC Is Working
+
+### Check PFC Counters
+
+```bash
+# PFC pause frames sent/received
+ethtool -S ens1f0 | grep pfc
+# rx_pfc_pause_0: 0
+# rx_pfc_pause_1: 0
+# rx_pfc_pause_2: 0
+# rx_pfc_pause_3: 1247    <-- PFC frames received on priority 3
+# tx_pfc_pause_0: 0
+# tx_pfc_pause_3: 892     <-- PFC frames sent on priority 3
+```
+
+Non-zero counters on priority 3 confirm PFC is active and working.
+
+### Check for PFC Storms
+
+PFC storms occur when a host continuously sends pause frames, stalling the entire priority class across the fabric. Monitor for anomalies:
+
+```bash
+# Watch PFC counters in real-time
+watch -n 1 "ethtool -S ens1f0 | grep pfc"
+```
+
+If `tx_pfc_pause_3` increments continuously without traffic, you have a PFC storm. Common causes:
+- Misconfigured buffer sizes
+- Slow receiver (host under memory pressure)
+- NIC firmware bug
+
+### Verify RoCEv2 Is Using the Correct Priority
+
+```bash
+# Check RDMA counters
+rdma statistic show link mlx5_0/1
+
+# Run a quick RDMA bandwidth test
+ib_write_bw -d mlx5_0 -x 3  # on server
+ib_write_bw -d mlx5_0 -x 3 <server_ip>  # on client
+```
+
+## Step 7: Make Configuration Persistent
+
+`mlnx_qos` settings are **not persistent** across reboots by default. You need to persist them.
+
+### Option A: NetworkManager Dispatcher Script
+
+```bash
+cat > /etc/NetworkManager/dispatcher.d/99-pfc-config << 'EOF'
+#!/bin/bash
+IFACE=$1
+ACTION=$2
+
+if [ "$ACTION" = "up" ] && [ "$IFACE" = "ens1f0" ]; then
+    mlnx_qos -i ens1f0 --pfc 0,0,0,1,0,0,0,0
+    mlnx_qos -i ens1f0 --trust dscp
+    mlnx_qos -i ens1f0 --dscp2prio set,26,3
+    mlnx_qos -i ens1f0 --tc_bw 12,12,12,52,3,3,3,3 \
+      --tsa ets,ets,ets,ets,ets,ets,ets,ets
+fi
+EOF
+chmod +x /etc/NetworkManager/dispatcher.d/99-pfc-config
+```
+
+### Option B: systemd Service
+
+```bash
+cat > /etc/systemd/system/pfc-config.service << 'EOF'
+[Unit]
+Description=Configure PFC on Mellanox NICs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/mlnx_qos -i ens1f0 --pfc 0,0,0,1,0,0,0,0
+ExecStart=/usr/bin/mlnx_qos -i ens1f0 --trust dscp
+ExecStart=/usr/bin/mlnx_qos -i ens1f0 --dscp2prio set,26,3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+systemctl enable pfc-config.service
+```
+
+### Option C: Ansible (Recommended for Clusters)
+
+```yaml
+- name: Configure PFC on Mellanox NICs
+  hosts: gpu_nodes
+  become: true
+  tasks:
+    - name: Enable PFC on priority 3
+      command: mlnx_qos -i {{ rdma_interface }} --pfc 0,0,0,1,0,0,0,0
+
+    - name: Set trust mode to DSCP
+      command: mlnx_qos -i {{ rdma_interface }} --trust dscp
+
+    - name: Map DSCP 26 to priority 3
+      command: mlnx_qos -i {{ rdma_interface }} --dscp2prio set,26,3
+
+    - name: Configure traffic class bandwidth
+      command: >
+        mlnx_qos -i {{ rdma_interface }}
+        --tc_bw 12,12,12,52,3,3,3,3
+        --tsa ets,ets,ets,ets,ets,ets,ets,ets
+```
+
+## Troubleshooting
+
+### PFC Not Triggering
+
+```bash
+# Verify trust mode is DSCP
+mlnx_qos -i ens1f0 | grep trust
+# Must show: dscp (not pcp)
+
+# Verify DSCP mapping
+mlnx_qos -i ens1f0 --dscp2prio show
+# DSCP 26 must map to priority 3
+
+# Verify switch port has PFC enabled on same priority
+# (check switch-side config)
+
+# Check if DCBX is overriding manual settings
+lldptool -t -i ens1f0 -V PFC
+# If DCBX is negotiating different values, disable it:
+mlnx_qos -i ens1f0 --dcbx_mode=0
+```
+
+### High PFC Pause Frame Count
+
+```bash
+# Check buffer allocation
+mlnx_qos -i ens1f0 --buffer_size
+
+# Check for headroom issues
+ethtool -S ens1f0 | grep -E "rx_buffer|headroom"
+
+# Increase buffer for priority 3 if needed
+# (switch-side, varies by platform)
+```
+
+### RDMA Performance Degradation
+
+```bash
+# Check for ECN (Explicit Congestion Notification) conflicts
+sysctl net.ipv4.tcp_ecn
+
+# Verify RDMA CM (Connection Manager) is using correct GID
+ibv_devinfo -d mlx5_0 -v | grep GID
+
+# Check for competing traffic on same priority
+mlnx_qos -i ens1f0  # verify TC bandwidth allocation
+```
+
+## PFC vs ECN: When to Use Each
+
+| Feature | PFC | ECN |
+|---------|-----|-----|
+| Mechanism | Pause frames (stop traffic) | Mark packets (slow down sender) |
+| Scope | Per-priority, per-link | End-to-end |
+| Latency impact | Can cause head-of-line blocking | Graceful backoff |
+| Required for RoCEv2 | Yes (prevents packet loss) | Recommended (reduces PFC events) |
+| Configuration | NIC + every switch hop | NIC + switch + DCQCN at endpoints |
+
+**Best practice:** Use **both PFC and ECN together**. PFC is the safety net that prevents drops. ECN with DCQCN (Data Center Quantized Congestion Notification) is the congestion signal that reduces PFC events. In a well-tuned fabric, you should see very few PFC pause frames because ECN handles congestion before buffers overflow.
+
+## Quick Reference: Complete Setup
+
+```bash
+# 1. Enable PFC on priority 3
+mlnx_qos -i ens1f0 --pfc 0,0,0,1,0,0,0,0
+
+# 2. Set trust mode to DSCP
+mlnx_qos -i ens1f0 --trust dscp
+
+# 3. Map DSCP 26 (AF31) to priority 3
+mlnx_qos -i ens1f0 --dscp2prio set,26,3
+
+# 4. Allocate bandwidth (52% to RoCEv2)
+mlnx_qos -i ens1f0 --tc_bw 12,12,12,52,3,3,3,3 \
+  --tsa ets,ets,ets,ets,ets,ets,ets,ets
+
+# 5. Verify
+mlnx_qos -i ens1f0
+ethtool -S ens1f0 | grep pfc
+
+# 6. Test RDMA
+ib_write_bw -d mlx5_0 -x 3
+```
+
+Configure the same priority on your switch ports, and you have lossless RDMA networking.
+
+---
+
+**Related Resources:**
+
+- [NVIDIA NIM Multi-Node Inference on Kubernetes](/blog/nvidia-nim-multi-node-kubernetes-deployment/)
+- [GPU Operator and SR-IOV NicClusterPolicy](/blog/nvidia-gpu-operator-sriov-nicclusterpolicy-kubernetes/)
+- [AI Infrastructure Optimization](/services/performance-optimization/)
+- [Book a Free Infrastructure Assessment](https://calendly.com/lucaberton/)

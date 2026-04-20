@@ -1,0 +1,446 @@
+---
+draft: false
+title: "Linux NIC Tuning on Client Machines: Ring Buffers, Coalescing, Offloads, and IRQ Affinity"
+snippet: "A practical guide to tuning network adapter settings on Linux client machines for maximum throughput, lower latency, and fewer dropped packets. Covers ethtool ring buffers, interrupt coalescing, TCP/UDP offloads, IRQ affinity, MTU jumbo frames, and kernel sysctl parameters with copy-paste commands."
+description: "A practical guide to tuning network adapter settings on Linux client machines for maximum throughput, lower latency, and fewer dropped packets. Covers ethtool ring buffers, interrupt coalescing, TCP/UDP offloads, IRQ affinity, MTU jumbo frames, and kernel sysctl parameters with copy-paste commands."
+image: { src: "/blog/thumbnails/linux-nic-tuning-client-performance.jpg", alt: "Linux NIC tuning on client machines for optimal network performance" }
+publishDate: "2026-04-20"
+lastModified: "2026-04-20"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["networking", "linux", "NIC tuning", "ethtool", "performance", "RDMA", "latency", "throughput"]
+---
+
+## Why Tune the NIC on Client Machines
+
+Most Linux installations ship with conservative NIC defaults. These defaults prioritize compatibility and low resource usage over throughput. On a client machine that needs to push data to storage, pull from GPU clusters, or sustain high-bandwidth connections, those defaults leave performance on the table.
+
+Common symptoms of an untuned NIC:
+- **Dropped packets** under load (`rx_missed_errors` incrementing)
+- **Throughput plateaus** well below link speed (getting 40 Gbps on a 100 Gbps NIC)
+- **Latency spikes** during burst traffic
+- **CPU saturation** on a single core while other cores are idle (IRQ imbalance)
+
+Here is every knob that matters, in the order you should tune them.
+
+## Step 1: Identify Your NIC
+
+```bash
+# List network interfaces
+ip link show
+
+# Get NIC details
+ethtool -i ens1f0
+# driver: mlx5_core
+# version: 24.10-1.1.4
+# firmware-version: 22.42.1000
+
+# Check current link speed
+ethtool ens1f0 | grep Speed
+# Speed: 100000Mb/s  (100 Gbps)
+```
+
+## Step 2: Increase Ring Buffer Size
+
+Ring buffers are the NIC's internal queues. When they overflow, packets are dropped before they even reach the kernel. This is the **single most impactful tuning** for preventing drops.
+
+```bash
+# Check current and maximum ring buffer sizes
+ethtool -g ens1f0
+# Ring parameters for ens1f0:
+# Pre-set maximums:
+# RX:     8192
+# TX:     8192
+# Current hardware settings:
+# RX:     1024    <-- default, too small
+# TX:     1024
+```
+
+Increase to maximum:
+
+```bash
+# Set ring buffers to maximum
+ethtool -G ens1f0 rx 8192 tx 8192
+
+# Verify
+ethtool -g ens1f0
+```
+
+**Impact:** Prevents `rx_missed_errors` and `rx_no_buffer_count` under burst traffic. Critical for 25 Gbps+ NICs.
+
+## Step 3: Tune Interrupt Coalescing
+
+Interrupt coalescing controls how many packets the NIC batches before raising an interrupt. More coalescing = higher throughput but higher latency. Less coalescing = lower latency but more CPU overhead.
+
+```bash
+# Check current coalescing settings
+ethtool -c ens1f0
+# Adaptive RX: off
+# rx-usecs: 8
+# rx-frames: 128
+# tx-usecs: 16
+# tx-frames: 128
+```
+
+### For Throughput (Bulk Transfer, AI Training, Storage)
+
+```bash
+# Enable adaptive coalescing (NIC auto-tunes)
+ethtool -C ens1f0 adaptive-rx on adaptive-tx on
+
+# Or set manually for high throughput
+ethtool -C ens1f0 rx-usecs 64 rx-frames 256 tx-usecs 64 tx-frames 256
+```
+
+### For Low Latency (Trading, Real-Time, Interactive)
+
+```bash
+# Minimize coalescing for lowest latency
+ethtool -C ens1f0 adaptive-rx off adaptive-tx off
+ethtool -C ens1f0 rx-usecs 0 rx-frames 1 tx-usecs 0 tx-frames 1
+```
+
+### For Balanced (General Workloads)
+
+```bash
+# Adaptive mode handles most scenarios well
+ethtool -C ens1f0 adaptive-rx on adaptive-tx on
+```
+
+## Step 4: Enable Hardware Offloads
+
+Let the NIC handle work that would otherwise consume CPU cycles.
+
+```bash
+# Check current offload settings
+ethtool -k ens1f0
+```
+
+Enable the important ones:
+
+```bash
+# TCP Segmentation Offload (TSO) — NIC handles TCP segmentation
+ethtool -K ens1f0 tso on
+
+# Generic Segmentation Offload (GSO)
+ethtool -K ens1f0 gso on
+
+# Generic Receive Offload (GRO) — batches incoming packets
+ethtool -K ens1f0 gro on
+
+# Large Receive Offload (LRO) — aggregates TCP segments
+# (disable if using routing/forwarding — breaks IP forwarding)
+ethtool -K ens1f0 lro on
+
+# Scatter-Gather (reduces memory copies)
+ethtool -K ens1f0 sg on
+
+# TX/RX checksum offload
+ethtool -K ens1f0 tx-checksum-ip-generic on
+ethtool -K ens1f0 rx-checksum on
+
+# Receive hashing (multi-queue distribution)
+ethtool -K ens1f0 rxhash on
+```
+
+**Verify all offloads:**
+
+```bash
+ethtool -k ens1f0 | grep -E "^(tcp|generic|large|scatter|checksum|receive-hash)"
+```
+
+## Step 5: Configure Multi-Queue and IRQ Affinity
+
+Modern NICs have multiple RX/TX queues that can be spread across CPU cores. By default, Linux may assign all interrupts to a single core, creating a bottleneck.
+
+### Check Current Queue Count
+
+```bash
+# Number of combined queues
+ethtool -l ens1f0
+# Combined:   16     <-- maximum
+# Current:    8      <-- active
+
+# Set to maximum
+ethtool -L ens1f0 combined 16
+```
+
+### Pin IRQs to CPU Cores
+
+```bash
+# Find NIC interrupts
+grep ens1f0 /proc/interrupts
+# Or for Mellanox:
+grep mlx5 /proc/interrupts
+
+# Automatic IRQ balancing (recommended first)
+systemctl start irqbalance
+systemctl enable irqbalance
+```
+
+For manual pinning (HPC/AI clusters where you need deterministic placement):
+
+```bash
+# Disable irqbalance
+systemctl stop irqbalance
+
+# Pin each queue's IRQ to a specific CPU core
+# Get IRQ numbers
+IRQS=$(grep mlx5_comp /proc/interrupts | awk '{print $1}' | tr -d ':')
+
+CORE=0
+for IRQ in $IRQS; do
+    echo $CORE > /proc/irq/$IRQ/smp_affinity_list
+    echo "IRQ $IRQ -> CPU $CORE"
+    CORE=$((CORE + 1))
+done
+```
+
+### Enable Receive Packet Steering (RPS) and Transmit Packet Steering (XPS)
+
+If you have fewer NIC queues than CPU cores:
+
+```bash
+# RPS: distribute received packets across cores
+# Set to all cores (for 16-core system: ffff)
+for Q in /sys/class/net/ens1f0/queues/rx-*/rps_cpus; do
+    echo ffff > $Q
+done
+
+# XPS: map TX queues to CPU cores
+CORE=0
+for Q in /sys/class/net/ens1f0/queues/tx-*/xps_cpus; do
+    echo $((1 << CORE)) > $Q
+    CORE=$((CORE + 1))
+done
+```
+
+## Step 6: MTU and Jumbo Frames
+
+If your network supports jumbo frames (9000 byte MTU), enabling them reduces per-packet overhead and increases throughput — especially for bulk transfers.
+
+```bash
+# Check current MTU
+ip link show ens1f0 | grep mtu
+
+# Enable jumbo frames
+ip link set ens1f0 mtu 9000
+
+# Verify end-to-end (must be enabled on every hop)
+ping -M do -s 8972 <destination_ip>
+# 8972 = 9000 MTU - 20 IP header - 8 ICMP header
+```
+
+**Important:** Jumbo frames must be enabled on the **NIC, every switch in the path, and the destination**. A single hop with 1500 MTU will fragment or drop jumbo packets.
+
+## Step 7: Kernel Sysctl Parameters
+
+TCP/IP stack tuning at the kernel level:
+
+```bash
+cat >> /etc/sysctl.d/99-nic-tuning.conf << 'EOF'
+# Increase socket buffer sizes
+net.core.rmem_max = 134217728
+net.core.wmem_max = 134217728
+net.core.rmem_default = 16777216
+net.core.wmem_default = 16777216
+
+# TCP buffer auto-tuning range (min, default, max)
+net.ipv4.tcp_rmem = 4096 87380 134217728
+net.ipv4.tcp_wmem = 4096 65536 134217728
+
+# Increase network backlog for burst handling
+net.core.netdev_max_backlog = 250000
+
+# Enable TCP window scaling
+net.ipv4.tcp_window_scaling = 1
+
+# Enable TCP timestamps
+net.ipv4.tcp_timestamps = 1
+
+# Enable selective acknowledgments
+net.ipv4.tcp_sack = 1
+
+# Increase max connections backlog
+net.core.somaxconn = 65535
+
+# Increase max SYN backlog
+net.ipv4.tcp_max_syn_backlog = 65535
+
+# Reduce TIME_WAIT sockets
+net.ipv4.tcp_tw_reuse = 1
+
+# Increase local port range
+net.ipv4.ip_local_port_range = 1024 65535
+
+# Enable busy polling for low-latency workloads
+# (set to 0 to disable, 50 for moderate, higher for aggressive)
+net.core.busy_read = 50
+net.core.busy_poll = 50
+
+# Increase number of allowed connections tracked
+net.netfilter.nf_conntrack_max = 1048576
+EOF
+
+# Apply
+sysctl -p /etc/sysctl.d/99-nic-tuning.conf
+```
+
+## Step 8: Verify with Performance Tests
+
+### Throughput Test (iperf3)
+
+```bash
+# Server side
+iperf3 -s
+
+# Client side — single stream
+iperf3 -c <server_ip> -t 30
+
+# Client side — parallel streams (saturate the link)
+iperf3 -c <server_ip> -t 30 -P 8
+
+# Client side — with jumbo frames
+iperf3 -c <server_ip> -t 30 -P 8 -M 8948
+```
+
+### Check for Drops
+
+```bash
+# NIC-level drops
+ethtool -S ens1f0 | grep -E "drop|error|miss|discard"
+
+# Kernel-level drops
+cat /proc/net/softnet_stat
+# Column 2 = dropped, Column 3 = time_squeeze (CPU too busy)
+
+# Watch in real-time
+watch -n 1 "ethtool -S ens1f0 | grep -E 'drop|error|miss'"
+```
+
+### Latency Test
+
+```bash
+# Basic ping latency
+ping -c 100 -i 0.01 <server_ip> | tail -1
+
+# Detailed latency histogram (sockperf)
+sockperf ping-pong -i <server_ip> -t 10
+```
+
+## Complete Tuning Script
+
+```bash
+#!/bin/bash
+# NIC tuning script for Linux client machines
+# Usage: sudo ./tune-nic.sh ens1f0
+
+IFACE=${1:-ens1f0}
+
+echo "Tuning NIC: $IFACE"
+
+# Ring buffers — maximize
+RX_MAX=$(ethtool -g $IFACE 2>/dev/null | awk '/Pre-set/,/^$/' | grep RX: | head -1 | awk '{print $2}')
+TX_MAX=$(ethtool -g $IFACE 2>/dev/null | awk '/Pre-set/,/^$/' | grep TX: | head -1 | awk '{print $2}')
+[ -n "$RX_MAX" ] && ethtool -G $IFACE rx $RX_MAX tx $TX_MAX && echo "Ring buffers: RX=$RX_MAX TX=$TX_MAX"
+
+# Adaptive coalescing
+ethtool -C $IFACE adaptive-rx on adaptive-tx on 2>/dev/null && echo "Adaptive coalescing: enabled"
+
+# Offloads
+for OFFLOAD in tso gso gro sg rxhash; do
+    ethtool -K $IFACE $OFFLOAD on 2>/dev/null
+done
+echo "Offloads: tso gso gro sg rxhash enabled"
+
+# Maximize queues
+QMAX=$(ethtool -l $IFACE 2>/dev/null | awk '/Pre-set/,/^$/' | grep Combined: | awk '{print $2}')
+[ -n "$QMAX" ] && ethtool -L $IFACE combined $QMAX 2>/dev/null && echo "Queues: $QMAX"
+
+# Sysctl
+sysctl -w net.core.rmem_max=134217728 > /dev/null
+sysctl -w net.core.wmem_max=134217728 > /dev/null
+sysctl -w net.core.netdev_max_backlog=250000 > /dev/null
+sysctl -w net.ipv4.tcp_rmem="4096 87380 134217728" > /dev/null
+sysctl -w net.ipv4.tcp_wmem="4096 65536 134217728" > /dev/null
+echo "Sysctl: buffer sizes and backlog tuned"
+
+echo "Done. Verify with: ethtool -S $IFACE | grep -E 'drop|error'"
+```
+
+Save as `/usr/local/bin/tune-nic.sh`, make executable, and run:
+
+```bash
+chmod +x /usr/local/bin/tune-nic.sh
+sudo tune-nic.sh ens1f0
+```
+
+## Quick Reference Table
+
+| Parameter | Default | Tuned (Throughput) | Tuned (Latency) |
+|-----------|---------|-------------------|-----------------|
+| RX ring buffer | 1024 | 8192 (max) | 8192 (max) |
+| TX ring buffer | 1024 | 8192 (max) | 8192 (max) |
+| Coalescing | Fixed | Adaptive on | 0 usecs, 1 frame |
+| TSO/GSO/GRO | Usually on | On | On |
+| LRO | Off | On | Off |
+| Combined queues | 4-8 | Max available | Max available |
+| IRQ affinity | Random | Pinned per core | Pinned per core |
+| MTU | 1500 | 9000 (if supported) | 9000 |
+| rmem_max | 212992 | 134217728 | 134217728 |
+| netdev_max_backlog | 1000 | 250000 | 250000 |
+| busy_poll | 0 | 0 | 50+ |
+
+## Ansible Playbook for Fleet Deployment
+
+```yaml
+- name: Tune NIC on client machines
+  hosts: clients
+  become: true
+  vars:
+    nic_interface: ens1f0
+    mtu: 9000
+  tasks:
+    - name: Maximize ring buffers
+      command: ethtool -G {{ nic_interface }} rx 8192 tx 8192
+      ignore_errors: true
+
+    - name: Enable adaptive coalescing
+      command: ethtool -C {{ nic_interface }} adaptive-rx on adaptive-tx on
+      ignore_errors: true
+
+    - name: Enable offloads
+      command: ethtool -K {{ nic_interface }} tso on gso on gro on sg on rxhash on
+      ignore_errors: true
+
+    - name: Set MTU
+      command: ip link set {{ nic_interface }} mtu {{ mtu }}
+
+    - name: Deploy sysctl tuning
+      copy:
+        dest: /etc/sysctl.d/99-nic-tuning.conf
+        content: |
+          net.core.rmem_max = 134217728
+          net.core.wmem_max = 134217728
+          net.core.rmem_default = 16777216
+          net.core.wmem_default = 16777216
+          net.ipv4.tcp_rmem = 4096 87380 134217728
+          net.ipv4.tcp_wmem = 4096 65536 134217728
+          net.core.netdev_max_backlog = 250000
+          net.core.somaxconn = 65535
+      notify: reload sysctl
+
+  handlers:
+    - name: reload sysctl
+      command: sysctl -p /etc/sysctl.d/99-nic-tuning.conf
+```
+
+---
+
+**Related Resources:**
+
+- [Enable Priority Flow Control (PFC) on Mellanox for Lossless RDMA](/blog/mellanox-priority-flow-control-pfc-rdma/)
+- [NVIDIA GPU Operator and SR-IOV NicClusterPolicy](/blog/nvidia-gpu-operator-sriov-nicclusterpolicy-kubernetes/)
+- [NVIDIA NIM Multi-Node Inference on Kubernetes](/blog/nvidia-nim-multi-node-kubernetes-deployment/)
+- [AI Infrastructure Optimization](/services/performance-optimization/)
+- [Book a Free Infrastructure Assessment](https://calendly.com/lucaberton/)

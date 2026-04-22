@@ -1,0 +1,398 @@
+---
+title: "Running Databases on Kubernetes: Why Memory Overcommit Must Be Off in Production"
+snippet: "Databases on Kubernetes fail silently when memory is overcommitted. OOM kills corrupt data, replication breaks, and WAL flushes stall. Here is how to configure guaranteed QoS, disable overcommit, and run stateful workloads safely."
+description: "Databases on Kubernetes fail silently when memory is overcommitted. OOM kills corrupt data, replication breaks, and WAL flushes stall. Here is how to configure guaranteed QoS, disable overcommit, and run stateful workloads safely."
+publishDate: "2026-04-22"
+lastModified: "2026-04-22"
+image:
+  src: "/blog/thumbnails/databases-kubernetes-memory-overcommit-off-production.jpg"
+  alt: "Database on Kubernetes with memory overcommit disabled"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags:
+  - "Kubernetes"
+  - "Database"
+  - "PostgreSQL"
+  - "Memory Management"
+  - "Production"
+  - "OOM"
+draft: false
+---
+
+import { BlogPromoCard } from "../../components/BlogPromoCard.astro";
+
+## The Silent Killer: Memory Overcommit
+
+Kubernetes lets you run pods where `requests` are lower than `limits`. This is called **memory overcommit** — the scheduler places pods based on requests, but the kernel enforces limits. The gap between the two is borrowed capacity that may not physically exist.
+
+For stateless web services, this is a reasonable trade-off. For databases, it is a disaster.
+
+When a node runs out of physical memory, the Linux OOM killer activates and terminates processes. In a database context, an OOM kill means:
+
+- **Write-Ahead Log (WAL) corruption** — incomplete flushes leave transactions in an undefined state
+- **Replication lag or breakage** — replica processes killed mid-stream require full resync
+- **Buffer pool eviction** — warm caches destroyed, causing massive I/O spikes on restart
+- **Data loss** — uncommitted transactions in shared buffers are gone permanently
+
+I have seen production PostgreSQL clusters lose data because memory was overcommitted and the OOM killer struck during a checkpoint. The fix took 6 hours of WAL replay and manual consistency checks. The prevention takes 5 minutes of YAML.
+
+## What Memory Overcommit Looks Like
+
+Here is the dangerous pattern that most Helm charts ship by default:
+
+```yaml
+# DANGEROUS: Memory overcommit enabled
+resources:
+  requests:
+    memory: "2Gi"    # Scheduler sees this
+    cpu: "1"
+  limits:
+    memory: "8Gi"    # Kernel enforces this
+    cpu: "4"
+```
+
+This pod is **Burstable QoS class**. Kubernetes scheduled it on a node with 2 Gi available, but the database will try to allocate up to 8 Gi. If four such pods land on a 16 Gi node, total potential memory demand is 32 Gi — 2x the physical capacity.
+
+When the node hits memory pressure:
+1. Kubelet starts evicting Burstable pods (lowest priority first)
+2. If eviction is too slow, the kernel OOM killer activates
+3. The process using the most memory dies — often your database
+
+## The Fix: Guaranteed QoS
+
+Set `requests` equal to `limits` for both memory and CPU:
+
+```yaml
+# SAFE: Guaranteed QoS — no overcommit
+resources:
+  requests:
+    memory: "8Gi"
+    cpu: "4"
+  limits:
+    memory: "8Gi"
+    cpu: "4"
+```
+
+This creates a **Guaranteed QoS class** pod. The scheduler will only place it on a node with 8 Gi of allocatable memory. The kernel will never OOM kill it (unless the kubelet itself is misconfigured) because the memory is reserved.
+
+### Why Guaranteed QoS Matters for Databases
+
+| Behavior | Burstable QoS | Guaranteed QoS |
+|----------|--------------|----------------|
+| OOM kill priority | High (first to die) | Lowest (last to die) |
+| CPU throttling | Yes, at limit | Dedicated cores available |
+| Eviction priority | Evicted under pressure | Only evicted if exceeding requests |
+| Memory reservation | Partial (only requests) | Full (requests = limits) |
+| Predictability | Variable | Consistent |
+
+Databases need **predictable performance**. Variable memory availability means variable query latency, variable checkpoint duration, and variable replication throughput.
+
+## Node-Level Memory Overcommit
+
+Kubernetes is only half the story. The Linux kernel has its own overcommit behavior controlled by `vm.overcommit_memory`:
+
+| Value | Behavior |
+|-------|----------|
+| 0 (default) | Heuristic — kernel guesses if allocation will succeed |
+| 1 | Always allow — never deny allocations (dangerous for databases) |
+| 2 | Strict — never allocate more than swap + (ratio x physical RAM) |
+
+For database nodes, set strict no-overcommit:
+
+```bash
+# On the node (via DaemonSet or node configuration)
+sysctl -w vm.overcommit_memory=2
+sysctl -w vm.overcommit_ratio=80
+```
+
+With `overcommit_memory=2` and `overcommit_ratio=80`, the kernel will never allocate more than swap + 80% of physical RAM. Allocations that would exceed this fail with `ENOMEM` instead of succeeding and being OOM-killed later.
+
+### Setting via Kubelet or Machine Config
+
+On managed Kubernetes:
+
+```yaml
+# GKE node pool configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-sysctl-config
+data:
+  vm.overcommit_memory: "2"
+  vm.overcommit_ratio: "80"
+```
+
+On OpenShift, use a `MachineConfig`:
+
+```yaml
+apiVersion: machineconfiguration.openshift.io/v1
+kind: MachineConfig
+metadata:
+  name: 99-db-node-sysctl
+  labels:
+    machineconfiguration.openshift.io/role: db-worker
+spec:
+  kernelArguments: []
+  config:
+    ignition:
+      version: 3.2.0
+    storage:
+      files:
+        - path: /etc/sysctl.d/99-db-overcommit.conf
+          mode: 0644
+          contents:
+            source: data:,vm.overcommit_memory%3D2%0Avm.overcommit_ratio%3D80
+```
+
+## Database-Specific Memory Configuration
+
+Setting Kubernetes resources correctly is necessary but not sufficient. You also need to configure the database engine's memory allocation to stay within the container's limits.
+
+### PostgreSQL
+
+```yaml
+# PostgreSQL memory configuration for 8Gi container
+# shared_buffers: 25% of total memory
+shared_buffers: "2GB"
+# effective_cache_size: 75% of total memory
+effective_cache_size: "6GB"
+# work_mem: per-sort/hash operation
+work_mem: "64MB"
+# maintenance_work_mem: VACUUM, CREATE INDEX
+maintenance_work_mem: "512MB"
+# wal_buffers: auto-tuned from shared_buffers
+wal_buffers: "-1"
+# huge_pages: use if available
+huge_pages: "try"
+```
+
+Critical: `shared_buffers` + `max_connections * work_mem` + `maintenance_work_mem` + OS overhead must stay under the container memory limit. If PostgreSQL allocates beyond the cgroup limit, the OOM killer strikes.
+
+```python
+# Memory budget calculation
+container_memory = 8 * 1024  # 8Gi in MB
+
+shared_buffers = 2048         # 2GB
+max_connections = 200
+work_mem = 64                 # per sort operation
+# Assume 2 active sorts per connection on average
+active_work_mem = max_connections * 2 * work_mem  # 25,600 MB worst case!
+
+# This EXCEEDS 8Gi! work_mem must be reduced or max_connections capped
+```
+
+**This is the most common mistake**: `work_mem` is per-sort-operation, not per-connection. A single complex query with multiple sort/hash nodes can use `work_mem` multiple times. Set it conservatively.
+
+### MySQL / MariaDB
+
+```ini
+# MySQL memory for 8Gi container
+innodb_buffer_pool_size = 5G       # 60-70% of total
+innodb_log_buffer_size = 64M
+key_buffer_size = 256M
+tmp_table_size = 256M
+max_heap_table_size = 256M
+sort_buffer_size = 4M              # per-connection
+join_buffer_size = 4M              # per-connection
+```
+
+### MongoDB
+
+```yaml
+# MongoDB WiredTiger cache for 8Gi container
+storage:
+  wiredTiger:
+    engineConfig:
+      cacheSizeGB: 4  # ~50% of container memory
+```
+
+MongoDB's WiredTiger defaults to `(RAM - 1GB) / 2`. In a container, it reads the cgroup memory limit, but verify this is correct — some older kernel/Docker combinations report host memory instead.
+
+## Topology: Dedicated Node Pools
+
+Do not mix database pods with application pods on the same nodes. Create dedicated node pools:
+
+```yaml
+# Node pool for databases (GKE example)
+apiVersion: v1
+kind: NodePool
+metadata:
+  name: db-pool
+spec:
+  machineType: n2-highmem-16  # 128GB RAM
+  taints:
+    - key: "workload"
+      value: "database"
+      effect: "NoSchedule"
+  labels:
+    workload: database
+```
+
+Database pods use tolerations and node affinity:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: postgresql-primary
+spec:
+  tolerations:
+    - key: "workload"
+      value: "database"
+      effect: "NoSchedule"
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: workload
+                operator: In
+                values: ["database"]
+  containers:
+    - name: postgresql
+      resources:
+        requests:
+          memory: "64Gi"
+          cpu: "8"
+        limits:
+          memory: "64Gi"
+          cpu: "8"
+```
+
+Benefits:
+- No noisy neighbors competing for memory
+- Node-level sysctl tuned for database workloads
+- Dedicated storage I/O paths
+- Predictable NUMA topology
+
+## Swap: Disable It
+
+Swap masks memory pressure instead of surfacing it. A database swapping to disk is worse than a database being OOM-killed — at least the OOM kill is fast. A swapping database delivers 100x worse latency for minutes or hours before anyone notices.
+
+```yaml
+# Kubelet configuration
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+failSwapOn: true  # Default: kubelet refuses to start if swap is on
+memorySwap:
+  swapBehavior: NoSwap
+```
+
+Kubernetes 1.28+ supports swap for specific workloads via `LimitedSwap`, but databases should **never** use it.
+
+## Huge Pages for Database Workloads
+
+Huge pages (2 Mi or 1 Gi) reduce TLB misses for large memory allocations — exactly what database buffer pools are:
+
+```yaml
+# Request huge pages for PostgreSQL shared_buffers
+resources:
+  requests:
+    memory: "8Gi"
+    hugepages-2Mi: "2Gi"  # For shared_buffers
+  limits:
+    memory: "8Gi"
+    hugepages-2Mi: "2Gi"
+```
+
+PostgreSQL with `huge_pages = on` and 2 Gi of huge pages allocated sees 5-15% improvement in TPS for OLTP workloads due to reduced TLB pressure.
+
+## LimitRange and ResourceQuota
+
+Enforce no-overcommit at the namespace level:
+
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: db-no-overcommit
+  namespace: databases
+spec:
+  limits:
+    - type: Container
+      default:
+        memory: "4Gi"
+        cpu: "2"
+      defaultRequest:
+        memory: "4Gi"    # Same as default limit
+        cpu: "2"          # Same as default limit
+      maxLimitRequestRatio:
+        memory: "1"       # Enforces requests == limits
+        cpu: "1"
+```
+
+The `maxLimitRequestRatio: 1` is the key — it rejects any pod where requests are not equal to limits, enforcing Guaranteed QoS at the admission level.
+
+## Monitoring: Catch Memory Pressure Before OOM
+
+```yaml
+# Prometheus alerts for database memory
+groups:
+  - name: database-memory
+    rules:
+      - alert: DatabaseMemoryOvercommitted
+        expr: |
+          sum by (node) (
+            kube_pod_container_resource_limits{resource="memory", namespace="databases"}
+          ) > sum by (node) (
+            kube_node_status_allocatable{resource="memory"}
+          )
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Database node memory overcommitted"
+
+      - alert: DatabaseContainerNearOOM
+        expr: |
+          container_memory_working_set_bytes{namespace="databases"}
+          / container_spec_memory_limit_bytes{namespace="databases"}
+          > 0.85
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Database container at 85% memory limit"
+
+      - alert: NodeMemoryPressure
+        expr: kube_node_status_condition{condition="MemoryPressure", status="true"} == 1
+        for: 1m
+        labels:
+          severity: critical
+```
+
+## The Checklist
+
+For every database running on Kubernetes in production:
+
+| Check | Why |
+|-------|-----|
+| `requests == limits` (memory AND CPU) | Guaranteed QoS, no OOM kill priority |
+| `vm.overcommit_memory=2` on node | Kernel-level overcommit prevention |
+| Swap disabled | Prevents latency disasters |
+| Dedicated node pool with taints | No noisy neighbors |
+| Database engine memory tuned to container limit | Prevents internal OOM |
+| `maxLimitRequestRatio: 1` in LimitRange | Namespace-level enforcement |
+| Memory pressure alerts configured | Early warning before OOM |
+| Huge pages allocated (optional) | 5-15% TPS improvement |
+
+## The Bottom Line
+
+Running databases on Kubernetes works. Running databases on Kubernetes with memory overcommit is asking for data loss.
+
+Set `requests == limits`. Disable swap. Dedicate nodes. Tune the engine. Monitor aggressively. These are not optimizations — they are prerequisites.
+
+Your data deserves Guaranteed QoS.
+
+---
+
+**Running stateful workloads on Kubernetes?** I help enterprises design database platforms with proper isolation, memory management, and operational guardrails.
+
+[Book a Platform Assessment →](https://calendly.com/lucaberton/)
+
+## Related Resources
+
+- [Multi-Tenant GPUs on Bare Metal Kubernetes](/blog/multi-tenant-gpus-bare-metal-kubernetes-mig-mps-time-slicing/)
+- [Your Model Does Not Matter. Your Infrastructure Does.](/blog/ai-infrastructure-matters-more-than-model-production/)
+- [AI on Kubernetes: Architecture Decisions That Make or Break Your Platform](/blog/ai-kubernetes-production-architecture-decisions/)
+- [Zero Trust Security for Kubernetes in 2026](/blog/zero-trust-kubernetes-security-2026/)

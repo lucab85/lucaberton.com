@@ -1,0 +1,485 @@
+---
+title: "NVIDIA AIPerf: The Definitive LLM Inference Benchmarking Tool for Production AI"
+snippet: "AIPerf is NVIDIA's open-source tool for benchmarking generative AI inference — measuring TTFT, ITL, throughput, and latency across vLLM, NIM, TGI, and any OpenAI-compatible endpoint with real-world traffic patterns."
+description: "AIPerf is NVIDIA's open-source tool for benchmarking generative AI inference — measuring TTFT, ITL, throughput, and latency across vLLM, NIM, TGI, and any OpenAI-compatible endpoint with real-world traffic patterns."
+publishDate: "2026-04-22"
+lastModified: "2026-04-22"
+image:
+  src: "/blog/thumbnails/nvidia-aiperf-llm-inference-benchmarking-guide.jpg"
+  alt: "NVIDIA AIPerf LLM inference benchmarking dashboard"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "NVIDIA"
+  - "AIPerf"
+  - "LLM"
+  - "Benchmarking"
+  - "Inference"
+  - "vLLM"
+  - "Production AI"
+draft: false
+---
+
+import { BlogPromoCard } from "../../components/BlogPromoCard.astro";
+
+## Why You Need a Real LLM Benchmarking Tool
+
+"How fast is your inference endpoint?" is the wrong question. The right questions are:
+
+- What is the **Time to First Token** at P99 under 50 concurrent users?
+- What is the **Inter-Token Latency** when the KV cache is 80% full?
+- At what concurrency does **throughput plateau** and latency spike?
+- Does your endpoint survive **Poisson-distributed bursty traffic**?
+
+You cannot answer these with `curl` and a stopwatch. You need [AIPerf](https://github.com/ai-dynamo/aiperf).
+
+**NVIDIA AIPerf** (formerly GenAI-Perf) is an open-source, production-grade benchmarking tool for generative AI inference. It measures every metric that matters — TTFT, TTST, ITL, throughput, latency distributions — across any OpenAI-compatible endpoint with realistic traffic patterns, concurrency control, and detailed reporting.
+
+## Quick Start: Benchmark in 5 Minutes
+
+### 1. Set Up a Local Server
+
+```bash
+# Start Ollama with a small model
+docker run -d \
+  --name ollama \
+  -p 11434:11434 \
+  -v ollama-data:/root/.ollama \
+  ollama/ollama:latest
+
+docker exec -it ollama ollama pull granite4:350m
+```
+
+### 2. Install and Run AIPerf
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install aiperf
+
+aiperf profile \
+  --model "granite4:350m" \
+  --streaming \
+  --endpoint-type chat \
+  --tokenizer ibm-granite/granite-4.0-micro \
+  --url http://localhost:11434
+```
+
+### 3. Read the Results
+
+AIPerf produces a comprehensive metrics table:
+
+| Metric | avg | min | max | p99 | p90 | p50 | std |
+|--------|-----|-----|-----|-----|-----|-----|-----|
+| Time to First Token (ms) | 7,463 | 7,126 | 9,484 | 9,295 | 7,597 | 7,240 | 677 |
+| Inter Token Latency (ms) | 65.31 | 53.06 | 81.31 | 81.24 | 80.64 | 63.79 | 9.09 |
+| Output Token Throughput (tok/s) | 6.85 | — | — | — | — | — | — |
+| Request Latency (ms) | 13,829 | 9,029 | 27,905 | 27,238 | 21,228 | 11,338 | 5,614 |
+
+Plus CSV and JSON exports for post-processing.
+
+## Architecture: Why AIPerf Is Different
+
+AIPerf is not a simple HTTP load generator. It is a **9-service multiprocess architecture** communicating via ZMQ:
+
+```
+┌─────────────────────────────────────────────┐
+│  AIPerf Orchestrator                         │
+├──────────┬──────────┬──────────┬────────────┤
+│ Request  │ Traffic  │ Response │ Metrics    │
+│ Generator│ Shaper   │ Collector│ Aggregator │
+├──────────┼──────────┼──────────┼────────────┤
+│ Tokenizer│ Dataset  │ Transport│ Reporter   │
+│ Service  │ Service  │ Pool     │ Service    │
+└──────────┴──────────┴──────────┴────────────┘
+```
+
+Each service runs in its own process, enabling:
+- **High concurrency** without GIL contention
+- **Accurate timing** — request generation and response collection are decoupled
+- **Extensibility** — plugin system with 25+ extension categories
+
+## The Metrics That Matter
+
+### Time to First Token (TTFT)
+
+The most important user-facing metric. How long from request submission to the first token appearing?
+
+- **Under 500ms**: Excellent — users perceive instant response
+- **500ms - 2s**: Acceptable for most applications
+- **Over 3s**: Users start abandoning
+
+TTFT is dominated by **prefill time** — processing the entire input prompt before generating the first output token. Longer prompts = higher TTFT.
+
+### Time to Second Token (TTST)
+
+Often overlooked but critical for perceived quality. The gap between first and second token reveals whether the model has "warmed up" or if there is scheduling overhead.
+
+### Inter-Token Latency (ITL)
+
+The time between consecutive output tokens. This determines the **streaming speed** users experience. At 60ms ITL, text appears at roughly 16 tokens/second — fast enough to feel like smooth typing.
+
+### Output Token Throughput
+
+Total tokens generated per second across all concurrent requests. This is your **capacity metric** — how many users can your endpoint serve simultaneously?
+
+### Request Throughput
+
+Requests completed per second. Combined with token throughput, this tells you whether your endpoint is handling many short requests or fewer long ones.
+
+## Benchmarking Modes
+
+### Concurrency Mode (Default)
+
+Fix the number of concurrent requests and measure performance:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --concurrency 10 \
+  --request-count 100 \
+  --streaming
+```
+
+### Request Rate Mode
+
+Send requests at a fixed rate (requests/second) regardless of response time:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --request-rate 5 \
+  --request-count 200
+```
+
+### Request Rate with Max Concurrency
+
+Dual control — send at a target rate but cap maximum concurrent requests:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --request-rate 10 \
+  --max-concurrency 20
+```
+
+### Trace Replay
+
+Replay real production traffic patterns for the most realistic benchmarks:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --trace-file production-traffic.json
+```
+
+## Traffic Patterns: Beyond Constant Load
+
+Real inference traffic is bursty. AIPerf supports multiple arrival patterns:
+
+### Poisson Distribution
+
+Models natural request arrivals — the most realistic pattern for web-facing endpoints:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --request-rate 10 \
+  --arrival-pattern poisson
+```
+
+### Gamma Distribution
+
+Models traffic with more variance than Poisson — useful for simulating enterprise workloads with periodic bursts.
+
+### Gradual Ramping
+
+Smooth ramp-up to identify the exact point where latency degrades:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --concurrency-start 1 \
+  --concurrency-end 50 \
+  --concurrency-step 5
+```
+
+This is how you find your endpoint's **breaking point** — the concurrency level where P99 latency exceeds your SLA.
+
+## Dataset Support
+
+AIPerf supports diverse workload types beyond simple synthetic prompts:
+
+### ShareGPT Dataset
+
+Real conversational data from ChatGPT interactions:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --dataset sharegpt
+```
+
+### Custom Prompts
+
+Send your exact production prompts:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --input-file my-prompts.jsonl
+```
+
+### Synthetic Generation with Sequence Control
+
+Control input/output sequence length distributions:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --input-tokens-mean 512 \
+  --input-tokens-stddev 100 \
+  --output-tokens-mean 256
+```
+
+### Specialized Datasets
+
+- **AIMO** — Math reasoning (NuminaMath)
+- **MMStar** — Vision language model benchmarks
+- **MMVU** — Video understanding
+- **InstructCoder** — Code generation
+- **SPEED-Bench** — Speculative decoding evaluation
+- **Agentic Code Generator** — Multi-turn coding agent traces for KV cache benchmarking
+
+## Supported Endpoints
+
+AIPerf works with any OpenAI-compatible API:
+
+| Endpoint Type | Use Case |
+|--------------|----------|
+| Chat Completions | Standard LLM chat (vLLM, NIM, TGI, Ollama) |
+| Completions | Text completion APIs |
+| Embeddings | Embedding model benchmarks |
+| Rankings | Reranker model benchmarks |
+| Audio | Audio language models |
+| Vision | Vision language models (with image inputs) |
+| Image Generation | DALL-E compatible APIs |
+| Video Generation | SGLang video generation |
+| OpenAI Responses API | New Responses API format |
+
+## Advanced Features
+
+### Warmup Phase
+
+Eliminate cold-start effects from your measurements:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --warmup-requests 10
+```
+
+### Multi-URL Load Balancing
+
+Distribute across multiple inference servers:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://server1:8000 http://server2:8000 http://server3:8000 \
+  --concurrency 30
+```
+
+### GPU Telemetry
+
+Collect DCGM metrics alongside inference benchmarks:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --gpu-telemetry
+```
+
+This correlates inference performance with GPU utilization, memory usage, and power consumption.
+
+### Goodput (SLO-Based Throughput)
+
+Measure throughput that actually meets your SLA:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --goodput-ttft 500 \
+  --goodput-itl 100
+```
+
+Only requests with TTFT under 500ms AND ITL under 100ms count toward goodput. This is the metric that matters for production — raw throughput is meaningless if half your requests breach SLA.
+
+### Multi-Run Confidence Intervals
+
+Run multiple iterations and get statistical confidence:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --runs 5 \
+  --confidence-level 0.95
+```
+
+### Request Cancellation Testing
+
+Simulate users abandoning requests — critical for testing inference server resilience:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --request-timeout 5000
+```
+
+### Prefill Concurrency
+
+Memory-safe benchmarking for long-context workloads — controls how many requests are in the prefill phase simultaneously:
+
+```bash
+aiperf profile \
+  --model "llama-3.1-70b" \
+  --url http://inference-server:8000 \
+  --prefill-concurrency 4 \
+  --input-tokens-mean 32000
+```
+
+## UI Modes
+
+### Dashboard (Real-Time TUI)
+
+Live terminal dashboard showing metrics updating in real-time:
+
+```bash
+aiperf profile --ui dashboard ...
+```
+
+### Simple (Progress Bars)
+
+Minimal progress indicator:
+
+```bash
+aiperf profile --ui simple ...
+```
+
+### Headless
+
+No UI — perfect for CI/CD pipelines:
+
+```bash
+aiperf profile --ui none ...
+```
+
+## Plugin System
+
+AIPerf's plugin architecture supports 25+ extension categories:
+
+- **Endpoint plugins** — Add support for custom inference APIs
+- **Dataset plugins** — Custom data formats and generators
+- **Transport plugins** — Custom HTTP clients or protocols
+- **Metrics plugins** — Additional metric calculations
+
+Create custom plugins by implementing the plugin interface — no core code changes required.
+
+## Practical Benchmarking Workflow
+
+Here is the workflow I use when evaluating inference infrastructure for enterprise deployments:
+
+### Step 1: Baseline (Single User)
+
+```bash
+aiperf profile --model "llama-3.1-70b" --url $URL \
+  --concurrency 1 --request-count 50 --streaming
+```
+
+Establishes minimum latency and maximum per-request quality.
+
+### Step 2: Find the Breaking Point
+
+```bash
+aiperf profile --model "llama-3.1-70b" --url $URL \
+  --concurrency-start 1 --concurrency-end 100 --concurrency-step 10 \
+  --request-count 200 --streaming
+```
+
+Identifies where P99 TTFT exceeds your SLA threshold.
+
+### Step 3: Sustained Load at Target Concurrency
+
+```bash
+aiperf profile --model "llama-3.1-70b" --url $URL \
+  --concurrency 30 --duration 300 --streaming \
+  --arrival-pattern poisson --warmup-requests 20
+```
+
+Five minutes of realistic traffic at your target concurrency — reveals memory leaks, GC pauses, and queue buildup.
+
+### Step 4: Goodput Validation
+
+```bash
+aiperf profile --model "llama-3.1-70b" --url $URL \
+  --concurrency 30 --duration 300 --streaming \
+  --goodput-ttft 1000 --goodput-itl 80
+```
+
+Confirms what percentage of requests actually meet your SLA under sustained load.
+
+## AIPerf vs. Other Tools
+
+| Feature | AIPerf | vegeta/wrk | locust | llm-perf |
+|---------|--------|-----------|--------|----------|
+| LLM-specific metrics (TTFT, ITL) | Yes | No | No | Yes |
+| Streaming support | Yes | No | Limited | Yes |
+| Traffic patterns (Poisson, gamma) | Yes | Limited | Yes | No |
+| GPU telemetry | Yes | No | No | No |
+| Goodput (SLO-based) | Yes | No | No | No |
+| Multi-node | Yes | No | Yes | No |
+| Plugin system | Yes | No | Yes | No |
+| Real-time dashboard | Yes | No | Yes | No |
+
+AIPerf is purpose-built for LLM inference. Generic HTTP load testers miss the streaming token-level metrics that define LLM user experience.
+
+## The Bottom Line
+
+If you are serving LLMs in production and not benchmarking with a tool that understands streaming tokens, TTFT, ITL, and goodput, you are flying blind. AIPerf gives you the visibility to:
+
+- **Right-size GPU allocation** based on actual throughput at target latency
+- **Compare inference engines** (vLLM vs TGI vs NIM) on equal terms
+- **Validate autoscaling** by finding the concurrency threshold that triggers scale-up
+- **Prove SLA compliance** with goodput metrics and confidence intervals
+- **Catch regressions** with reproducible benchmarks in CI/CD
+
+It is Apache 2.0 licensed, actively maintained by NVIDIA, and available via `pip install aiperf`.
+
+---
+
+**Benchmarking your inference infrastructure?** I help enterprises evaluate, optimize, and scale LLM serving platforms — from GPU selection to autoscaling configuration.
+
+[Book an AI Infrastructure Assessment →](https://calendly.com/lucaberton/)
+
+## Related Resources
+
+- [NVIDIA DOCA Perftest: Modern RDMA Benchmarking for GPU Clusters](/blog/nvidia-doca-perftest-rdma-benchmarking-guide/)
+- [Your Model Does Not Matter. Your Infrastructure Does.](/blog/ai-infrastructure-matters-more-than-model-production/)
+- [The Inference Economy: How Venture Is Betting on the Agentic Era](/blog/inference-economy-venture-capital-agentic-ai-2026/)
+- [AI on Kubernetes: Autoscaling Inference Without Burning Money](/blog/ai-kubernetes-production-autoscaling-inference/)
+- [NVIDIA NIM Support Matrix: Models and GPUs](/blog/nvidia-nim-support-matrix-models-gpus-2026/)
+- [NVIDIA Dynamo: The Inference Framework Built for the Agentic Era](/blog/nvidia-dynamo-inference-framework-triton-successor/)

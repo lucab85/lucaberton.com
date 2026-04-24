@@ -1,0 +1,328 @@
+---
+title: "Fix Kubernetes CreateContainerConfigError: Complete Troubleshooting Guide (2026)"
+snippet: "Getting CreateContainerConfigError in Kubernetes? This guide covers every cause — missing ConfigMaps, Secrets, volume mounts, security contexts, and resource limits — with kubectl commands to diagnose and fix each one."
+description: "Fix Kubernetes CreateContainerConfigError step by step. Covers missing ConfigMaps, Secrets, volume mount failures, security context issues, resource limit misconfigurations, and image pull problems with kubectl debugging commands."
+publishDate: "2026-04-24"
+lastModified: "2026-04-24"
+image:
+  src: "/blog/thumbnails/fix-kubernetes-createcontainerconfigerror.jpg"
+  alt: "Fix Kubernetes CreateContainerConfigError troubleshooting guide"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags:
+  - "Kubernetes"
+  - "Troubleshooting"
+  - "DevOps"
+  - "Containers"
+draft: false
+---
+
+## What Is CreateContainerConfigError?
+
+`CreateContainerConfigError` means Kubernetes accepted your Pod spec but cannot create the container because something in the configuration is invalid or missing. The Pod stays in `Pending` or shows `CreateContainerConfigError` in the STATUS column:
+
+```bash
+kubectl get pods
+```
+
+```
+NAME                     READY   STATUS                       RESTARTS   AGE
+my-app-7b8f9d4c6-x2k4j  0/1     CreateContainerConfigError   0          2m
+```
+
+Unlike `CrashLoopBackOff` (container starts then dies) or `ImagePullBackOff` (image not found), `CreateContainerConfigError` means the container **never starts** because its configuration references something that does not exist or is malformed.
+
+## Step 1: Get the Error Details
+
+```bash
+kubectl describe pod my-app-7b8f9d4c6-x2k4j
+```
+
+Scroll to the **Events** section at the bottom. The error message tells you exactly what is wrong. Here are the most common causes and fixes.
+
+## Cause 1: Missing ConfigMap
+
+**Error message:**
+```
+Warning  Failed  configmap "app-config" not found
+```
+
+The Pod references a ConfigMap that does not exist in the namespace.
+
+**Diagnose:**
+```bash
+kubectl get configmap app-config -n <namespace>
+```
+
+**Fix — Create the missing ConfigMap:**
+```bash
+kubectl create configmap app-config \
+  --from-literal=DATABASE_HOST=postgres \
+  --from-literal=DATABASE_PORT=5432 \
+  -n <namespace>
+```
+
+**Or from a file:**
+```bash
+kubectl create configmap app-config \
+  --from-file=config.yaml=./config.yaml \
+  -n <namespace>
+```
+
+**Prevention:** Use `optional: true` in your Pod spec if the ConfigMap is not critical:
+
+```yaml
+envFrom:
+  - configMapRef:
+      name: app-config
+      optional: true
+```
+
+## Cause 2: Missing Secret
+
+**Error message:**
+```
+Warning  Failed  secret "db-credentials" not found
+```
+
+**Diagnose:**
+```bash
+kubectl get secret db-credentials -n <namespace>
+```
+
+**Fix:**
+```bash
+kubectl create secret generic db-credentials \
+  --from-literal=username=admin \
+  --from-literal=password=s3cur3p4ss \
+  -n <namespace>
+```
+
+**Common gotcha:** Secrets are namespace-scoped. If you created the Secret in `default` but the Pod runs in `production`, it will not find it.
+
+```bash
+# Check which namespace the Pod is in
+kubectl get pod my-app-7b8f9d4c6-x2k4j -o jsonpath='{.metadata.namespace}'
+```
+
+## Cause 3: Missing Secret Key
+
+**Error message:**
+```
+Warning  Failed  couldn't find key "password" in Secret default/db-credentials
+```
+
+The Secret exists but is missing the specific key your Pod references.
+
+**Diagnose:**
+```bash
+kubectl get secret db-credentials -o jsonpath='{.data}' | jq
+```
+
+**Fix — Add the missing key:**
+```bash
+kubectl patch secret db-credentials -p '{"data":{"password":"czNjdXIzcDRzcw=="}}'
+```
+
+Note: Secret values must be base64-encoded:
+```bash
+echo -n "s3cur3p4ss" | base64
+```
+
+## Cause 4: Volume Mount Referencing Missing ConfigMap or Secret
+
+**Error message:**
+```
+Warning  Failed  configmap "nginx-config" not found
+```
+
+When a volume references a ConfigMap or Secret that does not exist:
+
+```yaml
+volumes:
+  - name: config-volume
+    configMap:
+      name: nginx-config  # This ConfigMap must exist
+```
+
+**Fix:** Create the ConfigMap or mark it optional:
+
+```yaml
+volumes:
+  - name: config-volume
+    configMap:
+      name: nginx-config
+      optional: true
+```
+
+## Cause 5: Invalid Security Context
+
+**Error message:**
+```
+Warning  Failed  Error: container has runAsNonRoot and image will run as root
+```
+
+The Pod security context requires non-root, but the container image runs as root.
+
+**Fix — Option A: Set runAsUser in the Pod spec:**
+```yaml
+securityContext:
+  runAsUser: 1000
+  runAsNonRoot: true
+```
+
+**Fix — Option B: Use an image that runs as non-root:**
+```dockerfile
+FROM nginx:alpine
+RUN adduser -D -u 1000 appuser
+USER appuser
+```
+
+**Fix — Option C: Remove the restriction (not recommended for production):**
+```yaml
+securityContext:
+  runAsNonRoot: false
+```
+
+## Cause 6: Invalid Resource Requests
+
+**Error message:**
+```
+Warning  Failed  Error: invalid resource quantity
+```
+
+Malformed resource requests or limits:
+
+```yaml
+# WRONG - missing unit
+resources:
+  requests:
+    memory: 256  # Should be "256Mi"
+    cpu: 100     # Should be "100m"
+```
+
+**Fix:**
+```yaml
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "500m"
+```
+
+## Cause 7: ServiceAccount Token Mount Failure
+
+**Error message:**
+```
+Warning  Failed  serviceaccount "my-sa" not found
+```
+
+**Diagnose:**
+```bash
+kubectl get serviceaccount my-sa -n <namespace>
+```
+
+**Fix:**
+```bash
+kubectl create serviceaccount my-sa -n <namespace>
+```
+
+## Cause 8: Projected Volume Configuration Error
+
+**Error message:**
+```
+Warning  Failed  projected volume source is invalid
+```
+
+Projected volumes combine multiple sources. Any misconfigured source blocks the container:
+
+```yaml
+volumes:
+  - name: combined
+    projected:
+      sources:
+        - configMap:
+            name: app-config    # Must exist
+        - secret:
+            name: app-secret    # Must exist
+        - serviceAccountToken:
+            expirationSeconds: 3600
+```
+
+**Fix:** Verify each source exists individually.
+
+## Quick Diagnostic Script
+
+Run this to check all common causes at once:
+
+```bash
+#!/bin/bash
+POD=$1
+NS=${2:-default}
+
+echo "=== Pod Events ==="
+kubectl describe pod $POD -n $NS | grep -A 20 "Events:"
+
+echo -e "\n=== ConfigMap References ==="
+kubectl get pod $POD -n $NS -o json | \
+  jq -r '.. | .configMapRef?.name // .configMap?.name // empty' | \
+  sort -u | while read cm; do
+    kubectl get configmap $cm -n $NS &>/dev/null && \
+      echo "  ✅ $cm exists" || echo "  ❌ $cm MISSING"
+  done
+
+echo -e "\n=== Secret References ==="
+kubectl get pod $POD -n $NS -o json | \
+  jq -r '.. | .secretRef?.name // .secretKeyRef?.secretName // .secret?.secretName // empty' | \
+  sort -u | while read s; do
+    kubectl get secret $s -n $NS &>/dev/null && \
+      echo "  ✅ $s exists" || echo "  ❌ $s MISSING"
+  done
+
+echo -e "\n=== ServiceAccount ==="
+SA=$(kubectl get pod $POD -n $NS -o jsonpath='{.spec.serviceAccountName}')
+kubectl get serviceaccount $SA -n $NS &>/dev/null && \
+  echo "  ✅ $SA exists" || echo "  ❌ $SA MISSING"
+```
+
+Save as `debug-createcontainerconfigerror.sh` and run:
+```bash
+chmod +x debug-createcontainerconfigerror.sh
+./debug-createcontainerconfigerror.sh my-app-7b8f9d4c6-x2k4j default
+```
+
+## Prevention Checklist
+
+| Check | Command |
+|-------|---------|
+| ConfigMaps exist | `kubectl get cm -n <ns>` |
+| Secrets exist | `kubectl get secret -n <ns>` |
+| ServiceAccount exists | `kubectl get sa -n <ns>` |
+| Resource format valid | Review YAML for units (Mi, Gi, m) |
+| Security context compatible | Check image USER directive |
+| Namespace correct | `kubectl config current-context` |
+| Optional flags set | Add `optional: true` for non-critical configs |
+
+## Common Mistakes
+
+1. **Wrong namespace** — most common cause. ConfigMap in `default`, Pod in `production`
+2. **Typo in ConfigMap/Secret name** — Kubernetes is case-sensitive
+3. **Forgot to apply ConfigMap** — your Helm chart or Kustomize overlay did not include it
+4. **Secret key mismatch** — the key in `secretKeyRef.key` must exactly match a key in the Secret data
+5. **Base64 encoding issues** — Secrets with newlines or special characters in base64
+
+## When It Is Not CreateContainerConfigError
+
+If you see similar symptoms but different status:
+- **`ImagePullBackOff`** — image does not exist or registry auth is wrong → [Fix ImagePullBackOff](/blog/fix-kubernetes-imagepullbackoff-error/)
+- **`CrashLoopBackOff`** — container starts but exits → [Fix CrashLoopBackOff](/blog/fix-kubernetes-crashloopbackoff-error/)
+- **`Pending`** — no node has enough resources → [Fix Pod Pending](/blog/fix-kubernetes-pod-pending-insufficient-resources/)
+- **`OOMKilled`** — out of memory → [Fix OOMKilled](/blog/fix-kubernetes-oomkilled-error/)
+
+---
+
+**Need help debugging Kubernetes in production?** I help teams build reliable platforms with proper ConfigMap management, secret rotation, and deployment guardrails.
+
+[Book a Platform Assessment →](https://calendly.com/lucaberton/)

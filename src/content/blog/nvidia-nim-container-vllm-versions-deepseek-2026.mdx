@@ -1,0 +1,245 @@
+---
+title: "NVIDIA NIM Container vLLM Versions: What Is Inside nvcr.io/nim Images (2026)"
+snippet: "What vLLM version ships inside NVIDIA NIM containers like nvcr.io/nim/deepseek-ai/deepseek-r1? Here is how to inspect NIM container contents, check vLLM and PyTorch versions, and understand the package stack."
+description: "Find the exact vLLM version inside NVIDIA NIM containers including DeepSeek-R1, Qwen3, and Granite models. Inspect nvcr.io/nim images, check PyTorch and CUDA versions, and understand the NIM inference stack."
+publishDate: "2026-04-24"
+lastModified: "2026-04-24"
+image:
+  src: "/blog/thumbnails/nvidia-nim-container-vllm-versions-deepseek-2026.jpg"
+  alt: "NVIDIA NIM container vLLM versions and package contents"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "NVIDIA"
+  - "NIM"
+  - "vLLM"
+  - "DeepSeek"
+  - "Inference"
+  - "Containers"
+draft: false
+---
+
+## Why Check vLLM Versions Inside NIM Containers?
+
+When deploying NVIDIA NIM containers like `nvcr.io/nim/deepseek-ai/deepseek-r1`, you need to know the exact vLLM version for:
+
+- **Compatibility** — matching vLLM features (speculative decoding, chunked prefill) to your workload
+- **Bug tracking** — knowing which vLLM release to check for known issues
+- **Custom model support** — understanding which model architectures are supported
+- **Security audits** — cataloging all package versions for CVE scanning
+
+## Inspect NIM Container Contents
+
+### Method 1: Run the Container and Check
+
+```bash
+# Pull the NIM container
+docker pull nvcr.io/nim/deepseek-ai/deepseek-r1:latest
+
+# Check vLLM version
+docker run --rm --entrypoint python3 \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:latest \
+  -c "import vllm; print(f'vLLM: {vllm.__version__}')"
+```
+
+### Method 2: Full Package Inventory
+
+```bash
+docker run --rm --entrypoint bash \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:latest \
+  -c "pip list 2>/dev/null | grep -E 'vllm|torch|cuda|nvidia|transformers|triton'"
+```
+
+Expected output (versions vary by NIM release):
+```
+vllm                     0.8.x
+torch                    2.6.x+cu124
+nvidia-cuda-runtime-cu12 12.4.x
+transformers             4.48.x
+triton                   3.2.x
+```
+
+### Method 3: Check Without GPU
+
+If you do not have a GPU on the machine where you are inspecting:
+
+```bash
+docker run --rm --entrypoint cat \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:latest \
+  /opt/nim/etc/nim-release.json 2>/dev/null || \
+docker run --rm --entrypoint bash \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:latest \
+  -c "pip show vllm 2>/dev/null | head -5"
+```
+
+### Method 4: Inspect Without Pulling (Skopeo)
+
+```bash
+# Inspect image labels without downloading
+skopeo inspect docker://nvcr.io/nim/deepseek-ai/deepseek-r1:latest | \
+  jq '.Labels'
+```
+
+## NIM Container Architecture
+
+Every NIM container follows this stack:
+
+```
+┌─────────────────────────────────┐
+│  NIM API Layer (OpenAI-compat)  │
+├─────────────────────────────────┤
+│  NIM Orchestrator               │
+│  (model download, profile pick) │
+├─────────────────────────────────┤
+│  vLLM Inference Engine          │
+│  (tensor parallel, KV cache)    │
+├─────────────────────────────────┤
+│  PyTorch + CUDA                 │
+├─────────────────────────────────┤
+│  NVIDIA Base Image              │
+│  (CUDA toolkit, cuDNN, NCCL)    │
+└─────────────────────────────────┘
+```
+
+The NIM container is **not** a thin wrapper around vLLM. It adds:
+
+- **Automatic model profile selection** based on detected GPU
+- **Model download and caching** from NGC or local storage
+- **OpenAI-compatible API** with `/v1/chat/completions` and `/v1/completions`
+- **Health checks** and readiness probes for Kubernetes
+- **Metrics endpoint** for Prometheus monitoring
+
+## Common NIM Containers and Their Contents
+
+### DeepSeek-R1
+
+```bash
+docker pull nvcr.io/nim/deepseek-ai/deepseek-r1:latest
+```
+
+Key details:
+- **Base model**: DeepSeek-R1 (671B MoE, 37B active parameters)
+- **Inference engine**: vLLM with MoE expert parallelism
+- **Tensor parallelism**: 8 (requires 8 GPUs for full model)
+- **Profiles**: FP8 and BF16 precision options
+- **Minimum GPU**: 8x H100 80GB or 8x A100 80GB
+
+### Qwen3-32B (DGX Spark Profile)
+
+```bash
+docker pull nvcr.io/nim/qwen/qwen3-32b:latest
+```
+
+Key details:
+- **Optimized profile**: `qwen3-32b-dgx-spark` for DGX Spark systems
+- **Precision**: NVFP4 for memory-efficient deployment
+- **Single GPU**: Runs on 1x H100 or A100 with NVFP4 quantization
+
+### IBM Granite 3B Code Instruct
+
+```bash
+docker pull nvcr.io/nim/ibm/granite-3b-code-instruct:latest
+```
+
+Key details:
+- **Small model**: 3B parameters, runs on smaller GPUs
+- **Context length**: Check model card (not 2K or 128K variants)
+- **Use case**: Code generation and completion
+
+## Check vLLM CLI Options Available
+
+NIM containers expose vLLM configuration through environment variables:
+
+```bash
+# List all vLLM-related environment variables
+docker run --rm --entrypoint env \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:latest | \
+  grep -i vllm
+
+# Check available vLLM override options
+docker run --rm --entrypoint bash \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:latest \
+  -c "python3 -m vllm.entrypoints.openai.api_server --help 2>/dev/null | head -50"
+```
+
+Common vLLM overrides in NIM:
+
+```bash
+# Override max model length
+docker run --gpus all \
+  -e NIM_MAX_MODEL_LEN=8192 \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:latest
+
+# Override tensor parallelism
+docker run --gpus all \
+  -e NIM_TENSOR_PARALLEL_SIZE=4 \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:latest
+
+# Enable chunked prefill
+docker run --gpus all \
+  -e NIM_VLLM_ENABLE_CHUNKED_PREFILL=true \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:latest
+```
+
+## Security Scanning NIM Containers
+
+For enterprise deployment, scan the full container:
+
+```bash
+# Trivy scan
+trivy image nvcr.io/nim/deepseek-ai/deepseek-r1:latest
+
+# Grype scan
+grype nvcr.io/nim/deepseek-ai/deepseek-r1:latest
+
+# Generate SBOM
+syft nvcr.io/nim/deepseek-ai/deepseek-r1:latest -o spdx-json > nim-deepseek-sbom.json
+```
+
+## Troubleshooting Container Issues
+
+### Container exits immediately
+
+```bash
+# Check logs
+docker logs <container_id>
+
+# Common cause: no GPU detected
+# Fix: ensure --gpus all is passed
+docker run --gpus all nvcr.io/nim/deepseek-ai/deepseek-r1:latest
+```
+
+### Wrong vLLM version for your workload
+
+NIM pins vLLM to a tested version. You cannot upgrade vLLM inside NIM — instead:
+
+1. Use the latest NIM tag for newer vLLM versions
+2. Check [NIM release notes](https://docs.nvidia.com/nim/) for vLLM version per release
+3. For custom vLLM, use the [NIM model-free approach](/blog/nvidia-nim-model-free-custom-model-deployment-guide/)
+
+### CUDA version mismatch
+
+```bash
+# Check CUDA version inside container
+docker run --rm --entrypoint nvidia-smi \
+  nvcr.io/nim/deepseek-ai/deepseek-r1:latest
+
+# Check host CUDA driver
+nvidia-smi
+```
+
+NIM containers require a host CUDA driver compatible with the container's CUDA toolkit version. Generally, a newer host driver supports older container CUDA versions.
+
+---
+
+**Deploying NIM in production?** I help teams design GPU infrastructure, optimize model serving, and implement multi-node inference at scale.
+
+[Book an AI Infrastructure Assessment →](https://calendly.com/lucaberton/)
+
+## Related Resources
+
+- [NVIDIA NIM Support Matrix: Every Model, GPU, and Profile](/blog/nvidia-nim-support-matrix-models-gpus-profiles-2026/)
+- [NVIDIA NIM Model Profiles: How to Choose the Right Configuration](/blog/nvidia-nim-model-profiles-precision-selection-guide/)
+- [NVIDIA NIM Model-Free and Custom Model Deployment Guide](/blog/nvidia-nim-model-free-custom-model-deployment-guide/)
+- [NVIDIA NIM Multi-Node Deployment on Kubernetes](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/)
+- [Container Security Scanning with Trivy](/blog/container-security-scanning-trivy-tutorial/)

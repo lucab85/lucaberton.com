@@ -1,0 +1,274 @@
+---
+title: "Kong vs Envoy vs Traefik vs APISIX: Kubernetes API Gateways Compared (2026)"
+snippet: "Kong vs Envoy vs Traefik vs Apache APISIX compared for Kubernetes. Performance, gRPC support, plugin ecosystems, Ingress vs Gateway API, and which API gateway fits your architecture."
+description: "Kong vs Envoy vs Traefik vs Apache APISIX comparison for Kubernetes API gateways. Performance benchmarks, gRPC and WebSocket support, plugin ecosystems, Gateway API support, and enterprise recommendations."
+publishDate: "2026-04-25"
+lastModified: "2026-04-25"
+image:
+  src: "/blog/thumbnails/kong-vs-envoy-vs-traefik-api-gateway-2026.jpg"
+  alt: "Kong vs Envoy vs Traefik vs APISIX API gateway comparison"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags:
+  - "Kubernetes"
+  - "API Gateway"
+  - "Kong"
+  - "Envoy"
+  - "Traefik"
+  - "APISIX"
+  - "Service Mesh"
+draft: false
+---
+
+## The Kubernetes API Gateway Landscape in 2026
+
+Choosing an API gateway for Kubernetes is one of the most consequential infrastructure decisions your team will make. The gateway handles every external request, enforces security policies, routes traffic, and often determines your application's latency floor.
+
+Four gateways dominate the Kubernetes ecosystem in 2026: **Kong**, **Envoy** (via Envoy Gateway or Istio), **Traefik**, and **Apache APISIX**. Each has a fundamentally different architecture and philosophy.
+
+## Quick Comparison Table
+
+| Feature | Kong | Envoy | Traefik | APISIX |
+|---------|------|-------|---------|--------|
+| **Core language** | Lua/Go (on Nginx) | C++ | Go | Lua (on Nginx) |
+| **Architecture** | Plugin-based proxy | Programmable L4/L7 proxy | Auto-discovery proxy | Plugin-based proxy |
+| **Gateway API** | ✅ Full | ✅ Full (via Envoy Gateway) | ✅ Full | ✅ Full |
+| **gRPC** | ✅ | ✅ Native | ✅ | ✅ |
+| **WebSocket** | ✅ | ✅ Native | ✅ | ✅ |
+| **Service mesh** | Kong Mesh (Envoy-based) | Istio/Envoy sidecar | Traefik Mesh | ❌ |
+| **Plugin ecosystem** | 100+ (Hub) | Filters (WASM, Lua, ext_proc) | Middleware (20+) | 80+ plugins |
+| **Config approach** | Declarative CRDs + Admin API | xDS API / CRDs | Auto-discovery (labels/annotations) | Admin API + CRDs |
+| **Learning curve** | Medium | High | Low | Medium |
+| **Enterprise tier** | Kong Enterprise (Konnect) | Solo.io Gloo, Tetrate | Traefik Enterprise | API7 Enterprise |
+| **License** | Apache 2.0 | Apache 2.0 | MIT | Apache 2.0 |
+| **Best for** | API management | Service mesh + gateway | Simple Kubernetes ingress | High-performance API routing |
+
+## Kong: The API Management Platform
+
+Kong started as an API gateway and evolved into a full API management platform. It runs on Nginx with a Lua plugin layer and an optional Go-based data plane (Kong Gateway 3.x).
+
+**Strengths:**
+- **Richest plugin ecosystem** — 100+ plugins for auth, rate limiting, transformations, analytics
+- **Developer portal** — built-in portal for API documentation and onboarding
+- **Multi-protocol** — HTTP, gRPC, WebSocket, GraphQL, TCP/UDP
+- **DB-less mode** — declarative configuration without PostgreSQL dependency
+- **Konnect cloud** — managed control plane, free tier available
+
+**Weaknesses:**
+- **Latency overhead** — Lua plugin execution adds microseconds per request compared to Envoy
+- **Enterprise features paywalled** — RBAC, OIDC, advanced rate limiting require Enterprise license
+- **Memory footprint** — heavier than Traefik for simple routing workloads
+
+**Best for:** Teams that need API management (versioning, developer portal, monetization) alongside traffic routing. Enterprise API platforms with multiple teams publishing APIs.
+
+```yaml
+# Kong Gateway with Gateway API
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: kong-gateway
+spec:
+  gatewayClassName: kong
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api-route
+spec:
+  parentRefs:
+    - name: kong-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api/v1
+      backendRefs:
+        - name: api-service
+          port: 8080
+```
+
+## Envoy: The Programmable Proxy
+
+Envoy is the most technically capable proxy on this list. Built in C++ for maximum performance, it powers service meshes (Istio, Linkerd2-proxy was inspired by it), API gateways (Envoy Gateway, Gloo), and CDNs.
+
+**Strengths:**
+- **Highest performance** — C++ data plane with near-zero overhead
+- **xDS API** — fully programmable control plane protocol
+- **WASM filters** — extend functionality with WebAssembly, no recompilation
+- **Native gRPC** — first-class HTTP/2 and gRPC support
+- **Observability** — built-in stats, tracing, and access logging
+- **Gateway API support** — Envoy Gateway provides Kubernetes-native management
+
+**Weaknesses:**
+- **Steep learning curve** — xDS configuration is complex
+- **Not an API gateway out of the box** — needs Envoy Gateway, Gloo, or Istio for Kubernetes integration
+- **No built-in admin UI** — requires additional tooling
+- **YAML complexity** — raw Envoy config is verbose
+
+**Best for:** Service mesh deployments (via Istio), high-performance east-west traffic, teams with strong infrastructure engineering capability, and workloads requiring sub-millisecond latency.
+
+```yaml
+# Envoy Gateway
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy-gateway
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: envoy-gw
+spec:
+  gatewayClassName: envoy-gateway
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+```
+
+## Traefik: The Auto-Discovery Gateway
+
+Traefik's philosophy is simplicity: it auto-discovers services from Kubernetes, Docker, and other providers with minimal configuration. No admin API to learn, no database to manage.
+
+**Strengths:**
+- **Easiest setup** — auto-discovers services via Kubernetes annotations
+- **Let's Encrypt built-in** — automatic TLS certificate management
+- **Dashboard included** — web UI for real-time traffic monitoring
+- **Lightweight** — single Go binary, low memory footprint
+- **Middleware chaining** — composable request/response transformations
+
+**Weaknesses:**
+- **Limited plugin ecosystem** — fewer plugins than Kong or APISIX
+- **No native gRPC load balancing** — works but not optimized like Envoy
+- **Enterprise features require license** — distributed tracing, WAF, OIDC
+- **Less suitable for API management** — no developer portal, no API versioning
+
+**Best for:** Small to medium Kubernetes clusters, teams that want zero-config ingress, startups that need quick setup with automatic TLS, and GitOps workflows with IngressRoute CRDs.
+
+```yaml
+# Traefik IngressRoute
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: api-route
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`api.example.com`) && PathPrefix(`/v1`)
+      kind: Rule
+      services:
+        - name: api-service
+          port: 8080
+      middlewares:
+        - name: rate-limit
+        - name: auth-forward
+  tls:
+    certResolver: letsencrypt
+```
+
+## Apache APISIX: The High-Performance Alternative
+
+APISIX is the newest contender, built on Nginx + Lua (like Kong) but with a focus on performance and a plugin architecture that supports hot-reloading without restarts.
+
+**Strengths:**
+- **Highest throughput** — benchmarks show 2-3x higher RPS than Kong in some scenarios
+- **Hot plugin reload** — add/remove plugins without gateway restart
+- **80+ plugins** — auth, traffic control, observability, serverless
+- **Multi-language plugin support** — Lua, Go, Java, Python, WASM
+- **Dashboard** — built-in admin dashboard (separate project)
+
+**Weaknesses:**
+- **Smaller community** — fewer contributors and production case studies than Kong or Envoy
+- **etcd dependency** — requires etcd for configuration storage (adds operational complexity)
+- **Less mature Kubernetes integration** — CRDs exist but less battle-tested
+- **Enterprise support** — API7 is the primary commercial backer (smaller than Kong Inc.)
+
+**Best for:** High-throughput API routing, teams familiar with Nginx/OpenResty, organizations that need hot plugin reload, and use cases requiring multi-language plugin development.
+
+```yaml
+# APISIX with Gateway API
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api-route
+spec:
+  parentRefs:
+    - name: apisix-gateway
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /api
+      backendRefs:
+        - name: api-service
+          port: 8080
+```
+
+## Decision Framework
+
+### Choose Kong if:
+- You need **API management** (portal, versioning, monetization)
+- Multiple teams publish APIs through a shared gateway
+- You want the **largest plugin ecosystem**
+- Enterprise support and SLA matter
+
+### Choose Envoy if:
+- You run a **service mesh** (Istio, Linkerd)
+- You need **maximum performance** (C++ data plane)
+- Your team has strong infrastructure engineering skills
+- You need **WASM extensibility** for custom logic
+
+### Choose Traefik if:
+- You want **the simplest setup** with auto-discovery
+- You need **automatic Let's Encrypt** certificates
+- Your cluster is small to medium (under 100 services)
+- **Fast time-to-production** matters more than advanced features
+
+### Choose APISIX if:
+- **Raw throughput** is your primary concern
+- You need **hot plugin reload** without downtime
+- You want to write plugins in **Go, Java, or Python** (not just Lua)
+- You are comfortable with etcd as a dependency
+
+## Performance Comparison
+
+Real-world performance depends on configuration, but typical benchmarks show:
+
+| Gateway | Requests/sec (simple proxy) | P99 Latency | Memory (idle) |
+|---------|---------------------------|-------------|---------------|
+| Envoy | ~50,000+ | under 1ms | ~30MB |
+| APISIX | ~40,000+ | ~1ms | ~40MB |
+| Kong (DB-less) | ~25,000+ | ~2ms | ~80MB |
+| Traefik | ~20,000+ | ~2ms | ~50MB |
+
+Note: These are approximate figures. Your results will vary based on plugins enabled, TLS termination, and backend latency.
+
+## Gateway API: The Great Equalizer
+
+The Kubernetes Gateway API (GA since 2023) standardizes gateway configuration across all four options. This means:
+
+1. **Portable configuration** — switch gateways without rewriting routes
+2. **Standard CRDs** — HTTPRoute, GRPCRoute, TLSRoute work everywhere
+3. **Role-based model** — infrastructure team manages Gateway, app teams manage Routes
+
+All four gateways now support Gateway API, making vendor lock-in less of a concern. Start with Gateway API resources and you can switch gateways later if your needs change.
+
+---
+
+**Designing your Kubernetes networking architecture?** I help enterprises select, deploy, and optimize API gateways, service meshes, and ingress controllers for production workloads.
+
+[Book a Platform Assessment →](https://calendly.com/lucaberton/)
+
+## Related Resources
+
+- [EKS vs AKS vs GKE: Managed Kubernetes Compared](/blog/eks-vs-aks-vs-gke-2026/)
+- [Kubernetes Namespace Best Practices](/blog/kubernetes-namespace-best-practices-2026/)
+- [Backstage vs Port: Developer Portals Compared](/blog/backstage-vs-port-2026/)
+- [NGINX vs Traefik for Kubernetes](/blog/nginx-vs-traefik-kubernetes/)

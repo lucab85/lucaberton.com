@@ -2,9 +2,10 @@
 draft: false
 title: "How to Install Docker on NixOS"
 seoTitle: "How to Install Docker on NixOS"
-snippet: "Complete guide to install Docker Engine on NixOS. Covers Docker CE installation, post-install steps, Docker Compose, and verification."
+snippet: "Complete guide to install Docker Engine on NixOS. Covers Docker CE installation via configuration.nix, rootless mode, Docker Compose, storage drivers, and NixOS-specific troubleshooting."
+description: "Install Docker on NixOS with configuration.nix. Covers Docker CE, rootless mode, Docker Compose, storage driver options, networking, and NixOS-specific troubleshooting."
 publishDate: "2026-04-03"
-lastModified: "2026-04-03"
+lastModified: "2026-04-28"
 category: "DevOps"
 author: "Luca Berton"
 tags:
@@ -13,42 +14,201 @@ tags:
   - "containers"
   - "devops"
   - "tutorial"
+  - "NixOS"
 image:
-  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  src: "/blog/thumbnails/How-to-Install-Docker-on-nixos.jpg"
   alt: "How to Install Docker on NixOS"
 ---
-Here is how to install Docker on NixOS in 2026.
 
-## Enable in configuration.nix
+NixOS handles Docker differently from every other Linux distribution. There is no `apt install docker-ce` or `dnf install docker`. Everything goes through the declarative configuration system. Here is the complete guide.
+
+## Enable Docker in configuration.nix
+
+Edit `/etc/nixos/configuration.nix`:
 
 ```nix
+{ config, pkgs, ... }:
 {
+  # Enable Docker daemon
   virtualisation.docker.enable = true;
+
+  # Add your user to the docker group
   users.users.youruser.extraGroups = [ "docker" ];
 }
 ```
 
-## Apply
+Apply the configuration:
 
 ```bash
 sudo nixos-rebuild switch
 ```
 
-## Verify
+Log out and back in for group membership to take effect, then verify:
 
 ```bash
 docker --version
 docker run hello-world
+```
+
+## Docker Compose
+
+Docker Compose is included with the Docker module in NixOS. Verify it works:
+
+```bash
 docker compose version
 ```
 
-## Temporary (nix-shell)
+If you need the standalone `docker-compose` binary (v1 compatibility):
+
+```nix
+{
+  environment.systemPackages = with pkgs; [
+    docker-compose
+  ];
+}
+```
+
+## Rootless Docker
+
+For environments where you do not want to grant full Docker socket access:
+
+```nix
+{
+  virtualisation.docker.rootless = {
+    enable = true;
+    setSocketVariable = true;
+  };
+}
+```
+
+This runs the Docker daemon under your user account. Containers cannot gain root privileges on the host, even if they escape the container namespace.
+
+After rebuilding, rootless Docker uses a different socket:
+
+```bash
+# Rootless socket location
+echo $DOCKER_HOST
+# unix:///run/user/1000/docker.sock
+```
+
+## Storage Driver Configuration
+
+NixOS defaults to the `overlay2` storage driver. If you need a different driver (for example, `btrfs` on a btrfs filesystem):
+
+```nix
+{
+  virtualisation.docker.daemon.settings = {
+    storage-driver = "btrfs";
+  };
+}
+```
+
+Other useful daemon settings:
+
+```nix
+{
+  virtualisation.docker.daemon.settings = {
+    storage-driver = "overlay2";
+    log-driver = "json-file";
+    log-opts = {
+      max-size = "10m";
+      max-file = "3";
+    };
+    default-address-pools = [
+      { base = "172.17.0.0/12"; size = 24; }
+    ];
+  };
+}
+```
+
+## NVIDIA GPU Support
+
+If you have an NVIDIA GPU and want Docker containers to access it:
+
+```nix
+{
+  virtualisation.docker.enable = true;
+  hardware.nvidia-container-toolkit.enable = true;
+}
+```
+
+Test GPU access:
+
+```bash
+docker run --rm --gpus all nvidia/cuda:12.6-base nvidia-smi
+```
+
+## Networking Considerations
+
+NixOS uses its own firewall module. If Docker containers need to expose ports, ensure the NixOS firewall allows them:
+
+```nix
+{
+  networking.firewall.allowedTCPPorts = [ 8080 3000 ];
+  # Or disable firewall for Docker bridge (not recommended for production)
+  # networking.firewall.trustedInterfaces = [ "docker0" ];
+}
+```
+
+## Temporary Docker (nix-shell)
+
+For quick testing without enabling Docker system-wide:
 
 ```bash
 nix-shell -p docker
+```
+
+This gives you the Docker CLI but not the daemon. You still need `virtualisation.docker.enable = true` for the daemon to run.
+
+## Troubleshooting
+
+### "Cannot connect to Docker daemon"
+
+After enabling Docker, you must log out and back in for the `docker` group to apply:
+
+```bash
+# Check if your user is in the docker group
+groups
+# If docker is not listed, log out and back in
+
+# Alternatively, use newgrp
+newgrp docker
+```
+
+### Docker service not starting
+
+Check the service status:
+
+```bash
+sudo systemctl status docker
+journalctl -u docker --no-pager -n 50
+```
+
+### Cleaning up images and containers
+
+```bash
+# Remove all stopped containers
+docker container prune -f
+
+# Remove unused images
+docker image prune -a -f
+
+# Nuclear option: remove everything
+docker system prune -a --volumes -f
+```
+
+### NixOS garbage collection removes Docker images
+
+By default, `nix-collect-garbage` does not affect Docker. However, if you are low on disk space, Docker images may compete with the Nix store. Monitor disk usage:
+
+```bash
+docker system df
+nix-store --gc --print-dead | wc -l
 ```
 
 ## Related Resources
 
 - [Docker Cheat Sheet](/blog/docker-cheat-sheet-2026/)
 - [Podman vs Docker](/blog/podman-vs-docker-2026/)
+- [containerd vs CRI-O](/blog/containerd-vs-cri-o-2026/)
+- [How to Install Docker on Ubuntu](/blog/how-to-install-docker-on-ubuntu/)

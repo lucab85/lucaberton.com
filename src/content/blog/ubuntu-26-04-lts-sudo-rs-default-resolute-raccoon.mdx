@@ -1,0 +1,189 @@
+---
+title: "Ubuntu 26.04 LTS: sudo-rs Is Now the Default — Why That Matters More Than You Think"
+snippet: "Ubuntu 26.04 Resolute Raccoon replaces the 44-year-old C sudo with sudo-rs, a memory-safe Rust rewrite. Plus APT 3.2 rollback, Wayland-only desktop, ROCm in official repos, and Kernel 7.0 with Intel TDX."
+description: "Ubuntu 26.04 LTS Resolute Raccoon ships sudo-rs as default — a Rust rewrite of sudo eliminating memory safety CVEs like Baron Samedit. Also covers APT 3.2 rollback, Wayland-only, ROCm GPU compute, Ptyxis terminal, and Kernel 7.0."
+publishDate: "2026-04-28"
+lastModified: "2026-04-28"
+image:
+  src: "/blog/thumbnails/ubuntu-26-04-lts-sudo-rs-default-resolute-raccoon.jpg"
+  alt: "Ubuntu 26.04 LTS Resolute Raccoon sudo-rs default"
+author: "Luca Berton"
+category: "Open Source"
+tags:
+  - "Ubuntu"
+  - "Linux"
+  - "Security"
+  - "Rust"
+  - "sudo"
+  - "LTS"
+draft: false
+---
+
+## The Binary That Runs as Root Just Got a Rewrite
+
+`sudo` is the most privileged binary on every Linux machine you manage. It has been written in C since 1980. In the last few years it has had CVEs that allowed local privilege escalation — **Baron Samedit (CVE-2021-3156)** being the memorable one, with 10 years of unpatched exposure across most Linux distributions.
+
+Ubuntu 26.04 LTS "Resolute Raccoon" makes **sudo-rs** the default sudo provider. Most release coverage will skip this. You should not.
+
+## What Is sudo-rs?
+
+sudo-rs is a **full rewrite of sudo in Rust**. Same `/etc/sudoers` config. Same CLI interface. Drop-in replacement. The memory safety guarantees Rust gives you matter specifically here — on the binary that handles privilege escalation.
+
+This is not experimental:
+
+- **Full security audit completed in 2023** by a third-party firm
+- The sudo-rs team worked directly with **Todd C. Miller**, the original sudo maintainer
+- Compatible with existing `sudoers` files, `visudo`, and PAM integration
+- Ubuntu 26.04 making it the default is the signal that it is **production-ready**
+
+### Why Memory Safety Matters for sudo
+
+Baron Samedit was a heap-based buffer overflow in sudoedit. It existed in sudo's C codebase for a decade. Any local user could exploit it to gain root — no sudo privileges required.
+
+Rust's ownership model and borrow checker eliminate entire classes of vulnerabilities:
+
+| Vulnerability Class | C sudo | sudo-rs (Rust) |
+|---------------------|--------|----------------|
+| Buffer overflow | Possible | Prevented at compile time |
+| Use-after-free | Possible | Prevented by ownership model |
+| Double-free | Possible | Prevented by ownership model |
+| Integer overflow | Silent | Panics (caught) |
+| Null pointer dereference | Segfault | `Option` type, no null |
+
+The result: the attack surface of privilege escalation on every Ubuntu machine just shrank dramatically.
+
+### Validating sudo-rs on Your Images
+
+If you build hardened base images, validate sudo-rs first:
+
+```bash
+# Check which sudo binary is active
+sudo --version
+# Should show: sudo-rs x.x.x
+
+# Verify sudoers compatibility
+visudo -c
+# Should report: /etc/sudoers: parsed OK
+
+# Test your existing sudoers rules
+sudo -l -U your-service-account
+
+# Check PAM integration
+grep pam_sudo /etc/pam.d/sudo
+```
+
+If you have custom sudoers rules with advanced features (I/O logging, per-command SELinux contexts), test those explicitly. sudo-rs covers the core sudoers grammar but some niche features may behave differently.
+
+## APT 3.2: Transaction Log with Full Rollback
+
+APT 3.2 introduces a **transaction log** that records every package operation with full state snapshots. The killer feature:
+
+```bash
+# View recent package operations
+apt history
+
+# Rollback the last operation
+sudo apt history-rollback
+
+# Rollback a specific transaction
+sudo apt history-rollback <transaction-id>
+```
+
+This is what `dnf history undo` has given RHEL users for years. Now Debian and Ubuntu have it natively. For anyone managing fleets of Ubuntu servers, this changes the risk profile of package updates — you can undo a bad `apt upgrade` without restoring from backup.
+
+### What Gets Rolled Back
+
+- Package versions are reverted to their pre-transaction state
+- Configuration files follow `dpkg` conffile rules (prompts if modified)
+- New packages installed as dependencies get removed
+- Removed packages get reinstalled
+
+This pairs well with automated patching workflows. Run `apt upgrade`, validate, rollback if tests fail — all scriptable.
+
+## Wayland-Only Desktop
+
+Ubuntu 26.04 removes X11 entirely. No more Xorg fallback session in GDM. This has been coming since Ubuntu 21.04 defaulted to Wayland, but the X11 escape hatch is now gone.
+
+**What this means in practice:**
+
+- **NVIDIA users**: The proprietary driver has supported Wayland since driver 470+. If you are on a recent NVIDIA GPU with the latest driver, you are fine
+- **Remote desktop**: RDP works natively through GNOME Remote Desktop. VNC requires a Wayland-compatible implementation (not x11vnc)
+- **Screen sharing**: PipeWire handles screen capture. Most modern apps (Chrome, Firefox, OBS) already support this
+- **Legacy X11 apps**: XWayland remains for backward compatibility — X11 *clients* still work, only the X11 *server* (Xorg) is removed
+
+If your workflow depends on raw X11 (custom display managers, old Java GUI apps, specific remote access tools), test before upgrading.
+
+## ROCm in Official Repos
+
+AMD GPU compute is now a one-liner:
+
+```bash
+sudo apt install rocm
+```
+
+Previously, ROCm required adding AMD's third-party repository, managing GPG keys, and dealing with version-specific package names. Ubuntu 26.04 ships ROCm in the official universe repository.
+
+This matters for AI workloads on AMD hardware. Combined with [PyTorch ROCm support](https://pytorch.org/), you can now run inference and training on AMD Instinct GPUs without repository gymnastics:
+
+```bash
+sudo apt install rocm python3-pip
+pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
+```
+
+For Kubernetes clusters with AMD GPUs, the ROCm device plugin now has a straightforward installation path on Ubuntu nodes. See my guide on [GPU operators and device plugins](/blog/nvidia-gpu-operator-kubernetes-guide/) for the architectural pattern (NVIDIA-focused, but the device plugin model is identical for AMD).
+
+## Kernel 7.0
+
+Linux Kernel 7.0 brings several features relevant to infrastructure engineers:
+
+- **Intel TDX (Trust Domain Extensions)** — confidential computing on the host side, hardware-isolated VMs where the hypervisor cannot read guest memory
+- **Improved hardware coverage** — better support for newer Intel and AMD platforms
+- **io_uring improvements** — continued performance gains for async I/O workloads
+- **BPF enhancements** — more expressiveness for eBPF observability programs
+
+Intel TDX is particularly relevant for regulated industries. If you run multi-tenant infrastructure and need to prove that VM isolation is hardware-enforced (not just software-enforced), TDX provides that attestation. This aligns with [EU CRA requirements](/blog/red-hat-eu-cyber-resilience-act-cra-compliance-2026/) for products handling sensitive data.
+
+## Ptyxis Replaces GNOME Terminal
+
+The default terminal emulator is now **Ptyxis** — a GTK4 terminal with GPU-accelerated rendering. Key improvements:
+
+- **GPU-accelerated text rendering** — noticeably faster scrolling on large output
+- **Tabs that hold state** — tab titles reflect the running process, not just the shell
+- **Native container integration** — open a tab directly inside a Podman or Toolbox container
+- **Profile-based customization** — per-host or per-project terminal profiles
+
+If you SSH into many machines, the container-aware tab feature is genuinely useful — you can have tabs labeled by the container or host they are connected to.
+
+## LTS Support Timeline
+
+| Channel | End of Support |
+|---------|---------------|
+| Standard LTS | **April 2031** (5 years) |
+| Ubuntu Pro (ESM) | **April 2036** (10 years) |
+| Ubuntu Pro Legacy | **April 2038** (12 years) |
+
+For enterprise deployments, the 10-year Ubuntu Pro coverage aligns with typical infrastructure lifecycle expectations.
+
+## What to Validate First
+
+If you are building hardened base images or managing Ubuntu fleets, prioritize testing:
+
+1. **sudo-rs compatibility** — validate your sudoers rules, PAM integration, and any sudo wrappers
+2. **APT rollback flow** — test `apt history-rollback` in your CI/CD pipeline for automated patching workflows
+3. **Wayland compatibility** — if you use remote desktop or custom display tooling, verify it works without X11
+4. **ROCm installation** — if you have AMD GPUs, test the simplified install path
+5. **Kernel module compatibility** — if you use out-of-tree kernel modules (DKMS), rebuild against Kernel 7.0
+
+---
+
+**Planning your Ubuntu 26.04 migration?** I help enterprises validate base image builds, harden security configurations, and automate fleet-wide OS upgrades.
+
+[Book a Platform Assessment →](https://calendly.com/lucaberton/)
+
+## Related Resources
+
+- [Ubuntu 25.10 Subiquity Installer: Troubleshooting Guide](/blog/ubuntu-25-10-subiquity-installer-troubleshooting/)
+- [RHEL vs Ubuntu Server: Enterprise Linux Compared](/blog/rhel-vs-ubuntu-server-2026/)
+- [Rocky Linux vs AlmaLinux: CentOS Replacements Compared](/blog/rocky-linux-vs-alma-linux/)
+- [Red Hat and the EU Cyber Resilience Act](/blog/red-hat-eu-cyber-resilience-act-cra-compliance-2026/)
+- [OWASP Top 10 for LLM Applications](/blog/owasp-top-10-llm-applications-2025-security-guide/)

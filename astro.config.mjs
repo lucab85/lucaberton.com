@@ -76,6 +76,12 @@ export default defineConfig({
         // Skip blog-old (legacy content)
         if (page.includes('/blog-old')) return false;
         
+        // Skip pagination pages (noindexed)
+        if (page.match(/\/blog\/\d+\/?$/)) return false;
+        
+        // Skip search page (noindexed)
+        if (page.includes('/blog/search')) return false;
+        
         // Include all other pages
         return true;
       },

@@ -68,6 +68,7 @@ export default defineConfig({
           '/blog/kubernetes',
           '/blog/categories/books-&-community',
           '/blog/categories/books-&amp;-community',
+          '/blog/hcl-vs-json-in-terraform',
           '/products/',
           '/team/',
         ];
@@ -81,6 +82,10 @@ export default defineConfig({
         
         // Skip search page (noindexed)
         if (page.includes('/blog/search')) return false;
+        
+        // Skip category redirect pages (conference -> devops, book -> open-source)
+        if (page.includes('/blog/categories/conference')) return false;
+        if (page.includes('/blog/categories/book')) return false;
         
         // Include all other pages
         return true;

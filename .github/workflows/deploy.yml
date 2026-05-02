@@ -36,6 +36,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      - name: Check broken internal links
+        run: node scripts/check-links.cjs
+
       - name: Build Astro site
         run: pnpm build
 
@@ -62,34 +65,71 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
-      - name: Submit URLs to IndexNow
+      - name: Detect changed URLs and submit to IndexNow
         run: |
-          SITEMAP_URL="https://lucaberton.com/sitemap-index.xml"
           KEY="ce29c05385d649b690e22576d20cde14"
+          SITE="https://lucaberton.com"
 
-          URLS=$(curl -sL "$SITEMAP_URL" \
-            | grep -oP '(?<=<loc>)[^<]+' \
-            | while read sub; do
-                curl -sL "$sub" | grep -oP '(?<=<loc>)[^<]+'
-              done \
-            | sort | tail -100)
+          # Get changed files in this commit
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+
+          if [ -z "$CHANGED" ]; then
+            echo "No changed files detected, submitting sitemap fallback."
+            URLS=$(curl -sL "${SITE}/sitemap-index.xml" \
+              | grep -oP '(?<=<loc>)[^<]+' \
+              | while read sub; do curl -sL "$sub" | grep -oP '(?<=<loc>)[^<]+'; done \
+              | sort | tail -100)
+          else
+            # Map changed files to URLs
+            URLS=""
+            # Always include homepage
+            URLS="${SITE}/"
+
+            # Blog posts
+            echo "$CHANGED" | grep '^src/content/blog/.*\.mdx$' | while read f; do
+              slug=$(basename "$f" .mdx)
+              echo "${SITE}/blog/${slug}/"
+            done >> /tmp/changed_urls.txt
+
+            # Pages
+            echo "$CHANGED" | grep '^src/pages/.*\.astro$' | while read f; do
+              route=$(echo "$f" | sed 's|^src/pages/||;s|/index\.astro$||;s|\.astro$||')
+              [ -n "$route" ] && echo "${SITE}/${route}/"
+            done >> /tmp/changed_urls.txt
+
+            # Components changed = resubmit recent posts
+            if echo "$CHANGED" | grep -q '^src/components/'; then
+              curl -sL "${SITE}/sitemap-index.xml" \
+                | grep -oP '(?<=<loc>)[^<]+' \
+                | while read sub; do curl -sL "$sub" | grep -oP '(?<=<loc>)[^<]+'; done \
+                | sort | tail -50 >> /tmp/changed_urls.txt
+            fi
+
+            echo "${SITE}/" >> /tmp/changed_urls.txt
+            URLS=$(sort -u /tmp/changed_urls.txt 2>/dev/null)
+          fi
 
           if [ -z "$URLS" ]; then
-            echo "No URLs found in sitemap, skipping."
+            echo "No URLs to submit."
             exit 0
           fi
+
+          URL_COUNT=$(echo "$URLS" | wc -l)
+          echo "Submitting ${URL_COUNT} URLs to IndexNow..."
+          echo "$URLS" | head -10
+          [ "$URL_COUNT" -gt 10 ] && echo "... and $((URL_COUNT - 10)) more"
 
           URL_ARRAY=$(echo "$URLS" | jq -R -s 'split("\n") | map(select(length > 0))')
 
           PAYLOAD=$(jq -n \
             --arg host "lucaberton.com" \
             --arg key "$KEY" \
-            --arg keyLocation "https://lucaberton.com/${KEY}.txt" \
+            --arg keyLocation "${SITE}/${KEY}.txt" \
             --argjson urlList "$URL_ARRAY" \
             '{host: $host, key: $key, keyLocation: $keyLocation, urlList: $urlList}')
-
-          echo "Submitting $(echo "$URL_ARRAY" | jq length) URLs to IndexNow..."
 
           for ENGINE in "api.indexnow.org" "www.bing.com"; do
             STATUS=$(curl -s -o /dev/null -w "%{http_code}" \

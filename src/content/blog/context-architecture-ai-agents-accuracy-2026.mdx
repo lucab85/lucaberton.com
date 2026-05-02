@@ -1,0 +1,210 @@
+---
+draft: false
+title: "Context Architecture for AI Agents: From 0% to 92% Accuracy"
+snippet: "Real experiment results: how adding context layers to an AI data agent improved accuracy from 0% to 92%. Column descriptions, business rules, and verified queries matter more than prompt engineering."
+description: "Real experiment: adding context layers to an AI data agent improved accuracy from 0% to 92%. Data models, column descriptions, and business rules matter most."
+publishDate: "2026-05-02"
+lastModified: "2026-05-02"
+image:
+  src: "/blog/thumbnails/context-architecture-ai-agents-accuracy-2026.jpg"
+  alt: "Context architecture for AI agents accuracy progression from 0% to 92%"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "ai"
+  - "agentic-ai"
+  - "data-engineering"
+  - "llm"
+  - "sql"
+  - "production-ai"
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## Everyone says context matters. Here are the numbers.
+
+There is a lot of talk about "context architecture" for AI agents. But how much does context actually matter? And which context moves the needle?
+
+A team ran a rigorous experiment with a real AI analytics agent built for a healthcare company operating multiple clinics. No synthetic datasets. Real user questions. Same LLM, same data, zero prompt engineering tricks. They added context one layer at a time, measuring accuracy after every change.
+
+The results are striking — and they validate something that experienced data engineers already know intuitively.
+
+## The experiment: 6 iterations
+
+| Iteration | What Changed | SQL Generation | Accuracy |
+|---|---|---|---|
+| 1 | Raw tables only | 0% | 0% |
+| 2 | Modeled table (no context) | 38.5% | 0% |
+| 3 | Column descriptions added | 100% | 15% |
+| 4 | Business rules and instructions | 100% | 77% |
+| 5-6 | Metrics, verified queries, eval refinement | 100% | 92% |
+
+Let that sink in. The same LLM went from **0% accuracy to 92% accuracy** — not by switching to a better model, not by clever prompt engineering, but by progressively adding the context that a good analyst accumulates over months on the job.
+
+## The boring stuff had the biggest impact
+
+The single most impactful change was not some sophisticated RAG pipeline or multi-agent orchestration. It was **column descriptions and a clean data model**.
+
+Going from raw tables to a properly modeled table with column descriptions took SQL generation from 0% to 100%. The agent could always generate SQL. What it could not do was generate SQL that gave **trustworthy results** until it understood what the columns actually meant.
+
+This should not be surprising to anyone who has onboarded a new analyst. You do not hand them raw database access and say "figure it out." You give them:
+
+- A data dictionary explaining what each column means
+- Business rules about how metrics are calculated
+- Context about edge cases and data quirks
+- Verified queries they can use as reference
+
+The AI agent needs exactly the same thing.
+
+## Context layers ranked by impact
+
+Based on the experiment results and my experience deploying AI agents against enterprise data, here is how I rank the context layers:
+
+### Tier 1: Foundation (0% → 15% accuracy)
+
+**Data modeling and column descriptions.** This is the single most important investment. A well-modeled table with clear column names and descriptions gives the LLM enough to generate syntactically correct SQL that actually references the right data.
+
+Without this, the agent is guessing. It might generate valid SQL, but against the wrong columns, with wrong join conditions, and wrong aggregation logic.
+
+**What to include:**
+
+```yaml
+# Example column description format
+tables:
+  - name: appointments
+    description: "Patient appointments across all clinic locations"
+    columns:
+      - name: appointment_date
+        description: "Date of the appointment (UTC). NULL for cancelled appointments that were never rescheduled."
+        type: date
+      - name: provider_id
+        description: "Foreign key to providers table. Maps to the attending physician, not the referring physician."
+        type: integer
+      - name: status
+        description: "Current appointment status. Values: scheduled, completed, cancelled, no_show. Note: 'completed' means the patient was seen, not that billing is finalized."
+        type: varchar
+```
+
+The specificity matters. "appointment_date" is not enough. "Date of the appointment (UTC). NULL for cancelled appointments that were never rescheduled" — that is the context that prevents wrong answers.
+
+### Tier 2: Business logic (15% → 77% accuracy)
+
+**Business rules and calculation instructions.** This is where domain knowledge lives. Every organization has implicit rules that are not encoded in the schema:
+
+- "Active patients" means patients with at least one appointment in the last 12 months
+- Revenue calculations exclude write-offs and adjustments
+- "New patient" is defined by the first appointment at any location, not per-clinic
+- Clinic performance metrics use a rolling 90-day window, not calendar quarter
+
+Without these rules, the agent will generate technically correct SQL that answers the wrong question. It will count all patients instead of active ones. It will include write-offs in revenue. It will define "new" differently than the business does.
+
+```yaml
+business_rules:
+  - rule: "Active patient definition"
+    description: "A patient is considered active if they have at least one completed appointment in the trailing 12 months from the query date."
+    sql_hint: "WHERE status = 'completed' AND appointment_date >= CURRENT_DATE - INTERVAL '12 months'"
+    
+  - rule: "Revenue calculation"
+    description: "Revenue = sum of payment_amount where payment_status = 'posted'. Exclude adjustments (type = 'adjustment') and write-offs (type = 'writeoff')."
+    sql_hint: "SUM(payment_amount) WHERE payment_status = 'posted' AND type NOT IN ('adjustment', 'writeoff')"
+```
+
+### Tier 3: Verification (77% → 92% accuracy)
+
+**Verified queries, metrics definitions, and evaluation refinement.** This is the layer that turns a decent agent into a reliable one:
+
+- **Golden queries** — known-correct SQL for common questions, used as few-shot examples
+- **Metric definitions** — exact formulas for KPIs with test cases
+- **Edge case documentation** — what happens with NULL values, timezone boundaries, fiscal year vs calendar year
+
+```yaml
+verified_queries:
+  - question: "How many new patients did we see last month?"
+    sql: |
+      SELECT COUNT(DISTINCT patient_id)
+      FROM appointments
+      WHERE status = 'completed'
+        AND appointment_date >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+        AND appointment_date < DATE_TRUNC('month', CURRENT_DATE)
+        AND patient_id NOT IN (
+          SELECT DISTINCT patient_id
+          FROM appointments
+          WHERE status = 'completed'
+            AND appointment_date < DATE_TRUNC('month', CURRENT_DATE - INTERVAL '1 month')
+        )
+    expected_result_range: "Typically 50-200 per clinic per month"
+    notes: "New = first completed appointment ever, not first at a specific clinic"
+```
+
+## What this means for agent builders
+
+### 1. Invest in data foundations before agent sophistication
+
+The biggest accuracy gains came from the "boring" work — clean data models and column descriptions. If you are building an AI agent that queries data, spend 80% of your effort on the data layer and 20% on the agent layer.
+
+### 2. Context is not just retrieval
+
+RAG gets all the attention, but this experiment shows that **structured context** (schemas, rules, verified queries) matters more than unstructured document retrieval for data agents. The context needs to be precise, not just relevant.
+
+### 3. Model choice is secondary to context quality
+
+The experiment used the same LLM throughout. The accuracy difference came entirely from context. Upgrading from GPT-4 to GPT-5 will not fix an agent that does not understand your data model. Fixing your column descriptions will.
+
+### 4. Build context iteratively
+
+Do not try to capture all business rules on day one. The experiment shows clear returns at each layer:
+
+1. **Week 1**: Model your tables and write column descriptions
+2. **Week 2**: Document the top 10 business rules that affect query results
+3. **Week 3**: Create verified queries for the 20 most common questions
+4. **Week 4**: Run evaluations and refine based on failure cases
+
+### 5. This applies beyond SQL agents
+
+The same principle applies to any agent that operates on domain-specific data:
+
+- **Infrastructure agents** need context about your environment topology, naming conventions, and runbook procedures
+- **Code review agents** need context about your team's coding standards, architecture decisions, and tech debt areas
+- **Customer support agents** need context about product features, known issues, and escalation rules
+
+The pattern is universal: **the agent needs the context that an experienced human accumulates over time**.
+
+## The context architecture stack
+
+Based on these results and production deployments, here is the context architecture I recommend:
+
+```
+┌─────────────────────────────────────┐
+│         Verified Queries            │  ← Few-shot examples
+│         (Golden SQLs)               │     77% → 92%
+├─────────────────────────────────────┤
+│       Business Rules                │  ← Domain logic
+│    (Metrics, Definitions)           │     15% → 77%
+├─────────────────────────────────────┤
+│      Column Descriptions            │  ← Schema context
+│     (Data Dictionary)               │     0% → 15%
+├─────────────────────────────────────┤
+│        Data Model                   │  ← Clean tables
+│   (Normalized, Well-Named)          │     Foundation
+└─────────────────────────────────────┘
+```
+
+Each layer multiplies the value of the layers below it. Skip the foundation and no amount of business rules will help. Skip the business rules and your verified queries will not generalize to new questions.
+
+## Key takeaway
+
+Context was the difference between 0% and 92% accuracy. Not the model. Not the prompt. Not the agent framework.
+
+The "boring" data engineering work — modeling tables, writing column descriptions, documenting business rules — had more impact on agent accuracy than any other factor.
+
+If you are building AI agents that need to work with real data, stop optimizing your prompts and start investing in your context layers.
+
+<BlogPromoCard />
+
+## Related
+
+- [Your Model Is Only as Good as Its Memory](/blog/your-model-is-only-as-good-as-its-memory-rag-architecture/)
+- [The Infrastructure Matters More Than the Model](/blog/infrastructure-matters-more-than-model-ai-production/)
+- [LLM Quality vs Cost vs Safety vs Throughput](/blog/llm-quality-cost-safety-throughput-benchmark-comparison/)
+- [From DevOps to AI-Native Infrastructure](/blog/devops-to-ai-native-infrastructure-skills-2026/)
+- [Multi-Agent Orchestration Patterns](/blog/multi-agent-orchestration-patterns/)

@@ -1,46 +1,43 @@
 ---
 draft: false
-title: "KEDA vs HPA: When to Use Event-Driven Autoscaling in Kubernetes (2026)"
-snippet: "KEDA vs HPA compared side by side. When to use event-driven KEDA (scale-to-zero, custom metrics, 60+ scalers) vs native HPA (CPU/memory) for Kubernetes workloads — with real production examples."
-description: "KEDA vs HPA comparison for Kubernetes autoscaling. Event-driven scaling with 60+ scalers, scale-to-zero, custom metrics, and production use cases."
+title: "KEDA vs HPA 2026: Kubernetes Autoscaling Comparison"
+snippet: "KEDA vs HPA compared for 2026. Event-driven vs metric-based autoscaling, scale-to-zero, external metrics, and which Kubernetes autoscaler to use."
+description: "KEDA vs HPA Kubernetes autoscaling comparison 2026. Event-driven, scale-to-zero, external metrics, and decision guide."
 image:
   src: "/blog/thumbnails/keda-vs-hpa-2026.jpg"
-  alt: "KEDA vs HPA: Kubernetes Autoscaling Compared (2026)"
+  alt: "KEDA vs HPA: Kubernetes Autoscaling"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-05-02"
 author: "Luca Berton"
 category: "Platform Engineering"
-tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
+tags:
+  - "keda"
+  - "hpa"
+  - "kubernetes"
+  - "autoscaling"
+  - "comparison"
 ---
-This is a practical comparison based on real production use, not vendor marketing.
 
-## Quick Comparison
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
 
-| Feature | KEDA | HPA (Horizontal Pod Autoscaler) |
-|---------|------|------|
-| Metrics sources | 60+ scalers (Kafka, SQS, Prometheus, etc.) | CPU, memory, custom metrics |
-| Scale to zero | Yes | No (minimum 1 replica) |
-| Event-driven | Yes (queue length, cron, external events) | No (metric threshold only) |
-| Built-in | No (install separately) | Yes (Kubernetes core) |
-| Complexity | Medium | Low |
-| CNCF status | Graduated | Core Kubernetes |
+HPA (Horizontal Pod Autoscaler) is built into Kubernetes and scales based on CPU/memory. KEDA extends HPA with 60+ event sources and scale-to-zero. KEDA does not replace HPA — it enhances it.
 
-## When to Use HPA
+## How they work
 
-- **Simple scaling**: CPU and memory-based scaling is sufficient for most web applications
-- **No additional dependencies**: HPA is built into every Kubernetes cluster
-- **Predictable workloads**: Request-based services with gradual traffic changes
+### HPA
+
+HPA watches metrics and adjusts replica count:
 
 ```yaml
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: web-app
+  name: web-hpa
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: web-app
+    name: web
   minReplicas: 2
   maxReplicas: 20
   metrics:
@@ -50,45 +47,148 @@ spec:
         target:
           type: Utilization
           averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
 ```
 
-## When to Use KEDA
+HPA checks metrics every 15 seconds and adjusts replicas. Simple, reliable, built-in.
 
-- **Queue-based workloads**: Scale workers based on Kafka lag, RabbitMQ queue depth, or AWS SQS messages
-- **Scale to zero**: Save costs by scaling idle workloads to zero replicas
-- **External metrics**: Scale based on Prometheus queries, Datadog metrics, or any custom source
-- **Cron-based scaling**: Pre-scale before expected traffic spikes
-- **Event-driven architectures**: Serverless-like scaling on Kubernetes
+### KEDA
+
+KEDA creates HPA objects behind the scenes but adds event-driven triggers:
 
 ```yaml
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: kafka-consumer
+  name: worker-scaler
 spec:
   scaleTargetRef:
-    name: kafka-consumer
-  minReplicaCount: 0          # Scale to zero!
+    name: worker
+  minReplicaCount: 0    # Scale to zero!
   maxReplicaCount: 50
   triggers:
-    - type: kafka
+    - type: rabbitmq
       metadata:
-        bootstrapServers: kafka:9092
-        consumerGroup: my-group
-        topic: events
-        lagThreshold: "100"
+        host: amqp://rabbitmq:5672
+        queueName: tasks
+        queueLength: "10"    # 1 pod per 10 messages
+
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus:9090
+        query: sum(rate(http_requests_total[2m]))
+        threshold: "100"
 ```
 
-## KEDA Works With HPA
+KEDA watches external event sources (message queues, databases, custom metrics) and creates/manages HPA objects automatically.
 
-KEDA does not replace HPA — it creates HPA resources under the hood and extends them with external metrics. You can use both: KEDA for event-driven scaling and HPA for CPU/memory.
+## Feature comparison
 
-## My Recommendation
+| Feature | HPA | KEDA |
+|---|---|---|
+| **Built-in** | Yes (Kubernetes core) | Addon (install separately) |
+| **Metric sources** | CPU, memory, custom metrics API | 60+ scalers (Kafka, RabbitMQ, Prometheus, AWS SQS, etc.) |
+| **Scale to zero** | No (min 1 replica) | Yes |
+| **Scale from zero** | N/A | Yes (activates on events) |
+| **External metrics** | Requires custom metrics adapter | Built-in for each scaler |
+| **Cron scaling** | No | Yes (scheduled scaling) |
+| **Multiple triggers** | Multiple metrics (AND logic) | Multiple triggers (OR logic) |
+| **Cooldown** | stabilizationWindow | cooldownPeriod |
+| **Jobs** | No | Yes (ScaledJob for batch work) |
 
-Start with **HPA** for web applications and request-based services. Add **KEDA** when you need queue-based scaling, scale-to-zero, or external metric sources. They are complementary. [Book a consultation](https://calendy.com/lucaberton/) to design your autoscaling strategy.
+## Common KEDA scalers
 
-## Related Resources
+```yaml
+# Kafka consumer lag
+- type: kafka
+  metadata:
+    bootstrapServers: kafka:9092
+    consumerGroup: my-group
+    topic: events
+    lagThreshold: "50"
 
-- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)
-- [Prometheus PromQL Cheat Sheet](/blog/prometheus-query-cheat-sheet/)
+# AWS SQS queue depth
+- type: aws-sqs-queue
+  metadata:
+    queueURL: https://sqs.us-east-1.amazonaws.com/123/my-queue
+    queueLength: "5"
+    awsRegion: us-east-1
+
+# PostgreSQL query result
+- type: postgresql
+  metadata:
+    connectionFromEnv: PG_CONNECTION
+    query: "SELECT count(*) FROM jobs WHERE status = 'pending'"
+    targetQueryValue: "10"
+
+# Cron schedule
+- type: cron
+  metadata:
+    timezone: Europe/Amsterdam
+    start: "0 8 * * 1-5"   # Scale up weekdays 8am
+    end: "0 20 * * 1-5"    # Scale down weekdays 8pm
+    desiredReplicas: "10"
+
+# HTTP request rate (KEDA HTTP Add-on)
+- type: prometheus
+  metadata:
+    query: sum(rate(nginx_ingress_controller_requests[2m]))
+    threshold: "500"
+```
+
+## Scale-to-zero (KEDA advantage)
+
+KEDA's scale-to-zero saves costs for bursty workloads:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: inference-scaler
+spec:
+  scaleTargetRef:
+    name: llm-inference
+  minReplicaCount: 0          # Zero pods when idle
+  maxReplicaCount: 10
+  pollingInterval: 10
+  cooldownPeriod: 300         # Wait 5 min before scaling to zero
+  triggers:
+    - type: prometheus
+      metadata:
+        query: sum(kube_deployment_status_replicas_available{deployment="llm-inference"})
+        threshold: "1"
+```
+
+With GPU workloads at $30+/hour per node, scaling to zero during idle periods saves thousands per month.
+
+## Decision guide
+
+### Choose HPA when:
+- **CPU/memory autoscaling** is sufficient
+- You want **zero dependencies** — HPA is built into every Kubernetes cluster
+- Simple web services that scale with **request load**
+- You already use **custom metrics API** (Prometheus adapter)
+
+### Choose KEDA when:
+- **Event-driven workloads** — scale based on queue depth, not CPU
+- **Scale-to-zero** — pay nothing when idle (especially for [GPU inference](/blog/nvidia-nim-support-matrix-models-gpus-profiles-2026/))
+- **External metrics** — Kafka lag, SQS depth, database queries
+- **Scheduled scaling** — cron-based scale up/down
+- **Batch processing** — ScaledJob for queue-draining workers
+
+<BlogPromoCard />
+
+## Related
+
+- [EKS vs GKE vs AKS 2026](/blog/eks-vs-gke-vs-aks-2026/)
+- [K3s vs K8s 2026](/blog/k3s-vs-k8s-2026/)
+- [Prometheus vs InfluxDB 2026](/blog/prometheus-vs-influxdb-2026/)
+- [Kubernetes vs Nomad 2026](/blog/kubernetes-vs-nomad-2026/)

@@ -1,55 +1,157 @@
 ---
 draft: false
-title: "Ansible vs SaltStack: Automation Tools Compared (2026)"
-snippet: "Ansible vs SaltStack comparison. Push vs pull, speed, scalability, and when to use each tool."
-description: "Ansible vs SaltStack comparison for enterprise automation. Push vs pull architecture, execution speed, scalability, learning curve, and when to use each tool."
+title: "Ansible vs SaltStack 2026: Automation at Scale"
+snippet: "Ansible vs SaltStack compared for 2026. Push vs push/pull, YAML vs YAML+Jinja, speed at scale, event-driven automation, and which tool handles 10,000+ nodes."
+description: "Ansible vs SaltStack automation comparison 2026. Push vs event-driven, speed, scalability, and decision guide for large infrastructure."
 image:
   src: "/blog/thumbnails/ansible-vs-saltstack-2026.jpg"
-  alt: "Ansible vs SaltStack: Automation Tools Compared (2026)"
+  alt: "Ansible vs SaltStack: Automation at Scale"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-05-02"
 author: "Luca Berton"
-category: "Platform Engineering"
-tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
+category: "Automation"
+tags:
+  - "ansible"
+  - "saltstack"
+  - "automation"
+  - "configuration-management"
+  - "comparison"
 ---
-This is a practical comparison based on real production use, not vendor marketing.
 
-## Quick Comparison
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+Ansible pushes commands over SSH. SaltStack uses a persistent ZeroMQ connection with minions. This architectural difference makes Salt significantly faster at scale — but Ansible is simpler to adopt.
+
+## Architecture
+
+| Aspect | Ansible | SaltStack |
+|---|---|---|
+| **Agent** | Agentless (SSH) | Minion agent (or agentless via salt-ssh) |
+| **Transport** | SSH/WinRM | ZeroMQ (persistent) or SSH |
+| **Execution model** | Push | Push + Pull (event-driven) |
+| **Server** | None required | Salt Master |
+| **Language** | YAML + Jinja2 | YAML + Jinja2 |
+| **Speed (1,000 nodes)** | Minutes (SSH overhead) | Seconds (ZeroMQ) |
+| **Event system** | None (run-based) | Built-in event bus (reactor) |
+
+## Speed comparison
+
+SaltStack's ZeroMQ transport is dramatically faster for large fleets:
+
+| Nodes | Ansible (SSH) | Salt (ZeroMQ) |
+|---|---|---|
+| 10 | 5 seconds | 2 seconds |
+| 100 | 30 seconds | 3 seconds |
+| 1,000 | 5 minutes | 8 seconds |
+| 10,000 | 30+ minutes | 15 seconds |
+
+Ansible opens SSH connections to each node (parallel via forks). Salt has a persistent connection — commands are instant.
+
+## Language
+
+Both use YAML with Jinja2, but the syntax differs:
+
+### Ansible playbook
+
+```yaml
+- name: Configure web servers
+  hosts: webservers
+  become: true
+  tasks:
+    - name: Install packages
+      ansible.builtin.package:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - nginx
+        - certbot
+
+    - name: Deploy config
+      ansible.builtin.template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+      notify: Restart nginx
+```
+
+### Salt state
+
+```yaml
+# /srv/salt/webserver.sls
+install_packages:
+  pkg.installed:
+    - pkgs:
+      - nginx
+      - certbot
+
+deploy_config:
+  file.managed:
+    - name: /etc/nginx/nginx.conf
+    - source: salt://nginx/nginx.conf.j2
+    - template: jinja
+    - watch_in:
+      - service: nginx_service
+
+nginx_service:
+  service.running:
+    - name: nginx
+    - enable: True
+```
+
+Similar complexity. Ansible developers will find Salt states familiar.
+
+## Event-driven automation (Salt advantage)
+
+Salt has a built-in event bus and reactor system:
+
+```yaml
+# /etc/salt/master.d/reactor.conf
+reactor:
+  - 'salt/minion/*/start':           # When a minion connects
+    - /srv/reactor/bootstrap.sls      # Auto-configure it
+
+  - 'salt/beacon/*/inotify/*':       # When a file changes
+    - /srv/reactor/config_changed.sls # React to it
+
+  - 'salt/beacon/*/diskusage/*':     # When disk is full
+    - /srv/reactor/cleanup.sls        # Clean up
+```
+
+Ansible has no equivalent. Event-driven automation in Ansible requires external tools (AWX webhooks, Event-Driven Ansible with Rulebooks). Salt's reactor is built into the core.
+
+## Ecosystem
 
 | Feature | Ansible | SaltStack |
-|---------|---------|-----------|
-| Architecture | Agentless (SSH) | Agent-based (Salt minion) or agentless (salt-ssh) |
-| Language | YAML (playbooks) | YAML (states) + Jinja2 |
-| Speed | Good (SSH overhead) | Very fast (ZeroMQ message bus) |
-| Event-driven | EDA (Event-Driven Ansible) | Built-in event system (reactor) |
-| Scalability | Good (with AAP) | Excellent (10K+ nodes) |
-| Remote execution | Ad-hoc commands | Real-time remote execution |
-| Community | Massive | Smaller |
+|---|---|---|
+| **Content** | Galaxy (10,000+ collections) | Salt Formulas (smaller) |
+| **Cloud modules** | Extensive | Good (salt-cloud) |
+| **Network automation** | Excellent | Limited |
+| **Enterprise** | Red Hat AAP | VMware (acquired) |
+| **Community** | Very large | Smaller |
+| **AI assistant** | Ansible Lightspeed | None |
+| **Windows** | WinRM (good) | Minion (good) |
 
-## When to Use Ansible
+## Decision guide
 
-- **Simplicity and adoption**: YAML playbooks, agentless, zero learning curve for basic tasks
-- **Ecosystem**: 100+ certified collections, Red Hat support, largest community
-- **Multi-domain**: Network devices, cloud APIs, containers, applications — all in one tool
-- **Enterprise platform**: AAP with Controller, Hub, EDA, and Lightspeed AI
+### Choose Ansible when:
+- **Agentless** is a requirement
+- Your team is **new to automation** (lower learning curve)
+- **Network automation** is a use case (routers, switches)
+- You manage under **1,000 nodes** where SSH speed is acceptable
+- **Red Hat ecosystem** integration matters
+- **Ad-hoc commands** across fleet are common
 
-## When to Use SaltStack
+### Choose SaltStack when:
+- **Speed at scale** — 10,000+ nodes need sub-minute execution
+- **Event-driven automation** — react to infrastructure events in real-time
+- **Continuous state enforcement** — minions enforce state on schedule
+- **Remote execution** — run arbitrary commands across thousands of nodes instantly
+- You already use the **VMware/Broadcom** ecosystem
 
-- **Speed at scale**: Salt's ZeroMQ transport is significantly faster than SSH for 1000+ nodes
-- **Real-time remote execution**: Execute commands across thousands of nodes in seconds
-- **Event-driven automation**: Salt's reactor system responds to infrastructure events in real-time
-- **Large-scale configuration**: If managing 10,000+ nodes, Salt's performance advantage matters
+<BlogPromoCard />
 
-## The 2026 Reality
+## Related
 
-SaltStack was acquired by VMware (2020), then VMware by Broadcom (2023). The commercial future is uncertain. The open-source community continues but at a slower pace. Ansible's Event-Driven Ansible (EDA) now covers many of Salt's event-driven use cases.
-
-## My Recommendation
-
-Use **Ansible** for almost all scenarios. Consider **SaltStack** only if you need sub-second remote execution across very large fleets and accept the smaller community. For event-driven automation, evaluate EDA before choosing Salt. [Book a consultation](https://calendly.com/lucaberton/) to design your automation strategy.
-
-## Related Resources
-
+- [Ansible vs Chef 2026](/blog/ansible-vs-chef-2026/)
+- [Ansible vs Puppet 2026](/blog/ansible-vs-puppet-2026/)
 - [Ansible Cheat Sheet](/blog/ansible-cheat-sheet-2026/)
-- [Ansible vs Puppet](/blog/ansible-vs-puppet-2026/)
-- [Ansible vs Chef](/blog/ansible-vs-chef-2026/)
+- [Terraform vs Ansible: When to Use Which](/blog/terraform-vs-ansible-when-to-use-which-2026/)

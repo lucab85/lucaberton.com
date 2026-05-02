@@ -1,59 +1,172 @@
 ---
 draft: false
-title: "Prometheus vs InfluxDB: Which Time Series Database for Monitoring?"
-snippet: "Prometheus vs InfluxDB compared for monitoring and observability. PromQL vs Flux, pull vs push, cardinality handling, and when to choose each for Kubernetes metrics."
-description: "Prometheus vs InfluxDB time series database comparison. PromQL vs Flux query languages, pull vs push models, cardinality limits, storage engines."
+title: "Prometheus vs InfluxDB 2026: Time-Series Monitoring"
+snippet: "Prometheus vs InfluxDB compared for 2026. Pull vs push, PromQL vs Flux, retention, scalability, and which time-series database to choose for monitoring."
+description: "Prometheus vs InfluxDB time-series monitoring comparison 2026. Pull vs push, query languages, retention, and decision guide."
 image:
   src: "/blog/thumbnails/prometheus-vs-influxdb-2026.jpg"
-  alt: "Prometheus vs InfluxDB: Time Series Databases Compared"
+  alt: "Prometheus vs InfluxDB: Time-Series Monitoring"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-05-02"
 author: "Luca Berton"
-category: "Platform Engineering"
-tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
+category: "DevOps"
+tags:
+  - "prometheus"
+  - "influxdb"
+  - "monitoring"
+  - "observability"
+  - "comparison"
 ---
-This is a practical comparison based on real production use, not vendor marketing.
 
-## Quick Comparison
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+Prometheus pulls metrics from targets. InfluxDB receives pushed data. Prometheus is built for Kubernetes monitoring. InfluxDB is a general-purpose time-series database for any data.
+
+## Architecture
+
+| Aspect | Prometheus | InfluxDB 3 |
+|---|---|---|
+| **Data model** | Multi-dimensional (labels) | Tags + fields |
+| **Collection** | Pull (scrape targets) | Push (write API) |
+| **Query language** | PromQL | SQL + InfluxQL |
+| **Storage** | Local TSDB | Apache Arrow + Parquet |
+| **Retention** | Configurable (default 15d) | Configurable |
+| **High availability** | Thanos / Cortex / Mimir | Built-in clustering |
+| **License** | Apache 2.0 | Apache 2.0 (OSS) / Proprietary (Cloud) |
+
+## Data collection
+
+### Prometheus (pull)
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: 'kubernetes-pods'
+    kubernetes_sd_configs:
+      - role: pod
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: true
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node1:9100', 'node2:9100']
+```
+
+Prometheus discovers and scrapes targets. The target exposes metrics at `/metrics`. Prometheus controls the collection schedule.
+
+### InfluxDB (push)
+
+```bash
+# Write data via line protocol
+curl -X POST "http://influxdb:8086/api/v2/write?bucket=mydb" \
+  -H "Authorization: Token ${TOKEN}" \
+  -d "cpu,host=server1,region=eu usage=72.5 $(date +%s)000000000"
+
+# Or via Telegraf agent
+# telegraf.conf
+[[inputs.cpu]]
+  percpu = true
+[[outputs.influxdb_v2]]
+  urls = ["http://influxdb:8086"]
+  token = "${TOKEN}"
+  organization = "myorg"
+  bucket = "metrics"
+```
+
+InfluxDB relies on agents (Telegraf) or applications pushing data. More flexible for non-infrastructure data (IoT sensors, business metrics, custom events).
+
+## Query languages
+
+### PromQL
+
+```yaml
+# CPU usage above 80% for 5 minutes
+avg by (instance) (rate(node_cpu_seconds_total{mode!="idle"}[5m])) > 0.8
+
+# 99th percentile request latency
+histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))
+
+# Error rate
+rate(http_requests_total{status=~"5.."}[5m]) / rate(http_requests_total[5m])
+```
+
+### InfluxDB SQL
+
+```sql
+-- CPU usage last hour
+SELECT mean(usage) FROM cpu
+WHERE time > now() - 1h
+GROUP BY host, time(5m)
+
+-- 99th percentile latency
+SELECT percentile(duration, 99) FROM requests
+WHERE time > now() - 5m
+GROUP BY service
+
+-- Error rate
+SELECT count(status) FROM requests
+WHERE status >= 500 AND time > now() - 5m
+```
+
+PromQL is purpose-built for metrics — powerful but has a learning curve. InfluxDB SQL is familiar to anyone who knows SQL.
+
+## Kubernetes monitoring
+
+Prometheus dominates Kubernetes monitoring:
+
+```bash
+# Install kube-prometheus-stack (Prometheus + Grafana + alerting)
+helm install monitoring prometheus-community/kube-prometheus-stack
+
+# Instantly get:
+# - Node metrics (CPU, memory, disk, network)
+# - Pod metrics (resource usage, restarts)
+# - Kubernetes API metrics
+# - etcd metrics
+# - CoreDNS metrics
+# - 100+ pre-built Grafana dashboards
+# - 100+ pre-configured alert rules
+```
+
+InfluxDB can monitor Kubernetes via Telegraf, but lacks the native service discovery and pre-built ecosystem.
+
+## Long-term storage
 
 | Feature | Prometheus | InfluxDB |
-|---------|-----------|----------|
-| Data model | Metrics (time series) | Metrics, events, logs |
-| Query language | PromQL | InfluxQL / Flux |
-| Collection | Pull-based (scrape) | Push-based (write API) |
-| Storage | Local TSDB | Local TSM engine |
-| Long-term storage | Thanos, Cortex, Mimir | Built-in (Enterprise) |
-| Alerting | AlertManager | Built-in (tasks) |
-| Kubernetes native | Yes (ServiceMonitor CRD) | Manual configuration |
-| License | Apache 2.0 | MIT (OSS) / Proprietary (Cloud) |
+|---|---|---|
+| **Local retention** | 15 days (default) | Unlimited |
+| **Long-term storage** | Thanos / Cortex / Mimir | Built-in |
+| **Object storage** | Via Thanos (S3, GCS) | Native Parquet on S3 |
+| **Downsampling** | Thanos Compactor | Built-in retention policies |
+| **Query across clusters** | Thanos Query / Mimir | Single instance or InfluxDB Cloud |
 
-## When to Use Prometheus
+Prometheus alone is not designed for long-term storage. You need Thanos, Cortex, or Mimir for multi-month retention. InfluxDB handles long-term storage natively.
 
-- **Kubernetes monitoring**: Prometheus is the de facto standard — every K8s tool exports Prometheus metrics
-- **Alert-first workflows**: AlertManager with routing, silencing, grouping, and inhibition
-- **CNCF ecosystem**: Grafana, Thanos, Mimir, OpenTelemetry all speak Prometheus natively
-- **Pull-based model**: Service discovery + scraping means no agent configuration on targets
+## Decision guide
 
-## When to Use InfluxDB
+### Choose Prometheus when:
+- **Kubernetes monitoring** — native service discovery, kube-prometheus-stack
+- **Pull-based model** — you control what gets scraped and when
+- **PromQL** is acceptable (your team will learn it)
+- **Alerting** with Alertmanager is needed
+- **Grafana** dashboards (Prometheus is the #1 data source)
+- **CNCF ecosystem** — every cloud-native tool exposes Prometheus metrics
 
-- **IoT and sensor data**: Push-based ingestion handles high-cardinality time-series from devices
-- **Mixed workloads**: Store metrics, events, and logs in one database
-- **SQL-like queries**: InfluxQL is easier for teams coming from relational database backgrounds
-- **Edge computing**: InfluxDB Edge runs on resource-constrained devices
+### Choose InfluxDB when:
+- **IoT / sensor data** — high-cardinality, high-write-volume time-series
+- **Push-based collection** — devices push data, not scraped
+- **SQL familiarity** — team prefers SQL over PromQL
+- **Business metrics** — custom events, financial data, application KPIs
+- **Long-term storage** built-in without external components
+- **Non-Kubernetes** environments where Prometheus service discovery does not apply
 
-## The Scale Question
+<BlogPromoCard />
 
-For large-scale Kubernetes monitoring, Prometheus alone hits limits around 10-20 million active time series. Solutions:
-- **Thanos**: Add long-term storage and global query view across multiple Prometheus instances
-- **Grafana Mimir**: Horizontally scalable, multi-tenant Prometheus-compatible backend
-- **VictoriaMetrics**: Drop-in replacement with better compression and performance
+## Related
 
-## My Recommendation
-
-Use **Prometheus** for Kubernetes and cloud-native monitoring — the ecosystem is unmatched. Use **InfluxDB** for IoT, custom metrics pipelines, or when push-based ingestion is required. For most infrastructure teams, Prometheus + Grafana + AlertManager is the proven stack. [Book a consultation](https://calendly.com/lucaberton/) to design your observability platform.
-
-## Related Resources
-
-- [Prometheus PromQL Cheat Sheet](/blog/prometheus-query-cheat-sheet/)
-- [Loki vs Elasticsearch](/blog/loki-vs-elasticsearch-2026/)
-- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)
+- [Loki vs Elasticsearch 2026](/blog/loki-vs-elasticsearch-2026/)
+- [Jaeger vs Zipkin 2026](/blog/jaeger-vs-zipkin-2026/)
+- [KEDA vs HPA 2026](/blog/keda-vs-hpa-2026/)
+- [EKS vs GKE vs AKS 2026](/blog/eks-vs-gke-vs-aks-2026/)

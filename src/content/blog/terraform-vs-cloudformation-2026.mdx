@@ -1,80 +1,155 @@
 ---
 draft: false
-title: "Terraform vs CloudFormation: IaC Tools Compared (2026)"
-snippet: "Terraform vs AWS CloudFormation. Multi-cloud, state management, modularity, and migration strategies."
-description: "Terraform vs AWS CloudFormation. Multi-cloud, state management, modularity, and migration strategies. Features, pricing, performance, and architecture."
+title: "Terraform vs CloudFormation 2026: IaC Comparison"
+snippet: "Terraform vs AWS CloudFormation compared for 2026. Multi-cloud vs AWS-native, HCL vs JSON/YAML, state management, and which IaC tool to choose."
+description: "Terraform vs CloudFormation IaC comparison 2026. Multi-cloud vs AWS-native, HCL vs YAML, state, drift detection, and decision guide."
 image:
   src: "/blog/thumbnails/terraform-vs-cloudformation-2026.jpg"
-  alt: "Terraform vs CloudFormation: IaC Tools Compared (2026)"
+  alt: "Terraform vs CloudFormation: Infrastructure as Code"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-05-02"
 author: "Luca Berton"
-category: "Platform Engineering"
-tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
+category: "DevOps"
+tags:
+  - "terraform"
+  - "cloudformation"
+  - "iac"
+  - "aws"
+  - "comparison"
 ---
-This is a practical comparison based on real production use, not vendor marketing.
 
-## Quick Comparison
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+Terraform is multi-cloud and uses HCL. CloudFormation is AWS-only and uses JSON/YAML. If you are 100% AWS, CloudFormation is free and deeply integrated. If you use multiple clouds (or might), Terraform avoids lock-in.
+
+## Feature comparison
 
 | Feature | Terraform | CloudFormation |
-|---------|-----------|----------------|
-| Cloud support | Multi-cloud (AWS, Azure, GCP, etc.) | AWS only |
-| Language | HCL (declarative) | JSON/YAML |
-| State management | State file (remote backend) | Managed by AWS |
-| Drift detection | `terraform plan` | Drift detection feature |
-| Module ecosystem | Terraform Registry (10K+ modules) | CloudFormation Registry |
-| Preview changes | `terraform plan` | Change sets |
-| Rollback | Manual (apply previous state) | Automatic stack rollback |
-| Cost | Free (BSL license) / Terraform Cloud | Free (AWS service) |
+|---|---|---|
+| **Provider** | Multi-cloud (4,000+ providers) | AWS only |
+| **Language** | HCL | JSON or YAML |
+| **State** | State file (you manage) | AWS-managed (automatic) |
+| **Drift detection** | `terraform plan` (manual) | Built-in (automatic) |
+| **Rollback** | Manual (no auto-rollback) | Automatic on failure |
+| **Cost** | Free (CLI), Terraform Cloud (paid) | Free |
+| **Preview** | `terraform plan` | Change sets |
+| **Modules/reuse** | Modules (Terraform Registry) | Nested stacks, modules |
+| **CDK support** | CDKTF (TypeScript, Python, etc.) | AWS CDK (TypeScript, Python, etc.) |
+| **Import existing** | `terraform import` | Resource import |
+| **License** | BSL 1.1 | Proprietary (AWS) |
 
-## When to Use Terraform
+## Language comparison
 
-- **Multi-cloud or hybrid**: Managing AWS + Azure + GCP + Kubernetes from one tool
-- **Team collaboration**: Terraform Cloud/Enterprise provides state locking, policy-as-code, run approvals
-- **Ecosystem**: HCL is more readable than JSON/YAML for infrastructure, and the provider ecosystem is massive
-- **Portability**: If you might change cloud providers, Terraform abstractions help
+### Terraform (HCL)
 
 ```hcl
-# Terraform — multi-cloud in one codebase
-resource "aws_instance" "web" {
-  ami           = "ami-0abcdef12345"
-  instance_type = "t3.medium"
+resource "aws_vpc" "main" {
+  cidr_block = "10.0.0.0/16"
+  tags = {
+    Name = "production"
+  }
 }
 
-resource "azurerm_kubernetes_cluster" "aks" {
-  name                = "my-aks"
-  location            = "westeurope"
-  dns_prefix          = "myaks"
+resource "aws_subnet" "public" {
+  count             = 3
+  vpc_id            = aws_vpc.main.id
+  cidr_block        = cidrsubnet(aws_vpc.main.cidr_block, 8, count.index)
+  availability_zone = data.aws_availability_zones.available.names[count.index]
+}
+
+resource "aws_instance" "web" {
+  ami           = data.aws_ami.ubuntu.id
+  instance_type = var.instance_type
+  subnet_id     = aws_subnet.public[0].id
 }
 ```
 
-## When to Use CloudFormation
-
-- **AWS-only shops**: If you are 100% AWS, CloudFormation integrates natively with every AWS service on day one
-- **Automatic rollback**: Failed deployments automatically roll back to the previous working state
-- **No state file management**: AWS manages state for you — no S3 backend, no DynamoDB lock table
-- **AWS CDK**: Write CloudFormation in TypeScript, Python, Java, or Go using AWS CDK
+### CloudFormation (YAML)
 
 ```yaml
-# CloudFormation
+AWSTemplateFormatVersion: '2010-09-09'
 Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      Tags:
+        - Key: Name
+          Value: production
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+
   WebServer:
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: ami-0abcdef12345
-      InstanceType: t3.medium
+      ImageId: !Ref AmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet1
 ```
 
-## The OpenTofu Factor
+HCL is more concise for loops and conditionals. CloudFormation YAML uses intrinsic functions (`!Ref`, `!Select`, `!GetAZs`) that are harder to read.
 
-Since Terraform moved to the BSL license in 2023, **OpenTofu** (Linux Foundation fork) provides a truly open-source alternative with full Terraform compatibility. If licensing matters to your organization, evaluate OpenTofu.
+## State management
 
-## My Recommendation
+### Terraform
 
-Use **Terraform** (or OpenTofu) for multi-cloud, hybrid, or Kubernetes-centric infrastructure. Use **CloudFormation** (especially with CDK) if you are all-in on AWS and want zero state management overhead. I help teams design their IaC strategy — [book a consultation](https://calendly.com/lucaberton/).
+```hcl
+# You manage the state file
+terraform {
+  backend "s3" {
+    bucket         = "my-terraform-state"
+    key            = "production/terraform.tfstate"
+    region         = "eu-west-1"
+    dynamodb_table = "terraform-locks"
+    encrypt        = true
+  }
+}
+```
 
-## Related Resources
+You create the S3 bucket, DynamoDB lock table, and manage state file access. State corruption = potential disaster.
 
+### CloudFormation
+
+No state management needed. AWS tracks all resource state internally. You deploy the template, AWS handles everything.
+
+## Rollback behavior
+
+| Scenario | Terraform | CloudFormation |
+|---|---|---|
+| **Resource creation fails** | Partial state (manual cleanup) | Auto-rollback (all or nothing) |
+| **Update fails mid-way** | Partial update (manual fix) | Auto-rollback to previous |
+| **Drift detected** | `terraform plan` shows diff | CloudFormation drift detection |
+
+CloudFormation's atomic rollback is a significant safety advantage for production environments.
+
+## Decision guide
+
+### Choose Terraform when:
+- **Multi-cloud** — AWS + Azure + GCP (or planning to expand)
+- **Non-AWS resources** — Kubernetes, GitHub, Datadog, PagerDuty, DNS
+- **Team skill** — your team already knows HCL
+- **[OpenTofu](/blog/terraform-vs-opentofu-2026/)** — want an open-source alternative
+- You need **advanced logic** (for_each, dynamic blocks, complex modules)
+
+### Choose CloudFormation when:
+- **100% AWS** with no multi-cloud plans
+- **Zero state management** — AWS handles everything
+- **Automatic rollback** on failure is critical
+- **AWS integration** — Service Catalog, Control Tower, Organizations
+- **Free** — no licensing cost, no state backend to manage
+- **AWS CDK** — write infrastructure in TypeScript/Python, compiles to CloudFormation
+
+<BlogPromoCard />
+
+## Related
+
+- [Terraform vs OpenTofu 2026](/blog/terraform-vs-opentofu-2026/)
+- [Crossplane vs Terraform 2026](/blog/crossplane-vs-terraform-2026/)
+- [Terraform vs Pulumi 2026](/blog/terraform-vs-pulumi-2026/)
 - [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
-- [Terraform vs OpenTofu](/blog/terraform-vs-opentofu-2026/)
-- [Crossplane vs Terraform](/blog/crossplane-vs-terraform-2026/)
+- [EKS vs GKE vs AKS 2026](/blog/eks-vs-gke-vs-aks-2026/)

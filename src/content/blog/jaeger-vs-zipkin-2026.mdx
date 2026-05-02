@@ -1,61 +1,162 @@
 ---
 draft: false
-title: "Jaeger vs Zipkin: Distributed Tracing Compared (2026)"
-snippet: "Jaeger vs Zipkin comparison. OpenTelemetry support, storage backends, UI, and Kubernetes deployment."
-description: "Jaeger vs Zipkin comparison. OpenTelemetry support, storage backends, UI, and Kubernetes deployment. Covers diagnosis with kubectl, root causes, and."
+title: "Jaeger vs Zipkin 2026: Distributed Tracing Compared"
+snippet: "Jaeger vs Zipkin compared for 2026. Architecture, storage backends, OpenTelemetry integration, UI, and which distributed tracing tool to deploy."
+description: "Jaeger vs Zipkin distributed tracing comparison 2026. Architecture, storage, OpenTelemetry, Kubernetes, and decision guide."
 image:
   src: "/blog/thumbnails/jaeger-vs-zipkin-2026.jpg"
-  alt: "Jaeger vs Zipkin: Distributed Tracing Compared (2026)"
+  alt: "Jaeger vs Zipkin: Distributed Tracing"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-05-02"
 author: "Luca Berton"
-category: "Platform Engineering"
-tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
+category: "DevOps"
+tags:
+  - "jaeger"
+  - "zipkin"
+  - "tracing"
+  - "observability"
+  - "comparison"
 ---
-This is a practical comparison based on real production use, not vendor marketing.
 
-## Quick Comparison
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+Jaeger (CNCF graduated) and Zipkin are the two leading open-source distributed tracing systems. Both collect, store, and visualize traces across microservices. Jaeger is more feature-rich. Zipkin is simpler to run.
+
+## Architecture
+
+| Component | Jaeger | Zipkin |
+|---|---|---|
+| **Origin** | Uber (2015), CNCF graduated | Twitter (2012) |
+| **Language** | Go | Java |
+| **Deployment** | All-in-one or distributed | All-in-one or distributed |
+| **Storage** | Cassandra, Elasticsearch, Kafka, Badger, ClickHouse | Cassandra, Elasticsearch, MySQL, in-memory |
+| **Protocol** | OpenTelemetry (OTLP), Jaeger, Zipkin | Zipkin, OpenTelemetry |
+| **Sampling** | Adaptive, rate-limiting, remote | Rate-limiting |
+| **UI** | React (feature-rich) | React (simpler) |
+| **Service dependencies** | DAG view | Dependency graph |
+
+## Installation
+
+### Jaeger (all-in-one)
+
+```bash
+# Docker
+docker run -d --name jaeger \
+  -p 16686:16686 \  # UI
+  -p 4317:4317 \    # OTLP gRPC
+  -p 4318:4318 \    # OTLP HTTP
+  jaegertracing/jaeger:latest
+
+# Kubernetes (Helm)
+helm repo add jaegertracing https://jaegertracing.github.io/helm-charts
+helm install jaeger jaegertracing/jaeger \
+  --set storage.type=elasticsearch \
+  --set elasticsearch.host=elasticsearch:9200
+```
+
+### Zipkin
+
+```bash
+# Docker
+docker run -d --name zipkin \
+  -p 9411:9411 \
+  openzipkin/zipkin:latest
+
+# Kubernetes
+kubectl create deployment zipkin --image=openzipkin/zipkin
+kubectl expose deployment zipkin --port=9411
+```
+
+Zipkin is a single container, single port. Jaeger has more components but also offers an all-in-one mode.
+
+## OpenTelemetry integration
+
+Both work with OpenTelemetry, but Jaeger is the more natural fit:
+
+```yaml
+# OpenTelemetry Collector config — export to Jaeger
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+# Export to Zipkin
+exporters:
+  zipkin:
+    endpoint: http://zipkin:9411/api/v2/spans
+```
+
+Jaeger natively speaks OTLP (OpenTelemetry's protocol). Zipkin requires translation through the Zipkin exporter. For new deployments using OpenTelemetry SDK, Jaeger is the path of least resistance.
+
+## Sampling
+
+### Jaeger adaptive sampling
+
+```yaml
+# Jaeger supports remote adaptive sampling
+# The collector adjusts sampling rates per service/endpoint
+{
+  "service_strategies": [
+    {
+      "service": "payment-service",
+      "type": "probabilistic",
+      "param": 0.5
+    },
+    {
+      "service": "health-check",
+      "type": "ratelimiting",
+      "param": 2
+    }
+  ],
+  "default_strategy": {
+    "type": "probabilistic",
+    "param": 0.1
+  }
+}
+```
+
+Jaeger's adaptive sampling adjusts rates based on traffic volume — high-traffic endpoints get sampled less, rare errors get sampled more. Zipkin only supports static rate limiting.
+
+## Feature comparison
 
 | Feature | Jaeger | Zipkin |
-|---------|--------|--------|
-| Origin | Uber | Twitter |
-| CNCF status | Graduated | Not CNCF |
-| Backend storage | Cassandra, Elasticsearch, Kafka, Badger | Cassandra, Elasticsearch, MySQL |
-| UI | Modern, feature-rich | Simple, functional |
-| Sampling | Adaptive (head + tail) | Head-based only |
-| OpenTelemetry | Native support | Via collector |
-| Deployment | Kubernetes operator | Docker/manual |
-| Analytics | Service dependencies, DAG | Service dependencies |
+|---|---|---|
+| **Adaptive sampling** | Yes | No |
+| **Service performance monitoring** | Yes (SPM) | Basic |
+| **Trace comparison** | Yes (diff two traces) | No |
+| **Kafka buffering** | Native (Jaeger Ingester) | Via collector |
+| **ClickHouse storage** | Yes (popular for scale) | Community plugin |
+| **Multi-tenancy** | Supported | Not built-in |
+| **Trace quality metrics** | Yes | No |
+| **OpenTelemetry native** | Yes (OTLP) | Via exporter |
 
-## When to Use Jaeger
+## Decision guide
 
-- **Kubernetes environments**: Jaeger has a Kubernetes Operator for easy deployment and management
-- **OpenTelemetry**: Jaeger natively supports OTLP protocol — the industry standard
-- **Adaptive sampling**: Jaeger can adjust sampling rates per-service based on traffic volume
-- **CNCF ecosystem**: Integrates naturally with Prometheus, Grafana, and Kubernetes
+### Choose Jaeger when:
+- **OpenTelemetry** is your instrumentation standard
+- You need **adaptive sampling** for high-traffic services
+- **Trace comparison** and SPM features matter
+- You are deploying on **Kubernetes** (CNCF ecosystem)
+- **Kafka buffering** for high-volume trace ingestion
+- **ClickHouse** as cost-effective trace storage
 
-## When to Use Zipkin
+### Choose Zipkin when:
+- **Simplicity** — single container, minimal configuration
+- Your team already uses **Zipkin instrumentation** (B3 propagation)
+- **Java ecosystem** — Spring Cloud Sleuth defaults to Zipkin
+- You want the **fastest path to traces** (5-minute setup)
+- **Small-medium scale** where adaptive sampling is not needed
 
-- **Simplicity**: Zipkin is easier to set up and operate — single binary, minimal configuration
-- **Existing Zipkin instrumentation**: If your services already use Zipkin client libraries
-- **Lightweight requirements**: When you need basic distributed tracing without the full observability platform
+### Also consider
+- **Grafana Tempo** — cloud-native, object storage backend (S3), integrates with Grafana
+- **[Loki](/blog/loki-vs-elasticsearch-2026/)** for logs + Tempo for traces = unified Grafana observability
 
-## The 2026 Reality
+<BlogPromoCard />
 
-**OpenTelemetry has become the standard**. Both Jaeger and Zipkin can receive OpenTelemetry data, but the trend is:
+## Related
 
-1. Instrument with **OpenTelemetry SDK**
-2. Collect with **OpenTelemetry Collector**
-3. Store in **Jaeger**, **Tempo**, or a commercial backend
-
-**Grafana Tempo** is increasingly popular as a third option — it uses object storage (like Loki for logs) making it significantly cheaper to operate than either Jaeger or Zipkin with Elasticsearch.
-
-## My Recommendation
-
-Use **Jaeger** for production Kubernetes environments, especially in the CNCF ecosystem. Consider **Grafana Tempo** if you already use the Grafana stack (Prometheus + Loki + Grafana). Use **Zipkin** only for simple setups or existing instrumentation. [Book a consultation](https://calendly.com/lucaberton/) to design your distributed tracing strategy.
-
-## Related Resources
-
-- [Prometheus vs InfluxDB](/blog/prometheus-vs-influxdb-2026/)
-- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)
-- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
+- [Prometheus vs InfluxDB 2026](/blog/prometheus-vs-influxdb-2026/)
+- [Loki vs Elasticsearch 2026](/blog/loki-vs-elasticsearch-2026/)
+- [EKS vs GKE vs AKS 2026](/blog/eks-vs-gke-vs-aks-2026/)
+- [Istio vs Linkerd 2026](/blog/istio-vs-linkerd-2026/)

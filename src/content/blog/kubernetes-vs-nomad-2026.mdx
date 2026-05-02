@@ -1,57 +1,239 @@
 ---
 draft: false
-title: "Kubernetes vs Nomad: Which Orchestrator in 2026"
-snippet: "Kubernetes vs Nomad compared for container orchestration. Complexity, multi-runtime support, scaling, and when HashiCorp Nomad is the better choice in 2026."
-description: "Kubernetes vs HashiCorp Nomad comparison. Complexity, multi-runtime support (containers + VMs + Java), scaling, operator overhead, and decision framework."
+title: "Kubernetes vs Nomad 2026: Container Orchestration"
+snippet: "Kubernetes vs HashiCorp Nomad compared in 2026. Complexity, multi-workload support, scheduling, networking, and when Nomad is the simpler alternative to Kubernetes."
+description: "Kubernetes vs Nomad container orchestration comparison 2026. Complexity, scheduling, networking, ecosystem, and decision guide for teams."
 image:
   src: "/blog/thumbnails/kubernetes-vs-nomad-2026.jpg"
-  alt: "Kubernetes vs Nomad: Which Orchestrator in 2026"
+  alt: "Kubernetes vs Nomad: Container Orchestration"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-05-02"
 author: "Luca Berton"
 category: "Platform Engineering"
-tags: ["Comparison", "Platform Engineering", "DevOps", "2026"]
+tags:
+  - "kubernetes"
+  - "nomad"
+  - "orchestration"
+  - "hashicorp"
+  - "comparison"
 ---
-This is a practical comparison based on real production use, not vendor marketing.
 
-## Quick Comparison
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+Kubernetes orchestrates containers. Nomad orchestrates anything — containers, VMs, Java JARs, raw binaries. This fundamental difference drives the complexity and capability trade-off.
+
+## Architecture
+
+### Kubernetes
+
+Kubernetes is a **container-only** orchestrator with a rich ecosystem:
+
+- API server, scheduler, controller manager, etcd
+- kubelet on every node
+- Container runtime (containerd/CRI-O)
+- CNI plugin for networking
+- CRDs for extensibility
+- Massive ecosystem of operators and tools
+
+### Nomad
+
+Nomad is a **multi-workload** scheduler with minimal dependencies:
+
+- Single binary (server + client modes)
+- No etcd — built-in Raft consensus
+- Task drivers: Docker, Podman, exec, Java, QEMU, raw_exec
+- Optional Consul integration for service discovery
+- Optional Vault integration for secrets
+
+## Feature comparison
 
 | Feature | Kubernetes | Nomad |
 |---------|-----------|-------|
-| Workload types | Containers (pods) | Containers, VMs, binaries, Java |
-| Complexity | High | Low |
-| Service mesh | Istio, Linkerd, Cilium | Consul Connect |
-| Auto-scaling | HPA, VPA, KEDA, Karpenter | Autoscaler plugin |
-| Ecosystem | Massive (CNCF) | HashiCorp ecosystem |
-| Multi-region | Federation (complex) | Native multi-region |
-| Secrets | External (Vault, ESO) | Vault integration (native) |
-| Cluster size | 5,000+ nodes | 10,000+ nodes |
+| **Workload types** | Containers only | Containers, VMs, binaries, JARs |
+| **Binary** | Multiple components | Single binary |
+| **Complexity** | High (steep learning curve) | Low-moderate |
+| **Scheduling** | Pod-level | Task group-level |
+| **Networking** | CNI plugins (complex) | Bridge, host, or Consul Connect |
+| **Service mesh** | Istio, Cilium, Linkerd | Consul Connect |
+| **Service discovery** | DNS, Services | Consul (external) |
+| **Secrets** | Kubernetes Secrets, CSI | Vault (external) |
+| **Storage** | PV/PVC, CSI drivers | Host volumes, CSI |
+| **Autoscaling** | HPA, VPA, KEDA, Karpenter | Nomad Autoscaler |
+| **Multi-region** | Federation (complex) | Built-in (native) |
+| **Ecosystem** | Massive (CNCF) | Smaller (HashiCorp) |
+| **Windows** | Yes (limited) | Yes (native) |
+| **GPU scheduling** | Device plugins | Device plugins |
+| **License** | Apache 2.0 | BSL 1.1 |
 
-## When to Use Kubernetes
+## Job definitions
 
-- **Industry standard**: The largest ecosystem, most job opportunities, widest vendor support
-- **Complex applications**: Stateful workloads, operators, custom controllers, service mesh
-- **Managed services**: EKS, GKE, AKS — let the cloud provider handle the control plane
-- **CNCF ecosystem**: Helm, ArgoCD, Prometheus, Istio, Cilium — everything integrates
+### Kubernetes
 
-## When to Use Nomad
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 80
+```
 
-- **Simplicity**: Single binary, no etcd, simpler operational model
-- **Mixed workloads**: Run containers alongside raw binaries, Java JARs, and even VMs
-- **HashiCorp stack**: If you already use Vault, Consul, and Terraform, Nomad integrates natively
-- **Multi-region**: Nomad's built-in multi-region federation is simpler than K8s federation
-- **Batch processing**: Nomad's batch and system job types are simpler than K8s Jobs/CronJobs
+Kubernetes needs a Deployment + Service + potentially Ingress, NetworkPolicy, HPA, PDB — multiple resources for one workload.
 
-## The 2026 Reality
+### Nomad
 
-Kubernetes has won the orchestrator war. Nomad is excellent technology but has a fraction of the ecosystem, community, and job market. Choose Nomad only if its specific strengths (simplicity, mixed workloads, HashiCorp integration) are critical for your use case.
+```hcl
+job "web" {
+  datacenters = ["dc1"]
+  type        = "service"
 
-## My Recommendation
+  group "web" {
+    count = 3
 
-Use **Kubernetes** for most production workloads — the ecosystem is unmatched. Use **Nomad** for simpler environments, mixed workload types, or deep HashiCorp integration. [Book a consultation](https://calendly.com/lucaberton/) to evaluate your orchestration strategy.
+    network {
+      port "http" { to = 80 }
+    }
 
-## Related Resources
+    service {
+      name = "web"
+      port = "http"
+      provider = "consul"
+    }
 
-- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
-- [K3s vs K8s](/blog/k3s-vs-k8s-2026/)
-- [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
+    task "nginx" {
+      driver = "docker"
+      config {
+        image = "nginx:alpine"
+        ports = ["http"]
+      }
+      resources {
+        cpu    = 100
+        memory = 128
+      }
+    }
+  }
+}
+```
+
+Nomad defines everything in one file — networking, service registration, and workload. Simpler, but fewer features.
+
+## Multi-workload scheduling (Nomad advantage)
+
+Nomad can schedule non-container workloads:
+
+```hcl
+# Run a Java application
+task "api" {
+  driver = "java"
+  config {
+    jar_path = "local/app.jar"
+    jvm_options = ["-Xmx512m"]
+  }
+}
+
+# Run a raw binary
+task "worker" {
+  driver = "raw_exec"
+  config {
+    command = "/usr/local/bin/worker"
+    args    = ["--config", "/etc/worker.toml"]
+  }
+}
+
+# Run a QEMU virtual machine
+task "legacy" {
+  driver = "qemu"
+  config {
+    image_path = "local/legacy-app.qcow2"
+    accelerator = "kvm"
+  }
+}
+```
+
+Kubernetes cannot do this without heavy lifting (KubeVirt for VMs, custom operators for bare processes).
+
+## Operational complexity
+
+| Aspect | Kubernetes | Nomad |
+|---|---|---|
+| **Install** | kubeadm (multi-step) or managed | Single binary, one config |
+| **Upgrade** | Rolling control plane + nodes | Rolling binary replacement |
+| **Debugging** | kubectl describe, logs, events | nomad alloc status, logs |
+| **Networking** | CNI plugins (Cilium, Calico) | Simple bridge or host networking |
+| **Certificate management** | Complex (kubeadm certs, cert-manager) | Built-in TLS |
+| **Learning curve** | 6-12 months to proficiency | 1-3 months |
+
+Nomad is genuinely simpler to operate. A production Nomad cluster can be maintained by a small team that would struggle with Kubernetes.
+
+## Ecosystem
+
+This is Kubernetes' decisive advantage:
+
+| Category | Kubernetes | Nomad |
+|---|---|---|
+| **Operators/CRDs** | 1,000+ | None (no CRD concept) |
+| **Monitoring** | Prometheus, Datadog, Grafana | Prometheus, Datadog |
+| **GitOps** | ArgoCD, Flux | Levant (limited) |
+| **Service mesh** | Istio, Cilium, Linkerd | Consul Connect |
+| **Managed offerings** | EKS, GKE, AKS, DOKS | HCP Nomad (limited) |
+| **Job market** | Massive demand | Niche |
+| **Community** | CNCF (vendor-neutral) | HashiCorp (BSL license) |
+
+If you need an operator for PostgreSQL, Redis, Kafka, or any other stateful workload — Kubernetes has it. Nomad does not have an operator pattern.
+
+## Decision guide
+
+### Choose Kubernetes when:
+
+- You run **containers in production** at scale
+- You need the **ecosystem** — operators, CRDs, managed services
+- Your team has or is willing to invest in **Kubernetes expertise**
+- You need **managed Kubernetes** ([EKS, GKE, AKS](/blog/eks-vs-gke-vs-aks-2026/))
+- **Industry standard** matters for hiring and tooling
+- You need advanced **networking** (service mesh, network policies)
+
+### Choose Nomad when:
+
+- You orchestrate **mixed workloads** — containers + VMs + binaries
+- **Simplicity** is a priority and your team is small
+- You already use the **HashiCorp stack** (Consul, Vault, Terraform)
+- **Multi-region** scheduling is a core requirement
+- You have **legacy applications** that cannot be containerized
+- You want a working orchestrator in **days, not months**
+
+<BlogPromoCard />
+
+## Related
+
+- [EKS vs GKE vs AKS 2026](/blog/eks-vs-gke-vs-aks-2026/)
+- [K3s vs K8s 2026](/blog/k3s-vs-k8s-2026/)
+- [Crossplane vs Terraform 2026](/blog/crossplane-vs-terraform-2026/)
+- [Internal Developer Platforms 2026](/blog/internal-developer-platforms-2026/)
+- [Enterprise Kubernetes Security Checklist](/blog/enterprise-kubernetes-security-hardening-checklist-2026/)

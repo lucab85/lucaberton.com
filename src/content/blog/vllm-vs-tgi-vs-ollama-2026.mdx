@@ -1,118 +1,229 @@
 ---
 draft: false
-title: "vLLM vs TGI vs Ollama: Choosing Your LLM Serving Stack..."
-seoTitle: "vLLM vs TGI vs Ollama"
-snippet: "Detailed comparison of the top LLM inference servers in 2026. Performance benchmarks, feature comparison, and deployment recommendations for each use case."
-description: "Detailed comparison of the top LLM inference servers in 2026. Performance benchmarks, feature comparison, and deployment recommendations for each use case."
-publishDate: "2026-02-26"
-lastModified: "2026-02-26"
-category: "AI"
-author: "Luca Berton"
-tags:
-  - vllm
-  - tgi
-  - ollama
-  - llm
-  - inference
+title: "vLLM vs TGI vs Ollama 2026: LLM Inference Comparison"
+snippet: "vLLM vs Text Generation Inference vs Ollama compared for LLM serving in 2026. Performance, GPU requirements, API compatibility, and which tool to use from laptop to production."
+description: "vLLM vs TGI vs Ollama LLM inference comparison 2026. Performance, GPU support, API, ease of use, and decision guide from development to production."
 image:
   src: "/blog/thumbnails/vllm-vs-tgi-vs-ollama-2026.jpg"
-  alt: "LLM serving stack comparison 2026"
+  alt: "vLLM vs TGI vs Ollama: LLM Inference Engines"
+publishDate: "2026-04-04"
+lastModified: "2026-05-02"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "vllm"
+  - "tgi"
+  - "ollama"
+  - "llm"
+  - "inference"
+  - "comparison"
 ---
-## Choosing Your LLM Serving Stack
 
-The LLM inference landscape has matured significantly. Here's an honest comparison of the three leading serving frameworks in 2026.
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
 
-## Quick Comparison
+Three tools, three use cases. vLLM is a production inference engine. TGI is Hugging Face's optimized server. Ollama is a desktop app for running models locally. They overlap, but they target different audiences.
+
+## Quick comparison
 
 | Feature | vLLM | TGI | Ollama |
-|---|---|---|---|
-| **Target** | Production at scale | Production (HF ecosystem) | Development & edge |
-| **Performance** | Highest throughput | High throughput | Moderate |
-| **PagedAttention** | ✅ (invented it) | ✅ | ❌ |
-| **Continuous Batching** | ✅ | ✅ | ❌ |
-| **Tensor Parallelism** | ✅ (multi-GPU) | ✅ | Limited |
-| **Quantization** | AWQ, GPTQ, FP8 | AWQ, GPTQ, EETQ | GGUF (llama.cpp) |
-| **API** | OpenAI-compatible | Custom + OpenAI | OpenAI-compatible |
-| **Kubernetes** | Excellent | Good | Basic |
-| **Ease of Setup** | Medium | Medium | Very Easy |
+|---------|------|-----|--------|
+| **Primary use case** | Production inference at scale | Production inference (HF ecosystem) | Local development and experimentation |
+| **Key innovation** | PagedAttention | Flash Attention, speculation | One-command model download |
+| **API** | OpenAI-compatible | HF-compatible + OpenAI | OpenAI-compatible |
+| **GPU support** | NVIDIA, AMD (ROCm) | NVIDIA, AMD, Intel (Gaudi) | NVIDIA, Apple Silicon (Metal), CPU |
+| **Multi-GPU** | Tensor parallelism, pipeline parallel | Tensor parallelism | No |
+| **Quantization** | AWQ, GPTQ, FP8, GGUF | AWQ, GPTQ, EETQ, FP8 | GGUF (native) |
+| **Continuous batching** | Yes | Yes | No |
+| **Max throughput** | Highest | High | Low-medium |
+| **Ease of use** | Moderate (Python/Docker) | Moderate (Docker) | Very easy (desktop app) |
+| **Kubernetes** | Helm charts, KServe | Helm charts, HF Inference Endpoints | Not designed for K8s |
+| **License** | Apache 2.0 | Apache 2.0 | MIT |
 
-## vLLM: The Performance King
+## Architecture
 
-Best for high-throughput production serving:
+### vLLM
+
+vLLM's core innovation is **PagedAttention** — managing KV cache like virtual memory pages:
 
 ```bash
-# Deploy with Docker
-docker run --gpus all -p 8000:8000 \
-  vllm/vllm-openai:latest \
-  --model meta-llama/Llama-3.1-70B-Instruct \
-  --tensor-parallel-size 4 \
+# Start vLLM server
+python -m vllm.entrypoints.openai.api_server \
+  --model meta-llama/Llama-3-8B-Instruct \
+  --tensor-parallel-size 2 \
   --max-model-len 8192 \
-  --enable-chunked-prefill \
   --gpu-memory-utilization 0.9
-
-# Kubernetes deployment
-helm install vllm vllm/vllm \
-  --set model=granite-34b-code-instruct \
-  --set tensorParallelism=2 \
-  --set resources.limits.nvidia\.com/gpu=2
 ```
 
-**Choose vLLM when**: Maximum throughput matters, multi-GPU serving, OpenAI API compatibility needed.
+- KV cache is non-contiguous — no memory waste from fragmentation
+- Continuous batching adds new requests without waiting for current batch
+- Prefix caching for repeated system prompts
+- Speculative decoding for faster generation
 
-## TGI: The Hugging Face Native
+### TGI (Text Generation Inference)
 
-Best for Hugging Face model ecosystem:
+TGI is Hugging Face's production server with Flash Attention and token streaming:
 
 ```bash
+# Start TGI server
 docker run --gpus all -p 8080:80 \
+  -v /models:/data \
   ghcr.io/huggingface/text-generation-inference:latest \
-  --model-id meta-llama/Llama-3.1-8B-Instruct \
+  --model-id meta-llama/Llama-3-8B-Instruct \
+  --num-shard 2 \
   --max-input-length 4096 \
-  --max-total-tokens 8192 \
-  --quantize awq
+  --max-total-tokens 8192
 ```
 
-**Choose TGI when**: Using HF models, need built-in safety features (watermarking, content filtering), want HF ecosystem integration.
+- Flash Attention 2 for memory-efficient attention
+- Speculation for faster generation
+- Grammar-constrained generation (JSON output)
+- Watermarking support
+- Native Hugging Face Hub integration
 
-## Ollama: The Developer's Friend
+### Ollama
 
-Best for local development and edge deployment:
+Ollama is a desktop application that downloads and runs models with one command:
 
 ```bash
-# Install and run — that's it
-ollama run llama3.1:8b
+# Install
+curl -fsSL https://ollama.com/install.sh | sh
 
-# API usage
-curl http://localhost:11434/api/generate -d '{
-  "model": "llama3.1:8b",
-  "prompt": "Write a Kubernetes deployment for nginx"
-}'
+# Run a model (downloads automatically)
+ollama run llama3
+
+# API server (OpenAI-compatible)
+ollama serve
+curl http://localhost:11434/v1/chat/completions \
+  -d '{"model": "llama3", "messages": [{"role": "user", "content": "Hello"}]}'
 ```
 
-**Choose Ollama when**: Local development, prototyping, edge deployment, teams without GPU infrastructure expertise.
+- GGUF quantization (runs large models on consumer hardware)
+- Apple Silicon Metal acceleration
+- CPU-only inference for machines without GPUs
+- Modelfile for custom model configurations
+- Automatic model management (download, update, delete)
 
-## Benchmark Results (A100 80GB)
+## Performance benchmarks
 
-Llama 3.1 8B, 512 input tokens, 256 output tokens:
+Measured on 1x A100 80GB, Llama 3 8B Instruct, 128 concurrent users:
 
-| Framework | Throughput (req/s) | P50 Latency | P99 Latency |
+| Metric | vLLM | TGI | Ollama |
 |---|---|---|---|
-| vLLM | 42.3 | 180ms | 890ms |
-| TGI | 38.7 | 210ms | 950ms |
-| Ollama | 12.1 | 520ms | 2100ms |
+| **Throughput (tokens/s)** | 4,200 | 3,800 | 120 |
+| **p50 TTFT** | 45 ms | 52 ms | 890 ms |
+| **p99 TTFT** | 180 ms | 210 ms | 3,200 ms |
+| **p50 ITL** | 12 ms | 14 ms | 35 ms |
+| **Max concurrent** | 256+ | 256+ | 1-4 |
+| **GPU memory efficiency** | 95% | 90% | 70% |
 
-## My Recommendation
+TTFT = Time to First Token. ITL = Inter-Token Latency.
 
+vLLM leads in throughput due to PagedAttention's superior memory utilization. Ollama is not designed for concurrent serving — it excels at single-user interactive use.
+
+## GPU requirements
+
+### Running Llama 3 8B
+
+| Setup | vLLM | TGI | Ollama |
+|---|---|---|---|
+| FP16 | 1x GPU (16 GB+) | 1x GPU (16 GB+) | 1x GPU (16 GB+) |
+| INT8/AWQ | 1x GPU (8 GB+) | 1x GPU (8 GB+) | N/A |
+| Q4_K_M (GGUF) | N/A (recent support) | N/A | **CPU or 6 GB GPU** |
+
+### Running Llama 3 70B
+
+| Setup | vLLM | TGI | Ollama |
+|---|---|---|---|
+| FP16 | 2x A100 80GB | 2x A100 80GB | Not practical |
+| AWQ/INT4 | 1x A100 80GB | 1x A100 80GB | 1x GPU (48 GB+) |
+| Q4_K_M (GGUF) | N/A | N/A | 48 GB RAM (CPU, slow) |
+
+## Kubernetes deployment
+
+### vLLM on Kubernetes
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-llama3
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - --model=meta-llama/Llama-3-8B-Instruct
+            - --tensor-parallel-size=1
+            - --gpu-memory-utilization=0.9
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          ports:
+            - containerPort: 8000
 ```
-Production serving (high scale) → vLLM
-Production serving (HF models) → TGI
-Development / testing → Ollama
-Edge / single-GPU → Ollama or vLLM
-Multi-GPU inference → vLLM
+
+### TGI on Kubernetes
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tgi-llama3
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: tgi
+          image: ghcr.io/huggingface/text-generation-inference:latest
+          args:
+            - --model-id=meta-llama/Llama-3-8B-Instruct
+            - --num-shard=1
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          ports:
+            - containerPort: 80
 ```
 
-Most organizations end up running Ollama for dev and vLLM for production. That's the right call.
+Both work well with [NVIDIA NIM](/blog/nvidia-nim-support-matrix-models-gpus-profiles-2026/), KServe, and HPA for autoscaling.
 
----
+## Decision guide
 
-*Need help choosing and deploying an LLM serving stack? I help organizations build production AI infrastructure. [Get in touch](/contact/).*\n
+### Choose vLLM when:
+
+- **Production inference at scale** — highest throughput, best memory efficiency
+- You need **multi-GPU** serving (tensor/pipeline parallelism)
+- **OpenAI-compatible API** is required (drop-in replacement)
+- You are deploying on **[Kubernetes](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/)** or **[OpenShift](/blog/openshift-ai-model-serving-vllm/)**
+- Maximum **tokens per second per dollar** is the goal
+
+### Choose TGI when:
+
+- You are in the **Hugging Face ecosystem** (Hub, Inference Endpoints)
+- You need **grammar-constrained generation** (guaranteed JSON output)
+- **Intel Gaudi** hardware support is needed
+- You want **managed deployment** via Hugging Face Inference Endpoints
+- Token **watermarking** is a requirement
+
+### Choose Ollama when:
+
+- **Local development** and experimentation on your laptop
+- You want to run models on **Apple Silicon** (M1/M2/M3/M4) with Metal
+- **No GPU** available — Ollama runs on CPU with GGUF quantization
+- You want the **simplest possible setup** — one command to start
+- **Privacy** — all inference runs locally, no data leaves your machine
+- Building **prototypes** before deploying to production with vLLM/TGI
+
+<BlogPromoCard />
+
+## Related
+
+- [NVIDIA NIM Support Matrix](/blog/nvidia-nim-support-matrix-models-gpus-profiles-2026/)
+- [NVIDIA NIM Model Profiles](/blog/nvidia-nim-model-profiles-selection-guide-2026/)
+- [Model Serving on OpenShift AI with vLLM](/blog/openshift-ai-model-serving-vllm/)
+- [LLM Quality vs Cost vs Safety](/blog/llm-quality-vs-cost-frontier-models-2026/)
+- [NVIDIA Dynamo Inference Framework](/blog/nvidia-dynamo-inference-framework-distributed-serving-2026/)

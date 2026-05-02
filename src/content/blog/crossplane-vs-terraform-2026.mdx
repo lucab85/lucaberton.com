@@ -1,79 +1,239 @@
 ---
 draft: false
-title: "Crossplane vs Terraform: Infrastructure Compared (2026)"
-snippet: "Crossplane vs Terraform comparison. Kubernetes-native IaC, reconciliation loops, and GitOps compatibility."
-description: "Crossplane vs Terraform comparison. Kubernetes-native IaC, reconciliation loops, and GitOps compatibility. Covers diagnosis with kubectl, root causes, and."
+title: "Crossplane vs Terraform 2026: Kubernetes IaC Comparison"
+snippet: "Crossplane vs Terraform compared for infrastructure as code in 2026. Reconciliation vs plan/apply, GitOps, drift detection, Compositions vs modules, and which approach fits your team."
+description: "Crossplane vs Terraform IaC comparison 2026. Kubernetes-native CRDs vs HCL, continuous reconciliation, GitOps, platform engineering, and decision guide."
 image:
   src: "/blog/thumbnails/crossplane-vs-terraform-2026.jpg"
-  alt: "Crossplane vs Terraform: Infrastructure Compared (2026)"
+  alt: "Crossplane vs Terraform: Infrastructure as Code"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-05-02"
 author: "Luca Berton"
 category: "Platform Engineering"
-tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
+tags:
+  - "crossplane"
+  - "terraform"
+  - "iac"
+  - "kubernetes"
+  - "platform-engineering"
 ---
-This is a practical comparison based on real production use, not vendor marketing.
 
-## Quick Comparison
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+Terraform and Crossplane both manage cloud infrastructure as code. The difference is fundamental: Terraform runs on-demand (`plan` → `apply`), Crossplane runs continuously (Kubernetes control loop). This shapes everything — drift handling, GitOps, team workflows, and failure modes.
+
+## Architecture
+
+### Terraform
+
+```
+Developer → terraform plan → Review → terraform apply → Cloud API → Done
+                                                              ↓
+                                                    State file (S3/TFC)
+```
+
+Terraform is **imperative-triggered**: you run a command, it computes a diff, you approve, it applies. Between runs, nothing watches your infrastructure.
+
+### Crossplane
+
+```
+Developer → kubectl apply → Kubernetes → Crossplane Controller → Cloud API
+                                ↑                                     ↓
+                          etcd (state)  ←  Reconciliation loop  ←  Actual state
+```
+
+Crossplane is **continuously reconciling**: a controller watches desired state in etcd and actual state in the cloud, fixing any drift automatically.
+
+## Feature comparison
 
 | Feature | Crossplane | Terraform |
 |---------|-----------|-----------|
-| Model | Kubernetes-native (CRDs) | CLI + state file |
-| Reconciliation | Continuous (control loop) | On-demand (`terraform apply`) |
-| Language | YAML (Kubernetes manifests) | HCL |
-| State | Kubernetes etcd | Terraform state file |
-| Drift detection | Automatic (continuous) | Manual (`terraform plan`) |
-| Composability | Compositions (XRDs) | Modules |
-| GitOps | Native (ArgoCD/Flux) | Requires wrapper |
-| Multi-tenancy | Kubernetes RBAC | Terraform Cloud/Enterprise |
+| **Execution model** | Continuous reconciliation | On-demand plan/apply |
+| **Language** | YAML (Kubernetes manifests) | HCL |
+| **State storage** | Kubernetes etcd | State file (S3, TFC, local) |
+| **Drift detection** | Automatic, continuous | Manual (`terraform plan`) |
+| **Drift correction** | Automatic | Manual (`terraform apply`) |
+| **Provider ecosystem** | ~100 providers | 4,000+ providers |
+| **Composability** | Compositions (XRDs) | Modules |
+| **GitOps** | Native (ArgoCD/Flux apply YAML) | Requires wrapper (Atlantis, TFC) |
+| **RBAC** | Kubernetes RBAC | TFC teams / custom |
+| **Secret management** | Kubernetes Secrets / External Secrets | Variables, Vault integration |
+| **Preview changes** | Limited (dry-run) | `terraform plan` (detailed) |
+| **Import existing** | Yes (observe-only) | `terraform import` |
+| **Destroy** | Delete the resource YAML | `terraform destroy` |
+| **Learning curve** | Kubernetes + Crossplane concepts | HCL (moderate) |
 
-## When to Use Crossplane
+## Drift handling
 
-- **Kubernetes-native teams**: If your team already thinks in Kubernetes resources, Crossplane feels natural
-- **Continuous reconciliation**: Crossplane detects and fixes drift automatically — infrastructure self-heals
-- **GitOps integration**: Manage infrastructure through ArgoCD or Flux, same as application deployments
-- **Platform engineering**: Build custom APIs (Compositions) that abstract cloud complexity for developers
+This is the most important practical difference:
+
+### Terraform: drift is invisible until you check
+
+```bash
+# Someone manually changed a security group in AWS console
+# Terraform doesn't know until you run:
+terraform plan
+
+# Plan shows drift:
+# ~ aws_security_group.web
+#   ~ ingress.0.cidr_blocks: ["10.0.0.0/8"] → ["0.0.0.0/0"]
+
+# You manually fix it:
+terraform apply
+```
+
+Between `terraform apply` runs, infrastructure can drift silently. If your team runs Terraform weekly, drift goes undetected for days.
+
+### Crossplane: drift is corrected automatically
 
 ```yaml
-# Crossplane: Developer requests a database
-apiVersion: database.example.com/v1alpha1
-kind: PostgreSQLInstance
+# Someone manually changed the security group
+# Crossplane detects the difference within seconds
+# and reverts it to the desired state in the YAML
+
+# You see it in events:
+kubectl describe securitygroup.ec2.aws.upbound.io/web
+# Events:
+#   Synced: True (drift detected and corrected)
+```
+
+Crossplane closes the gap between desired and actual state continuously. For security-critical infrastructure, this is a significant advantage.
+
+## GitOps integration
+
+### Crossplane + ArgoCD (native)
+
+```yaml
+# ArgoCD Application manages Crossplane resources
+apiVersion: argoproj.io/v1alpha1
+kind: Application
 metadata:
-  name: my-db
+  name: infrastructure
 spec:
-  parameters:
-    size: small
-    region: eu-west-1
+  source:
+    repoURL: https://github.com/myorg/infra
+    path: crossplane/production
+  destination:
+    server: https://kubernetes.default.svc
+  syncPolicy:
+    automated:
+      selfHeal: true
 ```
 
-## When to Use Terraform
+Infrastructure is just more Kubernetes YAML — ArgoCD syncs it like any other resource.
 
-- **Multi-cloud IaC standard**: Terraform is the most widely adopted IaC tool with the largest provider ecosystem
-- **Mature tooling**: `terraform plan` preview, import existing resources, extensive documentation
-- **Team familiarity**: Most infrastructure engineers already know HCL
-- **Terraform Cloud**: Managed state, policy-as-code (Sentinel), run approvals, cost estimation
+### Terraform + Atlantis (wrapper needed)
 
-```hcl
-# Terraform: Explicit resource definition
-resource "aws_db_instance" "my_db" {
-  engine         = "postgres"
-  instance_class = "db.t3.medium"
-  allocated_storage = 20
-}
+```yaml
+# atlantis.yaml
+version: 3
+projects:
+  - name: production
+    dir: terraform/production
+    workflow: default
+    autoplan:
+      enabled: true
 ```
 
-## The Convergence
+Terraform requires a wrapper tool (Atlantis, Terraform Cloud, Spacelift) to integrate with GitOps workflows. It works but is an additional system to manage.
 
-In 2026, the best teams use both:
-- **Terraform** for initial infrastructure provisioning and one-time setups
-- **Crossplane** for ongoing infrastructure management with continuous reconciliation
+## Platform engineering with Crossplane
 
-## My Recommendation
+Crossplane's killer feature for platform teams is **Compositions** — custom abstractions that hide cloud complexity:
 
-Use **Terraform** if your team is infrastructure-focused and you need the broadest provider support. Use **Crossplane** if you are building a platform engineering layer and want infrastructure management to follow Kubernetes patterns. [Book a consultation](https://calendly.com/lucaberton/) to design your IaC strategy.
+```yaml
+# Platform team defines the API
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xdatabases.platform.example.com
+spec:
+  group: platform.example.com
+  names:
+    kind: XDatabase
+  versions:
+    - name: v1alpha1
+      schema:
+        openAPIV3Schema:
+          properties:
+            spec:
+              properties:
+                size:
+                  type: string
+                  enum: [small, medium, large]
+                engine:
+                  type: string
+                  enum: [postgres, mysql]
+---
+# Composition maps the API to real cloud resources
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xdatabase-aws
+spec:
+  compositeTypeRef:
+    apiVersion: platform.example.com/v1alpha1
+    kind: XDatabase
+  resources:
+    - name: rds
+      base:
+        apiVersion: rds.aws.upbound.io/v1beta1
+        kind: Instance
+        spec:
+          forProvider:
+            engine: postgres
+            instanceClass: db.t3.medium
+```
 
-## Related Resources
+Developers request:
 
+```yaml
+apiVersion: platform.example.com/v1alpha1
+kind: XDatabase
+metadata:
+  name: orders-db
+spec:
+  size: medium
+  engine: postgres
+```
+
+They do not need to know about AWS RDS instance classes, subnet groups, or security groups. The platform team handles that in the Composition.
+
+Terraform modules offer similar abstraction but lack the continuous reconciliation and Kubernetes-native RBAC.
+
+## When they work together
+
+Many organizations use both:
+
+1. **Terraform** for foundational infrastructure — VPCs, accounts, DNS zones, Kubernetes clusters themselves
+2. **Crossplane** for application infrastructure — databases, caches, queues, buckets requested by development teams
+
+This hybrid approach works because Terraform excels at one-time setup and Crossplane excels at ongoing management.
+
+## Decision guide
+
+### Choose Crossplane when:
+
+- You are building an **[internal developer platform](/blog/internal-developer-platforms-2026/)** with self-service APIs
+- **Drift correction** must be automatic, not manual
+- Your team already uses **Kubernetes and GitOps** (ArgoCD/Flux)
+- You want **Kubernetes RBAC** for infrastructure access control
+- Infrastructure is managed by the **same pipeline as applications**
+
+### Choose Terraform when:
+
+- You need the **broadest provider ecosystem** (4,000+ providers)
+- Your team **already knows HCL** and has existing Terraform codebases
+- You need **detailed plan previews** before any change
+- **Terraform Cloud/Enterprise** features matter (Sentinel policies, cost estimation, VCS integration)
+- Infrastructure changes are **infrequent** and do not need continuous reconciliation
+
+<BlogPromoCard />
+
+## Related
+
+- [Terraform vs OpenTofu 2026](/blog/terraform-vs-opentofu-2026/)
+- [Terraform vs Pulumi 2026](/blog/terraform-vs-pulumi-2026/)
+- [ArgoCD vs Flux 2026](/blog/argocd-vs-flux-2026/)
+- [Internal Developer Platforms 2026](/blog/internal-developer-platforms-2026/)
 - [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
-- [Terraform vs CloudFormation](/blog/terraform-vs-cloudformation-2026/)
-- [Terraform vs OpenTofu](/blog/terraform-vs-opentofu-2026/)

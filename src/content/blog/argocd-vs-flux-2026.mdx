@@ -1,96 +1,244 @@
 ---
 draft: false
-title: "ArgoCD vs Flux: Which GitOps Tool Should You Choose for Kubernetes?"
-snippet: "ArgoCD vs Flux compared for GitOps on Kubernetes. Web UI, multi-cluster management, Helm and Kustomize support, RBAC, and a decision framework for enterprise GitOps adoption."
-description: "ArgoCD vs Flux GitOps comparison for Kubernetes. Web UI, multi-cluster support, Helm/Kustomize integration, RBAC, notification system."
+title: "ArgoCD vs Flux 2026: Kubernetes GitOps Comparison"
+snippet: "ArgoCD vs Flux CD compared for Kubernetes GitOps in 2026. UI, multi-tenancy, Helm support, OCI artifacts, scalability, and which tool to choose for production GitOps."
+description: "ArgoCD vs Flux CD GitOps comparison 2026. UI, multi-tenancy, Helm/Kustomize, OCI support, multi-cluster, and decision guide for Kubernetes."
 image:
   src: "/blog/thumbnails/argocd-vs-flux-2026.jpg"
-  alt: "ArgoCD vs Flux: GitOps Tools Compared (2026)"
+  alt: "ArgoCD vs Flux: GitOps for Kubernetes"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-05-02"
 author: "Luca Berton"
 category: "Platform Engineering"
-tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
+tags:
+  - "argocd"
+  - "flux"
+  - "gitops"
+  - "kubernetes"
+  - "comparison"
 ---
-This is a practical comparison based on real production use, not vendor marketing.
 
-## Quick Comparison
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+ArgoCD and Flux are the two CNCF graduated GitOps tools for Kubernetes. Both sync desired state from Git to clusters. The main difference: ArgoCD provides a rich UI and application-centric model. Flux provides a toolkit of controllers with no built-in UI.
+
+## Architecture
+
+### ArgoCD
+
+ArgoCD is an **application-centric** GitOps controller:
+
+- **Application CRD** — each deployment is an Application resource pointing to a Git repo + path
+- **Web UI** — full dashboard showing sync status, diffs, resource trees
+- **API server** — REST/gRPC API for CLI and UI
+- **Application controller** — watches Applications and syncs to clusters
+- **Repo server** — clones Git repos, renders Helm/Kustomize templates
+
+### Flux
+
+Flux is a **toolkit** of independent controllers:
+
+- **Source controller** — fetches from Git, Helm, OCI, S3
+- **Kustomize controller** — applies Kustomize overlays
+- **Helm controller** — manages Helm releases via HelmRelease CRDs
+- **Notification controller** — sends alerts to Slack, Teams, etc.
+- **Image automation** — updates image tags in Git automatically
+
+Each controller operates independently — you can use only the ones you need.
+
+## Feature comparison
 
 | Feature | ArgoCD | Flux |
 |---------|--------|------|
-| Architecture | Server with Web UI | Controller-based (no UI) |
-| UI | Built-in web dashboard | Weave GitOps (separate) |
-| Multi-cluster | ApplicationSet | Kustomization per cluster |
-| RBAC | Built-in, project-based | Kubernetes-native RBAC |
-| Sync strategy | Manual or auto | Always auto-reconcile |
-| Helm support | Native | HelmRelease CRD |
-| Image automation | Not built-in | Built-in (ImagePolicy) |
-| Multi-tenancy | AppProject isolation | Namespace-based |
+| **UI** | Built-in web dashboard | No UI (use Weave GitOps, Capacitor) |
+| **CLI** | `argocd` CLI | `flux` CLI |
+| **Application model** | Application CRD | GitRepository + Kustomization CRDs |
+| **Helm support** | Via Application (render) | HelmRelease CRD (native) |
+| **Kustomize** | Via Application | Kustomization CRD (native) |
+| **OCI artifacts** | Yes | Yes (first-class) |
+| **Multi-cluster** | ApplicationSets, hub-spoke | Kustomization with remote clusters |
+| **RBAC** | Built-in (projects, roles) | Kubernetes RBAC |
+| **SSO** | Built-in (OIDC, LDAP, SAML) | No (cluster-level auth) |
+| **Sync waves/hooks** | Yes (ordering, hooks) | Depends-on ordering |
+| **Diff preview** | UI + CLI (`argocd diff`) | CLI (`flux diff`) |
+| **Notifications** | Notification CRD | Notification controller |
+| **Image automation** | Via Argo Image Updater | Built-in Image automation |
+| **Multi-tenancy** | AppProjects | Namespace-scoped controllers |
+| **Pruning** | Configurable per app | Configurable per kustomization |
+| **Health checks** | Built-in (Lua scripts) | Via Kustomize health checks |
+| **CNCF** | Graduated | Graduated |
 
-## When to Use ArgoCD
+## UI and developer experience
 
-- **Developer experience matters**: The web UI gives instant visibility into sync status, resource health, and diff views
-- **Multi-team environments**: AppProjects provide fine-grained RBAC per team
-- **Complex rollout strategies**: Native integration with Argo Rollouts for canary and blue-green deployments
-- **Centralized management**: Single ArgoCD instance manages hundreds of clusters via ApplicationSets
+### ArgoCD: visual GitOps
+
+ArgoCD's UI is its biggest differentiator:
+
+- **Application dashboard**: See all applications, their sync status, and health at a glance
+- **Resource tree**: Visual representation of Deployments → ReplicaSets → Pods
+- **Live diff**: Compare desired (Git) vs actual (cluster) state
+- **Sync with one click**: Manual sync from the UI
+- **RBAC per project**: Different teams see different applications
+
+This matters in organizations where developers (not just platform engineers) need visibility into deployment state.
+
+### Flux: CLI-first
+
+```bash
+# Check what Flux is doing
+flux get all
+
+# See sync status
+flux get kustomizations
+# NAME        READY   MESSAGE
+# production  True    Applied revision: main@sha1:abc123
+# staging     True    Applied revision: main@sha1:abc123
+
+# Reconcile immediately
+flux reconcile kustomization production
+
+# Check events
+flux events
+```
+
+Flux is operator-friendly but provides no built-in visibility for developers. Third-party UIs exist (Weave GitOps, Capacitor) but are less mature than ArgoCD's UI.
+
+## Helm handling
+
+### ArgoCD
+
+ArgoCD renders Helm charts server-side via its repo server:
 
 ```yaml
-# ApplicationSet for multi-cluster
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: nginx
+spec:
+  source:
+    repoURL: https://charts.bitnami.com/bitnami
+    chart: nginx
+    targetRevision: 15.x
+    helm:
+      values: |
+        replicaCount: 3
+        service:
+          type: ClusterIP
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: production
+```
+
+ArgoCD renders the chart into manifests and tracks the rendered output. The Helm release is not visible to `helm list` because ArgoCD manages it directly.
+
+### Flux
+
+Flux uses a native HelmRelease CRD that actually creates Helm releases:
+
+```yaml
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: nginx
+  namespace: production
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: nginx
+      version: "15.x"
+      sourceRef:
+        kind: HelmRepository
+        name: bitnami
+  values:
+    replicaCount: 3
+    service:
+      type: ClusterIP
+```
+
+Flux Helm releases are visible to `helm list` and follow standard Helm lifecycle (install → upgrade → rollback).
+
+## Multi-cluster
+
+### ArgoCD: hub-spoke with ApplicationSets
+
+```yaml
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: my-app
+  name: nginx-everywhere
 spec:
   generators:
     - clusters:
         selector:
           matchLabels:
-            env: production
+            environment: production
   template:
+    metadata:
+      name: "nginx-{{name}}"
     spec:
       source:
-        repoURL: https://github.com/org/manifests
-        path: overlays/{{name}}
+        repoURL: https://github.com/myorg/apps
+        path: nginx
       destination:
         server: "{{server}}"
+        namespace: production
 ```
 
-## When to Use Flux
+ApplicationSets generate Applications dynamically for each matching cluster. The ArgoCD hub manages all clusters from a single control plane.
 
-- **GitOps purist**: Flux is built on the GitOps Toolkit — every component is a Kubernetes CRD
-- **Image automation**: Flux can detect new container image tags and auto-commit updates to Git
-- **Lightweight footprint**: No UI server to manage (lower resource usage)
-- **Composable architecture**: Each Flux component (source, kustomize, helm, notification) is independent
+### Flux: decentralized
 
-```yaml
-# ImageUpdateAutomation — Flux auto-updates image tags
-apiVersion: image.toolkit.fluxcd.io/v1beta1
-kind: ImageUpdateAutomation
-metadata:
-  name: my-app
-spec:
-  sourceRef:
-    kind: GitRepository
-    name: my-app
-  git:
-    commit:
-      author:
-        name: fluxbot
+Each cluster runs its own Flux controllers, syncing from the same Git repo with cluster-specific overlays. No central hub.
+
+```
+repo/
+├── base/
+│   └── nginx/
+├── clusters/
+│   ├── production-eu/
+│   │   └── kustomization.yaml  # patches for EU
+│   └── production-us/
+│       └── kustomization.yaml  # patches for US
 ```
 
-## Ecosystem Integration
+## Performance at scale
 
-Both integrate well with the CNCF ecosystem, but differently:
+| Metric | ArgoCD | Flux |
+|---|---|---|
+| Applications/cluster | 1,000+ (with sharding) | 1,000+ |
+| Clusters managed | 100+ (from hub) | Per-cluster (decentralized) |
+| Memory (1000 apps) | ~4 GB (controller + repo server) | ~1 GB (controllers) |
+| Reconciliation speed | Configurable (default 3 min) | Configurable (default 1 min) |
+| Git polling | Per-app interval | Per-source interval |
 
-- **ArgoCD** + Argo Rollouts + Argo Workflows = complete deployment platform
-- **Flux** + Flagger + Notification Controller = event-driven GitOps
+Flux is lighter because it has no UI, API server, or repo server. ArgoCD uses more resources but provides more features per resource consumed.
 
-## My Recommendation
+## Decision guide
 
-Use **ArgoCD** when your team values a visual dashboard and you need multi-team RBAC. Use **Flux** when you want a lightweight, fully declarative GitOps setup or need automatic image tag updates. Both are CNCF Graduated projects. I have deployed both in production — [book a consultation](https://calendly.com/lucaberton/) to discuss your GitOps strategy.
+### Choose ArgoCD when:
 
-## Related Resources
+- **Developer visibility** matters — teams need a UI to see deployment status
+- You want **centralized multi-cluster management** from a single hub
+- **RBAC and SSO** are requirements (built-in OIDC, LDAP)
+- You need **sync waves and hooks** for complex deployment ordering
+- Your organization values a **polished developer experience**
 
-- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
-- [Flux Cheat Sheet](/blog/flux-cheat-sheet-2026/)
-- [Helm vs Kustomize](/blog/helm-vs-kustomize-2026/)
+### Choose Flux when:
+
+- You prefer a **lightweight, CLI-first** approach
+- Each cluster should be **self-managing** (no central hub)
+- You want **native Helm release management** (`helm list` visibility)
+- **OCI artifacts** are your primary distribution mechanism
+- You are building a **[platform engineering](/blog/internal-developer-platforms-2026/) toolkit** and want composable controllers
+- Resource efficiency matters — Flux uses less memory per cluster
+
+<BlogPromoCard />
+
+## Related
+
+- [GitHub vs GitLab 2026](/blog/github-vs-gitlab-2026/)
+- [Crossplane vs Terraform 2026](/blog/crossplane-vs-terraform-2026/)
+- [Kustomize vs Helm 2026](/blog/kustomize-vs-helm-2026/)
+- [Internal Developer Platforms 2026](/blog/internal-developer-platforms-2026/)
+- [Rancher vs OpenShift 2026](/blog/rancher-vs-openshift-2026/)

@@ -1,72 +1,154 @@
 ---
 draft: false
-title: "Terraform vs OpenTofu: The Fork Explained (2026)"
-snippet: "Terraform vs OpenTofu comparison. License changes, compatibility, community, and migration guide."
-description: "Terraform vs OpenTofu comparison for 2026. License changes (BSL vs MPL), feature compatibility, community governance, migration path, and provider support."
+title: "Terraform vs OpenTofu 2026: License, Features, Migration"
+snippet: "Terraform vs OpenTofu compared in 2026. BSL license implications, feature parity, state encryption, provider lock-in, and how to migrate from Terraform to OpenTofu."
+description: "Terraform vs OpenTofu comparison 2026. License differences, feature parity, state encryption, migration guide, and when to switch to OpenTofu."
 image:
   src: "/blog/thumbnails/terraform-vs-opentofu-2026.jpg"
-  alt: "Terraform vs OpenTofu: The Fork Explained (2026)"
+  alt: "Terraform vs OpenTofu: License and Feature Comparison"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-05-02"
 author: "Luca Berton"
 category: "Platform Engineering"
-tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
+tags:
+  - "terraform"
+  - "opentofu"
+  - "iac"
+  - "open-source"
+  - "comparison"
 ---
-This is a practical comparison based on real production use, not vendor marketing.
 
-## Quick Comparison
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
 
-| Feature | Terraform | OpenTofu |
-|---------|-----------|----------|
-| License | BSL 1.1 (source-available) | MPL 2.0 (open source) |
-| Governance | HashiCorp (IBM) | Linux Foundation |
-| Provider compatibility | Native | Full compatibility |
-| State encryption | Terraform Cloud | Built-in (client-side) |
-| Registry | registry.terraform.io | registry.opentofu.org + TF registry |
-| Early variable evaluation | No | Yes (`-var` in backend config) |
-| `removed` block | Added later | Added first |
+In August 2023, HashiCorp changed Terraform's license from MPL 2.0 to BSL 1.1. The community forked it as OpenTofu under the Linux Foundation. Two years later, both projects have diverged. Here is where they stand.
 
-## When to Use Terraform
+## The license issue
 
-- **Terraform Cloud/Enterprise**: If you use HCP Terraform for state management, policy-as-code, and team workflows
-- **Enterprise support**: IBM/HashiCorp provides commercial support and SLAs
-- **Stability**: Terraform has 10+ years of production track record
-- **Existing workflows**: If your CI/CD, modules, and team processes are built around Terraform, switching has a cost
+**Terraform (BSL 1.1):** You can use Terraform freely for internal infrastructure. You **cannot** build competing commercial products on top of it. This affects:
+- Companies building IaC platforms that compete with Terraform Cloud
+- Managed service providers offering Terraform-as-a-Service
+- Tool vendors embedding Terraform in commercial products
 
-## When to Use OpenTofu
+**OpenTofu (MPL 2.0):** Fully open source. No restrictions on commercial use. You can build anything on top of it.
 
-- **Open-source commitment**: If your organization requires OSI-approved licenses
-- **Linux Foundation governance**: Community-driven development with transparent decision-making
-- **Client-side state encryption**: Built-in encryption at rest for state files without a SaaS dependency
-- **Innovation speed**: OpenTofu ships features like early variable evaluation faster
+**For most end users** (using Terraform to manage your own infrastructure), the BSL license has zero practical impact. The license matters if you are a **vendor** building products around Terraform.
 
-## Migration
+## Feature comparison (2026)
 
-OpenTofu is a drop-in replacement for Terraform 1.5.x:
+| Feature | Terraform 1.9+ | OpenTofu 1.9+ |
+|---------|----------------|---------------|
+| **License** | BSL 1.1 | MPL 2.0 (open source) |
+| **HCL support** | Full | Full (compatible) |
+| **Provider ecosystem** | 4,000+ providers | Same providers (compatible) |
+| **State encryption** | No (requires external tool) | **Built-in** (AES-GCM) |
+| **`for_each` for providers** | No | **Yes** (dynamic providers) |
+| **Client-side state** | No | **Yes** (end-to-end encryption) |
+| **`removed` block** | Yes | Yes |
+| **`import` block** | Yes | Yes |
+| **Testing framework** | `terraform test` | `tofu test` |
+| **Cloud backend** | Terraform Cloud/Enterprise | env0, Spacelift, Scalr |
+| **Registry** | registry.terraform.io | registry.opentofu.org (+ TF registry) |
+| **CDKTF support** | Yes | Partial |
+| **Stacks** | Yes (preview) | No |
+| **Community** | HashiCorp-managed | Linux Foundation, community-driven |
+
+## Where OpenTofu has diverged
+
+### State encryption (OpenTofu only)
+
+OpenTofu encrypts state files at rest — a feature the community requested for years:
+
+```hcl
+# OpenTofu state encryption
+terraform {
+  encryption {
+    key_provider "pbkdf2" "main" {
+      passphrase = var.state_passphrase
+    }
+    method "aes_gcm" "main" {
+      keys = key_provider.pbkdf2.main
+    }
+    state {
+      method   = method.aes_gcm.main
+      enforced = true
+    }
+  }
+}
+```
+
+With Terraform, you rely on S3 server-side encryption or Vault — the state file itself is plaintext. OpenTofu encrypts before writing, so even your storage backend cannot read it.
+
+### Dynamic provider configuration
+
+```hcl
+# OpenTofu: for_each on providers
+provider "aws" {
+  for_each = var.regions
+  region   = each.value
+}
+
+resource "aws_vpc" "main" {
+  for_each = var.regions
+  provider = aws[each.key]
+  cidr_block = "10.0.0.0/16"
+}
+```
+
+This eliminates the need for provider aliases when managing resources across multiple regions or accounts.
+
+## Migration from Terraform to OpenTofu
+
+The migration is straightforward because OpenTofu maintains HCL compatibility:
 
 ```bash
-# Switch from Terraform to OpenTofu
 # 1. Install OpenTofu
 brew install opentofu
 
-# 2. Initialize (uses existing state)
-tofu init
+# 2. In your existing Terraform project:
+tofu init          # Downloads same providers
+tofu plan          # Same plan output
+tofu apply         # Same apply behavior
 
-# 3. Plan (same syntax)
-tofu plan
-
-# 4. Apply
-tofu apply
+# 3. State is compatible — no migration needed
+# Your existing .tfstate files work as-is
 ```
 
-Existing `.tf` files, state files, and providers work without modification.
+### What to watch:
 
-## My Recommendation
+- **Provider versions**: Both use the same providers, but pin versions to avoid surprises
+- **Backend configuration**: S3, GCS, Azure backends work identically
+- **CI/CD**: Replace `terraform` with `tofu` in your pipeline scripts
+- **Terraform Cloud**: Does not work with OpenTofu — use env0, Spacelift, or Scalr
 
-For **new projects** where open-source licensing matters, choose **OpenTofu**. For **existing Terraform deployments** with Terraform Cloud, the switching cost may not be justified. Both tools produce identical infrastructure — the difference is licensing and governance. [Book a consultation](https://calendly.com/lucaberton/) to evaluate your IaC strategy.
+## Decision guide
 
-## Related Resources
+### Stay with Terraform when:
 
+- You use **Terraform Cloud/Enterprise** and its features (Sentinel, cost estimation, VCS integration)
+- The BSL license **does not affect your use case** (most internal teams)
+- You want **Stacks** for multi-deployment orchestration
+- Your organization has **HashiCorp enterprise agreements**
+- Team training and documentation references Terraform specifically
+
+### Switch to OpenTofu when:
+
+- You need **state encryption** built into the tool
+- The BSL license **affects your business** (you are a vendor or MSP)
+- You prefer **open-source governance** under the Linux Foundation
+- You want **dynamic provider configuration** (`for_each` on providers)
+- You want to **reduce vendor lock-in** risk
+- Your organization has a policy against non-open-source infrastructure tools
+
+### The pragmatic view
+
+For most teams managing their own cloud infrastructure, both tools produce identical results. The code is compatible, the providers are the same, and the workflow is identical. Choose based on your organization's stance on licensing and whether you need OpenTofu's unique features (state encryption, dynamic providers).
+
+<BlogPromoCard />
+
+## Related
+
+- [Crossplane vs Terraform 2026](/blog/crossplane-vs-terraform-2026/)
+- [Terraform vs Pulumi 2026](/blog/terraform-vs-pulumi-2026/)
 - [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
-- [Terraform vs CloudFormation](/blog/terraform-vs-cloudformation-2026/)
-- [Crossplane vs Terraform](/blog/crossplane-vs-terraform-2026/)
+- [Internal Developer Platforms 2026](/blog/internal-developer-platforms-2026/)
+- [ArgoCD vs Flux 2026](/blog/argocd-vs-flux-2026/)

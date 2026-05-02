@@ -1,73 +1,205 @@
 ---
 draft: false
-title: "K3s vs K8s: Lightweight Kubernetes Compared (2026)"
-snippet: "K3s vs full Kubernetes comparison. Resource usage, edge computing, features removed, and when to use K3s."
-description: "K3s vs full Kubernetes comparison. Resource usage, edge computing, features removed, and when to use K3s. Covers diagnosis with kubectl, root causes, and."
+title: "K3s vs K8s 2026: Lightweight vs Full Kubernetes"
+snippet: "K3s vs K8s compared for 2026. Resource requirements, architecture differences, edge deployment, production suitability, and when lightweight Kubernetes is the right choice."
+description: "K3s vs K8s comparison 2026. Resource usage, architecture, edge computing, HA setup, and decision guide for lightweight vs full Kubernetes."
 image:
   src: "/blog/thumbnails/k3s-vs-k8s-2026.jpg"
-  alt: "K3s vs K8s: Lightweight Kubernetes Compared (2026)"
+  alt: "K3s vs K8s: Lightweight vs Full Kubernetes"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-05-02"
 author: "Luca Berton"
 category: "Platform Engineering"
-tags: ["Comparison", "DevOps", "Kubernetes", "2026"]
+tags:
+  - "k3s"
+  - "kubernetes"
+  - "edge"
+  - "lightweight"
+  - "comparison"
 ---
-This is a practical comparison based on real production use, not vendor marketing.
 
-## Quick Comparison
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
 
-| Feature | K3s | K8s (kubeadm) |
-|---------|-----|---------------|
-| Binary size | ~70 MB | Multiple components (~500 MB+) |
-| Memory (control plane) | ~512 MB | ~2 GB+ |
-| Install time | 30 seconds | 15-30 minutes |
-| Default datastore | SQLite/etcd | etcd |
-| Certified Kubernetes | Yes (CNCF conformant) | Yes |
-| HA support | Yes (embedded etcd) | Yes |
-| ARM support | Native | Requires manual setup |
-| Components | Bundled (containerd, Flannel, CoreDNS, Traefik) | Choose your own |
+K3s is a certified Kubernetes distribution that runs in 512 MB of RAM. Full K8s (kubeadm) needs 2 GB minimum. Both are 100% conformant — the same workloads run on both. The difference is what is included, what is removed, and where each fits.
 
-## When to Use K3s
+## Architecture differences
 
-- **Edge and IoT**: Runs on Raspberry Pi, ARM devices, and minimal hardware
-- **Development and CI/CD**: Instant single-node clusters for testing
-- **Small production clusters**: 1-20 nodes where simplicity matters
-- **Learning Kubernetes**: Full Kubernetes API without the setup complexity
+| Component | K8s (kubeadm) | K3s |
+|---|---|---|
+| **Binary** | Multiple (kubelet, kube-apiserver, etcd, etc.) | Single binary (~70 MB) |
+| **Database** | etcd (external) | SQLite (default) or etcd, MySQL, PostgreSQL |
+| **Container runtime** | containerd (separate install) | containerd (bundled) |
+| **CNI** | Manual install (Calico, Cilium, etc.) | Flannel (bundled, replaceable) |
+| **Ingress** | Manual install | Traefik (bundled, replaceable) |
+| **Load balancer** | Manual (MetalLB, cloud) | ServiceLB (bundled) |
+| **Storage** | Manual (CSI drivers) | Local-path-provisioner (bundled) |
+| **Helm controller** | Not included | Built-in HelmChart CRD |
+| **Installation** | kubeadm init + join (multi-step) | `curl -sfL https://get.k3s.io \| sh -` |
+
+## Resource requirements
+
+| Metric | K8s (kubeadm) | K3s |
+|---|---|---|
+| **Minimum RAM (server)** | 2 GB | 512 MB |
+| **Recommended RAM** | 4 GB+ | 1 GB+ |
+| **Minimum CPU** | 2 cores | 1 core |
+| **Disk** | 50 GB+ | 10 GB+ |
+| **Control plane processes** | ~1.5 GB RAM | ~300 MB RAM |
+| **Binary size** | Multiple binaries, ~500 MB+ | Single binary, ~70 MB |
+| **Install time** | 10-20 minutes | 30 seconds |
+
+## Installation
+
+### K8s (kubeadm)
 
 ```bash
-# Install K3s — literally one command
-curl -sfL https://get.k3s.io | sh -
+# Disable swap, load modules, configure sysctl (see full guide)
+# Install containerd
+sudo apt-get install -y containerd.io
 
-# Check cluster
-sudo k3s kubectl get nodes
+# Install kubeadm
+sudo apt-get install -y kubelet kubeadm kubectl
 
-# Add a worker
-curl -sfL https://get.k3s.io | K3S_URL=https://master:6443   K3S_TOKEN=$(sudo cat /var/lib/rancher/k3s/server/node-token) sh -
+# Initialize
+sudo kubeadm init --pod-network-cidr=10.244.0.0/16
+
+# Configure kubectl
+mkdir -p ~/.kube && sudo cp /etc/kubernetes/admin.conf ~/.kube/config
+
+# Install CNI
+kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml
+
+# Join workers (on each worker node)
+sudo kubeadm join <master-ip>:6443 --token <token> --discovery-token-ca-cert-hash sha256:<hash>
 ```
 
-## When to Use K8s (kubeadm)
+Full guide: [Install Kubernetes on Rocky Linux 9](/blog/install-kubernetes-rocky-linux-9/)
 
-- **Full control**: Choose every component — CNI, CSI, ingress controller, runtime
-- **Large clusters**: 100+ nodes with advanced networking and storage requirements
-- **Enterprise environments**: When you need specific CNI (Cilium, Calico), storage (Ceph, Portworx), and observability
-- **Managed Kubernetes base**: kubeadm is what EKS, AKS, and GKE build upon
+### K3s
 
-## What K3s Removes
+```bash
+# Server (control plane + worker)
+curl -sfL https://get.k3s.io | sh -
 
-K3s is Kubernetes with the following replaced or removed:
-- **etcd** → SQLite (single node) or embedded etcd (HA)
-- **Cloud controller manager** → removed (no cloud provider integration)
-- **Storage plugins** → in-tree plugins removed, CSI supported
-- **Bundled**: Flannel CNI, CoreDNS, Traefik ingress, local-path storage
+# That's it. kubectl works immediately:
+sudo k3s kubectl get nodes
 
-You can replace any bundled component — for example, install Cilium instead of Flannel.
+# Join workers
+curl -sfL https://get.k3s.io | K3S_URL=https://<server-ip>:6443 \
+  K3S_TOKEN=$(sudo cat /var/lib/rancher/k3s/server/node-token) sh -
+```
 
-## My Recommendation
+One command. No prerequisites beyond a Linux machine.
 
-Start with **K3s** for development, edge, and small production workloads. Use **kubeadm** (or a managed service like EKS/GKE/AKS) when you need large-scale production clusters with full component control. K3s is real Kubernetes — same API, same kubectl, same Helm charts. [Book a consultation](https://calendly.com/lucaberton/) to plan your cluster architecture.
+## High availability
 
-## Related Resources
+### K8s HA
 
-- [Install K3s on Ubuntu](/blog/install-k3s-ubuntu/)
-- [Install K3s on Raspberry Pi](/blog/install-k3s-raspberry-pi/)
-- [EKS vs GKE vs AKS](/blog/eks-vs-gke-vs-aks-2026/)
+```bash
+# 3 control plane nodes with external etcd or stacked etcd
+sudo kubeadm init --control-plane-endpoint "load-balancer:6443" --upload-certs
+# Join additional control planes
+sudo kubeadm join load-balancer:6443 --control-plane --certificate-key <key>
+```
+
+Requires external load balancer, etcd cluster management, certificate distribution.
+
+### K3s HA
+
+```bash
+# Server 1 (with embedded etcd)
+curl -sfL https://get.k3s.io | sh -s - server --cluster-init
+
+# Server 2 and 3
+curl -sfL https://get.k3s.io | sh -s - server \
+  --server https://server1:6443 \
+  --token $(cat /var/lib/rancher/k3s/server/node-token)
+```
+
+K3s handles embedded etcd, certificate management, and load balancing internally. Three commands for a 3-node HA cluster.
+
+## What K3s removes
+
+K3s achieves its small footprint by removing and replacing components:
+
+- **Cloud controller manager** — removed (not needed for edge/bare-metal)
+- **Storage drivers** — in-tree drivers removed (use CSI)
+- **Legacy APIs** — deprecated alpha APIs removed
+- **Docker** — not supported (containerd only)
+- **etcd** — replaced with SQLite by default (etcd available as option)
+
+Everything removed is either deprecated, cloud-specific, or replaceable. K3s is still **100% CNCF conformant** — all standard Kubernetes APIs and behaviors work.
+
+## Edge and IoT
+
+K3s was built for edge computing:
+
+```bash
+# ARM64 (Raspberry Pi 4, NVIDIA Jetson)
+curl -sfL https://get.k3s.io | sh -
+
+# ARM (Raspberry Pi 3)
+curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable traefik" sh -
+
+# Air-gapped install
+# Download binary + images, copy to node
+sudo cp k3s /usr/local/bin/
+sudo cp k3s-airgap-images-amd64.tar /var/lib/rancher/k3s/agent/images/
+sudo k3s server
+```
+
+K3s runs on:
+- Raspberry Pi (2 GB+ RAM)
+- NVIDIA Jetson (AI at the edge)
+- Intel NUC
+- Industrial PCs
+- VMs with 512 MB RAM
+
+Full K8s does not fit on these devices — the control plane alone exceeds their memory.
+
+## When K3s matches K8s
+
+| Capability | Works on K3s? |
+|---|---|
+| Helm charts | Yes |
+| Operators (OLM) | Yes |
+| Istio / Cilium | Yes |
+| Prometheus / Grafana | Yes |
+| ArgoCD / Flux | Yes |
+| GPU workloads (NVIDIA) | Yes |
+| PersistentVolumes (CSI) | Yes |
+| NetworkPolicies | Yes |
+| RBAC | Yes |
+| CRDs | Yes |
+
+K3s is conformant Kubernetes. If it works on K8s, it works on K3s.
+
+## Decision guide
+
+### Choose K8s (kubeadm) when:
+
+- You need **full control** over every component (etcd tuning, custom kubelet flags)
+- You are running **large clusters** (100+ nodes) where etcd performance matters
+- **Cloud provider integration** is needed (cloud controller manager)
+- Your organization requires the **exact upstream Kubernetes** distribution
+- You have **experienced Kubernetes administrators** who manage the cluster
+
+### Choose K3s when:
+
+- **Edge, IoT, or resource-constrained** environments (under 4 GB RAM)
+- You want the **fastest path to a working cluster** (30 seconds)
+- **Development and testing** environments (local Kubernetes)
+- **Small production clusters** (3-20 nodes)
+- You want **batteries-included** (Traefik, Flannel, ServiceLB, Helm controller)
+- **Air-gapped environments** where a single binary is easier to distribute
+- Managed by [Rancher](/blog/rancher-vs-openshift-2026/) for multi-cluster
+
+<BlogPromoCard />
+
+## Related
+
+- [EKS vs GKE vs AKS 2026](/blog/eks-vs-gke-vs-aks-2026/)
+- [Kind vs Minikube 2026](/blog/kind-vs-minikube-2026/)
+- [Install Kubernetes on Rocky Linux 9](/blog/install-kubernetes-rocky-linux-9/)
+- [Rancher vs OpenShift 2026](/blog/rancher-vs-openshift-2026/)
+- [containerd vs CRI-O 2026](/blog/containerd-vs-cri-o-2026/)

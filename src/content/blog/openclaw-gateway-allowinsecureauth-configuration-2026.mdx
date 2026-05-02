@@ -1,0 +1,189 @@
+---
+draft: false
+title: "OpenClaw gateway.controlui.allowinsecureauth Explained"
+snippet: "What is openclaw gateway.controlui.allowinsecureauth? When to enable it, what security risks it carries, and safer alternatives for non-TLS deployments."
+description: "What is openclaw gateway.controlui.allowinsecureauth? When to enable it, security implications, and safer alternatives for non-TLS OpenClaw deployments."
+publishDate: "2026-05-02"
+lastModified: "2026-05-02"
+image:
+  src: "/blog/thumbnails/openclaw-gateway-allowinsecureauth-2026.jpg"
+  alt: "OpenClaw gateway.controlui.allowinsecureauth configuration guide"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "openclaw"
+  - "gateway"
+  - "security"
+  - "troubleshooting"
+  - "configuration"
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What is allowinsecureauth?
+
+The `gateway.controlui.allowinsecureauth` setting controls whether the OpenClaw Control UI allows authentication over unencrypted HTTP connections. By default, it is **disabled** — meaning the gateway requires HTTPS (TLS) for any authentication flow.
+
+When you try to authenticate to the Control UI over plain HTTP, you will see an error like:
+
+```
+insecure auth not allowed — use HTTPS or set gateway.controlui.allowinsecureauth=true
+```
+
+This is a security feature. Sending authentication tokens over unencrypted HTTP means anyone on the network can intercept your credentials.
+
+## When you might need it
+
+There are legitimate scenarios where you need to enable this:
+
+### Local development
+
+If you are running OpenClaw on `localhost` or `127.0.0.1` and accessing the Control UI from the same machine, the traffic never leaves your loopback interface. Network interception is not a realistic threat:
+
+```bash
+openclaw configure --set gateway.controlui.allowinsecureauth=true
+openclaw gateway restart
+```
+
+### Behind a TLS-terminating reverse proxy
+
+If you have Nginx, Caddy, or Traefik handling TLS termination in front of OpenClaw, the connection between the proxy and the gateway is internal. The proxy-to-gateway hop is typically on `localhost` or a private network:
+
+```
+Client → HTTPS → Nginx → HTTP → OpenClaw gateway (localhost:18789)
+```
+
+In this case, enabling `allowinsecureauth` is acceptable because the external-facing connection is encrypted.
+
+### Tailscale or WireGuard tunnels
+
+Traffic inside a Tailscale or WireGuard tunnel is already encrypted at the network layer. Running HTTP inside an encrypted tunnel is safe:
+
+```bash
+# Gateway bound to Tailscale interface
+openclaw configure --set gateway.bind=tailnet
+openclaw configure --set gateway.controlui.allowinsecureauth=true
+openclaw gateway restart
+```
+
+## Configuration
+
+### Enable via CLI
+
+```bash
+openclaw configure --set gateway.controlui.allowinsecureauth=true
+openclaw gateway restart
+```
+
+### Enable in config file
+
+Edit `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "gateway": {
+    "controlui": {
+      "allowinsecureauth": true,
+      "allowedorigins": ["http://192.168.1.100:18789"]
+    }
+  }
+}
+```
+
+Then restart:
+
+```bash
+openclaw gateway restart
+```
+
+### Environment variable
+
+```bash
+export OPENCLAW_GATEWAY_CONTROLUI_ALLOWINSECUREAUTH=true
+openclaw gateway restart
+```
+
+## Security risks
+
+Enabling this on a **public network or internet-facing deployment** is dangerous:
+
+- **Credential interception** — authentication tokens sent in plain text can be captured by anyone on the same network segment
+- **Session hijacking** — intercepted tokens can be replayed to impersonate your session
+- **Man-in-the-middle** — an attacker can intercept and modify requests between your browser and the gateway
+
+### Risk matrix
+
+| Scenario | Risk | Enable? |
+|---|---|---|
+| localhost / 127.0.0.1 | None | ✅ Safe |
+| Behind TLS reverse proxy | Low | ✅ Acceptable |
+| Tailscale / WireGuard | None | ✅ Safe |
+| LAN without encryption | Medium | ⚠️ Proceed with caution |
+| Public internet | **Critical** | ❌ Never |
+| Cloud VM with public IP | **Critical** | ❌ Never |
+
+## Safer alternatives
+
+Instead of enabling `allowinsecureauth`, consider these approaches:
+
+### 1. Use a reverse proxy with free TLS
+
+Caddy automatically provisions Let's Encrypt certificates:
+
+```
+openclaw.yourdomain.com {
+    reverse_proxy localhost:18789
+}
+```
+
+Zero configuration TLS. The Control UI gets HTTPS automatically.
+
+### 2. Use Tailscale HTTPS
+
+Tailscale provides [HTTPS certificates for your Tailscale hostnames](https://tailscale.com/kb/1153/enabling-https):
+
+```bash
+tailscale cert openclaw-server
+```
+
+Then configure OpenClaw to use the generated certificate.
+
+### 3. Self-signed certificates
+
+For internal deployments where you control all clients:
+
+```bash
+openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes
+```
+
+Configure OpenClaw to use TLS with the self-signed cert, then add it to your browser's trust store.
+
+## Troubleshooting
+
+### "insecure auth not allowed" after enabling
+
+Make sure you restarted the gateway:
+
+```bash
+openclaw gateway restart
+```
+
+Verify the setting took effect:
+
+```bash
+openclaw status
+```
+
+### Still getting auth errors
+
+Check that [`gateway.controlui.allowedorigins`](/blog/configuring-openclaw-gateway-bind-and-control-ui/) is also configured correctly. Both settings must be satisfied — the origin must be allowed AND the auth transport must be acceptable.
+
+<BlogPromoCard />
+
+## Related
+
+- [OpenClaw gateway.controlui.allowedorigins Configuration](/blog/configuring-openclaw-gateway-bind-and-control-ui/)
+- [Fix: Origin Not Allowed Error](/blog/openclaw-origin-not-allowed-fix/)
+- [OpenClaw dangerouslyallowhostheaderoriginfallback](/blog/understanding-openclaw-dangerouslyallowhostheaderoriginfallback/)
+- [OpenClaw Gateway Bind Modes](/blog/openclaw-gateway-bind-modes-loopback-lan-tailnet-auto-custom/)
+- [OpenClaw Docker allowedorigins Configuration](/blog/openclaw-docker-gateway-controlui-allowedorigins-configuration/)

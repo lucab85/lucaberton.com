@@ -1,0 +1,198 @@
+---
+draft: false
+title: "OpenClaw gateway.controlui.basepath Configuration Guide"
+snippet: "How to configure openclaw gateway.controlui.basepath to serve the Control UI under a subpath. Reverse proxy, Nginx, Traefik, and Kubernetes ingress examples."
+description: "Configure openclaw gateway.controlui.basepath to host the Control UI at a custom subpath behind a reverse proxy with Nginx, Traefik, or Kubernetes ingress."
+publishDate: "2026-05-02"
+lastModified: "2026-05-02"
+image:
+  src: "/blog/thumbnails/openclaw-gateway-basepath-configuration-2026.jpg"
+  alt: "OpenClaw gateway.controlui.basepath configuration guide"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "openclaw"
+  - "gateway"
+  - "reverse-proxy"
+  - "configuration"
+  - "kubernetes"
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What is basepath?
+
+The `gateway.controlui.basepath` setting tells the OpenClaw Control UI to serve its assets and API calls under a custom URL path prefix. By default, the Control UI is served at the root path `/`.
+
+When you host multiple services behind a single domain using a reverse proxy, you need each service at a different path:
+
+```
+https://tools.company.com/openclaw/     → OpenClaw Control UI
+https://tools.company.com/grafana/      → Grafana
+https://tools.company.com/jenkins/      → Jenkins
+```
+
+Without `basepath`, the Control UI expects to be at `/` and all its internal links, API calls, and static assets will break when served from a subpath.
+
+## Configuration
+
+### Set via CLI
+
+```bash
+openclaw configure --set gateway.controlui.basepath=/openclaw
+openclaw gateway restart
+```
+
+### Set in config file
+
+```json
+{
+  "gateway": {
+    "controlui": {
+      "basepath": "/openclaw",
+      "allowedorigins": ["https://tools.company.com"]
+    }
+  }
+}
+```
+
+### Environment variable
+
+```bash
+export OPENCLAW_GATEWAY_CONTROLUI_BASEPATH=/openclaw
+openclaw gateway restart
+```
+
+## Important rules
+
+1. **Always start with a slash**: `/openclaw` not `openclaw`
+2. **No trailing slash**: `/openclaw` not `/openclaw/`
+3. **Update allowedorigins**: The origin must match the external URL, not the internal one
+4. **API calls shift too**: The gateway API moves from `/api/...` to `/openclaw/api/...`
+
+## Reverse proxy examples
+
+### Nginx
+
+```nginx
+location /openclaw/ {
+    proxy_pass http://localhost:18789/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+}
+```
+
+The key detail: `proxy_pass http://localhost:18789/` with a trailing slash strips the `/openclaw/` prefix before forwarding to the gateway. Combined with `basepath=/openclaw`, the UI generates correct links.
+
+### Caddy
+
+```
+tools.company.com {
+    handle_path /openclaw/* {
+        reverse_proxy localhost:18789
+    }
+}
+```
+
+Caddy's `handle_path` strips the prefix automatically.
+
+### Traefik
+
+```yaml
+# docker-compose.yml labels
+labels:
+  - "traefik.http.routers.openclaw.rule=Host(`tools.company.com`) && PathPrefix(`/openclaw`)"
+  - "traefik.http.routers.openclaw.middlewares=openclaw-strip"
+  - "traefik.http.middlewares.openclaw-strip.stripprefix.prefixes=/openclaw"
+  - "traefik.http.services.openclaw.loadbalancer.server.port=18789"
+```
+
+### Kubernetes Ingress
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: openclaw
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+spec:
+  rules:
+    - host: tools.company.com
+      http:
+        paths:
+          - path: /openclaw(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: openclaw
+                port:
+                  number: 18789
+```
+
+## Full configuration example
+
+Putting it all together — OpenClaw behind Nginx with TLS, custom basepath, and proper origin enforcement:
+
+```json
+{
+  "gateway": {
+    "bind": "lan",
+    "controlui": {
+      "basepath": "/openclaw",
+      "allowedorigins": ["https://tools.company.com"],
+      "allowinsecureauth": false
+    }
+  }
+}
+```
+
+```bash
+openclaw gateway restart
+```
+
+Access at: `https://tools.company.com/openclaw/`
+
+## Troubleshooting
+
+### Blank page or 404
+
+The most common issue: the reverse proxy is not stripping the path prefix correctly. Check:
+
+1. Does your proxy strip `/openclaw` before forwarding?
+2. Does `basepath` in OpenClaw config match the proxy path?
+3. Open browser DevTools → Network tab → check if API calls go to `/openclaw/api/...` or just `/api/...`
+
+### WebSocket connection fails
+
+The Control UI uses WebSockets. Make sure your proxy passes `Upgrade` and `Connection` headers. For Nginx:
+
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+### Static assets return 404
+
+If CSS/JS files load from `/assets/...` instead of `/openclaw/assets/...`, the `basepath` setting is not being picked up. Verify with:
+
+```bash
+openclaw status
+```
+
+Look for `controlui.basepath` in the output.
+
+<BlogPromoCard />
+
+## Related
+
+- [OpenClaw gateway.controlui.allowedorigins Configuration](/blog/configuring-openclaw-gateway-bind-and-control-ui/)
+- [OpenClaw gateway.controlui.allowinsecureauth](/blog/openclaw-gateway-allowinsecureauth-configuration-2026/)
+- [OpenClaw Gateway Bind Modes](/blog/openclaw-gateway-bind-modes-loopback-lan-tailnet-auto-custom/)
+- [Running OpenClaw on Kubernetes](/blog/openclaw-kubernetes-personal-ai-agents-cloud-scale/)

@@ -1,56 +1,293 @@
 ---
 draft: false
-title: "Kustomize vs Helm: Kubernetes Packaging Compared"
+title: "Kustomize vs Helm 2026: When to Use Which (With Examples)"
 snippet: "Kustomize vs Helm compared for Kubernetes. Patch-based overlays vs templating, GitOps workflows, learning curve, and when to use both together in production."
-description: "Kustomize vs Helm comparison for Kubernetes deployments. Overlay patches vs templates, ArgoCD/Flux GitOps compatibility, and when to combine both approaches."
+description: "Kustomize vs Helm comparison for Kubernetes deployments. Overlay patches vs templates, ArgoCD/Flux GitOps compatibility, and when to combine both."
 image:
   src: "/blog/thumbnails/kustomize-vs-helm-2026.jpg"
   alt: "Kustomize vs Helm: Kubernetes Packaging Compared"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-05-02"
 author: "Luca Berton"
 category: "Platform Engineering"
-tags: ["Comparison", "Platform Engineering", "DevOps", "2026"]
+tags:
+  - "kubernetes"
+  - "helm"
+  - "kustomize"
+  - "gitops"
+  - "platform-engineering"
+  - "devops"
 ---
-## Kustomize vs Helm in 2026
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## The real question
+
+Both Kustomize and Helm solve the same problem — managing Kubernetes manifests across environments — but they approach it from opposite philosophies. Kustomize patches existing YAML. Helm templates it. Neither is universally better. The right choice depends on your team, your application complexity, and your GitOps workflow.
+
+After deploying both in production across dozens of projects, here is my honest comparison.
+
+## Feature comparison
 
 | Feature | Kustomize | Helm |
 |---------|----------|------|
-| **Approach** | Overlay patching | Templating |
-| **Language** | Pure YAML | Go templates |
-| **Learning curve** | Low | Moderate |
-| **Package management** | No | Yes (charts, repos) |
-| **Parameterization** | Patches, strategic merge | Values files |
+| **Philosophy** | Patch-based overlays | Template engine + package manager |
+| **Language** | Pure YAML (no templating) | Go templates + YAML |
+| **Learning curve** | Low — it is just YAML | Moderate — Go template syntax |
 | **Built into kubectl** | Yes (`kubectl apply -k`) | Separate binary |
+| **Package management** | No | Yes (charts, repos, OCI) |
 | **Dependency management** | No | Yes (subcharts) |
+| **Parameterization** | Strategic merge patches, JSON patches | Values files, `--set` flags |
+| **Rollback** | No native rollback | `helm rollback` with revision history |
+| **Lifecycle hooks** | No | Pre/post install, upgrade, delete hooks |
+| **Secret management** | No native support | Helm Secrets plugin, SOPS integration |
+| **Test framework** | No | `helm test` with test pods |
+| **GitOps compatibility** | ArgoCD + Flux native | ArgoCD + Flux native |
+| **Release tracking** | No — stateless | Yes — Secrets-based release history |
 
-## When to Use Kustomize
+## How Kustomize works
 
-- Simple overlays (dev/staging/prod variants)
-- You prefer plain YAML without templating
-- Small teams with straightforward deployments
-- You want kubectl-native workflows
+Kustomize starts with a base set of YAML manifests and applies layers of patches per environment:
 
-## When to Use Helm
+```
+├── base/
+│   ├── kustomization.yaml
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   └── configmap.yaml
+├── overlays/
+│   ├── dev/
+│   │   ├── kustomization.yaml
+│   │   └── replica-patch.yaml
+│   ├── staging/
+│   │   ├── kustomization.yaml
+│   │   └── resource-patch.yaml
+│   └── production/
+│       ├── kustomization.yaml
+│       ├── replica-patch.yaml
+│       └── hpa.yaml
+```
 
-- Complex applications with many configurable parameters
-- You need package management and versioned releases
-- You want to share charts across teams or publicly
-- You need lifecycle hooks and rollback capabilities
+**base/kustomization.yaml:**
 
-## Use Both Together
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - service.yaml
+  - configmap.yaml
+commonLabels:
+  app: my-api
+```
 
-The most common pattern in 2026:
+**overlays/production/kustomization.yaml:**
+
+```yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+  - hpa.yaml
+patches:
+  - path: replica-patch.yaml
+    target:
+      kind: Deployment
+      name: my-api
+namespace: production
+```
+
+**overlays/production/replica-patch.yaml:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-api
+spec:
+  replicas: 5
+  template:
+    spec:
+      containers:
+        - name: my-api
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+```
+
+Apply:
 
 ```bash
-# Helm generates base manifests, Kustomize patches per environment
-helm template my-app ./chart -f base-values.yaml > base/
-# Then kustomize overlays for each environment
 kubectl apply -k overlays/production/
 ```
 
-## Related Resources
+**What I like:** You can read every file and understand exactly what YAML will be produced. No template conditionals, no `{{ if }}` blocks, no hidden logic. The output is deterministic and auditable.
+
+## How Helm works
+
+Helm uses Go templates to generate manifests from a chart (a package of templates + default values):
+
+**templates/deployment.yaml:**
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "my-app.fullname" . }}
+  labels:
+    {{- include "my-app.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "my-app.selectorLabels" . | nindent 6 }}
+  template:
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.livenessProbe.path }}
+              port: http
+          {{- end }}
+```
+
+**values-production.yaml:**
+
+```yaml
+replicaCount: 5
+image:
+  repository: registry.company.com/my-app
+  tag: "v2.4.1"
+resources:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "2Gi"
+livenessProbe:
+  enabled: true
+  path: /healthz
+```
+
+Deploy:
+
+```bash
+helm upgrade --install my-app ./chart \
+  -f values-production.yaml \
+  --namespace production \
+  --create-namespace
+```
+
+**What I like:** One chart can serve dozens of environments with just a values file. Helm charts are shareable, versionable, and composable with subcharts. The ecosystem (Artifact Hub, Bitnami, vendor charts) saves enormous time.
+
+## When to use Kustomize
+
+**Simple applications with few configuration variants.** If your app has 3-5 manifests and the only difference between environments is replica count, resource limits, and namespace — Kustomize is the right tool. Adding Helm for this is over-engineering.
+
+**Teams that hate templating.** Some engineers find Go template syntax in YAML files genuinely painful. Kustomize's "it is just YAML" philosophy avoids that entirely.
+
+**kubectl-native workflows.** No extra binary to install, no Tiller (thankfully gone), no chart packaging. `kubectl apply -k` works everywhere.
+
+**Compliance environments.** When auditors want to see exactly what will be deployed, Kustomize's deterministic output is easier to review than Helm's template rendering.
+
+## When to use Helm
+
+**Complex applications with many knobs.** If your deployment has 20+ configurable parameters, conditional resources, and multiple deployment modes — Helm's templating power is worth the complexity.
+
+**Sharing across teams or publicly.** If you want other teams or the community to use your deployment, Helm charts with a `values.yaml` interface is the standard packaging format.
+
+**You need rollback and release history.** Helm tracks every release as a Kubernetes Secret. `helm rollback my-app 3` is one command. With Kustomize, you need GitOps or manual `kubectl apply` of a previous commit.
+
+**Dependency management.** Your app needs Redis, PostgreSQL, and an ingress controller? Helm subcharts handle this. Kustomize has no native dependency concept.
+
+## Use both together (the 2026 pattern)
+
+The most pragmatic teams in 2026 use both:
+
+1. **Helm** for third-party applications (Prometheus, Grafana, cert-manager, NGINX Ingress) — use the vendor's chart as-is with custom values
+2. **Kustomize** for your own applications — simpler, more readable, no template maintenance
+3. **Helm template + Kustomize overlay** for advanced cases — render Helm charts into static YAML, then apply Kustomize patches
+
+```bash
+# Render Helm chart to static manifests
+helm template prometheus prometheus-community/kube-prometheus-stack \
+  -f base-values.yaml > base/prometheus.yaml
+
+# Apply environment-specific patches with Kustomize
+kubectl apply -k overlays/production/
+```
+
+This pattern gives you Helm's ecosystem for third-party software and Kustomize's simplicity for your own code.
+
+## GitOps compatibility
+
+Both work well with ArgoCD and Flux:
+
+**ArgoCD with Kustomize:**
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  source:
+    repoURL: https://github.com/company/k8s-config
+    path: overlays/production
+```
+
+**ArgoCD with Helm:**
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  source:
+    repoURL: https://charts.company.com
+    chart: my-app
+    targetRevision: "2.4.1"
+    helm:
+      valueFiles:
+        - values-production.yaml
+```
+
+**Flux with Kustomize:**
+
+```yaml
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+spec:
+  sourceRef:
+    kind: GitRepository
+    name: k8s-config
+  path: ./overlays/production
+```
+
+## My recommendation
+
+Start with Kustomize for your own applications. Switch to Helm only when you hit one of these:
+
+- You need to package and share the deployment
+- You need 10+ configurable parameters per environment
+- You need lifecycle hooks or rollback
+- You are deploying a third-party application that ships a Helm chart
+
+Most teams end up using both. That is fine. They solve different problems.
+
+<BlogPromoCard />
+
+## Related
 
 - [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)
 - [Kustomize Cheat Sheet](/blog/kustomize-cheat-sheet-2026/)
-- [Helm vs Kustomize](/blog/helm-vs-kustomize-2026/)
+- [Kong vs Envoy vs Traefik: API Gateway Benchmark](/blog/kong-vs-envoy-vs-traefik-api-gateway-2026/)
+- [EKS vs GKE vs AKS 2026](/blog/eks-vs-gke-vs-aks-2026/)
+- [Enterprise Kubernetes Security Checklist](/blog/enterprise-kubernetes-security-hardening-checklist-2026/)

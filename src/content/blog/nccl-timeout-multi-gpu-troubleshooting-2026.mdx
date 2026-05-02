@@ -1,0 +1,242 @@
+---
+draft: false
+title: "Fix NCCL_TIMEOUT: Multi-GPU and Multi-Node Troubleshooting"
+snippet: "Fix export NCCL_TIMEOUT errors in multi-GPU training and distributed inference. Covers timeout tuning, NCCL environment variables, network debugging, and InfiniBand/RoCE configuration."
+description: "Fix NCCL_TIMEOUT errors in multi-GPU training and distributed inference. Timeout tuning, NCCL environment variables, InfiniBand and RoCE configuration."
+publishDate: "2026-05-02"
+lastModified: "2026-05-02"
+image:
+  src: "/blog/thumbnails/nccl-timeout-multi-gpu-troubleshooting-2026.jpg"
+  alt: "Fix NCCL TIMEOUT multi-GPU troubleshooting guide"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "nvidia"
+  - "nccl"
+  - "multi-gpu"
+  - "distributed-training"
+  - "troubleshooting"
+  - "infrastructure"
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## The error
+
+You are running multi-GPU training or distributed inference and hit:
+
+```
+RuntimeError: NCCL communicator was aborted on rank 0.
+Original reason for failure was: Watchdog caught collective operation timeout:
+WorkNCCL(SeqNum=12345, OpType=ALLREDUCE, ...) ran for 1800000 milliseconds before timing out.
+```
+
+Or you see:
+
+```
+[Rank 0] NCCL operation timed out after 1800 seconds
+```
+
+NCCL (NVIDIA Collective Communications Library) handles GPU-to-GPU communication in distributed workloads. When a collective operation (AllReduce, AllGather, Broadcast) takes longer than the configured timeout, NCCL aborts.
+
+## Quick fix: increase the timeout
+
+The most common fix is increasing `NCCL_TIMEOUT` (or the PyTorch equivalent):
+
+```bash
+# Set NCCL timeout to 1 hour (3600 seconds)
+export NCCL_TIMEOUT=3600
+
+# For PyTorch distributed
+export NCCL_ASYNC_ERROR_HANDLING=1
+export TORCH_NCCL_BLOCKING_WAIT=0
+```
+
+In PyTorch code:
+
+```python
+import torch.distributed as dist
+from datetime import timedelta
+
+dist.init_process_group(
+    backend="nccl",
+    timeout=timedelta(seconds=3600)
+)
+```
+
+For vLLM and NIM containers:
+
+```bash
+# vLLM
+export VLLM_NCCL_TIMEOUT=3600000  # milliseconds
+
+# NVIDIA NIM
+docker run --gpus all \
+  -e NCCL_TIMEOUT=3600 \
+  -e VLLM_NCCL_TIMEOUT=3600000 \
+  nvcr.io/nim/meta/llama-3.1-70b-instruct:latest
+```
+
+## Common causes and real fixes
+
+Increasing the timeout is a band-aid. Here are the actual root causes:
+
+### 1. Network misconfiguration between nodes
+
+The most common cause in multi-node setups. NCCL cannot reach other ranks over the expected network interface:
+
+```bash
+# Force NCCL to use a specific network interface
+export NCCL_SOCKET_IFNAME=eth0
+
+# For InfiniBand
+export NCCL_IB_HCA=mlx5_0
+
+# For RoCE (RDMA over Converged Ethernet)
+export NCCL_IB_GID_INDEX=3
+export NCCL_IB_DISABLE=0
+```
+
+Verify connectivity between nodes:
+
+```bash
+# Check InfiniBand status
+ibstat
+
+# Test RDMA connectivity
+ib_write_bw -d mlx5_0 --report_gbits
+
+# Check if NCCL can see the network
+NCCL_DEBUG=INFO python -c "import torch; torch.cuda.nccl.version()"
+```
+
+### 2. Firewall blocking NCCL ports
+
+NCCL uses a range of TCP/IP ports for socket-based communication. If ranks cannot connect:
+
+```bash
+# Default NCCL port range
+export NCCL_SOCKET_NTHREADS=4
+export NCCL_NSOCKS_PERTHREAD=4
+
+# Open firewall for NCCL (typical range)
+sudo ufw allow 29400:29500/tcp
+
+# Or in Kubernetes, ensure pods can communicate on all ports
+# (most CNI plugins allow this by default within a namespace)
+```
+
+### 3. GPU memory exhaustion
+
+If a GPU runs out of memory during a collective operation, it will hang rather than crash immediately — causing a timeout on other ranks:
+
+```bash
+# Monitor GPU memory during training
+watch -n 1 nvidia-smi
+
+# Set memory fraction limit
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
+```
+
+### 4. Asymmetric GPU topology
+
+When GPUs within a node have different interconnect speeds (NVLink vs PCIe), NCCL may choose a suboptimal path:
+
+```bash
+# Check GPU topology
+nvidia-smi topo -m
+
+# Force NCCL to use specific algorithms
+export NCCL_ALGO=Ring    # or Tree, CollnetDirect, CollnetChain
+export NCCL_PROTO=Simple # or LL, LL128
+```
+
+### 5. One rank is slower (straggler)
+
+Data loading, preprocessing, or gradient computation takes longer on one rank. All other ranks wait at the collective barrier:
+
+```bash
+# Enable async error handling to avoid indefinite hangs
+export NCCL_ASYNC_ERROR_HANDLING=1
+
+# Log per-rank timing
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=ALL
+```
+
+## Essential NCCL environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `NCCL_TIMEOUT` | 1800 | Timeout in seconds for collective operations |
+| `NCCL_DEBUG` | WARN | Logging level: VERSION, WARN, INFO, TRACE |
+| `NCCL_DEBUG_SUBSYS` | ALL | Which subsystems to log |
+| `NCCL_SOCKET_IFNAME` | auto | Network interface for socket communication |
+| `NCCL_IB_HCA` | auto | InfiniBand HCA device to use |
+| `NCCL_IB_GID_INDEX` | 0 | GID index for RoCE |
+| `NCCL_IB_DISABLE` | 0 | Set to 1 to force TCP instead of IB |
+| `NCCL_P2P_DISABLE` | 0 | Disable GPU peer-to-peer (NVLink/PCIe) |
+| `NCCL_SHM_DISABLE` | 0 | Disable shared memory transport |
+| `NCCL_ALGO` | auto | Algorithm: Ring, Tree, CollnetDirect |
+| `NCCL_PROTO` | auto | Protocol: LL, LL128, Simple |
+| `NCCL_NET_GDR_LEVEL` | auto | GPU Direct RDMA level |
+| `NCCL_CROSS_NIC` | 0 | Allow cross-NIC communication |
+| `NCCL_SOCKET_NTHREADS` | 1 | Threads per socket |
+
+## Kubernetes-specific configuration
+
+In Kubernetes multi-node GPU workloads, NCCL issues often come from pod networking:
+
+```yaml
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: training
+      env:
+        - name: NCCL_TIMEOUT
+          value: "3600"
+        - name: NCCL_DEBUG
+          value: "INFO"
+        - name: NCCL_SOCKET_IFNAME
+          value: "eth0"
+        - name: NCCL_IB_DISABLE
+          value: "0"
+      resources:
+        limits:
+          nvidia.com/gpu: 8
+          rdma/rdma_shared_device_a: 1
+      securityContext:
+        capabilities:
+          add: ["IPC_LOCK"]
+```
+
+For [NVIDIA NIM multi-node deployments](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/), the Helm chart handles most NCCL configuration. Override with:
+
+```yaml
+# values.yaml
+env:
+  - name: NCCL_TIMEOUT
+    value: "3600"
+  - name: NCCL_DEBUG
+    value: "INFO"
+```
+
+## Debugging workflow
+
+1. **Enable NCCL_DEBUG=INFO** — see which transport NCCL selects and where it gets stuck
+2. **Check `nvidia-smi topo -m`** — verify GPU interconnect topology
+3. **Test network** — `ib_write_bw` for RDMA, `iperf3` for TCP
+4. **Check firewall** — ensure all ranks can reach each other
+5. **Monitor GPU memory** — out-of-memory on one rank causes timeout on others
+6. **Increase timeout temporarily** — if the operation eventually completes, the issue is performance not connectivity
+
+<BlogPromoCard />
+
+## Related
+
+- [NVIDIA NIM Multi-Node on Kubernetes](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/)
+- [Run:ai Distributed Inference with DeepSeek-R1](/blog/nvidia-run-ai-nim-distributed-inference-tutorial-2026/)
+- [Enable PFC on Mellanox ConnectX NICs](/blog/enable-pfc-mellanox-connectx-lossless-rdma/)
+- [NVIDIA DOCA Perftest: RDMA Benchmarking](/blog/nvidia-doca-perftest-rdma-benchmarking-bluefield-dpu/)
+- [Linux NIC Tuning on Client Machines](/blog/linux-nic-tuning-client-machine-performance/)

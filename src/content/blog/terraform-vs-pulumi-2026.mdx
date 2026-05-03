@@ -7,28 +7,31 @@ image:
   src: "/blog/thumbnails/terraform-vs-pulumi-2026.jpg"
   alt: "Terraform vs Pulumi: Infrastructure as Code"
 publishDate: "2026-04-04"
-lastModified: "2026-05-02"
+lastModified: "2026-05-03"
 author: "Luca Berton"
 category: "Platform Engineering"
 tags:
   - "terraform"
   - "pulumi"
-  - "iac"
-  - "devops"
-  - "comparison"
+  - "infrastructure-as-code"
+  - "typescript"
+  - "python"
 ---
-
 import BlogPromoCard from '../../components/BlogPromoCard.astro';
 
-Terraform uses HCL (a domain-specific language). Pulumi uses general-purpose languages (TypeScript, Python, Go, Java, C#). This is the core difference — everything else follows from it.
+**Terraform** uses HCL, a domain-specific language designed for infrastructure. **Pulumi** lets you write infrastructure in TypeScript, Python, Go, C#, or Java. The core trade-off: HCL's simplicity and ecosystem vs general-purpose language power.
 
-## Language comparison
+## Side-by-Side: Same Infrastructure, Different Languages
 
-### Terraform (HCL)
-
+**Terraform (HCL):**
 ```hcl
 resource "aws_s3_bucket" "data" {
-  bucket = "my-data-bucket"
+  bucket = "mycompany-data-${var.environment}"
+
+  tags = {
+    Environment = var.environment
+    ManagedBy   = "terraform"
+  }
 }
 
 resource "aws_s3_bucket_versioning" "data" {
@@ -37,143 +40,123 @@ resource "aws_s3_bucket_versioning" "data" {
     status = "Enabled"
   }
 }
-
-# Conditional logic is limited
-resource "aws_s3_bucket" "logs" {
-  count  = var.enable_logging ? 1 : 0
-  bucket = "my-logs-bucket"
-}
-
-# Loops use for_each
-resource "aws_iam_user" "team" {
-  for_each = toset(var.team_members)
-  name     = each.value
-}
 ```
 
-### Pulumi (TypeScript)
-
+**Pulumi (TypeScript):**
 ```typescript
 import * as aws from "@pulumi/aws";
 
-const dataBucket = new aws.s3.Bucket("data", {
-  versioning: { enabled: true },
+const bucket = new aws.s3.Bucket("data", {
+  bucket: `mycompany-data-${environment}`,
+  tags: {
+    Environment: environment,
+    ManagedBy: "pulumi",
+  },
 });
 
-// Full programming language — conditionals, loops, functions
-if (config.requireBoolean("enableLogging")) {
-  const logsBucket = new aws.s3.Bucket("logs");
-}
-
-// Native loops
-const users = ["alice", "bob", "carol"].map(name =>
-  new aws.iam.User(name, { name })
-);
-
-// Reusable functions
-function createVpc(name: string, cidr: string) {
-  const vpc = new aws.ec2.Vpc(name, { cidrBlock: cidr });
-  const subnet = new aws.ec2.Subnet(`${name}-subnet`, {
-    vpcId: vpc.id,
-    cidrBlock: cidr.replace("/16", "/24"),
-  });
-  return { vpc, subnet };
-}
+new aws.s3.BucketVersioningV2("data-versioning", {
+  bucket: bucket.id,
+  versioningConfiguration: { status: "Enabled" },
+});
 ```
 
-## Feature comparison
+Both produce the same infrastructure. The difference is what happens when complexity grows.
 
-| Feature | Terraform | Pulumi |
-|---------|-----------|--------|
-| **Language** | HCL (DSL) | TypeScript, Python, Go, Java, C#, YAML |
-| **Type safety** | Limited (HCL types) | Full (compiler checks) |
-| **IDE support** | Basic (HCL extension) | Full (IntelliSense, refactoring) |
-| **Testing** | `terraform test` (basic) | Standard test frameworks (Jest, pytest, Go test) |
-| **Loops/conditionals** | `count`, `for_each` (limited) | Native language constructs |
-| **State** | State file (S3, TFC) | Pulumi Cloud, S3, local |
-| **Providers** | 4,000+ | ~150 native + all Terraform providers via bridge |
-| **Plan/preview** | `terraform plan` | `pulumi preview` |
-| **Import** | `terraform import` | `pulumi import` |
-| **Secrets** | Variables (plaintext in state) | Encrypted in state by default |
-| **Policy** | Sentinel (TFC), OPA | CrossGuard (built-in) |
-| **Component reuse** | Modules | Classes/functions/packages |
-| **Package management** | Terraform Registry | npm, PyPI, Go modules |
-| **License** | BSL 1.1 | Apache 2.0 |
+## Feature Comparison
 
-## Testing
+| Capability | Terraform | Pulumi |
+|---|---|---|
+| **Language** | HCL (domain-specific) | TypeScript, Python, Go, C#, Java |
+| **Type safety** | Limited (variable validation) | Full compile-time type checking |
+| **IDE support** | Good (HCL plugins) | Excellent (full IntelliSense, refactoring) |
+| **Testing** | `terraform test`, Terratest | Standard unit test frameworks (Jest, pytest) |
+| **Loops/conditionals** | `for_each`, `count`, ternary | Native loops, if/else, functions |
+| **State backend** | S3, Terraform Cloud, PostgreSQL | Pulumi Cloud, S3, Azure Blob, local |
+| **Provider ecosystem** | 3000+ providers (largest) | Same providers via Terraform bridge + native |
+| **Module reuse** | Terraform Registry | Package managers (npm, pip, go modules) |
+| **Secrets** | Marked sensitive, Vault | Built-in per-value encryption |
+| **Policy as code** | Sentinel (paid), OPA | CrossGuard (built-in) |
+| **Learning curve** | Learn HCL (1-2 weeks) | Use existing language skills |
+| **Community** | Massive (10+ years) | Growing (6+ years) |
 
-### Terraform
+## Where Pulumi Wins: Complex Logic
+
+When infrastructure requires dynamic logic — conditionally creating resources, transforming data, calling APIs during provisioning — Pulumi's general-purpose languages shine:
+
+```typescript
+// Pulumi: Dynamic resource creation with real programming
+const regions = ["us-east-1", "eu-west-1", "ap-southeast-1"];
+
+const buckets = regions.map(region => {
+  const provider = new aws.Provider(`provider-${region}`, { region });
+
+  return new aws.s3.Bucket(`data-${region}`, {
+    bucket: `mycompany-data-${region}`,
+    tags: { Region: region },
+  }, { provider });
+});
+
+// Aggregate all bucket ARNs for IAM policy
+const bucketArns = pulumi.all(buckets.map(b => b.arn));
+```
+
+The equivalent in Terraform requires `for_each` with maps, which becomes unwieldy for complex scenarios.
+
+## Where Terraform Wins: Ecosystem and Simplicity
+
+HCL is intentionally limited. This is a feature — infrastructure code should be declarative and readable by anyone, including junior engineers and platform consumers who do not write application code.
 
 ```hcl
-# terraform test (basic assertions)
-run "verify_bucket" {
-  command = plan
-  assert {
-    condition     = aws_s3_bucket.data.bucket == "my-data-bucket"
-    error_message = "Bucket name mismatch"
-  }
+# Terraform: readable by anyone in 30 seconds
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "5.0.0"
+
+  name = "production"
+  cidr = "10.0.0.0/16"
+
+  azs             = ["eu-west-1a", "eu-west-1b"]
+  private_subnets = ["10.0.1.0/24", "10.0.2.0/24"]
+  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24"]
+
+  enable_nat_gateway = true
 }
 ```
 
-### Pulumi (TypeScript with Jest)
+Terraform's module registry has thousands of production-tested modules. Pulumi can use the same providers (via a Terraform bridge) but the community modules are fewer.
+
+## State and Secrets
+
+Both tools use state files, but Pulumi adds a critical feature: **per-value secret encryption**. Every secret value is encrypted in the state file by default.
 
 ```typescript
-import * as pulumi from "@pulumi/pulumi/runtime";
-import { describe, it, expect } from "vitest";
-
-describe("Infrastructure", () => {
-  it("creates a versioned S3 bucket", async () => {
-    const bucket = await getResource("aws:s3:Bucket", "data");
-    expect(bucket.versioning.enabled).toBe(true);
-  });
-
-  it("encrypts all buckets", async () => {
-    const buckets = await getAllResources("aws:s3:Bucket");
-    for (const b of buckets) {
-      expect(b.serverSideEncryptionConfiguration).toBeDefined();
-    }
-  });
-});
+// Pulumi: secrets are first-class
+const dbPassword = new pulumi.Config().requireSecret("dbPassword");
+// This value is encrypted at rest in the state file
 ```
 
-Pulumi testing is significantly more powerful — you can use any test framework, mock resources, and test complex logic.
+Terraform marks values as `sensitive` to hide them from CLI output, but the state file contains them in plain text unless you encrypt the entire backend.
 
-## Secrets handling
+## Decision Guide
 
-Terraform stores secrets in plaintext in state files. You rely on encryption at the state backend level (S3 SSE, Terraform Cloud).
+**Choose Terraform when:**
+- Your team manages infrastructure but does not write application code
+- You need the largest provider and module ecosystem
+- You want broad hiring pool (Terraform skills are more common)
+- You are considering [OpenTofu](/blog/terraform-vs-opentofu-2026/) as a fork option
 
-Pulumi encrypts secrets in state by default:
+**Choose Pulumi when:**
+- Your infrastructure team writes TypeScript/Python/Go daily
+- You need complex conditional logic and transformations
+- You want unit testing with standard test frameworks
+- Per-value secret encryption is a compliance requirement
+- You prefer package managers (npm/pip) over HCL modules
 
-```typescript
-const password = new pulumi.Config().requireSecret("dbPassword");
-// password is encrypted in state — never stored in plaintext
-```
+## Related Reading
 
-## Decision guide
-
-### Choose Terraform when:
-
-- Your team is **infrastructure-focused** (not developers)
-- You want the **largest provider ecosystem** (4,000+ native providers)
-- **HCL simplicity** is a feature — it constrains what infrastructure code can do
-- You use **[Terraform Cloud](/blog/terraform-vs-opentofu-2026/)** (Sentinel, cost estimation, VCS workflows)
-- Existing codebases are in HCL — migration cost is high
-
-### Choose Pulumi when:
-
-- Your team is **developer-heavy** and already knows TypeScript/Python/Go
-- You need **complex logic** — loops, conditionals, API calls during provisioning
-- **Type safety and IDE support** are important (catch errors before plan)
-- You want **real testing** with standard test frameworks
-- **Secrets encryption** in state is a requirement
-- You want to share infrastructure code via **npm/PyPI packages**
+- [Terraform vs OpenTofu](/blog/terraform-vs-opentofu-2026/)
+- [Terraform vs CloudFormation](/blog/terraform-vs-cloudformation-2026/)
+- [Crossplane vs Terraform](/blog/crossplane-vs-terraform-2026/)
+- [Terraform vs Ansible](/blog/terraform-vs-ansible-when-to-use-which-2026/)
 
 <BlogPromoCard />
-
-## Related
-
-- [Terraform vs OpenTofu 2026](/blog/terraform-vs-opentofu-2026/)
-- [Crossplane vs Terraform 2026](/blog/crossplane-vs-terraform-2026/)
-- [Terraform Cheat Sheet](/blog/terraform-cheat-sheet-2026/)
-- [Internal Developer Platforms 2026](/blog/internal-developer-platforms-2026/)
-- [GitHub vs GitLab 2026](/blog/github-vs-gitlab-2026/)

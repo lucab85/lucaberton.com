@@ -50,4 +50,4 @@ OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES
 
 This error is caused by an added security to restrict multithreading in macOS High Sierra and later versions.
 
-Apple has [defined some rules on what is allowed and not allowed after forking](http://sealiesoftware.com/blog/archive/2017/6/5/Objective-C_and_fork_in_macOS_1013.html) and they have also added async-signal-safety to a limited number of APIs.
+Apple has [defined some rules on what is allowed and not allowed after forking](https://sealiesoftware.com/blog/archive/2017/6/5/Objective-C_and_fork_in_macOS_1013.html) and they have also added async-signal-safety to a limited number of APIs.

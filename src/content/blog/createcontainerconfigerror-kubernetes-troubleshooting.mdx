@@ -1,0 +1,223 @@
+---
+draft: false
+title: "Fix CreateContainerConfigError in Kubernetes Pods"
+snippet: "Kubernetes CreateContainerConfigError means the container cannot start due to missing ConfigMaps, Secrets, or invalid resource specs. Step-by-step troubleshooting guide."
+description: "Fix Kubernetes CreateContainerConfigError caused by missing ConfigMaps, Secrets, invalid resource limits, or mount failures. Complete troubleshooting guide."
+image:
+  src: "/blog/thumbnails/createcontainerconfigerror-kubernetes.jpg"
+  alt: "Fix CreateContainerConfigError in Kubernetes"
+publishDate: "2026-05-03"
+lastModified: "2026-05-03"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags:
+  - "kubernetes"
+  - "troubleshooting"
+  - "containers"
+  - "errors"
+  - "devops"
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+`CreateContainerConfigError` means Kubernetes accepted your Pod spec but cannot create the container because something in the configuration is wrong. The Pod stays in this state until you fix the underlying issue.
+
+## Common causes
+
+| Cause | Frequency | Fix |
+|---|---|---|
+| Missing ConfigMap | Most common | Create the ConfigMap |
+| Missing Secret | Very common | Create the Secret |
+| Invalid resource limits | Common | Fix CPU/memory format |
+| Volume mount misconfiguration | Occasional | Fix mount paths |
+| Invalid environment variable reference | Occasional | Fix `valueFrom` references |
+| SecurityContext issues | Rare | Fix UID/GID or capabilities |
+
+## Step 1: Identify the cause
+
+```bash
+# Check pod status
+kubectl get pod my-pod -o wide
+
+# Get detailed error message
+kubectl describe pod my-pod
+```
+
+Look for the `Events` section at the bottom:
+
+```
+Events:
+  Warning  Failed  2s  kubelet  Error: configmap "app-config" not found
+```
+
+or:
+
+```
+Events:
+  Warning  Failed  2s  kubelet  Error: secret "db-credentials" not found
+```
+
+The error message tells you exactly what is missing.
+
+## Fix: Missing ConfigMap
+
+```bash
+# Check if ConfigMap exists
+kubectl get configmap app-config
+
+# If not found, create it
+kubectl create configmap app-config \
+  --from-literal=DB_HOST=postgres \
+  --from-literal=DB_PORT=5432
+
+# Or from a file
+kubectl create configmap app-config --from-file=config.yaml
+```
+
+Verify the ConfigMap name in your Pod spec matches exactly:
+
+```yaml
+spec:
+  containers:
+    - name: app
+      envFrom:
+        - configMapRef:
+            name: app-config  # Must match the ConfigMap name exactly
+```
+
+## Fix: Missing Secret
+
+```bash
+# Check if Secret exists
+kubectl get secret db-credentials
+
+# If not found, create it
+kubectl create secret generic db-credentials \
+  --from-literal=username=admin \
+  --from-literal=password=secretpass
+
+# Check the Secret is in the correct namespace
+kubectl get secret db-credentials -n my-namespace
+```
+
+Common mistake — the Secret exists in a different namespace than the Pod:
+
+```bash
+# Pod is in namespace "production" but Secret is in "default"
+kubectl get secret db-credentials -n production  # Not found!
+kubectl get secret db-credentials -n default      # Found here
+
+# Fix: create in the correct namespace
+kubectl create secret generic db-credentials \
+  --from-literal=username=admin \
+  -n production
+```
+
+## Fix: Invalid resource limits
+
+```yaml
+# Wrong — invalid format
+resources:
+  limits:
+    cpu: "invalid"
+    memory: "lots"
+
+# Correct — valid Kubernetes resource format
+resources:
+  limits:
+    cpu: "500m"       # 500 millicores = 0.5 CPU
+    memory: "256Mi"   # 256 mebibytes
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+```
+
+Valid CPU formats: `100m`, `0.1`, `1`, `2`
+Valid memory formats: `128Mi`, `1Gi`, `512M`
+
+## Fix: Invalid environment variable reference
+
+```yaml
+# Wrong — referencing a key that doesn't exist in the ConfigMap
+env:
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: app-config
+        key: DATABASE_HOST  # Key doesn't exist!
+
+# Fix — use the correct key name
+env:
+  - name: DB_HOST
+    valueFrom:
+      configMapKeyRef:
+        name: app-config
+        key: DB_HOST  # Must match the actual key in the ConfigMap
+```
+
+Check what keys exist:
+
+```bash
+kubectl get configmap app-config -o yaml
+# data:
+#   DB_HOST: postgres    ← Use this key name
+#   DB_PORT: "5432"
+```
+
+## Fix: Optional references
+
+If a ConfigMap or Secret might not always exist, mark it as optional:
+
+```yaml
+envFrom:
+  - configMapRef:
+      name: app-config
+      optional: true   # Pod starts even if ConfigMap doesn't exist
+
+env:
+  - name: API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: api-keys
+        key: primary
+        optional: true  # Pod starts even if Secret doesn't exist
+```
+
+## Debugging checklist
+
+```bash
+# 1. Get the exact error
+kubectl describe pod <pod-name> | tail -20
+
+# 2. Check ConfigMaps in the namespace
+kubectl get configmap -n <namespace>
+
+# 3. Check Secrets in the namespace
+kubectl get secret -n <namespace>
+
+# 4. Verify the Pod spec references
+kubectl get pod <pod-name> -o yaml | grep -A5 configMapRef
+kubectl get pod <pod-name> -o yaml | grep -A5 secretKeyRef
+
+# 5. Check if Helm values are correct (if using Helm)
+helm get values <release-name>
+
+# 6. Check events for the namespace
+kubectl get events -n <namespace> --sort-by='.lastTimestamp'
+```
+
+## Prevention
+
+1. **Use Helm hooks** — create ConfigMaps and Secrets before Deployments
+2. **Mark optional references** as `optional: true` when appropriate
+3. **Use `kubectl dry-run`** — validate manifests before applying
+4. **GitOps validation** — [ArgoCD](/blog/argocd-vs-flux-2026/) can detect missing dependencies during sync
+
+<BlogPromoCard />
+
+## Related
+
+- [Kubernetes Troubleshooting Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
+- [EKS vs GKE vs AKS 2026](/blog/eks-vs-gke-vs-aks-2026/)
+- [Helm vs Kustomize 2026](/blog/helm-vs-kustomize-2026/)
+- [KEDA vs HPA 2026](/blog/keda-vs-hpa-2026/)

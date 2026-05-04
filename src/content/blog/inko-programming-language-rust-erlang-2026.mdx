@@ -1,0 +1,150 @@
+---
+title: "Inko: The Rust-Compiled Language with Erlang-Style Concurrency"
+snippet: "Inko is a new programming language that compiles to native code via Rust's LLVM backend. It combines single-ownership memory management with Erlang-style lightweight processes — no garbage collector, no data races."
+description: "Inko programming language combines Rust-style ownership with Erlang lightweight processes. No GC, no data races, batteries-included stdlib with HTTP server."
+publishDate: "2026-05-04"
+lastModified: "2026-05-04"
+image: { src: "/blog/thumbnails/inko-programming-language-rust-erlang-2026.jpg", alt: "Inko programming language - Rust compiled with Erlang concurrency" }
+category: "Open Source"
+author: "Luca Berton"
+draft: false
+tags: ["Programming Languages", "Rust", "Concurrency", "Open Source", "Erlang"]
+---
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+**Inko** is a programming language that takes the best ideas from Rust (single ownership, no garbage collector) and Erlang (lightweight processes, message passing) and wraps them in a syntax that is dramatically simpler than either. It compiles to native code via LLVM and ships with a batteries-included standard library — HTTP server, HTTP client, JSON, sockets, all built in.
+
+## The Design Philosophy
+
+Most languages make you choose: manual memory management with safety guarantees (Rust) or garbage collection with easy concurrency (Erlang, Go). Inko refuses this trade-off.
+
+**From Rust**, Inko takes single ownership and move semantics. Values are owned, can be borrowed, and are dropped when they go out of scope. No garbage collector means deterministic memory management and predictable performance.
+
+**From Erlang**, Inko takes lightweight processes that communicate via message passing. Processes are isolated — no shared mutable state, no data races by construction.
+
+**Unlike Rust**, Inko does not have a borrow checker that fights you. You can have multiple borrows (mutable and immutable) and move borrowed values while borrows exist:
+
+```
+let a = [10, 20, 30]
+
+let b = ref a   # immutable borrow
+let c = mut a   # mutable borrow
+let d = a       # move — all perfectly valid
+```
+
+This is the key insight: Inko gets most of Rust's memory safety benefits at a fraction of the complexity. The compiler catches the dangerous patterns (use-after-free, null pointers, data races) without requiring you to annotate lifetimes or fight the borrow checker.
+
+## Concurrency Model
+
+Inko processes are not OS threads. They are lightweight, isolated units that communicate by sending messages — similar to Erlang's actors or Pony's actors.
+
+```
+import std.sync (Promise)
+
+type async Counter {
+  let mut @value: Int
+
+  fn async mut increment {
+    @value += 1
+  }
+
+  fn async get(promise: uni Promise[Int]) {
+    promise.set(@value)
+  }
+}
+
+type async Main {
+  fn async main {
+    let counter = Counter(value: 0)
+
+    counter.increment
+    counter.increment
+
+    await counter.get  # => 2
+  }
+}
+```
+
+The `async` keyword on a type makes it a process. Methods marked `async` are messages. The compiler enforces that data sent between processes is **unique** (`uni`) — no outside references exist. This eliminates data races without locks, mutexes, or channels with complex ownership rules.
+
+Multi-producer multi-consumer channels are also available for decoupled communication.
+
+## Batteries-Included Standard Library
+
+Unlike Rust (where you reach for crates for basic functionality), Inko ships everything you need for common server applications:
+
+**HTTP server in 15 lines:**
+
+```
+import std.net.http.server (Handle, Request, Response, Server)
+
+type async Main {
+  fn async main {
+    Server.new(fn { recover App() }).start(8_000).or_panic
+  }
+}
+
+type App {}
+
+impl Handle for App {
+  fn pub mut handle(request: mut Request) -> Response {
+    Response.new.string('Hello, world!')
+  }
+}
+```
+
+No external dependencies. No Cargo.toml with 47 crates. The standard library covers HTTP client/server (with HTTPS), JSON, sockets, file I/O, and common data structures.
+
+## Memory Safety Without the Pain
+
+Inko eliminates entire categories of bugs at compile time:
+
+- **No NULL pointers** — optional values use an `Option` algebraic type with pattern matching
+- **No use-after-free** — single ownership with automatic dropping
+- **No data races** — process isolation with unique ownership transfers
+- **No unexpected runtime errors** — exhaustive pattern matching, no unchecked exceptions
+
+The compiler catches these at build time, not in production at 3 AM.
+
+## Where Inko Fits
+
+Inko targets the space between Go and Rust:
+
+| | Go | Inko | Rust |
+|---|---|---|---|
+| **Memory** | GC | Single ownership | Borrow checker |
+| **Concurrency** | Goroutines + channels | Processes + messages | async/await + manual |
+| **Complexity** | Low | Medium | High |
+| **Safety** | Data races possible | Data races impossible | Data races impossible |
+| **Stdlib** | Batteries included | Batteries included | Minimal |
+| **Compile target** | Native | Native (LLVM) | Native (LLVM) |
+
+**Use Inko when:**
+- You want Rust-level memory safety without the learning curve
+- You are building concurrent server applications
+- You want a batteries-included stdlib like Go
+- You come from Erlang/Elixir and want native performance
+
+**Stick with Rust when:**
+- You need zero-cost abstractions and maximum performance
+- You are writing systems-level code (OS kernels, drivers, embedded)
+- You need the massive crate ecosystem
+
+**Stick with Go when:**
+- Your team already knows Go
+- GC pauses are acceptable for your use case
+- You need the largest cloud-native ecosystem
+
+## My Take
+
+Inko is one of those languages that makes you ask "why didn't someone do this sooner?" Taking Rust's ownership model but relaxing the borrow checker enough to be usable, then adding Erlang's process model for concurrency — it is an elegant combination.
+
+The language is still early (small community, limited ecosystem), but the design decisions are sound. If you are starting a new server-side project and have the luxury of choosing your stack, Inko is worth a serious look. The "no GC + no data races + simple syntax" combination does not exist anywhere else.
+
+## Related Reading
+
+- [Weft Programming Language](/blog/weft-programming-language-ai-agents-durable-execution/)
+- [Podman vs Docker](/blog/podman-vs-docker-2026/)
+- [RHEL vs Ubuntu Server](/blog/rhel-vs-ubuntu-server-2026/)
+
+<BlogPromoCard />

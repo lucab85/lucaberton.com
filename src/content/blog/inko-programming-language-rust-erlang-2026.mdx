@@ -3,7 +3,7 @@ title: "Inko: The Rust-Compiled Language with Erlang-Style Concurrency"
 snippet: "Inko is a new programming language that compiles to native code via Rust's LLVM backend. It combines single-ownership memory management with Erlang-style lightweight processes — no garbage collector, no data races."
 description: "Inko programming language combines Rust-style ownership with Erlang lightweight processes. No GC, no data races, batteries-included stdlib with HTTP server."
 publishDate: "2026-05-04"
-lastModified: "2026-05-04"
+lastModified: "2026-05-05"
 image: { src: "/blog/thumbnails/inko-programming-language-rust-erlang-2026.jpg", alt: "Inko programming language - Rust compiled with Erlang concurrency" }
 category: "Open Source"
 author: "Luca Berton"
@@ -336,6 +336,145 @@ Inko targets the space between Go and Rust:
 - Your team already knows Go
 - GC pauses are acceptable for your use case
 - You need the largest cloud-native ecosystem
+
+## Test Statistics
+
+![Inko meetup — test statistics slide](/blog/events/inko-meetup-test-statistics.jpg)
+
+The Inko project has impressive test coverage:
+
+- **767 Rust unit tests**, most containing 5-10 asserts at minimum
+- **2,277 Inko tests**, similar number of asserts per test
+- Actual number is higher due to integration and table tests
+- `cargo test` takes **125 milliseconds** to run
+- `inko test` takes **3.1 seconds** to run
+- CI takes **11-12 minutes** across Linux, macOS, and FreeBSD
+- Could be half that if GitHub Actions supported FreeBSD natively
+
+### Table-Driven Tests
+
+![Inko meetup — table-driven tests expanding one test into 100 assertions](/blog/events/inko-meetup-table-driven-tests.jpg)
+
+Table-driven tests are a key testing pattern: define an array of `(INPUT, EXPECTED)` pairs and loop through them. One test function essentially expands into **100 tests/asserts**. This keeps the test code DRY while providing comprehensive coverage — especially useful for parser tests where you need to verify many input/output combinations.
+
+### Standard Library Tests
+
+![Inko meetup — stdlib tests are algorithmic, unit tests make more sense here](/blog/events/inko-meetup-stdlib-tests.jpg)
+
+Interestingly, the standard library uses a **different testing strategy** than the compiler:
+
+- Standard library is very "algorithmic" heavy
+- Most code requires little to no setup
+- **Unit tests make more sense here** than coarse integration tests
+- Lots of table-driven tests
+
+![Inko meetup — StringBuffer test with emoji support](/blog/events/inko-meetup-stdlib-test-code.jpg)
+
+The stdlib test example shows Inko's built-in test framework: `import std.test (Tests)`, define a `pub fn tests` function, and use `t.test('name', fn (t) { ... })` with `t.equal()` assertions. The example tests `StringBuffer.into_string` with emoji characters — confirming proper Unicode handling.
+
+## Challenges of Writing a Compiler in Rust
+
+The talk was refreshingly honest about Rust's pain points for compiler development.
+
+### The Borrow Checker Problem
+
+![Inko meetup — borrow checker challenge: iterating while mutating self](/blog/events/inko-meetup-borrow-checker-challenge.jpg)
+
+Code like `for value in &mut self.values { self.update_something_in_self(value); }` is extremely common in compilers — you need to iterate over data while mutating other parts of the same struct. Rust's borrow checker rejects this because `self` is borrowed immutably (for the iterator) and mutably (for the method call) simultaneously.
+
+![Inko meetup — borrow checker workarounds](/blog/events/inko-meetup-borrow-checker-workarounds.jpg)
+
+The workarounds are all unsatisfying:
+
+- `slice::get_disjoint_mut` can help, but comes with runtime cost
+- Using **IDs instead of borrows** works but adds indirection
+- Creative solutions like **GhostCell** exist but come with big caveats
+- Often there is **no good solution other than to just accept it**
+
+### Deep Nesting When Borrowing Multiple Fields
+
+![Inko meetup — deep nesting from borrowing multiple self fields](/blog/events/inko-meetup-borrow-checker-nesting.jpg)
+
+Another common pattern: `fn mark_escaping(&mut self)` needs to iterate `self.method.body.blocks`, then each block's instructions, then match on instruction types. Each level of nesting borrows a different field of `self`, creating deeply indented code that Rust forces upon you.
+
+### Enums Can Be Too Rigid
+
+![Inko meetup — struct + enum is more flexible than pure enum for TypeRef](/blog/events/inko-meetup-enums-rigid.jpg)
+
+Using an enum directly for `TypeRef` makes it too rigid — you cannot easily add fields without large changes. Better to use a **struct with an enum field**: `struct TypeRef { ownership: Ownership, type_enum: TypeEnum }` with `enum Ownership { Owned, Ref, ... }`. This gives flexibility to add metadata fields to `TypeRef` without touching every match arm.
+
+## Practical Tips for Rust Compiler Development
+
+### Tip: Pattern Matching
+
+![Inko meetup — pattern matching is much better than Java visitor pattern](/blog/events/inko-meetup-tip-pattern-matching.jpg)
+
+"Writing a compiler without good pattern matching support would be *much* harder." Pattern matching is often better than complex Java-style dispatch chains (e.g., the visitor pattern). The slide includes a Dilbert-esque comic about the complexity gap.
+
+### Tip: Reduce Unsafe Code
+
+![Inko meetup — only 168 unsafe blocks in the entire Inko compiler](/blog/events/inko-meetup-tip-reduce-unsafe.jpg)
+
+Running `rg 'unsafe' compiler/ inko/ types/ ast/ rt/ | wc -l` returns only **168** unsafe blocks across the entire codebase. The unavoidable unsafe areas:
+
+- LLVM is one giant unsafe library
+- Writing a good thread scheduler in safe Rust is impossible
+- Runtime exposes functions using the system ABI
+
+### Tip: Reduce Macros
+
+![Inko meetup — fewer macros = better compile times and tooling support](/blog/events/inko-meetup-tip-reduce-macros.jpg)
+
+- Macros can be useful, but figuring out what they actually do is difficult
+- Even more so with **proc macros**
+- rust-analyzer, rustfmt, etc. **just give up** inside macro bodies
+- Fewer macros = better compile times
+
+### Tip: Keep Compile Times Under Control
+
+![Inko meetup — Inko compiler builds in 5-15 seconds](/blog/events/inko-meetup-tip-compile-times.jpg)
+
+Fewer dependencies really helps. Crates being the compilation unit hurts compile times — splitting is necessary. Current Inko compiler build times:
+
+- `cargo check`: **5 seconds**
+- `cargo build`: **8 seconds**
+- `cargo build --release`: **15 seconds**
+
+These are full builds with all dependencies already downloaded. The creator notes this is difficult for large projects with many developers.
+
+### Tip: Reduce Third-Party Dependencies
+
+![Inko meetup — compiler has only 5 direct dependencies](/blog/events/inko-meetup-tip-reduce-deps.jpg)
+
+- The **compiler** has **5 direct dependencies**
+- The **runtime** has **10 direct dependencies** + a vendored version of `rustls-platform-modifier`
+- Inko first used a custom setup for I/O, then moved to the `polling` crate, then **back to a custom setup**
+- Allows greater control over your program
+
+The lesson: owning your critical path (I/O, scheduling) gives you control that third-party crates cannot.
+
+## Conclusion: The Creator's Honest Assessment
+
+![Inko meetup — conclusion slide](/blog/events/inko-meetup-conclusion.jpg)
+
+The talk ended with a balanced, honest conclusion:
+
+- Rust **does** have its challenges when writing a compiler
+- **Without Rust, he probably could not have built Inko**
+- Not sure what alternative he would pick (self-hosting = too much work)
+- Works best when you are **aggressive about keeping control**
+- Not sure Rust makes much sense for **higher-level applications**
+- "I'd use **Inko** 😄, **Gleam**, or **Go**" for application-level code
+
+The Gleam shoutout is notable — another BEAM-ecosystem language with strong typing.
+
+## Learn More
+
+![Inko meetup — learn more with QR code and links](/blog/events/inko-meetup-learn-more.jpg)
+
+- Creator's site: <https://yorickpeterse.com>
+- Language site: <https://inko-lang.org>
+- Source code: <https://github.com/inko-lang/inko>
 
 ## Why Inko Instead of Rust? (From the Talk)
 

@@ -113,6 +113,107 @@ The key quote from the talk: **"End goal: 80% of the benefits of Rust, at a frac
 
 The compiler tracks value states through control flow graphs. In the example: variable `a` is initialized in block A, conditionally moved in block C (`b = a`), while block D calls `bar`. At the join point E, the state of `a` is "moved OR available" — a **maybe moved** state. The compiler uses this to emit runtime checks only where needed, keeping the common path fast.
 
+## Stack-Allocated Types and Reference Counting
+
+![Inko meetup — stack-allocated types copied on borrow, like Swift structs](/blog/events/inko-meetup-stack-types.jpg)
+
+Inko also supports **stack-allocated types** that are copied upon borrowing — similar to Swift structs. For values that need to live beyond a single owner (strings, processes, certain user-defined types), Inko uses **atomically reference-counted types**. This is a pragmatic hybrid: stack allocation where possible, reference counting where needed, and single ownership for everything else.
+
+## Concurrency: The `uni` Keyword
+
+![Inko meetup — type-safe concurrency with the uni keyword](/blog/events/inko-meetup-concurrency-uni.jpg)
+
+The `uni` (unique) keyword is how Inko achieves **zero-copy, data-race-free concurrency**. When you send a value to another process, it must be `uni` — meaning no outside references exist. The compiler enforces this at compile time. You cannot accidentally share mutable state between processes because the type system makes it physically impossible.
+
+This is similar to Pony's `iso` (isolated) capability, but with simpler syntax. You either own a value exclusively and can send it, or you have shared references and cannot.
+
+## Process Scheduling
+
+![Inko meetup — Inko's process scheduling model](/blog/events/inko-meetup-scheduling.jpg)
+
+Inko processes are scheduled across OS threads by the runtime. The scheduler uses a **work-stealing** approach similar to Go's goroutine scheduler.
+
+![Inko meetup — scheduling diagram showing thread pools](/blog/events/inko-meetup-scheduling-diagram.jpg)
+
+The architecture separates **CPU-bound work** from **I/O-bound work** into different thread pools. This prevents a compute-heavy process from starving I/O-bound processes — a common problem in single-pool schedulers.
+
+## I/O Scheduling
+
+![Inko meetup — I/O scheduling with non-blocking operations](/blog/events/inko-meetup-io-scheduling.jpg)
+
+I/O operations are non-blocking at the runtime level. When a process performs I/O, it yields to the scheduler rather than blocking an OS thread. The runtime uses **epoll** (Linux) or **kqueue** (macOS/BSD) to efficiently multiplex I/O across processes. This gives Inko the same I/O scalability as Go or Erlang without requiring async/await syntax.
+
+## Generics
+
+![Inko meetup — generics with type bounds](/blog/events/inko-meetup-generics.jpg)
+
+Inko supports generics with type bounds, similar to Rust's trait bounds. Generic functions are monomorphized at compile time — each concrete type gets its own optimized machine code. No runtime dispatch, no boxing overhead.
+
+## Pattern Matching and Error Handling
+
+![Inko meetup — exhaustive pattern matching](/blog/events/inko-meetup-pattern-matching.jpg)
+
+Pattern matching in Inko is **exhaustive** — the compiler forces you to handle every possible case. No forgotten `else` branches, no unhandled variants. Combined with algebraic types (enums), this eliminates null pointer exceptions and unhandled error states at compile time.
+
+![Inko meetup — error handling without exceptions](/blog/events/inko-meetup-error-handling.jpg)
+
+Inko uses **Result types** for error handling — no exceptions, no try/catch. Errors are values that must be explicitly handled. This is the same approach as Rust and Go, but with Inko's exhaustive pattern matching making it impossible to accidentally ignore an error.
+
+## Standard Library
+
+![Inko meetup — batteries-included standard library](/blog/events/inko-meetup-stdlib.jpg)
+
+The standard library is intentionally comprehensive: HTTP server and client (with TLS), JSON, sockets, file I/O, process management, cryptographic hashing, and common data structures. The philosophy is the opposite of Rust's minimal stdlib — everything you need for a typical server application ships with the language.
+
+## Generating LLVM IR
+
+![Inko meetup — LLVM code generation for integer division](/blog/events/inko-meetup-generating-llvm.jpg)
+
+The final compilation stage converts MIR instructions to LLVM IR. The slide shows the Rust code that generates LLVM for a simple integer division — loading variables, performing the division, and storing the result. Straightforward LLVM builder API calls.
+
+![Inko meetup — 1500+ line match statement that lowers MIR to LLVM](/blog/events/inko-meetup-giant-match.jpg)
+
+Most of the LLVM generation happens in a single giant `match` statement — **1,500+ lines of code** — that lowers each MIR instruction to its LLVM equivalent. The creator's honest assessment: "Most happens in a single giant match that lowers each MIR instruction." Sometimes the simplest architecture is a massive match statement.
+
+## Linking
+
+![Inko meetup — linking is the boring but necessary final step](/blog/events/inko-meetup-linking.jpg)
+
+Linking is "probably the most boring part." Inko shells out to the system linker (e.g., clang) since there is no portable linker library similar to LLVM. The compiler automatically selects fast linkers when available (lld, mold). Linking usually takes up a tiny percentage of total compile time.
+
+## Testing Strategy: Integration Over Unit Tests
+
+![Inko meetup — integration tests vs unit tests for compiler development](/blog/events/inko-meetup-testing-strategy.jpg)
+
+The talk made a strong case for **integration tests over unit tests** for compiler development:
+
+- Writing unit tests for a compiler gets very tedious
+- Lots of boilerplate to set things up
+- Small internal changes may require updating many unit tests
+- High-level integration tests are much easier to work with
+- Allows for a much faster testing and development cycle
+- Various low-level type system tests are still written in Rust
+
+![Inko meetup — Rust unit test boilerplate for compiler testing](/blog/events/inko-meetup-rust-unit-tests.jpg)
+
+The Rust unit test example makes the pain obvious: setting up a `Database`, creating types, allocating placeholder variables — all just to test a single return type check. Integration tests skip all this boilerplate.
+
+![Inko meetup — three integration test categories](/blog/events/inko-meetup-test-categories.jpg)
+
+Inko's integration tests cover three areas: **compiler diagnostics**, **escape analysis**, and **code formatting**.
+
+![Inko meetup — diagnostic integration tests with expected error comments](/blog/events/inko-meetup-test-diagnostics.jpg)
+
+Diagnostic tests are elegant: a file contains Inko code with a comment at the end specifying the expected error. For example, defining `type A {}` twice triggers `error(duplicate-symbol): the symbol 'A' is already defined`. The test runner compiles the file and checks that the actual diagnostics match the expected ones.
+
+![Inko meetup — escape analysis integration tests](/blog/events/inko-meetup-test-escape-analysis.jpg)
+
+Escape analysis tests work similarly: regular Inko code with comments indicating where each allocation should end up — stack or heap. The test verifies the compiler's escape analysis places allocations correctly.
+
+![Inko meetup — code formatting integration tests](/blog/events/inko-meetup-test-formatting.jpg)
+
+Formatting tests use two files per test case: `input.inko` (before formatting) and `output.inko` (expected result). The compiler runs `inko fmt input.inko` and asserts the output matches `output.inko`. Simple, effective, and easy to add new test cases.
+
 ## The Design Philosophy
 
 Most languages make you choose: manual memory management with safety guarantees (Rust) or garbage collection with easy concurrency (Erlang, Go). Inko refuses this trade-off.

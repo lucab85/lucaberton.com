@@ -68,6 +68,51 @@ The compiler uses multiple intermediate representations. The **AST** (Abstract S
 
 ![Inko meetup — AST struct used by the code formatter and IR pipeline](/blog/events/inko-meetup-ast.jpg)
 
+## MIR: Where the Real Work Happens
+
+The **MIR** (Mid-level Intermediate Representation) is a graph of "basic blocks" — the stage where Inko verifies single ownership and applies optimizations.
+
+![Inko meetup — MIR basic blocks for ownership verification](/blog/events/inko-meetup-mir-blocks.jpg)
+
+The compiler runs **parallel optimizations** at the MIR level: merging switch blocks, compacting switches, removing unreachable blocks, removing unused instructions, inlining constants, and merging redundant moves. Most are straightforward — some just make the IR more readable for debugging.
+
+![Inko meetup — MIR parallel optimizations pipeline](/blog/events/inko-meetup-mir-optimizations.jpg)
+
+Beyond parallel passes, the compiler performs **sequential global optimizations**:
+
+![Inko meetup — escape analysis eliminates 50% of heap allocations](/blog/events/inko-meetup-escape-analysis.jpg)
+
+- **Function inlining across modules** — crucial because LLVM cannot inline across module boundaries
+- **Inter-procedural (whole program) escape analysis** — eliminates about **50% of heap allocations** on average
+- **Dead code elimination** — removal of unused symbols (methods, constants, etc.)
+
+The 50% heap allocation reduction from escape analysis is a significant performance win that most languages leave to the runtime GC to handle.
+
+## Single Ownership Without Borrow Checking
+
+This is Inko's most controversial design choice — and arguably its smartest.
+
+![Inko meetup — single ownership with borrow counting instead of borrow checking](/blog/events/inko-meetup-single-ownership.jpg)
+
+Instead of Rust's compile-time borrow checker, Inko uses **runtime borrow counting**:
+
+- Heap-allocated values store a borrow count
+- Borrows increment the count; dropping borrows decrements it
+- Borrow counts do not use atomics — cost is minor
+- When the heap value is dropped, check the count first and panic if non-zero
+
+This "may sound bad/slow, but works surprisingly well." Moving owned values incurs no increments. Moving while borrowing a heap value is fine because it resides in a stable location. You can still build compile-time analysis on top for optimizations.
+
+![Inko meetup — 80% of Rust benefits at a fraction of the cost](/blog/events/inko-meetup-80-percent-rust.jpg)
+
+The key quote from the talk: **"End goal: 80% of the benefits of Rust, at a fraction of the cost."** This is not `Rc<RefCell<T>>` — Inko does not enforce XOR mutability. It is a deliberate trade-off: accept a tiny runtime cost for dramatically simpler code.
+
+## Data Flow Analysis: Tracking Ownership Through Branches
+
+![Inko meetup — data flow graph tracking move states across conditional branches](/blog/events/inko-meetup-data-flow-graph.jpg)
+
+The compiler tracks value states through control flow graphs. In the example: variable `a` is initialized in block A, conditionally moved in block C (`b = a`), while block D calls `bar`. At the join point E, the state of `a` is "moved OR available" — a **maybe moved** state. The compiler uses this to emit runtime checks only where needed, keeping the common path fast.
+
 ## The Design Philosophy
 
 Most languages make you choose: manual memory management with safety guarantees (Rust) or garbage collection with easy concurrency (Erlang, Go). Inko refuses this trade-off.

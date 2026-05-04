@@ -1,0 +1,134 @@
+---
+title: "GBrain: Garry Tan's Self-Wiring Knowledge Graph for AI Agents"
+snippet: "Y Combinator CEO Garry Tan open-sourced GBrain — a self-wiring knowledge graph that gives AI agents persistent memory. 17,888 pages, hybrid search, entity extraction, and 34 skills. Built in 12 days."
+description: "GBrain gives AI agents a persistent brain with self-wiring knowledge graph, hybrid search, entity extraction, and MCP integration. Open source from YC CEO Garry Tan."
+publishDate: "2026-05-04"
+lastModified: "2026-05-04"
+image: { src: "/blog/thumbnails/garry-tan-gbrain-ai-agent-knowledge-graph-2026.jpg", alt: "GBrain - self-wiring knowledge graph for AI agents by Garry Tan" }
+category: "AI"
+author: "Luca Berton"
+draft: false
+tags: ["AI", "Knowledge Graph", "MCP", "Developer Tools", "Open Source", "RAG"]
+---
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+After open-sourcing [gstack](/blog/garry-tan-gstack-claude-code-ai-factory-2026/) (23 Claude Code specialist roles), Y Combinator CEO **Garry Tan** released [GBrain](https://github.com/garrytan/gbrain) — a self-wiring knowledge graph that gives AI agents persistent memory. Your agent ingests meetings, emails, tweets, voice calls, and ideas. It enriches every person and company it encounters. It fixes its own citations overnight. You wake up and the brain is smarter than when you went to bed.
+
+## The Problem: Agents Are Smart but Forgetful
+
+LLM agents lose context between sessions. They can reason about what you tell them right now, but they cannot recall what happened last week, who you met, or what decisions were made. RAG (Retrieval-Augmented Generation) helps, but pure vector search misses relational queries like "who works at company X?" or "what did this investor fund this quarter?"
+
+GBrain solves this with a **hybrid approach**: vector embeddings for semantic search plus a structured knowledge graph with typed entity links. Every page write extracts references and creates relationships (`attended`, `works_at`, `invested_in`, `founded`, `advises`) — with zero LLM calls for the graph wiring.
+
+## Architecture
+
+GBrain runs on **PGLite** — an embedded PostgreSQL that starts in 2 seconds with no server. The stack:
+
+```
+┌─────────────────────────────┐
+│  AI Agent (OpenClaw/Hermes) │
+├─────────────────────────────┤
+│  MCP Tools (30+ exposed)    │
+├─────────────────────────────┤
+│  Hybrid Search Engine       │
+│  ├── Vector (embeddings)    │
+│  ├── BM25 (keyword)         │
+│  └── Graph (entity links)   │
+├─────────────────────────────┤
+│  PGLite (embedded Postgres) │
+└─────────────────────────────┘
+```
+
+**Install and first query in under 2 minutes:**
+
+```bash
+git clone https://github.com/garrytan/gbrain.git
+cd gbrain && bun install && bun link
+
+gbrain init                    # Local brain, ready in 2 seconds
+gbrain import ~/notes/         # Index your markdown files
+gbrain query "what themes show up across my notes?"
+```
+
+The query returns ranked results with scores and source attribution — not hallucinated summaries.
+
+## Self-Wiring Knowledge Graph
+
+This is the feature that separates GBrain from standard RAG pipelines. When you write a page about a meeting with "Alice from Acme AI," GBrain automatically:
+
+1. Extracts entities: Alice (person), Acme AI (company)
+2. Creates typed links: Alice `works_at` Acme AI
+3. Links the meeting page to both entities
+4. Indexes for hybrid search
+
+No LLM calls required for extraction — it uses pattern matching and structured metadata. The graph enables queries that vector search alone cannot answer:
+
+- "Who works at Acme AI?" — follows `works_at` links
+- "What companies did Bob invest in this quarter?" — follows `invested_in` links with date filtering
+- "Show me everything connected to the Series A round" — traverses the graph from the event node
+
+## Benchmarks
+
+Tan published benchmarks comparing GBrain's hybrid search against alternatives on a 240-page Opus-generated corpus:
+
+| Method | Precision@5 | Recall@5 |
+|---|---|---|
+| **GBrain (graph + vector + BM25)** | **49.1%** | **97.9%** |
+| GBrain (graph disabled) | 17.7% | — |
+| ripgrep-BM25 + vector-only RAG | ~18% | — |
+
+The graph layer and entity extraction together account for a **+31.4 point improvement** in precision. Full evaluation methodology and corpus are in the [gbrain-evals](https://github.com/garrytan/gbrain-evals) repo.
+
+## MCP Integration
+
+GBrain exposes 30+ tools via the Model Context Protocol, making it accessible to any MCP-compatible agent:
+
+```json
+{
+  "mcpServers": {
+    "gbrain": { "command": "gbrain", "args": ["serve"] }
+  }
+}
+```
+
+Works with Claude Code, Cursor, OpenClaw, Hermes, and any MCP client. For production, `gbrain serve --http` starts an OAuth 2.1 server with an admin dashboard — zero external infrastructure.
+
+## 34 Built-In Skills
+
+GBrain ships with 34 skills that automate brain maintenance:
+
+- **Entity enrichment** — automatically research and expand person/company profiles
+- **Citation repair** — fix broken references and update sources overnight
+- **Memory consolidation** — merge duplicate entries, resolve conflicts
+- **Cron jobs** — 21 autonomous recurring tasks that keep the brain current
+
+Tan runs 21 cron jobs on his personal deployment. The brain maintains itself — deduplicating entities, updating stale information, and enriching profiles without manual intervention.
+
+## Scale: Tan's Production Numbers
+
+The production brain powering Tan's OpenClaw and Hermes deployments:
+
+- **17,888 pages** indexed
+- **4,383 people** with enriched profiles
+- **723 companies** with relationship graphs
+- **21 cron jobs** running autonomously
+- Built in **12 days**
+
+This is not a toy demo. It is the actual infrastructure running YC's CEO's AI workflow.
+
+## My Take
+
+GBrain fills the biggest gap in the AI agent ecosystem: **persistent, structured memory**. Most agent frameworks treat memory as an afterthought — append-only logs or basic vector stores. GBrain treats it as a first-class knowledge system with graph relationships, hybrid search, and self-maintenance.
+
+The PGLite choice is smart — no Postgres server to manage, no Docker containers, no cloud database. The brain starts in 2 seconds on your laptop. For teams, the HTTP server with OAuth 2.1 provides production-grade access control.
+
+If you are running any kind of AI agent (OpenClaw, Hermes, custom) and need it to remember context across sessions, GBrain is worth the 30-minute install.
+
+## Related Reading
+
+- [Garry Tan's gstack: 23 Claude Code Specialists](/blog/garry-tan-gstack-claude-code-ai-factory-2026/)
+- [Karpathy's CLAUDE.md: 4 Rules That Fix LLM Coding](/blog/karpathy-claude-md-llm-coding-principles-2026/)
+- [Context Architecture for AI Agents](/blog/context-architecture-ai-agents-accuracy-2026/)
+- [RAG vs Fine-Tuning for Enterprise AI](/blog/ai-model-memory-context-window-rag-production/)
+
+<BlogPromoCard />

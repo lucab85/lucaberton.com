@@ -315,6 +315,143 @@ To scale from 3 to more nodes:
 
 The sweet spot for Mistral 4 Small with LoRA is typically 2-4 nodes. Beyond that, communication overhead starts to dominate training time.
 
+## The Complete Training Script
+
+The Python training script ties everything together using HuggingFace's `trl` (SFTTrainer) and `peft` libraries, with Axolotl-inspired patterns:
+
+```python
+## Reference: https://github.com/axolotl-ai-cloud/axolotl/tree/main/examples/mistral4
+
+# Usage:
+# CUDA_VISIBLE_DEVICES=0,1 python finetune_mistral4small.py \
+#   --config configs/mistral4small_2xH200.yaml
+#
+# With overrides:
+# CUDA_VISIBLE_DEVICES=0,1 python finetune_mistral4small.py \
+#   --config configs/mistral4small_2xH200.yaml \
+#   --override train.learning_rate=1e-4 --override lora.r=32
+
+import argparse
+import logging
+import os
+from dataclasses import asdict, dataclass, field, fields
+from typing import Any, Optional
+
+import torch
+import yaml
+from datasets import load_dataset
+from peft import LoraConfig, TaskType
+from transformers import AutoConfig, AutoTokenizer, Mistral4ForCausalLM
+from trl import SFTConfig, SFTTrainer
+from peft import get_peft_model
+
+from llm_train_utils import LLMStepProfiler, print_hw_summary, _nval_gpu_stats
+```
+
+### Configuration Dataclasses
+
+The script uses typed dataclasses for clean configuration management:
+
+```python
+@dataclass
+class ModelConfig:
+    model_name_or_path: str = "/data/input/Models/Mistral-Small-4-119B-2603"
+    torch_dtype: str = "bfloat16"
+    device_map: str = "auto"
+    use_cache: bool = False
+    attn_implementation: Optional[str] = None
+
+@dataclass
+class LoRAConfig:
+    r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.05
+    target_modules: list = field(
+        default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    )
+    bias: str = "none"
+    task_type: str = "CAUSAL_LM"
+```
+
+Note the LoRA rank of 16 with alpha of 32 (ratio 2:1) — this is the standard scaling that produces stable training. The target modules here focus on attention projections only, while the YAML config version also includes MLP layers for higher quality.
+
+### SFTTrainer Integration
+
+The training loop uses HuggingFace's `SFTTrainer` with full configuration passthrough:
+
+```python
+sft_config = SFTConfig(
+    output_dir=train_cfg.output_dir,
+    num_train_epochs=train_cfg.num_train_epochs,
+    per_device_train_batch_size=train_cfg.per_device_train_batch_size,
+    per_device_eval_batch_size=train_cfg.per_device_eval_batch_size,
+    gradient_accumulation_steps=train_cfg.gradient_accumulation_steps,
+    gradient_checkpointing=train_cfg.gradient_checkpointing,
+    optim=train_cfg.optim,
+    learning_rate=train_cfg.learning_rate,
+    lr_scheduler_type=train_cfg.lr_scheduler_type,
+    warmup_ratio=train_cfg.warmup_ratio,
+    weight_decay=train_cfg.weight_decay,
+    bf16=train_cfg.bf16,
+    fp16=train_cfg.fp16,
+    logging_steps=train_cfg.logging_steps,
+    eval_strategy=train_cfg.eval_strategy,
+    eval_steps=train_cfg.eval_steps,
+    save_strategy=train_cfg.save_strategy,
+    save_steps=train_cfg.save_steps,
+    save_total_limit=train_cfg.save_total_limit,
+    seed=train_cfg.seed,
+    dataset_text_field=data_cfg.text_field,
+    max_length=data_cfg.max_length,
+    packing=False
+)
+
+trainer = SFTTrainer(
+    model=model,
+    args=sft_config,
+    train_dataset=train_dataset,
+    eval_dataset=val_dataset,
+    processing_class=tokenizer,
+    callbacks=[LLMStepProfiler(
+        debug_freq=args.debug_freq,
+        seq_len=data_cfg.max_length,
+        output_dir=train_cfg.output_dir,
+        report_meta={
+            "model": {"name": model_cfg.model_name_or_path, "dtype": model_cfg.torch_dtype},
+            "lora": {"r": lora_cfg.r, "alpha": lora_cfg.lora_alpha, "modules": lora_cfg.target_modules},
+            "data": {"dataset": data_cfg.dataset_name_or_path, "max_length": data_cfg.max_length},
+            "train": {"epochs": train_cfg.num_train_epochs, "lr": train_cfg.learning_rate,
+                      "batch": train_cfg.per_device_train_batch_size,
+                      "accum": train_cfg.gradient_accumulation_steps},
+        },
+        script_name="finetune_mistral4small",
+    )],
+)
+
+if trainer.accelerator.is_main_process and hasattr(trainer.model, "print_trainable_parameters"):
+    trainer.model.print_trainable_parameters()
+
+logger.info("Starting training...")
+trainer.train()
+logger.info("Training complete.")
+
+# Save final model
+save_path = os.path.join(train_cfg.output_dir, "final")
+trainer.save_model(save_path)
+tokenizer.save_pretrained(save_path)
+logger.info(f"Model saved to {save_path}")
+```
+
+### Key Design Patterns
+
+1. **`LLMStepProfiler` callback** — Custom profiler that tracks GPU utilization, memory, and throughput per step. Essential for optimizing training efficiency.
+
+2. **`packing=False`** — Disables sequence packing. While packing improves throughput by concatenating short sequences, it can affect training quality for instruction-tuned models.
+
+3. **`report_meta` dictionary** — Logs all hyperparameters to the profiler for experiment tracking without external tools like W&B or MLflow.
+
+4. **Final model save** — Saves only the LoRA adapter weights (not the full model), keeping checkpoint sizes at ~400MB instead of 24GB.
+
 ## Related Articles
 
 - [Distributed vs Multi-GPU Inference](/blog/distributed-vs-multi-gpu-inference-2026/) — the inference side of multi-node

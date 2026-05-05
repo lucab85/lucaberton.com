@@ -1,0 +1,330 @@
+---
+title: "Distributed Inference vs Multi-GPU Inference: Architecture Guide"
+snippet: "A practical comparison of multi-GPU inference within a single node versus distributed inference across multiple nodes. Covers tensor parallelism, pipeline parallelism, KV cache sharding, and when each approach delivers optimal throughput per dollar."
+description: "A practical comparison of multi-GPU inference within a single node versus distributed inference across multiple nodes. Covers tensor parallelism, pipeline parallelism, KV cache sharding, and when each approach delivers optimal throughput per dollar."
+publishDate: "2026-05-05"
+lastModified: "2026-05-05"
+image:
+  src: "/blog/thumbnails/distributed-vs-multi-gpu-inference-2026.jpg"
+  alt: "Distributed inference vs multi-GPU inference architecture comparison"
+tags: ["AI", "GPU", "Inference", "Kubernetes", "Performance"]
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+When a model doesn't fit on a single GPU, you have two paths: **multi-GPU inference** (multiple GPUs in one server) or **distributed inference** (multiple servers connected by network). The choice determines your latency, throughput, cost, and failure modes.
+
+## The Core Difference
+
+| Aspect | Multi-GPU (Single Node) | Distributed (Multi-Node) |
+|--------|------------------------|--------------------------|
+| Interconnect | NVLink/NVSwitch (900 GB/s) | InfiniBand/RoCE (400 Gb/s) |
+| Latency per hop | 1-5 μs | 5-50 μs |
+| Max GPUs | 8 (DGX H100) | Hundreds |
+| Failure domain | Single machine | Per-node isolation |
+| Complexity | Moderate | High |
+| Cost per GPU | Higher (DGX premium) | Lower (commodity nodes) |
+
+## Multi-GPU Inference: Single Node
+
+### When to Use
+
+- Model fits in 2-8 GPUs worth of VRAM
+- Latency is critical (sub-100ms Time-To-First-Token)
+- You have DGX or HGX systems with NVLink
+
+### Tensor Parallelism (TP)
+
+Split each layer's weight matrices across GPUs. Every GPU computes part of every token:
+
+```yaml
+# vLLM with tensor parallelism on 4 GPUs
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  containers:
+    - name: vllm
+      image: vllm/vllm-openai:latest
+      args:
+        - --model=meta-llama/Llama-3.1-70B
+        - --tensor-parallel-size=4
+        - --gpu-memory-utilization=0.92
+        - --max-model-len=32768
+      resources:
+        limits:
+          nvidia.com/gpu: 4
+```
+
+**How it works:**
+
+```
+Input tokens
+     │
+     ▼
+┌─────────────────────────────────────┐
+│  Layer N: Weight matrix split 4 ways │
+│  GPU 0: W[:,0:d/4]                   │
+│  GPU 1: W[:,d/4:d/2]                 │
+│  GPU 2: W[:,d/2:3d/4]               │
+│  GPU 3: W[:,3d/4:d]                 │
+└─────────────────────────────────────┘
+     │  AllReduce across NVLink (900 GB/s)
+     ▼
+  Combined output → next layer
+```
+
+**Pros:**
+- Lowest latency — all GPUs work on every token simultaneously
+- NVLink bandwidth makes AllReduce nearly free
+- vLLM, TensorRT-LLM, and [NVIDIA NIM](/blog/nvidia-nim-support-matrix-2026/) handle it natively
+
+**Cons:**
+- Limited to GPUs within one node (typically 8 max)
+- AllReduce frequency = once per layer = high communication
+- If one GPU fails, entire inference stops
+
+### Memory Math
+
+For Llama 3.1 70B in FP16:
+- Parameters: 70B × 2 bytes = 140 GB
+- KV cache (32K context, batch 8): ~40 GB
+- Activations: ~10 GB
+- **Total: ~190 GB → fits on 4× H100 80GB**
+
+## Distributed Inference: Multi-Node
+
+### When to Use
+
+- Model exceeds single-node GPU memory (405B+ parameters)
+- You need massive throughput (hundreds of concurrent users)
+- Running on commodity GPU nodes without NVLink
+- Building fault-tolerant inference clusters
+
+### Pipeline Parallelism (PP)
+
+Split layers across nodes. Each node processes a subset of layers sequentially:
+
+```yaml
+# NVIDIA NIM multi-node deployment
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: llama-405b-node
+spec:
+  replicas: 2  # 2 nodes × 8 GPUs = 16 GPUs total
+  template:
+    spec:
+      containers:
+        - name: nim
+          env:
+            - name: TENSOR_PARALLEL_SIZE
+              value: "8"
+            - name: PIPELINE_PARALLEL_SIZE
+              value: "2"
+            - name: NIM_LEADER_ADDRESS
+              value: "llama-405b-node-0.llama-405b-node:5557"
+```
+
+**How it works:**
+
+```
+Node 0 (Layers 0-39)          Node 1 (Layers 40-79)
+┌──────────────────┐          ┌──────────────────┐
+│ GPU 0-7: TP=8    │──────────│ GPU 0-7: TP=8    │
+│ Layers 0-39      │ Network  │ Layers 40-79     │
+│ (NVLink internal)│ (IB/RoCE)│ (NVLink internal)│
+└──────────────────┘          └──────────────────┘
+```
+
+**Pros:**
+- Scales to arbitrary model sizes (405B, 1T+)
+- Each node only holds partial weights — lower per-node memory
+- Can use cheaper nodes without NVLink interconnect between nodes
+- Micro-batching hides network latency
+
+**Cons:**
+- Pipeline bubbles — GPUs idle while waiting for activations
+- Network bandwidth becomes bottleneck for large activations
+- Higher TTFT due to sequential node processing
+- Complex orchestration and failure handling
+
+### Expert Parallelism (EP) for MoE Models
+
+For Mixture-of-Experts models (Mixtral, DeepSeek-V3):
+
+```
+Node 0: Experts 0-15     Node 1: Experts 16-31
+┌──────────────────┐     ┌──────────────────┐
+│ Router selects   │     │ Router selects   │
+│ top-K experts    │────▶│ top-K experts    │
+│ for each token   │◀────│ for each token   │
+└──────────────────┘     └──────────────────┘
+```
+
+Only activated experts need computation — reducing total FLOPs while maintaining model capacity.
+
+## The Network Bottleneck
+
+The critical difference between multi-GPU and distributed is **interconnect bandwidth**:
+
+| Interconnect | Bandwidth | Latency | Use Case |
+|-------------|-----------|---------|----------|
+| NVLink 4.0 (H100) | 900 GB/s | ~1 μs | Intra-node TP |
+| NVSwitch (DGX) | 900 GB/s all-to-all | ~1 μs | Intra-node TP |
+| InfiniBand HDR | 200 Gb/s (25 GB/s) | ~2 μs | Multi-node PP |
+| InfiniBand NDR | 400 Gb/s (50 GB/s) | ~2 μs | Multi-node PP |
+| RoCE v2 | 100-400 Gb/s | ~5 μs | Budget multi-node |
+| TCP/Ethernet | 25-100 Gb/s | ~50 μs | Don't do this |
+
+For a 70B model with TP=8 across nodes (not recommended):
+- AllReduce per layer: ~8 GB of data
+- At 400 Gb/s: 160ms per layer × 80 layers = **12.8 seconds per token**
+- At 900 GB/s NVLink: 9ms per layer × 80 layers = **0.7 seconds per token**
+
+**Rule of thumb**: Tensor parallelism should stay within NVLink. Use pipeline parallelism across nodes.
+
+## NVIDIA Dynamo: Disaggregated Serving
+
+[NVIDIA Dynamo](/blog/nvidia-dynamo-inference-framework-2026/) introduces a third option — disaggregated prefill and decode:
+
+```
+┌─────────────────┐     ┌─────────────────┐
+│ Prefill Nodes   │     │ Decode Nodes    │
+│ (Compute-heavy) │────▶│ (Memory-bound)  │
+│ 8× H100 each    │ KV  │ 4× H100 each   │
+│ Batch prefill    │cache│ Continuous decode│
+└─────────────────┘     └─────────────────┘
+```
+
+- **Prefill** is compute-bound → pack onto fewer, fully-utilized GPUs
+- **Decode** is memory-bandwidth-bound → spread across more GPUs with lighter load
+- KV cache transfers between nodes via [RDMA](/blog/nvidia-doca-perftest-rdma-benchmarking/)
+
+This disaggregation can improve throughput per dollar by 2-4x compared to monolithic serving.
+
+## Decision Framework
+
+### Model Size → Architecture
+
+| Model | VRAM Needed (FP16) | Recommended Setup |
+|-------|-------------------|-------------------|
+| 7-8B | 16 GB | 1× GPU |
+| 13B | 26 GB | 1× H100 or 2× A100 |
+| 34B | 68 GB | 1× H100 80GB |
+| 70B | 140 GB | 2× H100 (TP=2) or 4× A100 (TP=4) |
+| 70B + long context | 200 GB | 4× H100 (TP=4) |
+| 405B | 810 GB | 2 nodes × 8 H100 (TP=8, PP=2) |
+| 1T+ MoE | 1+ TB | 4+ nodes with EP |
+
+### Latency vs Throughput Optimization
+
+**Optimize for latency** (chatbots, real-time):
+- Maximize tensor parallelism within one node
+- Use larger GPUs (H100 80GB over A100 40GB)
+- Sacrifice throughput for faster single-request response
+
+**Optimize for throughput** (batch processing, offline):
+- Use pipeline parallelism with micro-batching
+- Fill pipeline bubbles with concurrent requests
+- Continuous batching to maximize GPU utilization
+- Consider [autoscaling inference](/blog/ai-kubernetes-autoscaling-inference/) based on queue depth
+
+## KV Cache: The Hidden Bottleneck
+
+At 128K context length, KV cache dominates memory:
+
+```
+KV cache per token per layer:
+  2 (K+V) × num_heads × head_dim × 2 bytes (FP16)
+
+Llama 3.1 70B at 128K context:
+  2 × 64 × 128 × 2 × 80 layers × 128,000 tokens = 167 GB
+
+That's MORE than the model weights (140 GB)!
+```
+
+Strategies:
+- **PagedAttention** (vLLM): Allocate KV cache in pages, avoid fragmentation
+- **KV cache quantization**: FP8 or INT8 reduces cache by 2-4x
+- **Prefix caching**: Share KV cache for common system prompts
+- **Offloading**: Spill cold KV cache to CPU RAM or SSD
+
+## Multi-GPU on Kubernetes
+
+```yaml
+# Multi-GPU single node (simple)
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: inference
+      resources:
+        limits:
+          nvidia.com/gpu: 8
+      env:
+        - name: CUDA_VISIBLE_DEVICES
+          value: "0,1,2,3,4,5,6,7"
+---
+# Multi-node distributed (complex)
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: llama-405b
+spec:
+  replicas: 2
+  leaderWorkerTemplate:
+    size: 2
+    workerTemplate:
+      spec:
+        containers:
+          - name: nim
+            resources:
+              limits:
+                nvidia.com/gpu: 8
+                rdma/rdma_shared_device: 1
+```
+
+For [multi-tenant GPU sharing](/blog/kubecon-2026-multi-tenant-gpus-talk/), tools like MIG (Multi-Instance GPU), time-slicing, and MPS allow multiple inference workloads on the same physical GPU.
+
+## Cost Comparison
+
+Running Llama 3.1 70B inference (1000 req/min target):
+
+| Setup | Hardware | Monthly Cost* | Throughput | $/1M tokens |
+|-------|----------|--------------|-----------|-------------|
+| 4× H100 SXM (1 node) | DGX H100 | ~$35K | 1200 req/min | $0.42 |
+| 8× A100 80GB (1 node) | DGX A100 | ~$25K | 800 req/min | $0.47 |
+| 2× 4-GPU nodes (A100) | Commodity | ~$18K | 700 req/min | $0.39 |
+| Cloud API (GPT-4o) | - | Usage-based | Unlimited | $2.50 |
+
+*Approximate cloud instance pricing, varies by provider.
+
+The commodity multi-node approach can be cheaper per token, but operational complexity is higher.
+
+## Failure Modes
+
+| Failure | Multi-GPU Impact | Distributed Impact |
+|---------|-----------------|-------------------|
+| Single GPU fault | Entire node down | One node down, others continue |
+| Memory error (ECC) | Process crash | Affected node restarts |
+| Network partition | N/A | Split-brain, request failures |
+| Thermal throttling | Reduced throughput | Affected node slower |
+
+Distributed systems offer better fault isolation but introduce network partition risks. For production, implement:
+- Health checks per node
+- Automatic failover to backup nodes
+- Request retry with timeout
+- Graceful degradation (serve smaller model as fallback)
+
+## Related Articles
+
+- [NVIDIA NIM Multi-Node Deployment](/blog/nvidia-nim-multi-node-kubernetes-deployment/) — production multi-node setup
+- [NVIDIA NIM Multinode Inference](/blog/nvidia-nim-multinode-inference-2026/) — Docker-based distributed serving
+- [NVIDIA Dynamo](/blog/nvidia-dynamo-inference-framework-2026/) — disaggregated prefill/decode
+- [NCCL Timeout Troubleshooting](/blog/nccl-timeout-multi-gpu-troubleshooting-2026/) — fixing multi-GPU communication issues
+- [GPU Cost Optimization](/blog/inference-economy-gpu-cost-optimization/) — the economics of inference at scale
+
+---
+
+*Start with the smallest setup that meets your latency SLA. Scale horizontally only when single-node capacity is exhausted. The best GPU cluster is the one you don't over-provision.*

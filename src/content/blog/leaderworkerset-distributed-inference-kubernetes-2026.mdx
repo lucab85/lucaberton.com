@@ -1,0 +1,342 @@
+---
+title: "Multi-Node Distributed Inference with LeaderWorkerSet on Kubernetes"
+snippet: "Deploy large language models across multiple Kubernetes nodes using the LeaderWorkerSet (LWS) operator. Covers vLLM pipeline parallelism, NCCL over InfiniBand, health checks, and autoscaling for 70B+ models in production."
+description: "Deploy large language models across multiple Kubernetes nodes using the LeaderWorkerSet (LWS) operator. Covers vLLM pipeline parallelism, NCCL over InfiniBand, health checks, and autoscaling for 70B+ models in production."
+publishDate: "2026-05-05"
+lastModified: "2026-05-05"
+image:
+  src: "/blog/thumbnails/lws-distributed-inference-2026.jpg"
+  alt: "LeaderWorkerSet distributed inference Kubernetes multi-node LLM"
+tags: ["Kubernetes", "AI", "Inference", "GPU", "Cloud Native"]
+category: "Platform Engineering"
+author: "Luca Berton"
+draft: false
+---
+
+When a model is too large for a single node — think Llama 3.1 405B requiring 810 GB of GPU memory — you need multi-node inference. The **LeaderWorkerSet (LWS)** operator is the Kubernetes-native way to orchestrate these distributed inference deployments.
+
+## What is LeaderWorkerSet?
+
+LWS is a Kubernetes operator (graduated from SIG-Apps) designed for workloads that need tightly-coupled multi-pod groups. Each "replica" consists of:
+
+- **1 Leader pod** — receives traffic, coordinates inference
+- **N Worker pods** — hold model shards, participate in tensor/pipeline parallelism
+
+```
+┌─────────────────────────────────────────────────┐
+│  LeaderWorkerSet "llama-405b"                    │
+│                                                   │
+│  Replica 0:                                       │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+│  │ Leader   │  │ Worker 0 │  │ Worker 1 │       │
+│  │ (head)   │──│ (layers) │──│ (layers) │       │
+│  │ 8× GPU   │  │ 8× GPU   │  │ 8× GPU   │       │
+│  └──────────┘  └──────────┘  └──────────┘       │
+│       ▲                                           │
+│       │ Service (traffic entry point)             │
+│                                                   │
+│  Replica 1: (for high availability)               │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐       │
+│  │ Leader   │  │ Worker 0 │  │ Worker 1 │       │
+│  │ 8× GPU   │  │ 8× GPU   │  │ 8× GPU   │       │
+│  └──────────┘  └──────────┘  └──────────┘       │
+└─────────────────────────────────────────────────┘
+```
+
+## Installing the LWS Operator
+
+```bash
+# Install LeaderWorkerSet CRDs and controller
+kubectl apply --server-side -f \
+  https://github.com/kubernetes-sigs/lws/releases/latest/download/manifests.yaml
+
+# Verify
+kubectl get pods -n lws-system
+```
+
+## Deploying Llama 405B with vLLM
+
+```yaml
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: llama-405b
+  namespace: ai-inference
+spec:
+  replicas: 1  # Number of independent model instances
+  leaderWorkerTemplate:
+    size: 3  # 1 leader + 2 workers = 3 nodes total
+    restartPolicy: RecreateGroupOnPodRestart
+    leaderTemplate:
+      metadata:
+        labels:
+          role: leader
+      spec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        containers:
+          - name: vllm
+            image: vllm/vllm-openai:v0.7.3
+            ports:
+              - containerPort: 8000
+                name: http
+            env:
+              - name: VLLM_HOST_IP
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.podIP
+              # LWS injects these automatically
+              - name: LWS_LEADER_ADDRESS
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['leaderworkerset.sigs.k8s.io/leader-address']
+            args:
+              - --model=meta-llama/Llama-3.1-405B-Instruct
+              - --tensor-parallel-size=8
+              - --pipeline-parallel-size=3
+              - --gpu-memory-utilization=0.92
+              - --max-model-len=32768
+              - --distributed-executor-backend=ray
+              - --trust-remote-code
+            resources:
+              limits:
+                nvidia.com/gpu: 8
+                rdma/rdma_shared_device_a: 1
+              requests:
+                memory: "200Gi"
+                cpu: "32"
+            readinessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              initialDelaySeconds: 300  # Model loading takes time
+              periodSeconds: 10
+            livenessProbe:
+              httpGet:
+                path: /health
+                port: 8000
+              initialDelaySeconds: 600
+              periodSeconds: 30
+            volumeMounts:
+              - name: model-cache
+                mountPath: /root/.cache/huggingface
+              - name: shm
+                mountPath: /dev/shm
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-store
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: "64Gi"
+    workerTemplate:
+      spec:
+        tolerations:
+          - key: nvidia.com/gpu
+            operator: Exists
+            effect: NoSchedule
+        containers:
+          - name: vllm-worker
+            image: vllm/vllm-openai:v0.7.3
+            env:
+              - name: VLLM_HOST_IP
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.podIP
+            args:
+              - --model=meta-llama/Llama-3.1-405B-Instruct
+              - --tensor-parallel-size=8
+              - --pipeline-parallel-size=3
+              - --gpu-memory-utilization=0.92
+              - --distributed-executor-backend=ray
+              - --trust-remote-code
+            resources:
+              limits:
+                nvidia.com/gpu: 8
+                rdma/rdma_shared_device_a: 1
+              requests:
+                memory: "200Gi"
+                cpu: "32"
+            volumeMounts:
+              - name: model-cache
+                mountPath: /root/.cache/huggingface
+              - name: shm
+                mountPath: /dev/shm
+        volumes:
+          - name: model-cache
+            persistentVolumeClaim:
+              claimName: model-store
+          - name: shm
+            emptyDir:
+              medium: Memory
+              sizeLimit: "64Gi"
+---
+# Service targets only the leader pods
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-405b
+  namespace: ai-inference
+spec:
+  selector:
+    leaderworkerset.sigs.k8s.io/name: llama-405b
+    role: leader
+  ports:
+    - port: 8000
+      targetPort: 8000
+      name: http
+```
+
+## NCCL Configuration for Multi-Node
+
+For the pods to communicate efficiently, configure NCCL environment variables:
+
+```yaml
+env:
+  # Use InfiniBand for tensor parallel communication
+  - name: NCCL_IB_HCA
+    value: "mlx5"
+  - name: NCCL_IB_GID_INDEX
+    value: "3"
+  - name: NCCL_SOCKET_IFNAME
+    value: "net1"
+  - name: NCCL_DEBUG
+    value: "WARN"
+  # Performance tuning
+  - name: NCCL_IB_QPS_PER_CONNECTION
+    value: "4"
+  - name: NCCL_IB_TC
+    value: "136"
+  - name: NCCL_IB_SL
+    value: "5"
+```
+
+## Network Requirements
+
+Multi-node inference requires high-bandwidth, low-latency networking:
+
+```yaml
+# Network attachment for InfiniBand/RoCE
+apiVersion: k8s.cni.cncf.io/v1
+kind: NetworkAttachmentDefinition
+metadata:
+  name: rdma-network
+  namespace: ai-inference
+  annotations:
+    k8s.v1.cni.cncf.io/resourceName: rdma/rdma_shared_device_a
+spec:
+  config: |
+    {
+      "cniVersion": "0.3.1",
+      "type": "host-device",
+      "device": "net1",
+      "ipam": {
+        "type": "whereabouts",
+        "range": "10.0.100.0/24"
+      }
+    }
+```
+
+Without RDMA networking, pipeline parallelism adds 10-50ms per pipeline stage — unacceptable for interactive inference.
+
+## Health Checks and Failure Recovery
+
+LWS's `RecreateGroupOnPodRestart` policy ensures that if any pod in the group fails, the **entire group** is recreated. This is critical because:
+
+1. Model shards are loaded at startup into specific ranks
+2. If one worker dies, the remaining pods hold stale NCCL communicators
+3. Partial recovery is impossible — the whole group must restart together
+
+```yaml
+spec:
+  leaderWorkerTemplate:
+    restartPolicy: RecreateGroupOnPodRestart
+```
+
+Startup time for 405B (3 nodes × 8 GPUs):
+- Model download from cache: ~2 minutes
+- Weight loading + sharding: ~5 minutes
+- NCCL ring initialization: ~30 seconds
+- **Total cold start: ~8 minutes**
+
+## Autoscaling with LWS
+
+Scale model replicas based on request queue depth:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: llama-405b-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: leaderworkerset.x-k8s.io/v1
+    kind: LeaderWorkerSet
+    name: llama-405b
+  minReplicas: 1
+  maxReplicas: 4  # Up to 4 full model instances (12 nodes × 8 GPUs = 96 GPUs)
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: vllm_num_requests_waiting
+        target:
+          type: AverageValue
+          averageValue: "10"  # Scale up when queue exceeds 10 requests
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 300  # Wait 5 min before scaling (loading time)
+    scaleDown:
+      stabilizationWindowSeconds: 600  # Wait 10 min before scaling down
+```
+
+## LWS vs Alternatives
+
+| Solution | Multi-Node | K8s Native | HA | Autoscaling |
+|----------|-----------|-----------|-----|-------------|
+| **LWS** | ✅ | ✅ (CRD) | ✅ (replicas) | ✅ (HPA) |
+| Run:ai | ✅ | ✅ (operator) | ⚠️ (manual) | ⚠️ (scheduler) |
+| Ray Serve | ✅ | ⚠️ (needs Ray cluster) | ✅ | ✅ (Ray autoscaler) |
+| Manual StatefulSet | ✅ | ✅ | ❌ | ❌ |
+| NVIDIA NIM + Helm | ✅ | ✅ | ✅ | ⚠️ |
+
+LWS is the lightest-weight option that provides group semantics (all-or-nothing restart) without requiring a full platform like Ray or Run:ai.
+
+## Monitoring
+
+```yaml
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: llama-405b-metrics
+spec:
+  selector:
+    matchLabels:
+      leaderworkerset.sigs.k8s.io/name: llama-405b
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+```
+
+Key metrics to watch:
+- `vllm_num_requests_running` — active inference requests
+- `vllm_num_requests_waiting` — queue depth (trigger for scaling)
+- `vllm_gpu_cache_usage_perc` — KV cache utilization
+- `vllm_avg_generation_throughput_toks_per_s` — output token rate
+
+## Related Articles
+
+- [Distributed vs Multi-GPU Inference](/blog/distributed-vs-multi-gpu-inference-2026/) — when to go multi-node
+- [NVIDIA NIM Multi-Node Deployment](/blog/nvidia-nim-multi-node-kubernetes-deployment/) — NIM-specific approach
+- [GenAI-Perf Benchmarking](/blog/genai-perf-nvidia-llm-benchmarking-2026/) — validating deployment performance
+- [Fine-Tuning Mistral with FSDP](/blog/fsdp-lora-mistral-openshift-fine-tuning-2026/) — training side of multi-node
+- [NCCL Timeout Troubleshooting](/blog/nccl-timeout-multi-gpu-troubleshooting-2026/) — debugging NCCL issues
+
+---
+
+*LWS solves the "how do I keep these pods together" problem that StatefulSets and Deployments weren't designed for. For multi-node inference, it's the missing piece between raw Kubernetes and full ML platforms.*

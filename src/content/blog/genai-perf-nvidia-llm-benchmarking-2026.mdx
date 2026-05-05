@@ -1,0 +1,272 @@
+---
+title: "GenAI-Perf: Benchmarking LLM Inference with NVIDIA's Performance Tool"
+snippet: "How to benchmark vLLM inference endpoints using NVIDIA GenAI-Perf from multiple network locations. Covers token throughput, latency percentiles, concurrency testing, and interpreting results for production capacity planning."
+description: "How to benchmark vLLM inference endpoints using NVIDIA GenAI-Perf from multiple network locations. Covers token throughput, latency percentiles, concurrency testing, and interpreting results for production capacity planning."
+publishDate: "2026-05-05"
+lastModified: "2026-05-05"
+image:
+  src: "/blog/thumbnails/genai-perf-benchmark-2026.jpg"
+  alt: "GenAI-Perf NVIDIA LLM inference benchmarking tool"
+tags: ["AI", "Performance", "Inference", "GPU", "Benchmarking"]
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+Before putting an LLM into production, you need to answer: how many concurrent users can this deployment handle? What's the P99 latency? What happens under load? NVIDIA's **GenAI-Perf** is the standard tool for answering these questions against vLLM, TensorRT-LLM, and NIM endpoints.
+
+## What GenAI-Perf Measures
+
+GenAI-Perf generates synthetic inference requests and measures:
+
+- **Time to First Token (TTFT)** — how long until the first token appears
+- **Inter-Token Latency (ITL)** — time between subsequent tokens
+- **Output Token Throughput** — tokens/second across all concurrent requests
+- **Request Throughput** — completed requests/second
+- **End-to-End Latency** — total time per request (P50, P90, P99)
+
+## Installation
+
+GenAI-Perf is part of the NVIDIA Triton Inference Server SDK:
+
+```bash
+pip install genai-perf
+
+# Or from the NGC container
+docker run --rm -it \
+  nvcr.io/nvidia/tritonserver:26.02-py3-sdk \
+  bash
+```
+
+## Basic Benchmark: Single GPU vLLM
+
+```bash
+# Deploy vLLM endpoint first
+# vLLM serving on port 8000 with OpenAI-compatible API
+
+genai-perf profile \
+  --model mistral-small \
+  --backend vllm \
+  --endpoint-type chat \
+  --url http://inference-endpoint:8000 \
+  --concurrency 1 \
+  --input-tokens-mean 200 \
+  --output-tokens-mean 100 \
+  --num-prompts 100 \
+  --streaming
+```
+
+Output:
+```
+                         LLM Metrics
+┌──────────────────────────────────────────────────────┐
+│ Metric                    │   P50  │   P90  │   P99  │
+├───────────────────────────┼────────┼────────┼────────┤
+│ Time to First Token (ms)  │   45   │   62   │   89   │
+│ Inter Token Latency (ms)  │   12   │   15   │   21   │
+│ Request Latency (ms)      │  1245  │  1580  │  1890  │
+│ Output Token Throughput   │   82 tokens/s              │
+│ Request Throughput        │  0.79 req/s                │
+└──────────────────────────────────────────────────────┘
+```
+
+## Scaling Concurrency
+
+The key question: how does performance degrade as concurrent users increase?
+
+```bash
+# Test with increasing concurrency
+for concurrency in 1 2 4 8 16 32; do
+  echo "=== Concurrency: $concurrency ==="
+  genai-perf profile \
+    --model mistral-small \
+    --backend vllm \
+    --endpoint-type chat \
+    --url http://inference-endpoint:8000 \
+    --concurrency $concurrency \
+    --input-tokens-mean 200 \
+    --output-tokens-mean 100 \
+    --num-prompts 200 \
+    --streaming
+done
+```
+
+Typical results for a single H100 with Mistral Small:
+
+| Concurrency | Throughput (tok/s) | TTFT P50 | TTFT P99 | ITL P99 |
+|-------------|-------------------|----------|----------|---------|
+| 1 | 82 | 45ms | 89ms | 21ms |
+| 2 | 158 | 48ms | 95ms | 23ms |
+| 4 | 295 | 55ms | 120ms | 28ms |
+| 8 | 510 | 72ms | 180ms | 35ms |
+| 16 | 780 | 110ms | 350ms | 52ms |
+| 32 | 920 | 250ms | 800ms | 88ms |
+
+The sweet spot is usually where throughput plateaus but latency remains acceptable for your SLA.
+
+## Multi-Location Testing
+
+In enterprise environments, test from multiple network paths to understand the impact of network topology:
+
+```bash
+# Test from 3 different locations:
+# 1. Same cluster (pod-to-pod)
+# 2. Admin node (behind HA proxy/load balancer)
+# 3. User laptop (through ingress + TLS)
+
+# Location 1: Cluster-internal
+genai-perf profile \
+  --url http://vllm-service.ai-namespace.svc:8000 \
+  --concurrency 8 \
+  --input-tokens-mean 200 \
+  --output-tokens-mean 100
+
+# Location 2: Admin node (via HA Proxy)
+genai-perf profile \
+  --url https://inference.internal.company.com \
+  --concurrency 8 \
+  --input-tokens-mean 200 \
+  --output-tokens-mean 100
+
+# Location 3: External (via ingress)
+genai-perf profile \
+  --url https://api.company.com/v1 \
+  --concurrency 8 \
+  --input-tokens-mean 200 \
+  --output-tokens-mean 100
+```
+
+Expected latency differences:
+
+| Location | Network Hops | TTFT Overhead |
+|----------|-------------|---------------|
+| Cluster-internal | 0 (pod-to-pod) | +0ms |
+| Admin node (HA Proxy) | 2-3 hops | +5-15ms |
+| External (ingress + TLS) | 4-6 hops | +20-50ms |
+
+## Multi-GPU Inference Benchmarking
+
+For [distributed inference](/blog/distributed-vs-multi-gpu-inference-2026/) with tensor parallelism:
+
+```bash
+# Benchmark with higher concurrency to saturate multi-GPU deployment
+genai-perf profile \
+  --model mistral-small \
+  --backend vllm \
+  --endpoint-type chat \
+  --url http://inference-endpoint:8000 \
+  --concurrency 16 \
+  --input-tokens-mean 200 \
+  --output-tokens-mean 200 \
+  --num-prompts 500 \
+  --streaming \
+  --request-rate 50  # Target 50 req/s
+```
+
+Compare single GPU vs multi-GPU:
+
+| Setup | Max Throughput | TTFT P99 @ max | Cost/token |
+|-------|--------------|----------------|------------|
+| 1× H100 (TP=1) | 920 tok/s | 800ms | $0.42/1M |
+| 2× H100 (TP=2) | 1,650 tok/s | 450ms | $0.46/1M |
+| 4× H100 (TP=4) | 2,800 tok/s | 280ms | $0.54/1M |
+
+More GPUs reduce latency and increase throughput, but cost per token increases due to communication overhead.
+
+## Advanced: Input Token Distribution
+
+Real-world traffic has variable prompt lengths. Test with realistic distributions:
+
+```bash
+# Short prompts (chatbot-style)
+genai-perf profile \
+  --input-tokens-mean 100 \
+  --input-tokens-stddev 50 \
+  --output-tokens-mean 150 \
+  --output-tokens-stddev 100
+
+# Long prompts (RAG with context)
+genai-perf profile \
+  --input-tokens-mean 2000 \
+  --input-tokens-stddev 500 \
+  --output-tokens-mean 200 \
+  --output-tokens-stddev 50
+
+# Code generation (long output)
+genai-perf profile \
+  --input-tokens-mean 500 \
+  --input-tokens-stddev 200 \
+  --output-tokens-mean 1000 \
+  --output-tokens-stddev 300
+```
+
+## Interpreting Results for Capacity Planning
+
+### SLA-Based Capacity
+
+If your SLA requires TTFT under 500ms at P99:
+
+1. Run concurrency sweep (1 → 64)
+2. Find the concurrency where TTFT P99 = 500ms (e.g., concurrency=24)
+3. Measure throughput at that concurrency (e.g., 850 tok/s)
+4. Calculate: `users_supported = throughput / avg_output_tokens_per_request`
+5. Example: `850 / 150 = ~5.6 simultaneous requests`
+
+### Cost Optimization
+
+```bash
+# Compare different quantization levels
+# FP16 baseline
+genai-perf profile --model mistral-fp16 --concurrency 8
+
+# FP8 quantized
+genai-perf profile --model mistral-fp8 --concurrency 8
+
+# INT4 (AWQ/GPTQ)
+genai-perf profile --model mistral-awq --concurrency 8
+```
+
+Typical quantization impact:
+
+| Precision | Throughput | Quality (MMLU) | Memory |
+|-----------|-----------|----------------|--------|
+| FP16 | 920 tok/s | 82.1% | 24 GB |
+| FP8 | 1,350 tok/s | 81.8% | 12 GB |
+| INT4 (AWQ) | 1,800 tok/s | 80.5% | 7 GB |
+
+## Automation: CI/CD Performance Regression
+
+```yaml
+# GitHub Actions: run perf test on every model update
+- name: Benchmark inference
+  run: |
+    genai-perf profile \
+      --model ${{ env.MODEL_NAME }} \
+      --backend vllm \
+      --concurrency 8 \
+      --input-tokens-mean 200 \
+      --output-tokens-mean 100 \
+      --num-prompts 100 \
+      --output-format json \
+      --output-file results.json
+
+- name: Check regression
+  run: |
+    python scripts/check_perf_regression.py \
+      --baseline baseline.json \
+      --current results.json \
+      --ttft-p99-threshold 500 \
+      --throughput-min 800
+```
+
+## Related Articles
+
+- [Distributed vs Multi-GPU Inference](/blog/distributed-vs-multi-gpu-inference-2026/) — architecture decisions
+- [NVIDIA NIM Support Matrix](/blog/nvidia-nim-support-matrix-2026/) — supported model/GPU combinations
+- [NVIDIA NIM Model Profiles](/blog/nvidia-nim-model-profiles-2026/) — performance profile selection
+- [The Inference Economy](/blog/inference-economy-gpu-cost-optimization/) — cost optimization strategies
+- [LLM Quality vs Cost vs Safety](/blog/llm-quality-cost-safety-throughput-2026/) — trade-off analysis
+
+---
+
+*Benchmark before you deploy, benchmark after you optimize, benchmark when traffic patterns change. GenAI-Perf makes this a 5-minute task instead of a week-long project.*

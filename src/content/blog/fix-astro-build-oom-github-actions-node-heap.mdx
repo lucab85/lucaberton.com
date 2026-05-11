@@ -1,0 +1,89 @@
+---
+draft: false
+title: "Fix Astro Build Out-of-Memory on GitHub Actions: Bump Node Heap to 6 GB"
+snippet: "Astro builds with heavy image optimization can OOM on GitHub Actions runners. Set NODE_OPTIONS=--max-old-space-size=6144 on the build step to fix exit code 134."
+description: "Astro build failing with 'JavaScript heap out of memory' on GitHub Actions? Bump Node's max-old-space-size to 6144 MB on the pnpm build step. Working YAML included."
+publishDate: "2026-05-11"
+lastModified: "2026-05-11"
+image:
+  src: "/blog/thumbnails/fix-astro-build-oom-github-actions-node-heap.jpg"
+  alt: "Astro build OOM on GitHub Actions — fix with NODE_OPTIONS max-old-space-size"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "astro"
+  - "github-actions"
+  - "node"
+  - "ci-cd"
+  - "troubleshooting"
+---
+
+## Symptom
+
+An Astro build that runs fine locally suddenly fails on GitHub Actions during image optimization. The job logs show Node's V8 garbage collector giving up:
+
+```text
+<--- Last few GCs --->
+[2415:0x2478a000] 485344 ms: Mark-Compact 4015.6 (4129.3) -> 3958.0 (4128.5) MB,
+  pooled: 5 MB, 1766.89 / 0.00 ms (average mu = 0.321, current mu = 0.377)
+  allocation failure; scavenge might not succeed
+[2415:0x2478a000] 487082 ms: Mark-Compact 3974.3 (4128.5) -> 3957.5 (4116.8) MB,
+  pooled: 15 MB, 1656.58 / 0.00 ms (average mu = 0.209, current mu = 0.047)
+  allocation failure; scavenge might not succeed
+
+<--- JS stacktrace --->
+FATAL ERROR: Ineffective mark-compacts near heap limit
+Allocation failed - JavaScript heap out of memory
+Aborted (core dumped)
+ELIFECYCLE  Command failed with exit code 134.
+```
+
+Exit code `134` is `SIGABRT` — Node aborted itself because the V8 heap hit its ceiling.
+
+## Why this happens
+
+Node's default old-generation heap is roughly 4 GB on 64-bit systems (it used to be 1.7 GB before Node 22's auto-sizing kicked in, and it still tops out around 4 GB on machines with modest RAM). Astro's image pipeline holds a lot of decoded pixel data in memory at once — for sites with hundreds of source images, each rendered to multiple `avif`, `webp`, and fallback variants, you can easily blow past that ceiling during the optimization phase.
+
+In my case the build was producing 581 image variants (`coursera-cdc.*`, `luca-hero.*`, `redhat.*`, …) and the OOM hit late in the run, right before sitemap generation.
+
+## Fix
+
+Tell Node it can use more memory. GitHub-hosted `ubuntu-latest` runners ship with **16 GB of RAM**, so 6 GB for the build process is generous without starving the OS or the rest of the job:
+
+```yaml
+- name: Build Astro site
+  run: pnpm build
+  env:
+    NODE_OPTIONS: --max-old-space-size=6144
+```
+
+That's it. Commit, push, watch the build go green.
+
+### Why 6 GB and not 8 or 12?
+
+- **Headroom for the OS, pnpm, and concurrent tools.** Sharp/libvips spawn worker threads with their own native memory outside V8.
+- **6 GB is enough for sites well into the thousand-image range.** If you still OOM, raise to 8192 — but first audit whether you're shipping unoptimized source images.
+- **Keep CI cheap on self-hosted runners.** Smaller VMs (4 GB / 8 GB) can't honor a 12 GB request, and the scheduler will OOM-kill the entire runner, not just Node.
+
+## Sanity checks before bumping memory
+
+Before you reach for more RAM, rule out the cheap wins:
+
+1. **Audit your source images.** Drop any `.png` over ~500 KB into a quick `cwebp` pass. The fewer megapixels Astro feeds the pipeline, the faster and lighter the build.
+2. **Check for duplicate references.** A single 4 K hero image referenced from 20 MDX files is processed once, but make sure you're not re-importing the same asset under different paths.
+3. **Look for memory leaks in your integrations.** Custom remark/rehype plugins that hold AST references across files can balloon heap usage.
+
+## Local reproduction
+
+To reproduce the same constraint on macOS or Linux before pushing:
+
+```bash
+NODE_OPTIONS=--max-old-space-size=4096 pnpm build
+```
+
+If that fails locally with the same stack trace, the heap bump is the right fix. If it succeeds locally but fails in CI, suspect a difference in runner concurrency (Sharp uses `os.cpus().length` workers by default — `ubuntu-latest` reports 4 vCPUs).
+
+## Related
+
+- [Fix Docker Container Out-of-Memory (OOM)](/blog/Fix-Docker-Container-Out-of-Memory-OOM/)
+- [Fix Kubernetes OOMKilled Error](/blog/fix-kubernetes-oomkilled-error/)

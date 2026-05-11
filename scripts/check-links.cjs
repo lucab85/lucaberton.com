@@ -10,9 +10,10 @@ const path = require('path');
 const BLOG_DIR = path.join(__dirname, '..', 'src', 'content', 'blog');
 const PAGES_DIR = path.join(__dirname, '..', 'src', 'pages');
 
-// Collect all valid blog slugs
+// Collect all valid blog slugs (lowercase for case-insensitive matching;
+// macOS preserves case in readdir while Linux CI is case-sensitive)
 const blogFiles = fs.readdirSync(BLOG_DIR).filter(f => f.endsWith('.mdx'));
-const validSlugs = new Set(blogFiles.map(f => f.replace('.mdx', '')));
+const validSlugs = new Set(blogFiles.map(f => f.replace('.mdx', '').toLowerCase()));
 
 // Collect all valid page routes
 const validPages = new Set(['books', 'courses', 'about', 'contact', 'services', 'blog', 'conference-speaking-journey', 'kubecon', 'book-signing', 'talk', 'network']);
@@ -53,7 +54,8 @@ for (const file of blogFiles) {
       let match;
       while ((match = regex.exec(line)) !== null) {
         const slug = match[1];
-        if (!validSlugs.has(slug) && !assetDirs.has(slug)) {
+        const slugLower = slug.toLowerCase();
+        if (!validSlugs.has(slugLower) && !assetDirs.has(slugLower)) {
           if (!broken[file]) broken[file] = [];
           broken[file].push({ line: i + 1, slug });
           totalBroken++;

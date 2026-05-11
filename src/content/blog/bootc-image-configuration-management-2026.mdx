@@ -1,0 +1,286 @@
+---
+title: "bootc Image Plus Config: Managing OS Configuration at Scale"
+snippet: "How to combine bootc immutable OS images with runtime configuration for production Linux. Build the golden image, layer site-specific config, and update both independently."
+description: "Guide to bootc image plus configuration management — combining immutable OS images with runtime config layers for scalable, reproducible Linux infrastructure."
+publishDate: "2026-05-12"
+lastModified: "2026-05-12"
+image:
+  src: "/blog/thumbnails/bootc-image-configuration-2026.jpg"
+  alt: "bootc image plus configuration management for Linux"
+tags: ["Linux", "bootc", "immutable OS", "RHEL", "configuration management", "image mode"]
+category: "DevOps"
+author: "Luca Berton"
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+In my previous article on [bootc immutable Linux](/blog/bootc-immutable-linux-update-rollback-2026/), I covered atomic OS updates and rollback. But a common question follows: **if the OS image is immutable, how do I handle configuration that differs per machine?**
+
+The answer is the **image plus configuration** model. You bake the OS and packages into the image, then layer site-specific configuration at deploy time or runtime. This gives you the best of both worlds — reproducible base images and flexible per-host customization.
+
+## The Two-Layer Model
+
+Think of your server as two distinct layers:
+
+1. **Image layer** — the OS, packages, system services, and default configs. Built from a Containerfile, tested in CI, identical everywhere. Updated with `bootc update`.
+2. **Configuration layer** — host-specific settings like network config, secrets, certificates, feature flags. Applied at boot or runtime. Persists across image updates.
+
+```
+┌─────────────────────────────┐
+│   Configuration Layer       │  ← /etc overrides, secrets, certs
+│   (mutable, per-host)       │     Persists across updates
+├─────────────────────────────┤
+│   OS Image Layer            │  ← Packages, services, defaults
+│   (immutable, identical)    │     Replaced atomically by bootc
+└─────────────────────────────┘
+```
+
+## How /etc Works in bootc
+
+bootc uses an intelligent merge strategy for `/etc`. Here is how it works:
+
+- `/usr` — **read-only**, comes entirely from the image
+- `/etc` — **writable**, with a 3-way merge on updates
+- `/var` — **fully mutable**, persists across image updates
+
+When you run `bootc update`, the new image brings new defaults for `/etc`. bootc performs a 3-way merge:
+
+1. If you modified a file that the new image also changed — **your changes win** (conflict preserved)
+2. If only the image changed a file — **new image version applied**
+3. If only you changed a file — **your changes preserved**
+
+This means site-specific configuration in `/etc` survives image updates automatically.
+
+```bash
+# Your custom network config
+cat /etc/NetworkManager/system-connections/prod-bond0.nmconnection
+
+# After bootc update + reboot:
+# - New image defaults applied where you did not customize
+# - Your bond0 config is untouched
+```
+
+## Containerfile: Baking Defaults
+
+Start by putting sensible defaults into the image. These are your organization-wide standards:
+
+```dockerfile
+FROM quay.io/centos-bootc/centos-bootc:stream9
+
+# Install the stack
+RUN dnf install -y \
+    nginx \
+    prometheus-node-exporter \
+    tuned \
+    NetworkManager \
+    chrony \
+    && dnf clean all
+
+# Organization-wide defaults
+COPY etc/tuned/active_profile /etc/tuned/active_profile
+COPY etc/chrony.conf /etc/chrony.conf
+COPY etc/nginx/nginx.conf /etc/nginx/nginx.conf
+
+# Security hardening (same everywhere)
+COPY etc/sysctl.d/99-hardening.conf /etc/sysctl.d/99-hardening.conf
+COPY etc/ssh/sshd_config.d/hardening.conf /etc/ssh/sshd_config.d/hardening.conf
+
+# Enable services
+RUN systemctl enable nginx prometheus-node-exporter tuned chronyd
+```
+
+This image contains everything that should be identical across all servers. Build it once, push it to a registry, deploy it everywhere.
+
+## Applying Site-Specific Configuration
+
+For per-host or per-environment configuration, you have several options:
+
+### Option 1: Cloud-init / Ignition
+
+For initial provisioning, use cloud-init or Ignition to set host-specific config at first boot:
+
+```yaml
+# cloud-init user-data
+hostname: prod-gpu-node-03
+network:
+  ethernets:
+    ens3:
+      addresses: [10.0.1.103/24]
+      gateway4: 10.0.1.1
+write_files:
+  - path: /etc/prometheus/targets.yml
+    content: |
+      - targets: ['localhost:9100']
+        labels:
+          env: production
+          role: gpu-inference
+```
+
+This configuration lands in `/etc` and persists across `bootc update` cycles.
+
+### Option 2: Ansible for Day-2 Config
+
+Use [Ansible](/blog/ansible-pilot-overview/) to manage configuration that changes over time:
+
+```yaml
+# site-config.yml
+- hosts: gpu_nodes
+  tasks:
+    - name: Deploy TLS certificates
+      copy:
+        src: "certs/{{ inventory_hostname }}.pem"
+        dest: /etc/pki/tls/certs/server.pem
+      notify: reload nginx
+
+    - name: Set GPU power limit
+      copy:
+        content: |
+          [Unit]
+          Description=Set GPU Power Limit
+          After=nvidia-persistenced.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/bin/nvidia-smi -pl {{ gpu_power_limit }}
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/gpu-power-limit.service
+```
+
+Ansible manages only configuration — the OS image handles packages and services. This is a much cleaner separation than using Ansible for everything.
+
+### Option 3: Environment-Specific Image Layers
+
+For distinct environments (dev/staging/prod), build layered images:
+
+```dockerfile
+# Base image — shared by all environments
+FROM quay.io/myorg/base-server:latest AS base
+
+# Production image
+FROM base AS production
+COPY etc/nginx/conf.d/production.conf /etc/nginx/conf.d/site.conf
+COPY etc/sysctl.d/production-tuning.conf /etc/sysctl.d/99-tuning.conf
+
+# Staging image
+FROM base AS staging
+COPY etc/nginx/conf.d/staging.conf /etc/nginx/conf.d/site.conf
+```
+
+```bash
+# Production servers pull the production image
+bootc switch quay.io/myorg/server:production
+
+# Staging servers pull the staging image
+bootc switch quay.io/myorg/server:staging
+```
+
+## Updating Configuration Without Changing the Image
+
+Sometimes you need to push configuration changes without a full OS update. Since `/etc` is writable, you can update config files directly or through Ansible:
+
+```bash
+# Direct config change on the host
+vim /etc/nginx/conf.d/rate-limiting.conf
+systemctl reload nginx
+
+# This change persists across future bootc updates
+# because bootc preserves your /etc modifications
+```
+
+For fleet-wide config changes, Ansible remains the right tool:
+
+```bash
+ansible-playbook -i inventory/production site-config.yml --tags certificates
+```
+
+The key insight: **bootc handles the OS lifecycle, Ansible handles the configuration lifecycle.** They complement each other perfectly.
+
+## Secrets Management
+
+Secrets should never be baked into images. Use runtime injection:
+
+```bash
+# Secrets from vault, injected at boot via systemd
+# /etc/systemd/system/load-secrets.service
+[Unit]
+Description=Load secrets from Vault
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vault-agent \
+    -config=/etc/vault-agent/config.hcl
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Or use Kubernetes Secrets for containerized workloads running on top of the immutable OS — the OS image provides the platform, and secrets live in the orchestration layer.
+
+## The Update Workflow
+
+Here is the complete lifecycle for image plus configuration:
+
+```
+Developer → Containerfile → CI Build → Registry
+                                          │
+                                     bootc update
+                                          │
+                              ┌───────────┴───────────┐
+                              │    New OS Image        │
+                              │  + Preserved /etc      │
+                              │  + Preserved /var      │
+                              └───────────────────────┘
+                                          │
+                                    Ansible Day-2
+                                          │
+                              ┌───────────┴───────────┐
+                              │  Updated certificates  │
+                              │  New feature flags     │
+                              │  Rotated secrets       │
+                              └───────────────────────┘
+```
+
+1. Build new OS image in CI (weekly, on security patches, or on demand)
+2. Push to registry
+3. `bootc update` on target hosts (manual, cron, or orchestrated)
+4. Reboot — new image boots with existing `/etc` config preserved
+5. Ansible applies any pending configuration changes
+6. If anything fails — `bootc rollback` reverts the OS, config stays
+
+## Best Practices
+
+**Put in the image:**
+- Packages and dependencies
+- System service definitions
+- Organization-wide security baselines
+- Default configurations
+- Monitoring agents
+
+**Keep in configuration:**
+- Network settings (IPs, bonds, VLANs)
+- TLS certificates
+- Application-specific tuning
+- Secrets and credentials
+- Host identity (hostname, machine-id)
+
+**Never bake into images:**
+- Secrets, tokens, passwords
+- Environment-specific endpoints
+- Customer data
+- Anything that changes more often than the OS
+
+## Related Articles
+
+- [Immutable Linux with bootc](/blog/bootc-immutable-linux-update-rollback-2026/)
+- [Ansible Pilot Overview](/blog/ansible-pilot-overview/)
+- [RHEL AI Tutorial](/blog/rhel-ai-tutorial-complete-beginners-guide-2026/)
+- [Podman vs Docker](/blog/podman-vs-docker-2026/)
+- [RHEL vs Ubuntu Server](/blog/rhel-vs-ubuntu-server-2026/)
+
+<BlogPromoCard />

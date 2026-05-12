@@ -1,0 +1,121 @@
+---
+title: "Wide Expert Parallelism on NVL72: Scaling MoE Inference"
+snippet: "How NVIDIA TensorRT-LLM Wide-EP distributes MoE experts across GB200 NVL72 racks for 1.8x per-GPU throughput on DeepSeek-R1 scale models."
+description: "How NVIDIA TensorRT-LLM Wide-EP distributes MoE experts across GB200 NVL72 racks for 1.8x per-GPU throughput on DeepSeek-R1 scale models."
+publishDate: "2026-05-12"
+lastModified: "2026-05-12"
+image:
+  src: "/blog/thumbnails/nvidia-wide-ep-nvl72-moe-2026.jpg"
+  alt: "Wide Expert Parallelism on NVL72 for MoE model inference"
+category: "AI"
+tags:
+  - "NVIDIA"
+  - "TensorRT-LLM"
+  - "MoE"
+  - "Expert Parallelism"
+  - "NVL72"
+  - "GB200"
+  - "DeepSeek"
+  - "Inference"
+author: "Luca Berton"
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Mixture-of-experts (MoE) models like DeepSeek-R1 (256 experts, 671B parameters) are more efficient than dense models because they activate only a subset of experts per token. But scaling them to production introduces parallelism, communication, and scheduling challenges that standard inference stacks cannot handle.
+
+NVIDIA's **Wide Expert Parallelism (Wide-EP)** in TensorRT-LLM solves this by distributing experts across 8+ GPUs in the GB200 NVL72 rack-scale domain — achieving **1.8x higher per-GPU throughput** compared to small-scale EP configurations.
+
+## Why Expert Parallelism Matters
+
+Expert parallelism (EP) distributes a MoE model's experts across multiple GPUs. At small scale (EP=2 or EP=4), it reduces memory pressure and balances work. At large scale (EP=32 or EP=64), it fundamentally changes inference economics.
+
+**Small-scale EP** packs many experts per GPU. Each GPU must load and cycle through many expert weight sets, creating memory bandwidth bottlenecks in the GroupGEMM kernels that process tokens.
+
+**Large-scale EP** spreads fewer experts per GPU. This means:
+
+- **Less weight-loading pressure** — smaller expert weight sets per GPU
+- **Higher arithmetic intensity** — more FLOPs per byte of weight loaded in GroupGEMM
+- **Better compute/memory balance** inside the kernel
+
+## The GroupGEMM Bottleneck
+
+MoE models route tokens to specific experts dynamically. Tokens destined for the same expert get packed together and processed with a single fused **GroupGEMM kernel** — a grouped matrix multiplication that batches per-expert computation.
+
+The problem: each GroupGEMM must load the activated expert's weights into on-chip memory before multiplication. In high-throughput, latency-constrained scenarios, this weight-loading overhead dominates. Wide-EP directly attacks this by reducing experts-per-GPU, making each weight load serve more tokens.
+
+## NVL72: The Hardware Foundation
+
+Large-scale EP only works if the interconnect can handle the all-to-all communication pattern. When DeepSeek-R1's 256 experts are distributed across 64 GPUs with 8 active experts per token, every transformer block requires per-token dispatching and output aggregation across the rack.
+
+The GB200 NVL72 provides **130 TB/s of aggregate NVLink bandwidth** across 72 GPUs in a coherent memory domain. Without this bandwidth floor, the communication overhead of large-scale EP would erase the compute gains.
+
+Key architectural details:
+
+- **232 experts assigned per GPU** (4 experts per layer, across all layers) in an EP=64 configuration
+- **Custom NCCL kernels** handle non-static data sizes and CUDA graph compatibility
+- **Coherent NVLink domain** enables efficient token-gather collectives across the full rack
+
+## Expert Parallel Load Balancer (EPLB)
+
+Not all experts are equally popular. Without load balancing, "hot" experts cluster on the same GPU while "cold" expert GPUs sit idle. Wide-EP's **EPLB** redistributes experts to prevent this:
+
+**Static EPLB** uses pre-computed expert-to-GPU mappings based on historical data patterns. Good baseline, deterministic.
+
+**Online EPLB** redistributes experts during runtime, adapting to changing workload patterns in real-time. Higher potential for optimal utilization, but requires solving weight-update challenges — experts flow in and out of container allocations without breaking the CUDA graph, with updates scheduled between forward passes in a non-blocking fashion.
+
+## Wide-EP + NVIDIA Dynamo
+
+In production, Wide-EP pairs with [NVIDIA Dynamo](/blog/nvidia-dynamo-inference-framework-2026/) for disaggregated serving:
+
+| Concern | Dynamo | Wide-EP |
+|---------|--------|---------|
+| **Role** | Orchestration layer | Execution engine |
+| **Scope** | Prefill and decode across GPU pools | Expert distribution per GPU |
+| **SLA** | TTFT and ITL-aware autoscaling | Expert scheduling for latency |
+| **Adaptation** | ISL/OSL fluctuations | Expert load balancing |
+| **Hardware** | Kubernetes + Planner | NVLink domain communication |
+
+Dynamo handles the macro-level orchestration (which phase runs where, rate matching, autoscaling) while Wide-EP handles the micro-level execution (how experts are distributed, loaded, and balanced within the decode phase).
+
+## Performance: 1.8x Per-GPU Throughput
+
+Benchmarks on DeepSeek-R1 with disaggregated serving and multi-token prediction (MTP):
+
+- **EP32 (large-scale)**: Up to **1.8x higher output token throughput per GPU** compared to EP8 at 100 tokens/sec per user
+- **EP8 (small-scale)**: Baseline — communication overhead is lower but weight-loading pressure limits throughput
+- **MTP compatibility**: Speculative decoding with multi-token prediction works with Wide-EP, boosting per-user token throughput further
+
+The Pareto frontier shows that large EP configurations consistently dominate at production-relevant latency targets. The throughput gain is not marginal — it is nearly double.
+
+## TCO Impact
+
+The 1.8x per-GPU throughput improvement directly translates to infrastructure economics:
+
+- **Fewer GPUs needed** for the same aggregate throughput
+- **Higher concurrency** per rack — more users served per NVL72
+- **Lower cost per token** — the InferenceMAX benchmarks show GB200 NVL72 with Wide-EP delivers the lowest TCO across all system architectures for large MoE models
+- **10x faster inference and 1/10 token cost** compared to prior generation architectures for MoE frontier models
+
+For organizations running DeepSeek-R1 or similarly large MoE models, Wide-EP on NVL72 changes the deployment calculus. What was previously a multi-rack problem becomes a single-rack solution.
+
+## When to Use Wide-EP
+
+Wide-EP delivers the most value when:
+
+1. **Large model with many experts** — DeepSeek-R1 (256 experts), Llama 4 Scout/Maverick. Smaller MoE models with fewer experts gain less because communication overhead can outweigh benefits
+2. **Throughput constrained by latency** — large-scale EP is most effective when you need higher per-GPU throughput at iso-latency
+3. **NVLink domain available** — GB200 NVL72's 130 TB/s aggregate bandwidth is what makes the all-to-all communication practical
+
+For dense models or small MoE models (under 16 experts), standard tensor parallelism remains more efficient.
+
+## Related Articles
+
+- [NVIDIA Dynamo: Next-Gen Inference Framework](/blog/nvidia-dynamo-inference-framework-2026/)
+- [NVIDIA NIM Multi-Node Deployment on Kubernetes](/blog/nvidia-nim-multi-node-kubernetes-deployment-2026/)
+- [The Inference Economy](/blog/inference-gold-rush-economics-llm-serving-2026/)
+- [AI Infrastructure Matters More Than the Model](/blog/ai-infrastructure-matters-more-than-model-production/)
+- [llm-d KV-Cache Routing at Red Hat Summit 2026](/blog/llmd-kv-cache-routing-summit-2026/)
+
+<BlogPromoCard />

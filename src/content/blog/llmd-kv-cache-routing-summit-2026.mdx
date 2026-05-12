@@ -1,0 +1,107 @@
+---
+title: "llm-d at Red Hat Summit 2026: KV-Cache Aware Routing for LLM Inference"
+snippet: "Red Hat presented llm-d at Summit 2026 — cache-aware load balancing for multi-pod vLLM deployments. Cold 4.3s vs warm 0.6s (7x faster), $0.30 vs $3.00 per million tokens (10x cheaper)."
+description: "llm-d KV-cache aware routing at Red Hat Summit 2026. Prefix caching breaks at scale — llm-d solves it with cache-aware routing. 7x faster TTFT, 10x cost reduction."
+publishDate: "2026-05-12"
+lastModified: "2026-05-12"
+image:
+  src: "/blog/thumbnails/llmd-kv-cache-routing-summit-2026.jpg"
+  alt: "llm-d KV-cache aware routing presentation at Red Hat Summit 2026"
+tags: ["Red Hat Summit", "llm-d", "KV-cache", "vLLM", "inference", "LLM", "Kubernetes"]
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+At the Community Central Theater at Red Hat Summit 2026, I watched one of the most important talks for anyone running LLM inference at scale: the **llm-d** project and why your load balancer is destroying your inference performance.
+
+The numbers are stark: **$0.30 vs $3.00 per million tokens**. Same model. Same hardware. The only difference is whether your infrastructure is smart enough to use KV-cache.
+
+## Your GPU Is Re-Doing Work It Already Did
+
+![KV-cache hit rate — $0.30/M cached vs $3.00/M uncached tokens](/blog/events/rh-summit-2026-llmd-cost1.jpg)
+
+The presenter opened with a direct challenge: in production LLM inference, we track dozens of metrics, but one stands above the rest — **KV-cache hit rate**. KV-cache stores the Key and Value tensors from previous attention computations. It directly affects latency, throughput, and your bill:
+
+- **Cached token**: $0.30 / M
+- **Uncached token**: $3.00 / M
+
+That is a **10x cost difference**. Same model. Same hardware. The question is not whether caching matters — it is whether your infrastructure is smart enough to use it.
+
+![KV-cache cost comparison — 10x difference](/blog/events/rh-summit-2026-llmd-cost2.jpg)
+
+## Why KV-Cache Matters
+
+![Prefill is expensive, Decode is cheap — caching is the bridge](/blog/events/rh-summit-2026-llmd-prefill.jpg)
+
+The Transformer inference loop has two phases:
+
+1. **Prefill** — process the entire input prompt, computing attention over every token pair (O(n^2)). This is where your GPUs sweat.
+2. **KV-Cache** — store the resulting Key and Value tensors. This is the model's working memory.
+3. **Decode** — generate one token at a time (O(n)), reading and extending KV-Cache. This is cheap.
+
+Prefill is expensive. Decode is cheap. **Caching is the bridge.**
+
+## Prefix Caching: Works on One Pod, Breaks on Two
+
+![KV-cache prefix caching — cold 4.3s vs warm 0.6s, 7x faster](/blog/events/rh-summit-2026-llmd-kvcache1.jpg)
+
+For shared prefixes — common in conversational AI, agentic workflows, and RAG — the prefill is skipped entirely for subsequent requests. The presenter demonstrated this with a 10K token prompt on a Qwen3-32B instance:
+
+- **Cold (no cache)**: 4.3s TTFT
+- **Warm (cache hit)**: 0.6s TTFT
+- **Speedup**: **7x faster**, zero extra compute
+
+![KV-cache prefix caching diagram](/blog/events/rh-summit-2026-llmd-kvcache2.jpg)
+
+This works beautifully on a single instance. **The moment you add a second pod — it breaks.**
+
+![Community Central Theater — KV-cache presentation](/blog/events/rh-summit-2026-llmd-kvcache3.jpg)
+
+![Full audience view of KV-cache presentation](/blog/events/rh-summit-2026-llmd-kvcache4.jpg)
+
+![Wide shot of the Community Central Theater stage](/blog/events/rh-summit-2026-llmd-kvcache5.jpg)
+
+## The Scale-Out Problem
+
+![The Scale-Out Problem — your load balancer is cache-blind](/blog/events/rh-summit-2026-llmd-scaleout1.jpg)
+
+Here is the core problem that llm-d solves:
+
+- In a multi-pod deployment, each vLLM instance manages its own KV-cache **in isolation**
+- Standard load balancers route on utilization, round-robin, or latency — **nothing cache-aware**
+- Related requests get scattered across pods, **destroying cache locality**
+
+![Scale-out problem — cache-blind routing is the default behavior](/blog/events/rh-summit-2026-llmd-scaleout2.jpg)
+
+In a fleet of pods, this is not a rare event. **It is the default behavior.** Every time a follow-up message in a conversation hits a different pod, the entire prefix must be recomputed from scratch. That is 4.3 seconds instead of 0.6 seconds. That is $3.00 instead of $0.30 per million tokens.
+
+## What llm-d Does
+
+**llm-d** is a Kubernetes-native inference gateway that makes load balancing KV-cache aware. Instead of blindly distributing requests, it:
+
+1. **Hashes the prompt prefix** to identify which pod already has the relevant KV-cache warmed up
+2. **Routes the request to that pod**, achieving cache hits across a multi-pod fleet
+3. **Falls back intelligently** when the cached pod is overloaded, balancing cache locality against queue depth
+
+The result: you get single-instance cache hit rates across a horizontally scaled fleet. The 7x latency improvement and 10x cost reduction that prefix caching delivers on one pod — llm-d delivers across your entire cluster.
+
+## Why This Matters for Production AI
+
+This talk crystallized something I have been seeing across enterprise AI deployments: **the inference cost problem is not about the model or the hardware — it is about the routing layer.**
+
+Most organizations running multi-pod vLLM deployments behind a standard Kubernetes Service or Ingress are unknowingly paying 10x more than they need to. Every agentic workflow, every RAG pipeline, every multi-turn conversation is recomputing prefill because the load balancer does not understand KV-cache.
+
+llm-d turns infrastructure from a cost center into a competitive advantage. And it is [open source](https://github.com/llm-d).
+
+## Related Articles
+
+- [Red Hat Summit 2026: Open Source AI in Atlanta](/blog/red-hat-summit-2026-atlanta-open-source-ai/)
+- [Red Hat Training Hub at Summit 2026](/blog/red-hat-training-hub-summit-2026/)
+- [NVIDIA NIM Multi-Node Deployment on Kubernetes](/blog/nvidia-nim-multi-node-kubernetes-deployment-2026/)
+- [The Inference Economy](/blog/inference-gold-rush-economics-llm-serving-2026/)
+- [AI Infrastructure Matters More Than the Model](/blog/ai-infrastructure-matters-more-than-model-production/)
+
+<BlogPromoCard />

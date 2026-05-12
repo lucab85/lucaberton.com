@@ -1,0 +1,312 @@
+---
+title: "FIO Storage Benchmarks for AI Training: NFS and SMB on Kubernetes"
+snippet: "How to benchmark shared storage performance for distributed AI training workloads using FIO on Kubernetes. Covers NFS vs SMB throughput, IOPS patterns, and PScale storage validation for multi-node GPU training."
+description: "How to benchmark shared storage performance for distributed AI training workloads using FIO on Kubernetes. Covers NFS vs SMB throughput, IOPS patterns, and PScale storage validation for multi-node GPU training."
+publishDate: "2026-05-05"
+lastModified: "2026-05-05"
+image:
+  src: "/blog/thumbnails/fio-storage-ai-training-2026.jpg"
+  alt: "FIO storage benchmarks NFS SMB Kubernetes AI training"
+tags: ["Kubernetes", "Storage", "Performance", "AI", "Benchmarking"]
+category: "Platform Engineering"
+author: "Luca Berton"
+draft: false
+---
+
+Storage is the silent bottleneck in distributed AI training. Your GPUs can process tokens at teraflops, but if the data pipeline can't feed them fast enough, those expensive accelerators sit idle. Before committing to a storage solution for multi-node training, benchmark it properly with FIO.
+
+## Why Storage Matters for AI Training
+
+In a typical training pipeline:
+
+```
+Storage (PVC) → DataLoader workers → CPU preprocessing → GPU batch
+              │                                            │
+              └── THIS is often the bottleneck ────────────┘
+```
+
+Key storage operations during training:
+- **Sequential read**: Loading large dataset files (images, parquet, tokenized text)
+- **Random read**: Shuffled access to training samples
+- **Checkpoint write**: Saving model state every N steps (can be 10-200 GB)
+- **Logging**: Continuous small writes (metrics, profiler data)
+
+## FIO on Kubernetes: Multi-Pod Benchmark
+
+Deploy FIO pods that each target the same PVC (simulating multi-node training):
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: fio-benchmark
+spec:
+  parallelism: 4  # Simulate 4 training nodes
+  template:
+    spec:
+      containers:
+        - name: fio
+          image: nixery.dev/fio
+          command: ["fio"]
+          args:
+            - "--name=ai-training-read"
+            - "--directory=/data/benchmark"
+            - "--rw=read"
+            - "--bs=1M"
+            - "--size=10G"
+            - "--numjobs=4"
+            - "--iodepth=32"
+            - "--direct=1"
+            - "--group_reporting"
+            - "--output-format=json"
+          volumeMounts:
+            - name: shared-storage
+              mountPath: /data
+      volumes:
+        - name: shared-storage
+          persistentVolumeClaim:
+            claimName: ai-training-data
+      restartPolicy: Never
+```
+
+## Benchmark Profiles for AI Workloads
+
+### Profile 1: Dataset Loading (Sequential Read)
+
+Simulates loading large training files (HDF5, Parquet, WebDataset):
+
+```ini
+[ai-dataset-load]
+directory=/data/benchmark
+rw=read
+bs=1M
+size=10G
+numjobs=4
+iodepth=32
+direct=1
+runtime=120
+time_based=1
+group_reporting=1
+```
+
+**Target**: 2+ GB/s per node for large model training, 500 MB/s minimum for vision workloads.
+
+### Profile 2: Shuffled Sample Access (Random Read)
+
+Simulates PyTorch DataLoader with shuffle=True on image datasets:
+
+```ini
+[ai-random-read]
+directory=/data/benchmark
+rw=randread
+bs=256K
+size=10G
+numjobs=8
+iodepth=16
+direct=1
+runtime=120
+time_based=1
+group_reporting=1
+```
+
+**Target**: 50K+ IOPS for fast random sample access. Below 10K IOPS, the GPU will starve.
+
+### Profile 3: Checkpoint Writing (Sequential Write)
+
+Simulates saving model checkpoints (10-200 GB bursts):
+
+```ini
+[ai-checkpoint]
+directory=/data/benchmark
+rw=write
+bs=4M
+size=50G
+numjobs=1
+iodepth=16
+direct=1
+group_reporting=1
+```
+
+**Target**: 1+ GB/s write throughput. Checkpoint saves should complete in under 60 seconds to minimize training interruption.
+
+### Profile 4: Mixed Workload (Read + Checkpoint)
+
+Simulates training with periodic checkpoint saves:
+
+```ini
+[ai-mixed]
+directory=/data/benchmark
+rw=randrw
+rwmixread=90
+bs=1M
+size=10G
+numjobs=4
+iodepth=16
+direct=1
+runtime=120
+time_based=1
+group_reporting=1
+```
+
+## NFS vs SMB for AI Training
+
+### NFS (Network File System)
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+spec:
+  capacity:
+    storage: 10Ti
+  accessModes:
+    - ReadWriteMany
+  nfs:
+    server: storage-node.internal
+    path: /exports/ai-training
+  mountOptions:
+    - nfsvers=4.2
+    - rsize=1048576
+    - wsize=1048576
+    - hard
+    - intr
+    - noatime
+    - tcp
+```
+
+**NFS tuning for AI workloads:**
+- `rsize=1048576` / `wsize=1048576` — 1MB read/write buffers (default 64KB is too small)
+- `noatime` — skip access time updates (reduces metadata overhead)
+- `tcp` — reliable transport (UDP drops packets under high load)
+- `nfsvers=4.2` — supports parallel NFS (pNFS) for multi-path I/O
+
+### SMB (CIFS)
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+spec:
+  capacity:
+    storage: 10Ti
+  accessModes:
+    - ReadWriteMany
+  csi:
+    driver: smb.csi.k8s.io
+    volumeAttributes:
+      source: //storage-node/ai-training
+    nodeStageSecretRef:
+      name: smb-creds
+  mountOptions:
+    - dir_mode=0755
+    - file_mode=0644
+    - vers=3.0
+    - multichannel
+    - max_channels=4
+```
+
+**SMB tuning:**
+- `multichannel` + `max_channels=4` — aggregate bandwidth across multiple network connections
+- `vers=3.0` — required for multichannel and encryption support
+
+### Benchmark Comparison
+
+Typical results on enterprise storage (measured with FIO):
+
+| Metric | NFS v4.2 | SMB 3.0 | PScale (parallel) |
+|--------|---------|---------|-------------------|
+| Sequential Read (1 pod) | 1.2 GB/s | 900 MB/s | 3.5 GB/s |
+| Sequential Read (4 pods) | 2.8 GB/s | 2.1 GB/s | 12 GB/s |
+| Random Read IOPS | 45K | 32K | 120K |
+| Sequential Write | 800 MB/s | 650 MB/s | 2.8 GB/s |
+| Latency P99 (4K random) | 2.1ms | 3.5ms | 0.4ms |
+
+**PScale** (parallel file system) dramatically outperforms traditional NFS/SMB for multi-node access because it distributes data across multiple storage nodes and supports concurrent access without lock contention.
+
+## Multi-Client Stress Test
+
+Simulate the actual training scenario: multiple pods reading from the same PVC simultaneously, each targeting a specific storage node IP:
+
+```bash
+#!/bin/bash
+# Deploy FIO pods targeting specific PScale node IPs
+# Validates that storage bandwidth scales linearly with clients
+
+STORAGE_NODE_IP="10.0.1.100"
+NUM_CLIENTS=8
+
+for i in $(seq 1 $NUM_CLIENTS); do
+  kubectl run fio-client-$i \
+    --image=nixery.dev/fio \
+    --restart=Never \
+    --overrides='{
+      "spec": {
+        "containers": [{
+          "name": "fio",
+          "image": "nixery.dev/fio",
+          "command": ["fio"],
+          "args": [
+            "--name=client-'$i'",
+            "--directory=/data",
+            "--rw=read",
+            "--bs=1M",
+            "--size=5G",
+            "--numjobs=2",
+            "--iodepth=16",
+            "--direct=1",
+            "--output-format=json"
+          ],
+          "volumeMounts": [{
+            "name": "data",
+            "mountPath": "/data"
+          }]
+        }],
+        "volumes": [{
+          "name": "data",
+          "persistentVolumeClaim": {
+            "claimName": "ai-training-pvc"
+          }
+        }]
+      }
+    }'
+done
+```
+
+## Interpreting Results for AI Training
+
+### Will My GPUs Starve?
+
+Calculate the minimum storage throughput needed:
+
+```
+Required bandwidth = batch_size × sample_size × batches_per_second
+
+Example (Vision - RetinaNet):
+  batch_size = 4 images/GPU × 4 GPUs = 16 images
+  sample_size = 800×800×3 = 1.92 MB
+  batches_per_second = 3 (based on GPU compute time)
+  Required = 16 × 1.92 × 3 = 92 MB/s ← NFS easily handles this
+
+Example (LLM - Mistral training):
+  Tokenized dataset loaded once into CPU RAM
+  Checkpoint size = 238 GB (full model)
+  Checkpoint frequency = every 200 steps (~30 minutes)
+  Required burst = 238 GB / 60s target = 4 GB/s ← needs parallel FS
+```
+
+### Red Flags in FIO Results
+
+- **Latency spikes** (P99 over 10× P50): storage contention or network congestion
+- **Throughput drops with multiple clients**: lock contention on NFS metadata
+- **Write stalls**: storage controller buffering full, need faster backing drives
+- **IOPS below 10K random**: shuffle-based training will bottleneck
+
+## Related Articles
+
+- [Fine-Tuning Mistral with FSDP](/blog/fsdp-lora-mistral-openshift-fine-tuning-2026/) — the training workload that needs this storage
+- [RetinaNet DDP Training](/blog/retinanet-ddp-runai-training-2026/) — vision training data pipeline
+- [Databases on Kubernetes — Memory Overcommit](/blog/databases-kubernetes-memory-overcommit-off-production/) — storage performance patterns
+- [Distributed vs Multi-GPU Inference](/blog/distributed-vs-multi-gpu-inference-2026/) — model serving storage needs
+- [NVIDIA DOCA Perftest](/blog/nvidia-doca-perftest-rdma-benchmarking-guide/) — network benchmarking companion
+
+---
+
+*Fast GPUs with slow storage is like a Formula 1 engine on bicycle tires. Benchmark your storage before you blame your model for slow training.*

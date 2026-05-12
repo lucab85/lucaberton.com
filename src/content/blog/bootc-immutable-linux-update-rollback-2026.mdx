@@ -1,0 +1,219 @@
+---
+title: "Immutable Linux with bootc: Atomic Updates and Rollback"
+snippet: "How bootc brings container-native image mode to Linux. Atomic OS updates, instant rollback, and why immutable infrastructure is the future of production servers."
+description: "Guide to bootc immutable Linux — atomic OS updates, instant rollback, image mode RHEL, container-native operating systems for production infrastructure."
+publishDate: "2026-05-12"
+lastModified: "2026-05-12"
+image:
+  src: "/blog/thumbnails/bootc-immutable-os-2026.jpg"
+  alt: "Immutable Linux with bootc — atomic updates and rollback"
+tags: ["Linux", "bootc", "immutable OS", "RHEL", "containers", "image mode"]
+category: "DevOps"
+author: "Luca Berton"
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+The traditional Linux model — mutable packages installed and updated in place — has served us for decades. But in production, it is a liability. Every `yum update` or `apt upgrade` mutates the running system, and if something breaks halfway through, you are left with a partially updated machine that is neither the old version nor the new one.
+
+**Immutable operating systems** fix this. And **bootc** is how Red Hat is bringing immutable, container-native infrastructure to enterprise Linux.
+
+## What Is an Immutable Operating System
+
+An immutable OS treats the root filesystem as read-only. You do not install packages on a running system. Instead, you build a new OS image — like a container image — and deploy it atomically. The system boots into the new image, and if anything goes wrong, you roll back to the previous one in seconds.
+
+This is not a new idea. ChromeOS, Android, and CoreOS have done it for years. What is new is applying this model to **enterprise Linux servers** with full RHEL compatibility.
+
+Key properties of immutable operating systems:
+
+- **Atomic updates** — the entire OS is replaced in one transaction, never partially
+- **Instant rollback** — boot into the previous image if the new one fails
+- **Reproducibility** — every server runs the exact same image, built from a Containerfile
+- **Drift elimination** — no configuration drift because you cannot mutate the running OS
+- **Security** — read-only rootfs means attackers cannot modify system binaries
+
+## Enter bootc
+
+**bootc** is the tool that makes Linux image mode work. It manages bootable container images — OCI images that contain a full operating system, bootloader, and kernel. You build your OS as a container image, push it to a registry, and bootc handles deploying it to bare metal or VMs.
+
+```bash
+# Check current bootc status
+bootc status
+
+# Update to the latest image from the registry
+bootc update
+
+# If something breaks, rollback instantly
+bootc rollback
+```
+
+That is it. Three commands cover 90% of what you need.
+
+## How bootc Update Works
+
+When you run `bootc update`, here is what happens under the hood:
+
+1. **Pull** — bootc fetches the latest image from the container registry
+2. **Stage** — the new image is written to an inactive partition/deployment slot
+3. **Switch** — the bootloader is configured to boot into the new image on next reboot
+4. **Reboot** — the system boots into the new OS image atomically
+
+The previous image remains untouched. If the new image fails health checks or you notice issues, you run `bootc rollback` and the system reverts to the last known good state on the next reboot.
+
+```bash
+# See both deployments (current and previous)
+bootc status
+
+# Output shows something like:
+# staged: quay.io/myorg/rhel-ai:9.5-20260510
+# booted: quay.io/myorg/rhel-ai:9.5-20260503
+# rollback: quay.io/myorg/rhel-ai:9.5-20260426
+```
+
+No partial updates. No broken dependency chains. No "works on my machine" when the same image runs identically everywhere.
+
+## Building Your OS Image
+
+The OS image is defined in a **Containerfile** (Dockerfile), just like application containers:
+
+```dockerfile
+FROM quay.io/centos-bootc/centos-bootc:stream9
+
+# Install your packages
+RUN dnf install -y \
+    nginx \
+    prometheus-node-exporter \
+    python3 \
+    && dnf clean all
+
+# Drop in configuration
+COPY etc/nginx/nginx.conf /etc/nginx/nginx.conf
+COPY etc/systemd/system/myapp.service /etc/systemd/system/myapp.service
+
+# Enable services
+RUN systemctl enable nginx prometheus-node-exporter myapp
+```
+
+Build it, push it, deploy it:
+
+```bash
+# Build the OS image
+podman build -t quay.io/myorg/my-server:latest .
+
+# Push to registry
+podman push quay.io/myorg/my-server:latest
+
+# On the target machine, update
+bootc update
+systemctl reboot
+```
+
+Your entire server configuration is version controlled, reviewed in pull requests, and tested in CI before it ever touches production.
+
+## Image Mode RHEL
+
+Red Hat has fully embraced this model with **Image Mode for RHEL** (previously called RHEL image mode). Starting with RHEL 9.4, you can run RHEL as a bootable container image managed by bootc.
+
+This is not a stripped-down or experimental variant — it is full RHEL with:
+
+- Complete package compatibility
+- SELinux enforcement
+- FIPS compliance
+- Subscription management
+- All the certifications enterprise customers need
+
+[RHEL AI](/blog/practical-rhel-ai/) uses image mode extensively. The InstructLab training and inference stack ships as bootable container images, making GPU driver updates and model deployments atomic and rollback-safe.
+
+## Rollback in Practice
+
+The rollback story is where immutable OS really shines. Consider a GPU driver update on an AI inference server:
+
+**Traditional approach:**
+```bash
+# Update GPU driver
+dnf update nvidia-driver
+# Reboot
+# GPU driver fails to load
+# Panic — production inference is down
+# Manually downgrade, hope dependencies resolve
+# 45 minutes of downtime
+```
+
+**Immutable with bootc:**
+```bash
+# Update to new image with updated GPU driver
+bootc update
+systemctl reboot
+# GPU driver fails health check
+bootc rollback
+systemctl reboot
+# Back to working state in under 2 minutes
+```
+
+No dependency resolution. No hoping the old packages are still cached. The previous image is right there, ready to boot.
+
+## bootc vs Traditional Package Management
+
+| Aspect | Traditional (dnf/apt) | bootc Image Mode |
+|--------|----------------------|------------------|
+| Update granularity | Individual packages | Entire OS image |
+| Rollback | Manual, unreliable | Atomic, instant |
+| Reproducibility | Drift over time | Identical everywhere |
+| Testing | Test on staging, hope prod matches | Same image, CI-verified |
+| Security patching | Package-by-package | New image, full retest |
+| Configuration | Ansible/Puppet after install | Baked into image |
+
+## When to Use Immutable OS
+
+Immutable operating systems are ideal for:
+
+- **AI/ML infrastructure** — GPU drivers, CUDA libraries, and model runtimes need atomic updates
+- **Edge deployments** — thousands of devices that must update reliably without hands-on access
+- **Security-sensitive workloads** — read-only rootfs prevents tampering
+- **Kubernetes nodes** — worker nodes should be cattle, not pets
+- **CI/CD runners** — fresh, identical environment every time
+
+They are less ideal for development workstations where you need to install and remove packages frequently, or for legacy applications that expect to write to arbitrary filesystem locations.
+
+## The Bigger Picture
+
+The industry is converging on immutable infrastructure at every layer:
+
+- **Containers** — immutable application images (solved a decade ago)
+- **Kubernetes** — declarative, immutable workload definitions
+- **GitOps** — immutable desired state in Git
+- **bootc** — immutable operating system images (the final layer)
+
+When your OS, your orchestrator, and your applications are all managed as immutable images built from version-controlled definitions, you get a level of reproducibility and reliability that traditional mutable infrastructure simply cannot match.
+
+bootc closes the last gap. The entire stack — from bare metal to application — becomes an image pipeline.
+
+## Getting Started
+
+If you are running RHEL 9.4+ or CentOS Stream 9, bootc is available today:
+
+```bash
+# Install bootc on an existing system
+dnf install bootc
+
+# Check status
+bootc status
+
+# Switch to image mode from an existing RHEL install
+bootc switch quay.io/myorg/my-rhel-image:latest
+```
+
+For new installations, use the `bootc-image-builder` to create ISO or disk images from your container image for bare metal provisioning.
+
+The future of Linux servers is not packages — it is images. And bootc is how you get there.
+
+## Related Articles
+
+- [RHEL AI Tutorial](/blog/rhel-ai-tutorial-complete-beginners-guide-2026/)
+- [InstructLab Fine-Tuning Guide](/blog/instructlab-fine-tuning-guide-rhel-ai-2026/)
+- [RHEL AI Deployment Guide](/blog/rhel-ai-deployment-guide-enterprise-production-2026/)
+- [Podman vs Docker in 2026](/blog/podman-vs-docker-2026/)
+- [RHEL vs Ubuntu Server](/blog/rhel-vs-ubuntu-server-2026/)
+
+<BlogPromoCard />

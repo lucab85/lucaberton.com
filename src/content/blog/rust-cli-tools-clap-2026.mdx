@@ -1,0 +1,362 @@
+---
+title: "Building CLI Tools in Rust with Clap: From Zero to Production"
+snippet: "Step-by-step guide to building professional CLI tools in Rust using clap, colored output, progress bars, and cross-platform distribution. Includes real examples from infrastructure tooling."
+description: "Step-by-step guide to building professional CLI tools in Rust using clap, colored output, progress bars, and cross-platform distribution. Includes real examples from infrastructure tooling."
+publishDate: "2026-05-04"
+lastModified: "2026-05-04"
+image:
+  src: "/blog/thumbnails/rust-cli-tools-clap-2026.jpg"
+  alt: "Building CLI tools in Rust with clap framework"
+tags: ["Rust", "CLI", "DevTools", "Developer Experience"]
+category: "Open Source"
+author: "Luca Berton"
+draft: false
+---
+
+Rust has become the dominant language for CLI tools. ripgrep, fd, bat, eza, uv, delta, zoxide, starship — the tools developers love most are written in Rust. Here's how to build production-quality CLI tools from scratch.
+
+## Project Setup
+
+```bash
+cargo new my-tool
+cd my-tool
+cargo add clap --features derive
+cargo add anyhow
+cargo add colored
+cargo add indicatif  # progress bars
+```
+
+## Basic CLI with Clap Derive
+
+```rust
+use clap::{Parser, Subcommand};
+
+#[derive(Parser)]
+#[command(name = "kubectl-gpu")]
+#[command(about = "Manage GPU resources in Kubernetes clusters")]
+#[command(version)]
+struct Cli {
+    /// Kubernetes context to use
+    #[arg(long, global = true)]
+    context: Option<String>,
+
+    /// Output format
+    #[arg(long, default_value = "table", global = true)]
+    output: OutputFormat,
+
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// List available GPUs across all nodes
+    List {
+        /// Filter by GPU type
+        #[arg(short, long)]
+        gpu_type: Option<String>,
+
+        /// Show only available GPUs
+        #[arg(long)]
+        available: bool,
+    },
+    /// Allocate GPU resources for a workload
+    Allocate {
+        /// Workload name
+        name: String,
+
+        /// Number of GPUs requested
+        #[arg(short, long, default_value = "1")]
+        count: u32,
+
+        /// Minimum VRAM in GB
+        #[arg(long)]
+        min_vram: Option<u32>,
+    },
+    /// Show GPU utilization metrics
+    Metrics {
+        /// Refresh interval in seconds
+        #[arg(short, long, default_value = "5")]
+        interval: u64,
+    },
+}
+
+#[derive(Clone, clap::ValueEnum)]
+enum OutputFormat {
+    Table,
+    Json,
+    Yaml,
+}
+```
+
+## Colored Output
+
+```rust
+use colored::Colorize;
+
+fn print_gpu_status(gpu: &Gpu) {
+    let status = if gpu.available {
+        "AVAILABLE".green().bold()
+    } else {
+        "IN USE".red().bold()
+    };
+
+    let utilization = match gpu.utilization_percent {
+        0..=50 => format!("{}%", gpu.utilization_percent).green(),
+        51..=80 => format!("{}%", gpu.utilization_percent).yellow(),
+        _ => format!("{}%", gpu.utilization_percent).red(),
+    };
+
+    println!(
+        "  {} {} {} ({} VRAM, {} util)",
+        "●".color(if gpu.available { "green" } else { "red" }),
+        gpu.name.bold(),
+        status,
+        format!("{}GB", gpu.vram_gb).cyan(),
+        utilization,
+    );
+}
+```
+
+## Progress Bars for Long Operations
+
+```rust
+use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
+
+async fn deploy_models(models: &[Model]) -> anyhow::Result<()> {
+    let multi = MultiProgress::new();
+
+    let overall = multi.add(ProgressBar::new(models.len() as u64));
+    overall.set_style(
+        ProgressStyle::default_bar()
+            .template("{prefix:.bold} [{bar:40.cyan/blue}] {pos}/{len} ({eta})")?
+            .progress_chars("━━╸━"),
+    );
+    overall.set_prefix("Deploying");
+
+    for model in models {
+        let spinner = multi.insert_before(
+            &overall,
+            ProgressBar::new_spinner(),
+        );
+        spinner.set_style(
+            ProgressStyle::default_spinner()
+                .template("  {spinner:.green} {msg}")?
+        );
+        spinner.set_message(format!("Pulling {}...", model.name));
+
+        pull_model(model).await?;
+        spinner.finish_with_message(format!("✓ {}", model.name));
+        overall.inc(1);
+    }
+
+    overall.finish_with_message("All models deployed");
+    Ok(())
+}
+```
+
+## Table Output
+
+```rust
+use comfy_table::{Table, ContentArrangement, presets::UTF8_FULL};
+
+fn print_gpu_table(gpus: &[Gpu]) {
+    let mut table = Table::new();
+    table
+        .load_preset(UTF8_FULL)
+        .set_content_arrangement(ContentArrangement::Dynamic)
+        .set_header(vec!["Node", "GPU", "Type", "VRAM", "Status", "Workload"]);
+
+    for gpu in gpus {
+        table.add_row(vec![
+            &gpu.node,
+            &gpu.device_id,
+            &gpu.model,
+            &format!("{}GB", gpu.vram_gb),
+            if gpu.available { "Available" } else { "In Use" },
+            gpu.workload.as_deref().unwrap_or("-"),
+        ]);
+    }
+
+    println!("{table}");
+}
+```
+
+## Configuration Files
+
+```rust
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+#[derive(Deserialize, Serialize)]
+struct Config {
+    default_context: Option<String>,
+    default_namespace: String,
+    gpu_preferences: GpuPreferences,
+}
+
+#[derive(Deserialize, Serialize)]
+struct GpuPreferences {
+    preferred_type: String,
+    min_vram_gb: u32,
+}
+
+impl Config {
+    fn load() -> anyhow::Result<Self> {
+        let path = Self::config_path();
+        if path.exists() {
+            let content = std::fs::read_to_string(&path)?;
+            Ok(toml::from_str(&content)?)
+        } else {
+            Ok(Self::default())
+        }
+    }
+
+    fn config_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("kubectl-gpu")
+            .join("config.toml")
+    }
+}
+```
+
+## Error Handling for CLIs
+
+```rust
+use anyhow::{Context, Result};
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            // Print error chain nicely
+            eprintln!("{}: {}", "error".red().bold(), e);
+            for cause in e.chain().skip(1) {
+                eprintln!("  {} {}", "caused by:".yellow(), cause);
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Commands::List { gpu_type, available } => {
+            list_gpus(gpu_type.as_deref(), available)
+                .context("failed to list GPUs")?;
+        }
+        Commands::Allocate { name, count, min_vram } => {
+            allocate_gpu(&name, count, min_vram)
+                .context("GPU allocation failed")?;
+        }
+        Commands::Metrics { interval } => {
+            show_metrics(interval)
+                .context("metrics collection failed")?;
+        }
+    }
+    Ok(())
+}
+```
+
+## Cross-Platform Distribution
+
+```yaml
+# .github/workflows/release.yml
+name: Release
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: target/${{ matrix.target }}/release/kubectl-gpu*
+```
+
+## Shell Completions
+
+```rust
+use clap::CommandFactory;
+use clap_complete::{generate, Shell};
+
+#[derive(Subcommand)]
+enum Commands {
+    // ... other commands ...
+
+    /// Generate shell completions
+    Completions {
+        /// Shell to generate for
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+}
+
+// In command handler:
+Commands::Completions { shell } => {
+    let mut cmd = Cli::command();
+    generate(shell, &mut cmd, "kubectl-gpu", &mut std::io::stdout());
+}
+```
+
+## Testing CLIs
+
+```rust
+use assert_cmd::Command;
+use predicates::prelude::*;
+
+#[test]
+fn test_list_command() {
+    Command::cargo_bin("kubectl-gpu")
+        .unwrap()
+        .arg("list")
+        .arg("--output")
+        .arg("json")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("gpu_type"));
+}
+
+#[test]
+fn test_invalid_args() {
+    Command::cargo_bin("kubectl-gpu")
+        .unwrap()
+        .arg("--invalid-flag")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("error"));
+}
+```
+
+## Related Articles
+
+- [Rust in 2026](/blog/rust-2026-systems-programming/) — the developer tools revolution
+- [Pixi Package Manager](/blog/pixi-package-manager-rust-meetup-2026/) — real-world Rust CLI
+- [Rust vs Go](/blog/rust-vs-go-infrastructure-2026/) — CLI language choice
+
+---
+
+*The best CLI tools are invisible — they do exactly what you expect, fast, with helpful errors when things go wrong. Rust's type system and ecosystem make this achievable in days, not weeks.*

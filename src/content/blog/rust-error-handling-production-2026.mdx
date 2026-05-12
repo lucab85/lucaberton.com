@@ -1,0 +1,230 @@
+---
+title: "Rust Error Handling Patterns for Production Systems"
+snippet: "Practical error handling strategies in Rust for infrastructure code. Covers thiserror vs anyhow, error propagation, retry patterns, and structured error reporting in distributed systems."
+description: "Practical error handling strategies in Rust for infrastructure code. Covers thiserror vs anyhow, error propagation, retry patterns, and structured error reporting in distributed systems."
+publishDate: "2026-05-04"
+lastModified: "2026-05-04"
+image:
+  src: "/blog/thumbnails/rust-error-handling-2026.jpg"
+  alt: "Rust error handling patterns for production infrastructure"
+tags: ["Rust", "Error Handling", "Best Practices", "Production"]
+category: "Open Source"
+author: "Luca Berton"
+draft: false
+---
+
+Error handling in Rust is the language's most underappreciated superpower. While the borrow checker gets all the attention, it's the `Result` type and trait-based error system that prevent the silent failures that bring down production systems at 3 AM.
+
+## The Two-Crate Strategy
+
+Every production Rust project should use both:
+
+- **`thiserror`** — for library code (typed, structured errors)
+- **`anyhow`** — for application code (ergonomic, contextual errors)
+
+```rust
+// Library layer: typed errors with thiserror
+#[derive(Debug, thiserror::Error)]
+pub enum StorageError {
+    #[error("object not found: {bucket}/{key}")]
+    NotFound { bucket: String, key: String },
+
+    #[error("permission denied for {principal} on {resource}")]
+    PermissionDenied { principal: String, resource: String },
+
+    #[error("storage quota exceeded: {used_bytes}/{limit_bytes} bytes")]
+    QuotaExceeded { used_bytes: u64, limit_bytes: u64 },
+
+    #[error("network timeout after {0:?}")]
+    Timeout(std::time::Duration),
+
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+// Application layer: anyhow for ergonomic propagation
+use anyhow::{Context, Result};
+
+async fn deploy_model(config: &ModelConfig) -> Result<()> {
+    let artifact = download_artifact(&config.model_uri)
+        .await
+        .context("failed to download model artifact")?;
+
+    let container = build_container(&artifact)
+        .await
+        .with_context(|| format!("failed to build container for {}", config.name))?;
+
+    push_to_registry(&container)
+        .await
+        .context("registry push failed")?;
+
+    Ok(())
+}
+```
+
+## Error Context Chains
+
+The most valuable pattern for debugging production issues:
+
+```rust
+use anyhow::{Context, Result};
+
+async fn reconcile_cluster(cluster: &Cluster) -> Result<()> {
+    let client = connect(&cluster.endpoint)
+        .await
+        .with_context(|| format!("connecting to cluster {}", cluster.name))?;
+
+    let nodes = client.list_nodes()
+        .await
+        .context("listing cluster nodes")?;
+
+    for node in &nodes {
+        provision_gpu(node)
+            .await
+            .with_context(|| format!("provisioning GPU on node {}", node.name))?;
+    }
+
+    Ok(())
+}
+```
+
+When this fails, you get a full chain:
+```
+Error: provisioning GPU on node gpu-worker-03
+
+Caused by:
+    0: NVIDIA driver installation failed
+    1: download interrupted
+    2: connection reset by peer
+```
+
+Compare this to Go's `fmt.Errorf("failed: %w", err)` — same concept, but Rust's is compile-time enforced.
+
+## Retry Patterns
+
+```rust
+use std::time::Duration;
+use tokio::time::sleep;
+
+pub async fn with_retry<F, Fut, T, E>(
+    max_attempts: u32,
+    base_delay: Duration,
+    mut operation: F,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(e) if attempt >= max_attempts => return Err(e),
+            Err(e) => {
+                let delay = base_delay * 2u32.pow(attempt - 1);
+                tracing::warn!(
+                    attempt,
+                    max_attempts,
+                    ?delay,
+                    "operation failed: {e}, retrying"
+                );
+                sleep(delay).await;
+            }
+        }
+    }
+}
+
+// Usage
+let result = with_retry(3, Duration::from_secs(1), || async {
+    client.create_deployment(&spec).await
+}).await?;
+```
+
+## The `must_use` Pattern
+
+Prevent ignored errors at compile time:
+
+```rust
+#[must_use = "this Result may contain an error that should be handled"]
+pub fn validate_config(config: &Config) -> Result<ValidatedConfig, ValidationError> {
+    // ...
+}
+
+// Compiler WARNING if you write:
+validate_config(&config); // ⚠️ unused Result that must be used
+```
+
+## Structured Error Reporting
+
+For observability integration:
+
+```rust
+use tracing::instrument;
+
+#[derive(Debug, thiserror::Error)]
+enum InferenceError {
+    #[error("model load failed: {model_id}")]
+    ModelLoad {
+        model_id: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("OOM: need {required_mb}MB, have {available_mb}MB")]
+    OutOfMemory {
+        required_mb: u64,
+        available_mb: u64,
+    },
+}
+
+#[instrument(skip(input), fields(model_id = %config.model_id))]
+async fn run_inference(
+    config: &InferenceConfig,
+    input: &Tensor,
+) -> Result<Output, InferenceError> {
+    // Errors automatically include span context in traces
+    let model = load_model(&config.model_id)
+        .map_err(|e| InferenceError::ModelLoad {
+            model_id: config.model_id.clone(),
+            source: e,
+        })?;
+
+    Ok(model.forward(input))
+}
+```
+
+## Anti-Patterns to Avoid
+
+```rust
+// ❌ Don't unwrap in library code
+let value = map.get("key").unwrap();
+
+// ✅ Return a meaningful error
+let value = map.get("key")
+    .ok_or_else(|| ConfigError::MissingKey("key"))?;
+
+// ❌ Don't use String as error type
+fn parse(input: &str) -> Result<Ast, String> { ... }
+
+// ✅ Use typed errors
+fn parse(input: &str) -> Result<Ast, ParseError> { ... }
+
+// ❌ Don't panic on expected conditions
+assert!(port > 0 && port < 65536);
+
+// ✅ Validate and return errors
+if port == 0 || port >= 65536 {
+    return Err(ConfigError::InvalidPort(port));
+}
+```
+
+## Related Articles
+
+- [Rust in 2026](/blog/rust-2026-systems-programming/) — the broader ecosystem
+- [Rust Kubernetes Operators](/blog/rust-kubernetes-operators-kube-rs-2026/) — error handling in controllers
+- [OWASP Top 10 for LLMs](/blog/owasp-top-10-llm-applications-2025-security-guide/) — security error patterns
+
+---
+
+*Good error handling is invisible when things work and invaluable when they don't. Invest the time upfront.*

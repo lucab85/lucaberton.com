@@ -8,6 +8,9 @@ import partytown from "@astrojs/partytown"; // Corrected import
 
 // https://astro.build/config
 export default defineConfig({
+  image: {
+    service: { entrypoint: "astro/assets/services/noop" },
+  },
   site: "https://lucaberton.com",
   base: "/",
   trailingSlash: "always",

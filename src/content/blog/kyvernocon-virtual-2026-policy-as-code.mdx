@@ -1,0 +1,239 @@
+---
+title: "KyvernoCon Virtual 2026: Policy-as-Code Meets AI and Compliance"
+snippet: "Full agenda and key takeaways from KyvernoCon Virtual 2026 — covering CEL policies, AI workload provenance, ISO27001 compliance, multi-tenant RBAC, GitOps drift prevention, and LLM inference guardrails."
+description: "Full agenda and key takeaways from KyvernoCon Virtual 2026 — covering CEL policies, AI workload provenance, ISO27001 compliance, multi-tenant RBAC, GitOps drift prevention, and LLM inference guardrails."
+publishDate: "2026-05-06"
+lastModified: "2026-05-06"
+image:
+  src: "/blog/thumbnails/kyvernocon-virtual-2026.jpg"
+  alt: "KyvernoCon Virtual 2026 policy-as-code Kubernetes event"
+tags: ["Kubernetes", "Security", "Cloud Native", "Policy", "Open Source"]
+category: "Open Source"
+author: "Luca Berton"
+draft: false
+---
+
+**KyvernoCon Virtual 2026** brought together the Kubernetes policy community for a packed half-day of talks spanning the full spectrum — from CEL migration to AI workload security. Here's a breakdown of the agenda and key themes.
+
+## Event Overview
+
+- **Event**: KyvernoCon Virtual 2026
+- **Format**: Virtual (half-day)
+- **Focus**: Policy-as-Code for Kubernetes — compliance, AI security, multi-tenancy, GitOps
+
+## Full Agenda
+
+| Time | Session |
+|------|---------|
+| 8:00 AM | Welcome and Opening Remarks |
+| 8:05 AM | From YAML to CEL: Understanding Kyverno's New Policy Model |
+| 8:25 AM | Poison Control: Unifying Software and Content Provenance for AI Workloads via Kyverno |
+| 8:55 AM | From Policy to Production: Implementing ISO27001/BSI IT-Grundschutz in Kubernetes with Kyverno |
+| 9:20 AM | Break |
+| 9:35 AM | ReBAC with Kyverno: Automating Multi-Tenant RBAC at Scale |
+| 10:05 AM | Drift Prevention in GitOps Workflows Using Kyverno |
+| 10:35 AM | Policy-as-Code for LLM Inference: Cost and Security Guardrails |
+| 10:50 AM | Webhook Topology and Admission Latency: Lessons from Migration |
+| 11:00 AM | Closing Remarks |
+
+## Key Themes
+
+### 1. From YAML to CEL: The Policy Language Evolution
+
+Kyverno is embracing **Common Expression Language (CEL)** as an alternative to its traditional YAML-based policy definitions. CEL brings:
+
+- **Type safety** — compile-time validation of policy expressions
+- **Kubernetes alignment** — CEL is already used in ValidatingAdmissionPolicy (built into K8s 1.30+)
+- **Portability** — same expressions work in Kyverno, native K8s admission, and other tools
+- **Performance** — compiled expressions evaluate faster than interpreted YAML/JMESPath
+
+```yaml
+# Old YAML-based policy
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+spec:
+  rules:
+    - name: require-labels
+      match:
+        resources:
+          kinds: ["Pod"]
+      validate:
+        message: "label 'team' is required"
+        pattern:
+          metadata:
+            labels:
+              team: "?*"
+
+# New CEL-based policy
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+spec:
+  rules:
+    - name: require-labels
+      match:
+        resources:
+          kinds: ["Pod"]
+      validate:
+        cel:
+          expressions:
+            - expression: "has(object.metadata.labels.team)"
+              message: "label 'team' is required"
+```
+
+### 2. AI Workload Provenance: Poison Control
+
+The most forward-looking talk addressed a critical 2026 concern: **how do you trust AI model artifacts in your cluster?**
+
+The "Poison Control" framework unifies:
+- **Software provenance** (SLSA, Sigstore) — verifying container images
+- **Content provenance** (C2PA) — verifying model weights and training data origin
+- **Kyverno policies** — enforcing provenance requirements at admission time
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-model-provenance
+spec:
+  rules:
+    - name: check-model-signature
+      match:
+        resources:
+          kinds: ["Pod"]
+          selector:
+            matchLabels:
+              workload-type: inference
+      verifyImages:
+        - imageReferences:
+            - "registry.internal/models/*"
+          attestors:
+            - entries:
+                - keys:
+                    publicKeys: |-
+                      -----BEGIN PUBLIC KEY-----
+                      ...model-signing-key...
+                      -----END PUBLIC KEY-----
+          attestations:
+            - type: https://slsa.dev/provenance/v1
+              conditions:
+                - all:
+                    - key: "{{ builder.id }}"
+                      operator: Equals
+                      value: "https://internal-ci/model-pipeline"
+```
+
+This is particularly relevant given the rise of [supply chain attacks on AI models](/blog/content-credentials-c2pa-digital-provenance/) and the need to verify that models deployed in production haven't been tampered with.
+
+### 3. ISO27001/BSI IT-Grundschutz Compliance
+
+Mapping compliance frameworks to Kubernetes policies is a real enterprise challenge. The talk demonstrated:
+
+- **Automated evidence collection** — Kyverno PolicyReports as audit artifacts
+- **Control mapping** — each Kyverno policy tagged with its ISO27001 control ID
+- **Continuous compliance** — real-time violation detection vs. periodic audits
+- **BSI IT-Grundschutz** — German federal security standard mapped to cluster policies
+
+### 4. ReBAC: Relationship-Based Access Control
+
+Moving beyond traditional RBAC, **Relationship-Based Access Control** with Kyverno enables:
+
+- Dynamic permission inheritance based on resource relationships
+- Multi-tenant isolation without thousands of static RoleBindings
+- Namespace ownership chains (team → project → namespace → workload)
+
+```yaml
+# Generate RoleBindings based on team ownership annotations
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: rebac-team-access
+spec:
+  rules:
+    - name: generate-team-binding
+      match:
+        resources:
+          kinds: ["Namespace"]
+      generate:
+        kind: RoleBinding
+        name: "team-admin-{{ request.object.metadata.labels.team }}"
+        namespace: "{{ request.object.metadata.name }}"
+        data:
+          roleRef:
+            apiGroup: rbac.authorization.k8s.io
+            kind: ClusterRole
+            name: admin
+          subjects:
+            - apiGroup: rbac.authorization.k8s.io
+              kind: Group
+              name: "team-{{ request.object.metadata.labels.team }}"
+```
+
+### 5. GitOps Drift Prevention
+
+Kyverno can detect and prevent drift between Git-declared state and cluster state:
+
+- **Mutation blocking** — prevent manual `kubectl` changes to GitOps-managed resources
+- **Drift detection** — PolicyReports flag resources that differ from their Git source
+- **Exception management** — allow emergency changes with audit trail
+
+### 6. LLM Inference Cost and Security Guardrails
+
+Policy-as-Code for AI inference — the newest frontier:
+
+- **Cost guardrails** — limit max tokens, concurrent requests, model size per namespace
+- **Security guardrails** — block prompt injection patterns, enforce output filtering
+- **Resource quotas** — GPU time limits per team, auto-scaling boundaries
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: llm-inference-guardrails
+spec:
+  rules:
+    - name: limit-gpu-per-inference
+      match:
+        resources:
+          kinds: ["Pod"]
+          selector:
+            matchLabels:
+              workload-type: inference
+      validate:
+        message: "Inference pods limited to 4 GPUs max per namespace quota"
+        deny:
+          conditions:
+            - key: "{{ request.object.spec.containers[0].resources.limits.nvidia\\.com/gpu }}"
+              operator: GreaterThan
+              value: 4
+```
+
+### 7. Webhook Performance at Scale
+
+The migration talk covered real-world admission webhook challenges:
+
+- **Topology-aware webhook placement** — co-locate webhook pods with API server
+- **Latency budgets** — keep total admission under 500ms (multiple webhooks compound)
+- **Failure modes** — `failurePolicy: Ignore` vs `Fail` trade-offs
+- **Webhook ordering** — mutating before validating, dependency chains
+
+## Kyverno in 2026: The State of Policy
+
+Kyverno has evolved significantly since its [CNCF graduation](/blog/kyverno-cncf-graduated-kubernetes-policy-engine/):
+
+- **CEL support** — native Kubernetes expression language
+- **ValidatingAdmissionPolicy integration** — generate native K8s policies from Kyverno
+- **CLI for CI/CD** — `kyverno test` in pipelines without a cluster
+- **Policy Reports v2** — structured compliance evidence
+- **AI workload policies** — purpose-built for model serving and training guardrails
+
+## Related Articles
+
+- [Kyverno Graduates CNCF](/blog/kyverno-cncf-graduated-kubernetes-policy-engine/) — graduation milestone
+- [C2PA Content Credentials](/blog/content-credentials-c2pa-digital-provenance/) — provenance for AI content
+- [OWASP Top 10 for LLM Applications](/blog/owasp-top-10-llm-applications-2025-security-guide/) — LLM security risks
+- [EU Cyber Resilience Act](/blog/cra-what-is-cyber-resilience-act/) — compliance drivers
+- [Zero Trust Kubernetes](/blog/zero-trust-kubernetes-workloads/) — policy enforcement patterns
+
+---
+
+*Policy-as-Code is no longer just about "require labels on pods." In 2026, it's about AI supply chain trust, compliance automation, and cost governance for inference workloads. Kyverno is leading that evolution.*

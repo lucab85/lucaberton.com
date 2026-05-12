@@ -1,0 +1,505 @@
+---
+title: "Inko: The Rust-Compiled Language with Erlang-Style Concurrency"
+snippet: "Inko is a new programming language that compiles to native code via Rust's LLVM backend. It combines single-ownership memory management with Erlang-style lightweight processes — no garbage collector, no data races."
+description: "Inko programming language combines Rust-style ownership with Erlang lightweight processes. No GC, no data races, batteries-included stdlib with HTTP server."
+publishDate: "2026-05-04"
+lastModified: "2026-05-05"
+image: { src: "/blog/thumbnails/inko-programming-language-rust-erlang-2026.jpg", alt: "Inko programming language - Rust compiled with Erlang concurrency" }
+category: "Open Source"
+author: "Luca Berton"
+draft: false
+tags: ["Programming Languages", "Rust", "Concurrency", "Open Source", "Erlang"]
+---
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+**Inko** is a programming language that takes the best ideas from Rust (single ownership, no garbage collector) and Erlang (lightweight processes, message passing) and wraps them in a syntax that is dramatically simpler than either. It compiles to native code via LLVM and ships with a batteries-included standard library — HTTP server, HTTP client, JSON, sockets, all built in.
+
+## Origin Story: Born from Ruby's Concurrency Pain
+
+![Inko meetup — Why another programming language? slide](/blog/events/inko-meetup-why-another-language.jpg)
+
+Inko's creator started the project in 2015 while working with Ruby at GitLab. The pain points were clear:
+
+- Ruby was difficult to work with in large projects
+- Poor concurrency support — the GIL (Global Interpreter Lock) problem
+- Existing languages did not meet what he was looking for
+- Prior experience building `ruby-lint` (a static analysis tool for Ruby) taught him language internals
+- "Experimenting with new ideas is easier when you start from scratch"
+
+This explains Inko's design priorities: concurrency as a first-class citizen, static analysis built into the compiler rather than bolted on, and accessibility for developers coming from dynamic languages.
+
+## Why Rust as the Implementation Language
+
+![Inko meetup — What language to write it in? slide](/blog/events/inko-meetup-what-language.jpg)
+
+The creator evaluated every option for writing the Inko compiler itself:
+
+- **Ruby**: too slow, too high-level
+- **C/C++**: too painful, every line is a security vulnerability
+- **D**: has a GC, shrinking community
+- **Go**: has a GC, poor error handling, no generics (at the time)
+- **Rust**: new but looks promising
+
+Rust won — it gives the compiler native performance and memory safety without a garbage collector. Inko is written in Rust but does not expose Rust's complexity to Inko developers. The borrow checker fights happen in the compiler codebase, not in user code.
+
+![Inko meetup — Rust in 2015 slide showing early ecosystem challenges](/blog/events/inko-meetup-rust-in-2015.jpg)
+
+But Rust in 2015 was rough: frequent breaking changes, more borrow types than today (`@T`, `~T`, `T~`), nightly builds often required, poor stdlib support for raw memory allocations, no rust-analyzer (RLS ate all your memory), and no rustfmt until 2016-2017. The creator stuck with it anyway — betting on the language's trajectory rather than its state at the time.
+
+## Compilation Pipeline
+
+![Inko meetup — Compilation stages slide](/blog/events/inko-meetup-compilation-stages.jpg)
+
+Inko's compiler follows a traditional multi-stage pipeline:
+
+1. Parse source code into a token stream
+2. Convert token stream into a tree structure for type checking
+3. Convert tree structure into a graph for data flow analysis
+4. Convert graph into LLVM code
+5. Convert LLVM to machine code
+6. Wait forever for LLVM to compile the code
+7. Profit!
+
+Step 6 is tongue-in-cheek — LLVM compilation is the bottleneck in most compiled languages (Rust included). The data flow analysis graph (step 3) is where Inko enforces its ownership and uniqueness rules without a full borrow checker.
+
+![Attending the Inko meetup — HIR (High-level Intermediate Representation) deep dive](/blog/events/inko-meetup-selfie-hir.jpg)
+
+The compiler uses multiple intermediate representations. The **AST** (Abstract Syntax Tree) is used by the code formatter and to produce the next IR. The **HIR** is "less noisy than the AST" and used by the type checker — it strips syntactic sugar and adds type annotations resolved during compilation.
+
+![Inko meetup — AST struct used by the code formatter and IR pipeline](/blog/events/inko-meetup-ast.jpg)
+
+## MIR: Where the Real Work Happens
+
+The **MIR** (Mid-level Intermediate Representation) is a graph of "basic blocks" — the stage where Inko verifies single ownership and applies optimizations.
+
+![Inko meetup — MIR basic blocks for ownership verification](/blog/events/inko-meetup-mir-blocks.jpg)
+
+The compiler runs **parallel optimizations** at the MIR level: merging switch blocks, compacting switches, removing unreachable blocks, removing unused instructions, inlining constants, and merging redundant moves. Most are straightforward — some just make the IR more readable for debugging.
+
+![Inko meetup — MIR parallel optimizations pipeline](/blog/events/inko-meetup-mir-optimizations.jpg)
+
+Beyond parallel passes, the compiler performs **sequential global optimizations**:
+
+![Inko meetup — escape analysis eliminates 50% of heap allocations](/blog/events/inko-meetup-escape-analysis.jpg)
+
+- **Function inlining across modules** — crucial because LLVM cannot inline across module boundaries
+- **Inter-procedural (whole program) escape analysis** — eliminates about **50% of heap allocations** on average
+- **Dead code elimination** — removal of unused symbols (methods, constants, etc.)
+
+The 50% heap allocation reduction from escape analysis is a significant performance win that most languages leave to the runtime GC to handle.
+
+## Single Ownership Without Borrow Checking
+
+This is Inko's most controversial design choice — and arguably its smartest.
+
+![Inko meetup — single ownership with borrow counting instead of borrow checking](/blog/events/inko-meetup-single-ownership.jpg)
+
+Instead of Rust's compile-time borrow checker, Inko uses **runtime borrow counting**:
+
+- Heap-allocated values store a borrow count
+- Borrows increment the count; dropping borrows decrements it
+- Borrow counts do not use atomics — cost is minor
+- When the heap value is dropped, check the count first and panic if non-zero
+
+This "may sound bad/slow, but works surprisingly well." Moving owned values incurs no increments. Moving while borrowing a heap value is fine because it resides in a stable location. You can still build compile-time analysis on top for optimizations.
+
+![Inko meetup — 80% of Rust benefits at a fraction of the cost](/blog/events/inko-meetup-80-percent-rust.jpg)
+
+The key quote from the talk: **"End goal: 80% of the benefits of Rust, at a fraction of the cost."** This is not `Rc<RefCell<T>>` — Inko does not enforce XOR mutability. It is a deliberate trade-off: accept a tiny runtime cost for dramatically simpler code.
+
+## Data Flow Analysis: Tracking Ownership Through Branches
+
+![Inko meetup — data flow graph tracking move states across conditional branches](/blog/events/inko-meetup-data-flow-graph.jpg)
+
+The compiler tracks value states through control flow graphs. In the example: variable `a` is initialized in block A, conditionally moved in block C (`b = a`), while block D calls `bar`. At the join point E, the state of `a` is "moved OR available" — a **maybe moved** state. The compiler uses this to emit runtime checks only where needed, keeping the common path fast.
+
+## Stack-Allocated Types and Reference Counting
+
+![Inko meetup — stack-allocated types copied on borrow, like Swift structs](/blog/events/inko-meetup-stack-types.jpg)
+
+Inko also supports **stack-allocated types** that are copied upon borrowing — similar to Swift structs. For values that need to live beyond a single owner (strings, processes, certain user-defined types), Inko uses **atomically reference-counted types**. This is a pragmatic hybrid: stack allocation where possible, reference counting where needed, and single ownership for everything else.
+
+## Concurrency: The `uni` Keyword
+
+![Inko meetup — type-safe concurrency with the uni keyword](/blog/events/inko-meetup-concurrency-uni.jpg)
+
+The `uni` (unique) keyword is how Inko achieves **zero-copy, data-race-free concurrency**. When you send a value to another process, it must be `uni` — meaning no outside references exist. The compiler enforces this at compile time. You cannot accidentally share mutable state between processes because the type system makes it physically impossible.
+
+This is similar to Pony's `iso` (isolated) capability, but with simpler syntax. You either own a value exclusively and can send it, or you have shared references and cannot.
+
+## Process Scheduling
+
+![Inko meetup — Inko's process scheduling model](/blog/events/inko-meetup-scheduling.jpg)
+
+Inko processes are scheduled across OS threads by the runtime. The scheduler uses a **work-stealing** approach similar to Go's goroutine scheduler.
+
+![Inko meetup — scheduling diagram showing thread pools](/blog/events/inko-meetup-scheduling-diagram.jpg)
+
+The architecture separates **CPU-bound work** from **I/O-bound work** into different thread pools. This prevents a compute-heavy process from starving I/O-bound processes — a common problem in single-pool schedulers.
+
+## I/O Scheduling
+
+![Inko meetup — I/O scheduling with non-blocking operations](/blog/events/inko-meetup-io-scheduling.jpg)
+
+I/O operations are non-blocking at the runtime level. When a process performs I/O, it yields to the scheduler rather than blocking an OS thread. The runtime uses **epoll** (Linux) or **kqueue** (macOS/BSD) to efficiently multiplex I/O across processes. This gives Inko the same I/O scalability as Go or Erlang without requiring async/await syntax.
+
+## Generics
+
+![Inko meetup — generics with type bounds](/blog/events/inko-meetup-generics.jpg)
+
+Inko supports generics with type bounds, similar to Rust's trait bounds. Generic functions are monomorphized at compile time — each concrete type gets its own optimized machine code. No runtime dispatch, no boxing overhead.
+
+## Pattern Matching and Error Handling
+
+![Inko meetup — exhaustive pattern matching](/blog/events/inko-meetup-pattern-matching.jpg)
+
+Pattern matching in Inko is **exhaustive** — the compiler forces you to handle every possible case. No forgotten `else` branches, no unhandled variants. Combined with algebraic types (enums), this eliminates null pointer exceptions and unhandled error states at compile time.
+
+![Inko meetup — error handling without exceptions](/blog/events/inko-meetup-error-handling.jpg)
+
+Inko uses **Result types** for error handling — no exceptions, no try/catch. Errors are values that must be explicitly handled. This is the same approach as Rust and Go, but with Inko's exhaustive pattern matching making it impossible to accidentally ignore an error.
+
+## Standard Library
+
+![Inko meetup — batteries-included standard library](/blog/events/inko-meetup-stdlib.jpg)
+
+The standard library is intentionally comprehensive: HTTP server and client (with TLS), JSON, sockets, file I/O, process management, cryptographic hashing, and common data structures. The philosophy is the opposite of Rust's minimal stdlib — everything you need for a typical server application ships with the language.
+
+## Generating LLVM IR
+
+![Inko meetup — LLVM code generation for integer division](/blog/events/inko-meetup-generating-llvm.jpg)
+
+The final compilation stage converts MIR instructions to LLVM IR. The slide shows the Rust code that generates LLVM for a simple integer division — loading variables, performing the division, and storing the result. Straightforward LLVM builder API calls.
+
+![Inko meetup — 1500+ line match statement that lowers MIR to LLVM](/blog/events/inko-meetup-giant-match.jpg)
+
+Most of the LLVM generation happens in a single giant `match` statement — **1,500+ lines of code** — that lowers each MIR instruction to its LLVM equivalent. The creator's honest assessment: "Most happens in a single giant match that lowers each MIR instruction." Sometimes the simplest architecture is a massive match statement.
+
+## Linking
+
+![Inko meetup — linking is the boring but necessary final step](/blog/events/inko-meetup-linking.jpg)
+
+Linking is "probably the most boring part." Inko shells out to the system linker (e.g., clang) since there is no portable linker library similar to LLVM. The compiler automatically selects fast linkers when available (lld, mold). Linking usually takes up a tiny percentage of total compile time.
+
+## Testing Strategy: Integration Over Unit Tests
+
+![Inko meetup — integration tests vs unit tests for compiler development](/blog/events/inko-meetup-testing-strategy.jpg)
+
+The talk made a strong case for **integration tests over unit tests** for compiler development:
+
+- Writing unit tests for a compiler gets very tedious
+- Lots of boilerplate to set things up
+- Small internal changes may require updating many unit tests
+- High-level integration tests are much easier to work with
+- Allows for a much faster testing and development cycle
+- Various low-level type system tests are still written in Rust
+
+![Inko meetup — Rust unit test boilerplate for compiler testing](/blog/events/inko-meetup-rust-unit-tests.jpg)
+
+The Rust unit test example makes the pain obvious: setting up a `Database`, creating types, allocating placeholder variables — all just to test a single return type check. Integration tests skip all this boilerplate.
+
+![Inko meetup — three integration test categories](/blog/events/inko-meetup-test-categories.jpg)
+
+Inko's integration tests cover three areas: **compiler diagnostics**, **escape analysis**, and **code formatting**.
+
+![Inko meetup — diagnostic integration tests with expected error comments](/blog/events/inko-meetup-test-diagnostics.jpg)
+
+Diagnostic tests are elegant: a file contains Inko code with a comment at the end specifying the expected error. For example, defining `type A {}` twice triggers `error(duplicate-symbol): the symbol 'A' is already defined`. The test runner compiles the file and checks that the actual diagnostics match the expected ones.
+
+![Inko meetup — escape analysis integration tests](/blog/events/inko-meetup-test-escape-analysis.jpg)
+
+Escape analysis tests work similarly: regular Inko code with comments indicating where each allocation should end up — stack or heap. The test verifies the compiler's escape analysis places allocations correctly.
+
+![Inko meetup — code formatting integration tests](/blog/events/inko-meetup-test-formatting.jpg)
+
+Formatting tests use two files per test case: `input.inko` (before formatting) and `output.inko` (expected result). The compiler runs `inko fmt input.inko` and asserts the output matches `output.inko`. Simple, effective, and easy to add new test cases.
+
+## The Design Philosophy
+
+Most languages make you choose: manual memory management with safety guarantees (Rust) or garbage collection with easy concurrency (Erlang, Go). Inko refuses this trade-off.
+
+**From Rust**, Inko takes single ownership and move semantics. Values are owned, can be borrowed, and are dropped when they go out of scope. No garbage collector means deterministic memory management and predictable performance.
+
+**From Erlang**, Inko takes lightweight processes that communicate via message passing. Processes are isolated — no shared mutable state, no data races by construction.
+
+**Unlike Rust**, Inko does not have a borrow checker that fights you. You can have multiple borrows (mutable and immutable) and move borrowed values while borrows exist:
+
+```
+let a = [10, 20, 30]
+
+let b = ref a   # immutable borrow
+let c = mut a   # mutable borrow
+let d = a       # move — all perfectly valid
+```
+
+This is the key insight: Inko gets most of Rust's memory safety benefits at a fraction of the complexity. The compiler catches the dangerous patterns (use-after-free, null pointers, data races) without requiring you to annotate lifetimes or fight the borrow checker.
+
+## Concurrency Model
+
+Inko processes are not OS threads. They are lightweight, isolated units that communicate by sending messages — similar to Erlang's actors or Pony's actors.
+
+```
+import std.sync (Promise)
+
+type async Counter {
+  let mut @value: Int
+
+  fn async mut increment {
+    @value += 1
+  }
+
+  fn async get(promise: uni Promise[Int]) {
+    promise.set(@value)
+  }
+}
+
+type async Main {
+  fn async main {
+    let counter = Counter(value: 0)
+
+    counter.increment
+    counter.increment
+
+    await counter.get  # => 2
+  }
+}
+```
+
+The `async` keyword on a type makes it a process. Methods marked `async` are messages. The compiler enforces that data sent between processes is **unique** (`uni`) — no outside references exist. This eliminates data races without locks, mutexes, or channels with complex ownership rules.
+
+Multi-producer multi-consumer channels are also available for decoupled communication.
+
+## Batteries-Included Standard Library
+
+Unlike Rust (where you reach for crates for basic functionality), Inko ships everything you need for common server applications:
+
+**HTTP server in 15 lines:**
+
+![Inko meetup — Hello HTTP slide showing the batteries-included HTTP server](/blog/events/inko-meetup-hello-http.jpg)
+
+```
+import std.net.http.server (Handle, Request, Response, Server)
+
+type async Main {
+  fn async main {
+    Server.new(fn { recover App() }).start(8_000).or_panic
+  }
+}
+
+type App {}
+
+impl Handle for App {
+  fn pub mut handle(request: mut Request) -> Response {
+    Response.new.string('Hello, world!')
+  }
+}
+```
+
+No external dependencies. No Cargo.toml with 47 crates. The standard library covers HTTP client/server (with HTTPS), JSON, sockets, file I/O, and common data structures.
+
+## Memory Safety Without the Pain
+
+Inko eliminates entire categories of bugs at compile time:
+
+- **No NULL pointers** — optional values use an `Option` algebraic type with pattern matching
+- **No use-after-free** — single ownership with automatic dropping
+- **No data races** — process isolation with unique ownership transfers
+- **No unexpected runtime errors** — exhaustive pattern matching, no unchecked exceptions
+
+The compiler catches these at build time, not in production at 3 AM.
+
+## Where Inko Fits
+
+Inko targets the space between Go and Rust:
+
+| | Go | Inko | Rust |
+|---|---|---|---|
+| **Memory** | GC | Single ownership | Borrow checker |
+| **Concurrency** | Goroutines + channels | Processes + messages | async/await + manual |
+| **Complexity** | Low | Medium | High |
+| **Safety** | Data races possible | Data races impossible | Data races impossible |
+| **Stdlib** | Batteries included | Batteries included | Minimal |
+| **Compile target** | Native | Native (LLVM) | Native (LLVM) |
+
+**Use Inko when:**
+- You want Rust-level memory safety without the learning curve
+- You are building concurrent server applications
+- You want a batteries-included stdlib like Go
+- You come from Erlang/Elixir and want native performance
+
+**Stick with Rust when:**
+- You need zero-cost abstractions and maximum performance
+- You are writing systems-level code (OS kernels, drivers, embedded)
+- You need the massive crate ecosystem
+
+**Stick with Go when:**
+- Your team already knows Go
+- GC pauses are acceptable for your use case
+- You need the largest cloud-native ecosystem
+
+## Test Statistics
+
+![Inko meetup — test statistics slide](/blog/events/inko-meetup-test-statistics.jpg)
+
+The Inko project has impressive test coverage:
+
+- **767 Rust unit tests**, most containing 5-10 asserts at minimum
+- **2,277 Inko tests**, similar number of asserts per test
+- Actual number is higher due to integration and table tests
+- `cargo test` takes **125 milliseconds** to run
+- `inko test` takes **3.1 seconds** to run
+- CI takes **11-12 minutes** across Linux, macOS, and FreeBSD
+- Could be half that if GitHub Actions supported FreeBSD natively
+
+### Table-Driven Tests
+
+![Inko meetup — table-driven tests expanding one test into 100 assertions](/blog/events/inko-meetup-table-driven-tests.jpg)
+
+Table-driven tests are a key testing pattern: define an array of `(INPUT, EXPECTED)` pairs and loop through them. One test function essentially expands into **100 tests/asserts**. This keeps the test code DRY while providing comprehensive coverage — especially useful for parser tests where you need to verify many input/output combinations.
+
+### Standard Library Tests
+
+![Inko meetup — stdlib tests are algorithmic, unit tests make more sense here](/blog/events/inko-meetup-stdlib-tests.jpg)
+
+Interestingly, the standard library uses a **different testing strategy** than the compiler:
+
+- Standard library is very "algorithmic" heavy
+- Most code requires little to no setup
+- **Unit tests make more sense here** than coarse integration tests
+- Lots of table-driven tests
+
+![Inko meetup — StringBuffer test with emoji support](/blog/events/inko-meetup-stdlib-test-code.jpg)
+
+The stdlib test example shows Inko's built-in test framework: `import std.test (Tests)`, define a `pub fn tests` function, and use `t.test('name', fn (t) { ... })` with `t.equal()` assertions. The example tests `StringBuffer.into_string` with emoji characters — confirming proper Unicode handling.
+
+## Challenges of Writing a Compiler in Rust
+
+The talk was refreshingly honest about Rust's pain points for compiler development.
+
+### The Borrow Checker Problem
+
+![Inko meetup — borrow checker challenge: iterating while mutating self](/blog/events/inko-meetup-borrow-checker-challenge.jpg)
+
+Code like `for value in &mut self.values { self.update_something_in_self(value); }` is extremely common in compilers — you need to iterate over data while mutating other parts of the same struct. Rust's borrow checker rejects this because `self` is borrowed immutably (for the iterator) and mutably (for the method call) simultaneously.
+
+![Inko meetup — borrow checker workarounds](/blog/events/inko-meetup-borrow-checker-workarounds.jpg)
+
+The workarounds are all unsatisfying:
+
+- `slice::get_disjoint_mut` can help, but comes with runtime cost
+- Using **IDs instead of borrows** works but adds indirection
+- Creative solutions like **GhostCell** exist but come with big caveats
+- Often there is **no good solution other than to just accept it**
+
+### Deep Nesting When Borrowing Multiple Fields
+
+![Inko meetup — deep nesting from borrowing multiple self fields](/blog/events/inko-meetup-borrow-checker-nesting.jpg)
+
+Another common pattern: `fn mark_escaping(&mut self)` needs to iterate `self.method.body.blocks`, then each block's instructions, then match on instruction types. Each level of nesting borrows a different field of `self`, creating deeply indented code that Rust forces upon you.
+
+### Enums Can Be Too Rigid
+
+![Inko meetup — struct + enum is more flexible than pure enum for TypeRef](/blog/events/inko-meetup-enums-rigid.jpg)
+
+Using an enum directly for `TypeRef` makes it too rigid — you cannot easily add fields without large changes. Better to use a **struct with an enum field**: `struct TypeRef { ownership: Ownership, type_enum: TypeEnum }` with `enum Ownership { Owned, Ref, ... }`. This gives flexibility to add metadata fields to `TypeRef` without touching every match arm.
+
+## Practical Tips for Rust Compiler Development
+
+### Tip: Pattern Matching
+
+![Inko meetup — pattern matching is much better than Java visitor pattern](/blog/events/inko-meetup-tip-pattern-matching.jpg)
+
+"Writing a compiler without good pattern matching support would be *much* harder." Pattern matching is often better than complex Java-style dispatch chains (e.g., the visitor pattern). The slide includes a Dilbert-esque comic about the complexity gap.
+
+### Tip: Reduce Unsafe Code
+
+![Inko meetup — only 168 unsafe blocks in the entire Inko compiler](/blog/events/inko-meetup-tip-reduce-unsafe.jpg)
+
+Running `rg 'unsafe' compiler/ inko/ types/ ast/ rt/ | wc -l` returns only **168** unsafe blocks across the entire codebase. The unavoidable unsafe areas:
+
+- LLVM is one giant unsafe library
+- Writing a good thread scheduler in safe Rust is impossible
+- Runtime exposes functions using the system ABI
+
+### Tip: Reduce Macros
+
+![Inko meetup — fewer macros = better compile times and tooling support](/blog/events/inko-meetup-tip-reduce-macros.jpg)
+
+- Macros can be useful, but figuring out what they actually do is difficult
+- Even more so with **proc macros**
+- rust-analyzer, rustfmt, etc. **just give up** inside macro bodies
+- Fewer macros = better compile times
+
+### Tip: Keep Compile Times Under Control
+
+![Inko meetup — Inko compiler builds in 5-15 seconds](/blog/events/inko-meetup-tip-compile-times.jpg)
+
+Fewer dependencies really helps. Crates being the compilation unit hurts compile times — splitting is necessary. Current Inko compiler build times:
+
+- `cargo check`: **5 seconds**
+- `cargo build`: **8 seconds**
+- `cargo build --release`: **15 seconds**
+
+These are full builds with all dependencies already downloaded. The creator notes this is difficult for large projects with many developers.
+
+### Tip: Reduce Third-Party Dependencies
+
+![Inko meetup — compiler has only 5 direct dependencies](/blog/events/inko-meetup-tip-reduce-deps.jpg)
+
+- The **compiler** has **5 direct dependencies**
+- The **runtime** has **10 direct dependencies** + a vendored version of `rustls-platform-modifier`
+- Inko first used a custom setup for I/O, then moved to the `polling` crate, then **back to a custom setup**
+- Allows greater control over your program
+
+The lesson: owning your critical path (I/O, scheduling) gives you control that third-party crates cannot.
+
+## Conclusion: The Creator's Honest Assessment
+
+![Inko meetup — conclusion slide](/blog/events/inko-meetup-conclusion.jpg)
+
+The talk ended with a balanced, honest conclusion:
+
+- Rust **does** have its challenges when writing a compiler
+- **Without Rust, he probably could not have built Inko**
+- Not sure what alternative he would pick (self-hosting = too much work)
+- Works best when you are **aggressive about keeping control**
+- Not sure Rust makes much sense for **higher-level applications**
+- "I'd use **Inko** 😄, **Gleam**, or **Go**" for application-level code
+
+The Gleam shoutout is notable — another BEAM-ecosystem language with strong typing.
+
+## Learn More
+
+![Inko meetup — learn more with QR code and links](/blog/events/inko-meetup-learn-more.jpg)
+
+- Creator's site: [yorickpeterse.com](https://yorickpeterse.com)
+- Language site: [inko-lang.org](https://inko-lang.org)
+- Source code: [github.com/inko-lang/inko](https://github.com/inko-lang/inko)
+
+## Why Inko Instead of Rust? (From the Talk)
+
+At a recent meetup, the Inko presentation laid out the case against Rust directly:
+
+- **Concurrency built into the language** — no async/await mess
+- **Batteries-included standard library** — no crate hunting for basics
+- **Emphasis on accessibility and ease of use** — lower learning curve
+- **Faster compile times** (in theory) — Rust's compile times remain a pain point
+- **No package build/post-install hooks** — safer dependency management
+- **Decentralized package manager** — no single registry bottleneck
+- **No macros** — everything is explicit, no hidden code generation
+
+The "no macros" point is interesting. Rust macros are powerful but make code harder to read and debug. Inko deliberately omits them, betting that explicit code is better than magic.
+
+## My Take
+
+Inko is one of those languages that makes you ask "why didn't someone do this sooner?" Taking Rust's ownership model but relaxing the borrow checker enough to be usable, then adding Erlang's process model for concurrency — it is an elegant combination.
+
+The language is still early (small community, limited ecosystem), but the design decisions are sound. If you are starting a new server-side project and have the luxury of choosing your stack, Inko is worth a serious look. The "no GC + no data races + simple syntax" combination does not exist anywhere else.
+
+## Related Reading
+
+- [Weft Programming Language](/blog/weft-programming-language-ai-agents-durable-execution/)
+- [Podman vs Docker](/blog/podman-vs-docker-2026/)
+- [RHEL vs Ubuntu Server](/blog/rhel-vs-ubuntu-server-2026/)
+
+<BlogPromoCard />

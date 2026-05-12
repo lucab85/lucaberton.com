@@ -88,6 +88,87 @@ In a fleet of pods, this is not a rare event. **It is the default behavior.** Ev
 
 The result: you get single-instance cache hit rates across a horizontally scaled fleet. The 7x latency improvement and 10x cost reduction that prefix caching delivers on one pod — llm-d delivers across your entire cluster.
 
+## The llm-d Architecture: Three Planes
+
+The presenter walked through the full architecture in detail. llm-d is organized into three planes:
+
+### Control Plane
+
+![llm-d Control Plane — Kubernetes CRDs, Gateway, service mesh](/blog/events/rh-summit-2026-llmd-control-plane.jpg)
+
+The **Control Plane** installs Kubernetes CRDs, Gateway infrastructure, and service mesh. It provides guides to ensure cluster prerequisites are met and offers "Well Lit Paths" — opinionated deployment patterns. The main repository is [llm-d/llm-d](https://github.com/llm-d/llm-d).
+
+### Routing Plane
+
+![llm-d Routing Plane — Inference Gateway and EPP](/blog/events/rh-summit-2026-llmd-routing-plane.jpg)
+
+The **Routing Plane** is the Inference Gateway built on the upstream [Gateway API Inference Extension](https://github.com/kubernetes-sigs/gateway-api-inference-extension). The key component is the **EPP** (Endpoint Picker Plugin) — the `llm-d-inference-scheduler` that intercepts every request before it is forwarded and scores candidate pods. The scoring is KV-cache-aware and load-aware, using pluggable scorers. Related repositories:
+
+- [llm-d/llm-d-inference-scheduler](https://github.com/llm-d/llm-d-inference-scheduler)
+- [llm-d/llm-d-kv-cache](https://github.com/llm-d/llm-d-kv-cache)
+
+### Data Plane
+
+![llm-d Data Plane — distributed KV-cache with KVEvents](/blog/events/rh-summit-2026-llmd-data-plane.jpg)
+
+The **Data Plane** is where the actual inference happens. Each pod manages its own KV-cache, and vLLM's Automatic Prefix Caching identifies shared token prefixes and skips prefill. In a fleet, these isolated caches form a **distributed KV-cache** — the total cached state is spread across all pods. In the precise path, every pod continuously emits **KVEvents** giving the routing plane its view into this state.
+
+## Two Data Flow Modes: Precise vs Approximate
+
+### Precise Path
+
+![llm-d Precise Data Flows — KVEvents, kvblock.Index, TokenProcessor](/blog/events/rh-summit-2026-llmd-precise-flow.jpg)
+
+The precise path provides exact cache awareness:
+
+- vLLM emits **KVEvents** (via ZMQ) on every block store and eviction
+- The `kvblock.Index` maintains a real-time map of **block-hash to (pod, memory tier)**
+- On each request, the `TokenProcessor` hashes the prompt into ordered block keys using the same chunking algorithm as vLLM, ensuring hash compatibility
+- Routing is based on **Longest Consecutive Match (LCM)** from position 1
+
+![llm-d Precise Data Flows — detailed architecture](/blog/events/rh-summit-2026-llmd-precise-flow2.jpg)
+
+### Approximate Path
+
+![llm-d Approximate Data Flows — PrefixStore inside EPP](/blog/events/rh-summit-2026-llmd-approximate.jpg)
+
+The approximate path is simpler — no external indexer, no ZMQ stream. The **PrefixStore** lives entirely inside the EPP:
+
+- After every routing decision, `PostSchedule` records the pod-prompt association in an in-memory trie
+- On the next matching request, `PrefixAwareScorer` queries the trie and scores pods by longest prefix match
+- Prefix affinity is combined with `LoadAwareScorer` and `KVCacheUtilizationScorer`
+
+![llm-d Approximate path — PrefixAwareScorer pointing to diagram](/blog/events/rh-summit-2026-llmd-approximate2.jpg)
+
+The approximate path trades precision for simplicity — no additional infrastructure components needed. The PrefixStore is an in-memory structure inside the EPP, meaning it resets on pod restart and has no persistence or cross-EPP replication.
+
+## Benchmarks: 57x Faster, 2x Throughput
+
+![llm-d benchmark results — 57x faster response, 2x throughput](/blog/events/rh-summit-2026-llmd-benchmark-results.jpg)
+
+The benchmark results are stunning. On a test workload using 73% of a 16 H100 GPU KV-cache capacity:
+
+- **57x faster response time** than naive scheduling (precise scheduling)
+- **2x throughput** vs load-aware scheduling
+- TTFT stays near zero for precise scheduling even at 60 QPS, while random and load-aware scheduling spike to 50,000-60,000ms
+
+The TTFT vs QPS chart tells the story: precise scheduling (blue line) stays flat near zero across all QPS levels, while load-aware scheduling (red) climbs exponentially past 25 QPS.
+
+### Benchmark Setup
+
+![llm-d benchmark setup — 150 enterprise customers, 16x H100 GPUs](/blog/events/rh-summit-2026-llmd-benchmark-setup.jpg)
+
+The benchmark simulated a realistic B2B scenario:
+
+- **150 enterprise customers**, 5 concurrent users each
+- Each request shares **6K context tokens**, adds 1,200 unique input tokens, and expects 1,000 output tokens
+- **16x NVIDIA H100 GPUs** in an 8x vLLM Qwen/Qwen3-32B TP=2 deployment
+- Total KV-cache demand is 73% of cluster capacity, within the hardware limit
+
+![llm-d benchmark configuration details](/blog/events/rh-summit-2026-llmd-benchmark-setup2.jpg)
+
+The key insight: because the workload fits within KV-cache capacity, cache-aware scheduling can win by placing repeated prefixes on the right pods. Full benchmark configuration details at [llm-d.ai/blog/kvcache-wins-you-can-see](https://llm-d.ai/blog/kvcache-wins-you-can-see#a1-benchmark-setup-details).
+
 ## Why This Matters for Production AI
 
 This talk crystallized something I have been seeing across enterprise AI deployments: **the inference cost problem is not about the model or the hardware — it is about the routing layer.**

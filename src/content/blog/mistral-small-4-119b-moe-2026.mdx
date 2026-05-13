@@ -1,0 +1,214 @@
+---
+title: "Mistral Small 4 119B: One Model, Three Personalities"
+snippet: "Mistral Small 4 unifies instruct, reasoning, and coding into a single 119B MoE model with 128 experts, 6.5B active per token, 256K context, and Apache 2.0 license."
+description: "Mistral Small 4 unifies instruct, reasoning, and coding into a single 119B MoE model with 128 experts, 6.5B active per token, 256K context, and Apache 2.0 license."
+publishDate: "2026-05-12"
+lastModified: "2026-05-12"
+image:
+  src: "/blog/thumbnails/mistral-small-4-119b-moe-2026.jpg"
+  alt: "Mistral Small 4 119B MoE model architecture"
+category: "AI"
+tags:
+  - "Mistral"
+  - "MoE"
+  - "Inference"
+  - "vLLM"
+  - "Open Source"
+  - "Reasoning"
+  - "LLM"
+author: "Luca Berton"
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Mistral has been shipping separate model families for different tasks — Instruct for chat, Magistral for reasoning, Devstral for coding. **Mistral Small 4** collapses all three into a single 119B parameter MoE model that switches modes per request via the `reasoning_effort` parameter.
+
+The result: one deployment, three capabilities, and 40% lower latency than Mistral Small 3.
+
+## Architecture
+
+Mistral Small 4 uses an aggressive MoE design:
+
+- **128 experts**, 4 active per token
+- **119B total parameters**, only **6.5B activated** per token
+- **256K context length**
+- **Multimodal**: text + image input, text output
+- **Apache 2.0 license**
+
+The 128-expert / 4-active ratio is notable — DeepSeek-R1 uses 256 experts with 8 active, meaning Mistral Small 4 activates a smaller fraction of the model per token. This translates directly to lower compute per forward pass and higher throughput potential.
+
+## Three Modes, One Model
+
+The key innovation is per-request mode switching via the `reasoning_effort` parameter:
+
+**`reasoning_effort="none"`** — Fast instruct mode. Lightweight responses for everyday tasks. Equivalent behavior to Mistral Small 3.2-24B-Instruct. No chain-of-thought overhead.
+
+**`reasoning_effort="high"`** — Deep reasoning mode. Step-by-step thinking for complex problems. Equivalent verbosity to Magistral models. Use temperature 0.7 for best results.
+
+**Tool calling / Agentic** — Native function calling with `--tool-call-parser mistral` and `--enable-auto-tool-choice`. JSON output mode for structured extraction.
+
+This eliminates the deployment complexity of running separate model instances for different task types. One vLLM server handles chat, reasoning, coding, and tool use.
+
+## Benchmarks That Matter
+
+Mistral Small 4 with reasoning matches or surpasses GPT-OSS 120B across benchmarks while generating significantly shorter outputs:
+
+- **AA LCR**: Scores 0.72 with just 1.6K characters — Qwen models need 3.5-4x more output (5.8-6.1K) for comparable performance
+- **LiveCodeBench**: Outperforms GPT-OSS 120B while producing 20% less output
+- **AIME**: Competitive with frontier reasoning models
+
+The efficiency story is compelling: shorter outputs mean lower latency, lower inference costs, and better user experience. Generating fewer tokens to reach the same answer is a harder optimization than generating more tokens with higher accuracy.
+
+## Performance vs Mistral Small 3
+
+Compared to its predecessor:
+
+- **40% reduction in end-to-end completion time** in latency-optimized setup
+- **3x more requests per second** in throughput-optimized setup
+- Same API compatibility — drop-in replacement
+
+## Deploying with vLLM
+
+The recommended serving configuration:
+
+```bash
+vllm serve mistralai/Mistral-Small-4-119B-2603 \
+  --max-model-len 262144 \
+  --tensor-parallel-size 2 \
+  --attention-backend FLASH_ATTN_MLA \
+  --tool-call-parser mistral \
+  --enable-auto-tool-choice \
+  --reasoning-parser mistral \
+  --max_num_batched_tokens 16384 \
+  --max_num_seqs 128 \
+  --gpu_memory_utilization 0.8
+```
+
+Key flags:
+
+- **`--tensor-parallel-size 2`** — runs on 2x GPUs (H100 80GB or larger)
+- **`--attention-backend FLASH_ATTN_MLA`** — Multi-head Latent Attention for efficiency
+- **`--reasoning-parser mistral`** — enables reasoning mode toggling
+- **`--max_num_batched_tokens 16384`** — batch size for throughput optimization
+
+### Installation Requirements
+
+vLLM nightly is required:
+
+```bash
+uv pip install -U vllm \
+  --torch-backend=auto \
+  --extra-index-url https://wheels.vllm.ai/nightly
+```
+
+This automatically installs `mistral_common >= 1.11.0`. Also install transformers from main:
+
+```bash
+uv pip install git+https://github.com/huggingface/transformers.git
+```
+
+## Efficiency Variants
+
+Mistral provides two optimized variants for production:
+
+### NVFP4 Quantization
+
+[Mistral-Small-4-119B-2603-NVFP4](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603-NVFP4) — 4-bit float precision quantization. Roughly halves memory requirements, enabling deployment on fewer GPUs with minimal accuracy loss for most tasks.
+
+### Eagle Speculative Decoding
+
+[Mistral-Small-4-119B-2603-eagle](https://huggingface.co/mistralai/Mistral-Small-4-119B-2603-eagle) — a trained draft head for speculative decoding. The draft model predicts multiple tokens ahead; the main model verifies them in parallel. This can significantly reduce per-token latency for autoregressive generation.
+
+## Using the Model
+
+### Instruct Mode (Fast)
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+response = client.chat.completions.create(
+    model="mistralai/Mistral-Small-4-119B-2603",
+    messages=[
+        {"role": "user", "content": "Explain MoE routing in one paragraph."}
+    ],
+    temperature=0.1,
+    reasoning_effort="none",
+)
+print(response.choices[0].message.content)
+```
+
+### Reasoning Mode (Deep)
+
+```python
+response = client.chat.completions.create(
+    model="mistralai/Mistral-Small-4-119B-2603",
+    messages=[
+        {"role": "user", "content": "Prove that sqrt(2) is irrational."}
+    ],
+    temperature=0.7,
+    reasoning_effort="high",
+)
+```
+
+### Tool Calling
+
+```python
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "calculate",
+        "description": "Evaluate a math expression",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string"}
+            },
+            "required": ["expression"]
+        }
+    }
+}]
+
+response = client.chat.completions.create(
+    model="mistralai/Mistral-Small-4-119B-2603",
+    messages=[{"role": "user", "content": "What is 2^32 * 3?"}],
+    tools=tools,
+    tool_choice="auto",
+)
+```
+
+## Hardware Sizing
+
+| Configuration | GPUs | Precision | Context | Use Case |
+|---|---|---|---|---|
+| 2x H100 80GB | TP=2 | BF16 | 256K | Full precision, max capability |
+| 2x H200 141GB | TP=2 | BF16 | 256K | More headroom for batching |
+| 1x H200 141GB | TP=1 | NVFP4 | 128K | Cost-optimized single GPU |
+| 4x A100 80GB | TP=4 | BF16 | 128K | Previous-gen hardware |
+
+With only 6.5B parameters active per token, Mistral Small 4 is remarkably efficient on compute — the bottleneck is loading 119B parameters worth of expert weights into memory, not the actual matrix multiplications.
+
+## Where It Fits
+
+Mistral Small 4 occupies a unique position:
+
+- **vs DeepSeek-R1 (671B)**: Much smaller, fewer active parameters, but unified instruct + reasoning in one model
+- **vs Llama 4 Scout (109B)**: Similar size class, both MoE. Mistral has native reasoning mode toggle
+- **vs Qwen3 (235B)**: Mistral generates 3.5-4x shorter outputs for comparable quality — significant cost advantage
+- **vs GPT-OSS 120B**: Competitive performance, Apache 2.0, self-hostable
+
+For teams that want one model deployment handling chat, reasoning, coding, and tool use — with an open-source license and efficient inference — Mistral Small 4 is a strong contender.
+
+Check out the [vLLM Recipes project](/blog/vllm-recipes-deploy-model-gpu-2026/) for community-maintained serving configurations, and explore [Wide Expert Parallelism](/blog/nvidia-wide-ep-nvl72-moe-2026/) for scaling MoE inference across NVL72 racks.
+
+## Related Articles
+
+- [vLLM Recipes: Deploy Any Model on Any GPU](/blog/vllm-recipes-deploy-model-gpu-2026/)
+- [Wide Expert Parallelism on NVL72: Scaling MoE Inference](/blog/nvidia-wide-ep-nvl72-moe-2026/)
+- [NVIDIA Dynamo: Next-Gen Inference Framework](/blog/nvidia-dynamo-inference-framework-2026/)
+- [The Inference Economy](/blog/inference-gold-rush-economics-llm-serving-2026/)
+- [LLM Quality vs Cost vs Safety vs Throughput](/blog/llm-quality-cost-safety-throughput-tradeoff-2026/)
+
+<BlogPromoCard />

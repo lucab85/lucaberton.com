@@ -198,19 +198,56 @@ After migration, the rootdisk now shows 50 GiB on the `custom-storage-class`:
 
 The Virtualization Migrations tab provides a real-time overview of all VirtualMachineInstanceMigrations. In the lab, 3 migrations completed successfully — all at 100% progress, moving from `worker-cluster-gt6p6-1` to `worker-cluster-gt6p6-2`. The dashboard also tracks bandwidth consumption and running migrations.
 
-### Hardware Optimization and Workload Balancing
+### Hot-Plugging VM Resources
 
-The second module focused on getting the most out of your hardware:
+One of the most powerful features: adding resources to a **running** VM without downtime.
 
-- CPU pinning and NUMA topology awareness
-- Dedicated CPUs vs shared CPU pools for different workload types
-- Node affinity and anti-affinity rules for VMs
-- Resource quotas and limits for VM workloads
-- Balancing VM density vs performance isolation
+![hot-plug-vm1 storage — cloudinitdisk, data-disk-01 (5 GiB Persistent HotPlug), rootdisk (30 GiB)](/blog/events/rh-summit-2026-ocpv-ops-25.jpg)
+
+The `hot-plug-vm1` VM shows a hot-plugged `data-disk-01` (5 GiB) tagged as **Persistent HotPlug** — attached to a running VM via `dv-hot-plug-vm1-data-disk-01-dictio` DataVolume on Ceph RBD storage.
+
+![Terminal showing lsblk before and after hot-plug — vdc 5G appears via virtio-pci PCIe endpoint](/blog/events/rh-summit-2026-ocpv-ops-24.jpg)
+
+Inside the VM, `lsblk` shows the new `vdc` device (5.37 GB / 5.00 GiB) appearing dynamically. The kernel logs confirm the virtio-pci device detection: PCIe Endpoint at `0000:03:00.0`, BAR assignment, and `virtio_blk virtio8` queue initialization — all without a reboot.
+
+![Edit InstanceType — General Purpose sizes from nano (1 CPU, 512Mi) to 2xlarge (8 CPUs, 32Gi)](/blog/events/rh-summit-2026-ocpv-ops-26.jpg)
+
+CPU and memory can also be hot-plugged via **InstanceType** changes. The dropdown shows the full sizing range:
+- **nano**: 1 CPU, 512Mi Memory
+- **micro**: 1 CPU, 1Gi Memory
+- **small**: 1 CPU, 2Gi Memory (current)
+- **medium**: 1 CPU, 4Gi Memory
+- **2xmedium**: 2 CPUs, 4Gi Memory
+- **large**: 2 CPUs, 8Gi Memory
+- **xlarge**: 4 CPUs, 16Gi Memory
+- **2xlarge**: 8 CPUs, 32Gi Memory
+
+### Memory Overcommit
+
+Memory overcommit lets you pack more VMs onto your cluster by oversubscribing physical RAM — a critical density optimization for non-latency-sensitive workloads.
+
+![Memory density settings — slider from 100% to 400%, set to 200%](/blog/events/rh-summit-2026-ocpv-ops-27.jpg)
+
+The **Memory Density** slider (new in OpenShift 4.21.6) controls the `memoryOvercommitPercentage` on the HyperConverged custom resource. At 200%, a VM requesting 16 GiB only consumes 8 GiB of pod memory requests — doubling your VM density. The gauge shows current density applied: 99% / 100%.
+
+![Split view — Understanding Memory Overcommit documentation alongside terminal](/blog/events/rh-summit-2026-ocpv-ops-29.jpg)
+
+The lab instructions explain the math clearly: prior to OpenShift 4.21 (Kubernetes 1.21), native swap was not available. The **wasp-agent** add-on provided the workaround. The `memoryOvercommitPercentage` parameter scales memory requests for each VM — at 100% (default) it is the full declared amount, at 200% it is halved.
+
+![Terminal — full overcommit CLI session showing cluster capacity and VM status](/blog/events/rh-summit-2026-ocpv-ops-30.jpg)
+
+The terminal session demonstrates the full workflow:
+- Cluster nodes: 3 nodes (1 control-plane + 2 workers) running Kubernetes v1.34.6
+- Worker capacity: 8 CPUs, 24.6 GiB memory, 250 pods
+- `oc get vms` in the `over-commit` namespace showing `overcommit-vm-1` with 16 vCPUs
+- CPU topology: Ice Lake-Server-v2, 8 maxSockets, 2 sockets, 2 threads
+- Pod memory request verification after overcommit configuration
+
+![Split view — Enable Memory Overcommit instructions with terminal commands](/blog/events/rh-summit-2026-ocpv-ops-28.jpg)
 
 ### Resilience and Automated Recovery
 
-The third module covered high availability:
+The fencing module covered high availability:
 
 - VM eviction strategies during node maintenance
 - Automatic restart policies and health checks
@@ -220,7 +257,7 @@ The third module covered high availability:
 
 ### Advanced Live Migration Strategies
 
-The final module tackled the most complex topic:
+The final modules tackled dynamic scheduling and cross-cluster migration:
 
 - Live migration bandwidth and concurrency configuration
 - Pre-copy vs post-copy migration strategies

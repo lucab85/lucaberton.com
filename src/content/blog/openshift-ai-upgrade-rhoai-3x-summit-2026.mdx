@@ -115,6 +115,106 @@ The session highlighted the key new capabilities coming to RHOAI 3.x (not the en
 
 This is a massive feature jump from 2.x — the platform is evolving from a notebook/pipeline tool into a full AI application lifecycle platform.
 
+### Platform Architecture: What Is New in OpenShift AI 3
+
+![What is new in OpenShift AI 3 — LLM-d, MaaS, Gateway API, kube-rbac-proxy, Kubeflow Trainer v2, Unified Observability](/blog/events/rh-summit-2026-rhoai-upgrade-8.jpg)
+
+The session described RHOAI 3 as **"a platform evolution, not just a version bump."** The six core architectural changes:
+
+- **LLM-d** — Distributed LLM inference with intelligent routing (KV-cache aware)
+- **Model-as-a-Service** — Multi-tenant LLM governance, RBAC, and rate limiting
+- **Gateway API** — Cloud-native traffic management replacing OpenShift Routes
+- **kube-rbac-proxy** — External identity provider support for authentication
+- **Kubeflow Trainer v2** — Unified TrainJob API for distributed PyTorch, JAX, DeepSpeed
+- **Unified Observability** — Zero-config GPU monitoring and native vLLM metrics
+
+## Architecture at a Glance: 2.25 vs 3.3
+
+![Architecture comparison — RHOAI 2.25 vs 3.3 showing removed, unchanged, and new components](/blog/events/rh-summit-2026-rhoai-upgrade-7.jpg)
+
+This side-by-side comparison is the most important slide in the entire session. Here is what moved, what is new, and what is gone:
+
+**Model Serving:**
+- ~~ModelMesh~~ REMOVED → RawDeployment (NEW)
+- ~~KServe Serverless~~ REMOVED → LLM-d (NEW)
+
+**Networking:**
+- ~~OpenShift Routes~~ REMOVED → Gateway API (NEW)
+- ~~Service Mesh v2~~ REMOVED → Service Mesh v3 embedded (NEW)
+
+**Authentication:**
+- ~~oauth-proxy~~ REMOVED → kube-rbac-proxy (NEW)
+- ~~Authorino (standalone)~~ REMOVED → RHCL / Authorino + Limitador (NEW)
+
+**Operators:**
+- ~~Codeflare~~ REMOVED → KubeRay
+- ~~Embedded Kueue~~ REMOVED → RH Build of Kueue (NEW)
+- cert-manager now REQUIRED
+
+## What Is Removed
+
+![Components removed in RHOAI 3.x and their replacements](/blog/events/rh-summit-2026-rhoai-upgrade-9.jpg)
+
+Components you **must migrate away from before upgrading**:
+
+- **ModelMesh** (multi-model serving) → RawDeployment
+- **KServe Serverless** (Knative-based) → RawDeployment or LLM-d
+- **oauth-proxy** → kube-rbac-proxy
+- **OpenShift Serverless operator** → Not needed, uninstall
+- **Service Mesh v2** → Service Mesh v3 (embedded in OCP 4.19)
+- **Standalone Authorino** → Red Hat Connectivity Link
+- **Codeflare Operator** → KubeRay (standalone)
+- **Embedded Kueue** → Red Hat Build of Kueue
+
+**Critical data warning:** Llama Stack SQLite is replaced by PostgreSQL — **complete data loss during transition.** No automated migration exists.
+
+## What Breaks If You Do Nothing
+
+![What breaks if you upgrade without preparation — these are not edge cases](/blog/events/rh-summit-2026-rhoai-upgrade-10.jpg)
+
+This is the scariest slide. If you run RHOAI in production today, **at least some of these apply to you:**
+
+- **ModelMesh / KServe Serverless models** → HTTP 503 errors, endpoints stop responding
+- **Custom workbench images** (built for oauth-proxy) → Redirection loops, users cannot log in
+- **Running workbenches not stopped before migration** → Redirection loops, no warning
+- **Kueue left in "Managed" state** → Unrecoverable cluster instability, full restore required
+- **Llama Stack data** → Permanently lost, no automated migration
+- **All Route-based URLs** → Stop working: bookmarks, scripts, monitoring, CI/CD, DNS
+
+## Assessing Your Exposure
+
+![Impact assessment — minimal, moderate, and high impact categories](/blog/events/rh-summit-2026-rhoai-upgrade-11.jpg)
+
+The `rhai-cli` assessment tool will tell you exactly where you stand:
+
+**Minimal impact** — Standard RawDeployment models, default workbench images, no custom auth
+
+**Moderate impact** — Custom workbench images, Kueue for batch scheduling, Llama Stack
+
+**High impact** — ModelMesh or Serverless models, custom oauth-proxy configurations, Service Mesh v2 dependencies, distributed inference workloads
+
+## Migration Paths: 2.25.x to 3.3.z
+
+![Migration path diagram — supported sources (2.25.4+) to supported target (3.3.latest)](/blog/events/rh-summit-2026-rhoai-upgrade-12.jpg)
+
+The migration path is strict:
+
+- **Supported sources**: RHOAI 2.25.4 and later (2.25.4, 2.25.5, 2.25.latest) → ALLOWED to 3.3.latest
+- **Blocked**: RHOAI 2.25.3 and earlier — known vulnerabilities, migration blocked
+- **Unsupported targets**: 3.3.0, 3.3.1 — outdated with reproducibility risks. Only 3.3.latest (e.g., 3.3.2) is a valid target
+
+## Support Timeline
+
+![Support timeline — RHOAI 2.25 EUS until April 2027, migration path from 2.25.4+ to 3.3.latest](/blog/events/rh-summit-2026-rhoai-upgrade-13.jpg)
+
+Key dates and rules — *"Proper Planning Prevents Poor Performance"*:
+
+- **RHOAI 2.25** — Extended Update Support until **April 2027** (security patches and CVE fixes via z-stream releases)
+- **RHOAI 3.3.2** — First release supporting migration from 2.25.X(latest)
+- All new features and capabilities exclusive to 3.x stream
+- **Migration path**: from 2.25.4 and later → to 3.3.latest
+- **Migration to 3.3.0 or 3.3.1 is NOT supported**
+
 Reference links from the session:
 - [RHOAI SM Lifecycle](https://access.redhat.com/support/policy/updates/rhoai-sm/lifecycle)
 - [RHOAI Supported Configs](https://access.redhat.com/articles/rhoai-supported-configs)
@@ -122,10 +222,14 @@ Reference links from the session:
 
 ## Key Takeaways
 
-- **Plan your OpenShift version first** — RHOAI 3.3 needs OCP 4.19.9+, which may be a significant jump from your current version
-- **EUS is your friend** for production stability — 18-month support windows on both 2.x and 3.x tracks
-- **The 2.x → 3.x migration is not trivial** — follow the 5-step framework: evaluate scope, understand architectural shifts, prepare prerequisites, then execute
-- **Test in non-production first** — especially if you rely on custom pipelines, model serving configurations, or notebook environments
+- **This is not a minor upgrade** — ModelMesh, KServe Serverless, oauth-proxy, Service Mesh v2 are all removed. Plan accordingly.
+- **Run `rhai-cli` assessment first** — know your exposure level before touching anything
+- **Minimum source**: RHOAI 2.25.4+ → target 3.3.latest only (not 3.3.0 or 3.3.1)
+- **OpenShift 4.19.9+ required** — may be a multi-step upgrade from your current version
+- **Llama Stack data is permanently lost** — back up before migrating, no automated path
+- **Stop all workbenches** before migration — running workbenches cause silent redirection loops
+- **EUS gives you time** — 2.25 supported until April 2027, so plan the migration on your schedule
+- **Test in non-production first** — especially ModelMesh → RawDeployment and oauth-proxy → kube-rbac-proxy transitions
 
 <BlogPromoCard />
 

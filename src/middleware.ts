@@ -29,9 +29,13 @@ export const onRequest = defineMiddleware((context, next) => {
     return Response.redirect(`${url.origin}/blog/categories/${slug}`, 301);
   }
   
-  if (url.pathname.startsWith('/tags/')) {
-    const slug = url.pathname.replace('/tags/', '').replace('/', '');
-    return Response.redirect(`${url.origin}/blog/tags/${slug}`, 301);
+  // /blog/tags/* has no real route — redirect to root-level /tags/* where pages exist.
+  if (url.pathname.startsWith('/blog/tags/')) {
+    const slug = url.pathname.replace('/blog/tags/', '').replace(/\/$/, '');
+    if (slug) {
+      return Response.redirect(`${url.origin}/tags/${slug}/`, 301);
+    }
+    return Response.redirect(`${url.origin}/blog/`, 301);
   }
   
   // Handle legacy /old/ URLs

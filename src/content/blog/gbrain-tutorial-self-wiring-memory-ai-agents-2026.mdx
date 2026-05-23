@@ -1,0 +1,301 @@
+---
+title: "GBrain Tutorial: Build a Self-Wiring Memory Layer for AI Agents"
+snippet: "Step-by-step implementation of GBrain, Garry Tan's self-wiring knowledge graph that gives AI agents persistent, queryable memory using Neo4j and sentence transformers."
+description: "Step-by-step implementation of GBrain, Garry Tan's self-wiring knowledge graph that gives AI agents persistent, queryable memory using Neo4j and sentence transformers."
+publishDate: "2026-05-22"
+lastModified: "2026-05-22"
+image:
+  src: "/blog/thumbnails/gbrain-tutorial-self-wiring-memory.jpg"
+  alt: "GBrain Tutorial — Self-Wiring Memory Layer for AI Agents"
+tags: ["AI", "Knowledge Graph", "AI Agents", "Neo4j", "Python", "Tutorial"]
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+## Why AI Agents Need Memory
+
+Most AI agents today operate in a memoryless loop: prompt in, response out, context forgotten. Every session starts from zero. The agent cannot recall what it learned yesterday, what relationships it discovered, or what conclusions it reached.
+
+**GBrain** changes this. Built by Y Combinator president [Garry Tan](https://github.com/garrytan), GBrain is a self-wiring knowledge graph that acts as a persistent memory layer for AI agents. Unlike vector databases that store flat embeddings, GBrain creates a structured graph where entities connect through typed relationships — and the graph grows automatically as the agent processes new information.
+
+I covered the [architecture and vision behind GBrain](/blog/garry-tan-gbrain-ai-agent-knowledge-graph-2026/) previously. This post is the hands-on implementation guide.
+
+## Architecture Overview
+
+GBrain consists of three core components:
+
+1. **Entity Extraction** — LLM-powered parsing of unstructured text into structured entities and relationships
+2. **Graph Storage** — Neo4j as the persistent knowledge graph backend
+3. **Semantic Search** — Sentence transformers for embedding-based entity retrieval
+
+The key insight: the graph wires itself. Feed it documents, conversations, or observations, and it automatically extracts entities, infers relationships, and connects new knowledge to existing nodes.
+
+## Prerequisites
+
+```bash
+# Python 3.10+
+pip install neo4j sentence-transformers openai networkx
+```
+
+You will also need:
+- A running Neo4j instance (Docker works fine)
+- An OpenAI API key (for entity extraction)
+
+```bash
+docker run -d --name neo4j \
+  -p 7474:7474 -p 7687:7687 \
+  -e NEO4J_AUTH=neo4j/password \
+  neo4j:5-community
+```
+
+## Step 1: Define the Knowledge Graph Schema
+
+```python
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class Entity:
+    name: str
+    entity_type: str  # person, concept, tool, project, etc.
+    description: Optional[str] = None
+    embedding: Optional[list[float]] = None
+
+@dataclass
+class Relationship:
+    source: str
+    target: str
+    relation_type: str  # uses, created_by, depends_on, etc.
+    weight: float = 1.0
+    context: Optional[str] = None
+```
+
+## Step 2: Entity Extraction with LLMs
+
+```python
+import openai
+import json
+
+EXTRACTION_PROMPT = """Extract entities and relationships from the following text.
+Return JSON with:
+- entities: list of {name, type, description}
+- relationships: list of {source, target, relation, context}
+
+Entity types: person, organization, technology, concept, project, event
+Relationship types: uses, created, maintains, depends_on, competes_with, part_of
+
+Text: {text}"""
+
+def extract_entities(text: str) -> dict:
+    response = openai.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": EXTRACTION_PROMPT.format(text=text)}],
+        response_format={"type": "json_object"}
+    )
+    return json.loads(response.choices[0].message.content)
+```
+
+## Step 3: Embedding Generation
+
+```python
+from sentence_transformers import SentenceTransformer
+
+model = SentenceTransformer('all-MiniLM-L6-v2')
+
+def embed_entity(entity: Entity) -> list[float]:
+    text = f"{entity.name}: {entity.description or entity.entity_type}"
+    return model.encode(text).tolist()
+```
+
+## Step 4: Neo4j Graph Storage
+
+```python
+from neo4j import GraphDatabase
+
+class GBrainStore:
+    def __init__(self, uri="bolt://localhost:7687", user="neo4j", password="password"):
+        self.driver = GraphDatabase.driver(uri, auth=(user, password))
+
+    def upsert_entity(self, entity: Entity):
+        with self.driver.session() as session:
+            session.run("""
+                MERGE (e:Entity {name: $name})
+                SET e.type = $type,
+                    e.description = $description,
+                    e.embedding = $embedding,
+                    e.updated_at = datetime()
+            """, name=entity.name, type=entity.entity_type,
+                 description=entity.description,
+                 embedding=entity.embedding)
+
+    def upsert_relationship(self, rel: Relationship):
+        with self.driver.session() as session:
+            session.run("""
+                MATCH (s:Entity {name: $source})
+                MATCH (t:Entity {name: $target})
+                MERGE (s)-[r:RELATES_TO {type: $rel_type}]->(t)
+                SET r.weight = r.weight + $weight,
+                    r.context = $context,
+                    r.updated_at = datetime()
+            """, source=rel.source, target=rel.target,
+                 rel_type=rel.relation_type, weight=rel.weight,
+                 context=rel.context)
+
+    def query_neighbors(self, entity_name: str, depth: int = 2) -> list:
+        with self.driver.session() as session:
+            result = session.run("""
+                MATCH path = (e:Entity {name: $name})-[*1..$depth]-(neighbor)
+                RETURN neighbor.name AS name, neighbor.type AS type,
+                       neighbor.description AS description,
+                       length(path) AS distance
+                ORDER BY distance
+                LIMIT 20
+            """, name=entity_name, depth=depth)
+            return [dict(record) for record in result]
+```
+
+## Step 5: Semantic Search
+
+```python
+import numpy as np
+
+class GBrainSearch:
+    def __init__(self, store: GBrainStore):
+        self.store = store
+
+    def find_similar(self, query: str, top_k: int = 5) -> list[Entity]:
+        query_embedding = model.encode(query).tolist()
+
+        with self.store.driver.session() as session:
+            result = session.run("""
+                MATCH (e:Entity)
+                WHERE e.embedding IS NOT NULL
+                RETURN e.name AS name, e.type AS type,
+                       e.description AS description, e.embedding AS embedding
+            """)
+
+            scored = []
+            for record in result:
+                similarity = np.dot(query_embedding, record["embedding"]) / (
+                    np.linalg.norm(query_embedding) * np.linalg.norm(record["embedding"])
+                )
+                scored.append((similarity, record))
+
+            scored.sort(reverse=True, key=lambda x: x[0])
+            return scored[:top_k]
+```
+
+## Step 6: The Self-Wiring Pipeline
+
+```python
+class GBrain:
+    def __init__(self):
+        self.store = GBrainStore()
+        self.search = GBrainSearch(self.store)
+
+    def ingest(self, text: str):
+        """Feed text into the brain — it wires itself."""
+        # Extract structured knowledge
+        extracted = extract_entities(text)
+
+        # Create and store entities
+        for e in extracted.get("entities", []):
+            entity = Entity(
+                name=e["name"],
+                entity_type=e["type"],
+                description=e.get("description")
+            )
+            entity.embedding = embed_entity(entity)
+            self.store.upsert_entity(entity)
+
+        # Wire relationships
+        for r in extracted.get("relationships", []):
+            rel = Relationship(
+                source=r["source"],
+                target=r["target"],
+                relation_type=r["relation"],
+                context=r.get("context")
+            )
+            self.store.upsert_relationship(rel)
+
+    def recall(self, query: str, depth: int = 2) -> dict:
+        """Query the brain — semantic search + graph traversal."""
+        # Find relevant entities
+        similar = self.search.find_similar(query, top_k=3)
+
+        # Expand via graph
+        context = []
+        for score, entity in similar:
+            neighbors = self.store.query_neighbors(entity["name"], depth)
+            context.append({
+                "entity": entity["name"],
+                "relevance": float(score),
+                "connections": neighbors
+            })
+
+        return {"query": query, "results": context}
+```
+
+## Usage Example
+
+```python
+brain = GBrain()
+
+# Feed it knowledge
+brain.ingest("""
+    Kubernetes 1.32 introduced DRA (Dynamic Resource Allocation) for GPU scheduling.
+    The NVIDIA GPU Operator uses DRA to expose GPUs to pods. Red Hat OpenShift AI
+    builds on this for multi-tenant GPU sharing on bare metal clusters.
+""")
+
+brain.ingest("""
+    Luca Berton presented 'Multi-tenant GPUs on Bare Metal OpenShift AI' at
+    Red Hat Summit 2026 Discovery Theater. The talk covered MIG, time-slicing,
+    and DRA-based GPU partitioning strategies.
+""")
+
+# Query it
+result = brain.recall("GPU sharing strategies for Kubernetes")
+# Returns connected knowledge: DRA -> GPU Operator -> OpenShift AI -> MIG -> time-slicing
+```
+
+## Why This Matters for Production AI
+
+GBrain solves three critical problems:
+
+1. **Context window limitations** — Instead of stuffing everything into a prompt, query only relevant subgraphs
+2. **Knowledge persistence** — The agent remembers across sessions, building cumulative understanding
+3. **Relationship reasoning** — Graph traversal reveals connections that flat vector search misses
+
+For enterprise AI platforms, this pattern enables:
+- **Audit trails** — Every fact traced back to its source document
+- **Knowledge decay** — Timestamp-based relevance scoring (older facts decay)
+- **Multi-agent sharing** — Multiple agents can read/write the same knowledge graph
+
+## GBrain vs. Traditional RAG
+
+| Aspect | Vector RAG | GBrain |
+|--------|-----------|--------|
+| Storage | Flat embeddings | Structured graph |
+| Retrieval | Similarity search | Graph traversal + similarity |
+| Relationships | Implicit | Explicit typed edges |
+| Growth | Manual chunking | Self-wiring extraction |
+| Reasoning | Single-hop | Multi-hop via graph paths |
+
+## Production Considerations
+
+- **Scale**: Neo4j handles millions of nodes; for larger graphs consider Neptune or TigerGraph
+- **Extraction quality**: GPT-4o works well; for cost optimization, fine-tune a smaller model on your domain
+- **Embedding refresh**: Re-embed entities when descriptions change significantly
+- **Graph pruning**: Implement TTL-based cleanup for stale relationships
+
+## Related Content
+
+- [GBrain: Garry Tan's Self-Wiring Knowledge Graph for AI Agents](/blog/garry-tan-gbrain-ai-agent-knowledge-graph-2026/)
+- [gstack: Garry Tan's Claude Code AI Factory](/blog/garry-tan-gstack-claude-code-ai-factory-2026/)
+- [OWASP Top 10 for LLM Applications](/blog/owasp-top-10-llm-applications-2025-security-guide/)
+
+---
+
+*Building AI agent infrastructure with persistent memory? [Let's architect your knowledge layer](/contact/).*

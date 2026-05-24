@@ -1,0 +1,164 @@
+---
+title: "How to Reduce Your Vercel Bill: Build and Deployment Cost Optimization"
+snippet: "Practical strategies to cut Vercel build costs — disable on-demand concurrency, optimize machine types, enable remote cache, and reduce unnecessary preview deployments."
+description: "Practical strategies to cut Vercel build costs — disable on-demand concurrency, optimize machine types, enable remote cache, and reduce unnecessary preview deployments."
+publishDate: "2026-05-24"
+lastModified: "2026-05-24"
+image:
+  src: "/blog/thumbnails/reduce-vercel-build-costs.jpg"
+  alt: "Reduce Vercel Build Costs — Optimization Guide"
+tags: ["DevOps", "Vercel", "Cloud", "Cost Optimization", "CI/CD"]
+category: "DevOps"
+author: "Luca Berton"
+draft: false
+---
+
+## The Problem: Vercel Bills That Creep Up
+
+You deployed a few sites on Vercel. Then a few more. Now you have a dozen projects, preview deployments firing on every push, and a monthly bill that is harder to justify. The good news: most Vercel cost overruns come from a handful of misconfigured settings that take minutes to fix.
+
+Here is a prioritized playbook for reducing your Vercel build and deployment costs without sacrificing developer experience.
+
+## 1. Disable On-Demand Concurrent Builds for Most Projects
+
+This is likely the single biggest avoidable cost lever.
+
+On-demand concurrent builds let deployments skip the queue and run immediately. The catch: on Pro plans, **standard machines are free without on-demand concurrency** but cost **$0.014 per build minute when on-demand concurrency is enabled**.
+
+That means every project set to "Immediate" is paying to skip a queue that may not even have contention.
+
+### Recommended Settings by Project Type
+
+| Project Type | Concurrency Setting |
+|---|---|
+| Production app with frequent urgent deploys | Per Branch |
+| Marketing or static sites | Disabled |
+| Low-traffic or rarely updated sites | Disabled |
+| Monorepo with many preview deploys | Per Branch |
+| Emergency or critical app (temporary) | Immediate |
+
+### Action
+
+Go to each project's Build settings and set on-demand concurrent builds to **Disabled** for all non-critical sites. Use **Per Branch** only for active applications where preview deployment speed directly impacts developer velocity.
+
+## 2. Keep Build Machines on Standard
+
+Vercel offers multiple machine tiers with dramatically different pricing:
+
+| Machine | Cost |
+|---|---:|
+| Elastic | from $0.0035 per CPU minute |
+| Standard | from $0.014 per build minute |
+| Enhanced | from $0.03 per build minute |
+| Turbo | from $0.126 per build minute |
+
+**Standard is the right default for most projects.** Enhanced and Turbo machines only make economic sense if the faster build time reduces total cost — which rarely happens for typical Next.js or Astro sites that build in under 5 minutes anyway.
+
+### When to Consider Alternatives
+
+- **Elastic**: Test on lightweight builds that might benefit from per-CPU-minute pricing
+- **Enhanced**: Only if your build consistently times out or fails on Standard
+- **Turbo**: Almost never justified unless you have a massive monorepo build exceeding 30 minutes
+
+Validate any machine upgrade by comparing total cost in the usage dashboard after a few deployments.
+
+## 3. Enable Remote Cache
+
+Remote Cache shares cached build, test, and lint artifacts across your team and CI pipelines. Vercel has made Remote Cache **free for all plans** — there is no reason not to enable it.
+
+Benefits are most significant with:
+
+- Turborepo or Nx monorepos
+- Projects with expensive compilation steps (TypeScript, Tailwind CSS JIT)
+- Teams running repeated preview deployments
+- CI pipelines that build before Vercel deploys
+
+### How to Enable
+
+In your team settings, find the Remote Cache section and turn it on. For Turborepo projects, ensure `turbo.json` is configured to cache build outputs.
+
+## 4. Reduce Unnecessary Preview Deployments
+
+Every git push triggers a preview deployment by default. For many projects, this means building and deploying branches that nobody will ever preview — documentation updates, README changes, test-only modifications.
+
+### Strategies
+
+**Configure branch filtering:**
+- Deploy only `main`, `production`, or explicitly selected preview branches
+- Ignore branches matching patterns like `docs/*`, `chore/*`, or `dependabot/*`
+
+**Use ignored build steps:**
+```bash
+# vercel-ignore.sh — skip builds for docs-only changes
+#!/bin/bash
+git diff --name-only HEAD~1 | grep -qvE '^(docs/|README|\.md$)' || exit 0
+```
+
+**Monorepo isolation:**
+Ensure each Vercel project only rebuilds when its own app or package changes. Use `rootDirectory` and path-based ignore rules.
+
+**Disable preview deployments entirely** for projects that do not benefit from them — static marketing sites, documentation, personal blogs.
+
+## 5. Set Up Spend Management
+
+Vercel supports spend controls and alerts on Pro plans. Without them, a misconfigured webhook or runaway preview deployment can burn through budget before anyone notices.
+
+### Recommended Alert Thresholds
+
+| Alert | Trigger |
+|---|---|
+| Early warning | 50% of normal monthly spend |
+| Review point | 80% of normal monthly spend |
+| Hard limit | 100% — pause and investigate |
+
+Set alerts for: build minutes, bandwidth, serverless function invocations, image optimization, and edge requests.
+
+## 6. Audit Your Top Spenders
+
+Sort your last invoice by project. The Pareto principle applies: 2-3 projects likely account for 70%+ of your bill.
+
+For each top spender, ask:
+- Does this project need preview deployments on every branch?
+- Is on-demand concurrency actually saving developer time?
+- Could this project build on a cheaper machine without timeout issues?
+- Are there redundant rebuilds from dependency updates that do not affect output?
+
+## Quick-Win Checklist
+
+```markdown
+- [ ] Set on-demand concurrent builds to Disabled for all non-critical projects
+- [ ] Set Per Branch only for active apps where preview speed matters
+- [ ] Confirm all projects use Standard build machines
+- [ ] Enable Remote Cache (free)
+- [ ] Disable preview deployments for static/marketing sites
+- [ ] Add ignored build step for docs-only changes
+- [ ] Configure spend management alerts at 50%, 80%, 100%
+- [ ] Review last invoice and optimize top 2-3 projects
+```
+
+## The Savings Math
+
+Consider a typical scenario: 10 projects, 5 builds per day each, averaging 3 minutes per build, all with on-demand concurrency enabled.
+
+**Before optimization:**
+- 10 projects x 5 builds x 3 min x $0.014 = **$2.10/day = $63/month** in build minutes alone
+
+**After optimization (disable concurrency for 7 projects):**
+- 3 projects x 5 builds x 3 min x $0.014 = **$0.63/day = $18.90/month**
+- 7 projects build for free (standard queue)
+
+That is a **70% reduction** from one settings change.
+
+## Key Takeaways
+
+- On-demand concurrency is the hidden cost multiplier — disable it for most projects
+- Standard machines are free without concurrency; do not pay to skip an empty queue
+- Remote Cache is free — enable it immediately
+- Fewer preview deployments means fewer builds means lower costs
+- Set spend alerts before you need them, not after a surprise invoice
+
+The highest-impact change takes 5 minutes: move most projects away from Immediate concurrency. Everything else is optimization on top of that foundation.
+
+---
+
+*Need help optimizing your cloud infrastructure costs? [Let's review your architecture](/contact/).*

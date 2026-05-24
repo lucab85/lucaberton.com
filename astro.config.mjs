@@ -74,6 +74,10 @@ export default defineConfig({
           '/blog/hcl-vs-json-in-terraform',
           '/products/',
           '/team/',
+          '/booklist/',
+          '/redhat-summit',
+          '/services/kubernetes-consulting/',
+          '/services/platform-engineering/',
         ];
         if (redirectPages.some(p => page.includes(p))) return false;
         

@@ -1,0 +1,120 @@
+---
+draft: false
+title: "Zaya1-8B: The Most Interesting Local LLM Since DeepSeek-R1"
+seoTitle: "Zaya1-8B Review: Compressed Convolutional Attention + Markovian RSA"
+snippet: "Zyphra's Zaya1-8B introduces Compressed Convolutional Attention, Markovian RSA reasoning, and a PID-balanced MoE router — the most novel local LLM architecture in years."
+description: "A deep look at Zyphra's Zaya1-8B: CCA / CCGQA attention, co-trained Markovian RSA reasoning, MLP+PID router, AMD MI300X training, and what actually runs locally on Apple Silicon and ROCm today."
+image:
+  src: "/blog/thumbnails/edge-ai-llm-private-assistants-offline.jpg"
+  alt: "Zaya1-8B local LLM architecture review"
+publishDate: "2026-05-24"
+lastModified: "2026-05-24"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "llm"
+  - "zaya1"
+  - "zyphra"
+  - "local-llm"
+  - "mixture-of-experts"
+  - "amd"
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+Most "small reasoning" models released in the last year are minor variations on the same recipe: a transformer backbone, an MoE wrapper, grouped-query attention (or Gated DeltaNet), and a heavy RL post-training stage. Benchmarks creep up, but the *architecture* has barely moved since DeepSeek-R1.
+
+**Zaya1-8B** is the first small model in a while that genuinely breaks the mould. It is an 8.4B-parameter Mixture-of-Experts with only ~760M active parameters per token, released by [Zyphra](https://www.zyphra.com/) under Apache-2.0, and it ships **three** independent architectural contributions in one checkpoint.
+
+## TL;DR
+
+- **Compressed Convolutional Attention (CCA / CCGQA)** — Q/K/V are down-projected into a single shared latent space and the whole attention computation runs there. 8× KV-cache compression with no measurable quality loss, 1.7× faster prefill at 16k context on H100.
+- **Markovian RSA** — Recursive Self-Aggregation co-trained into the weights (not bolted on at inference). Parallel reasoning traces, tail-token forwarding between fixed-duration chunks. Reaches 91.9% on AIME 2025 and 89.6% on HMMT 2025 Feb when enabled.
+- **MLP router with PID-style bias balancer** — replaces the linear MoE gate to keep experts evenly utilised without a heavy auxiliary load-balancing loss.
+- **Trained end-to-end on 1,024 AMD MI300X GPUs** (IBM cluster). No NVIDIA in the pretraining loop.
+
+## Compressed Convolutional Attention (CCA)
+
+The KV cache is the silent killer for any local model. The moment your context window opens, VRAM disappears into keys and values that can be several times the size of the model itself. MHA is the worst offender; GQA shares K/V across head groups; MLA pushes the cache into a learned latent space. All three have ceilings.
+
+CCA takes a different angle. Queries, keys *and* values are all down-projected into one shared latent space, and the entire attention computation runs **inside** that compressed space. On top of that, convolutional sequence- and channel-mixing is applied to the compressed Q/K — the convolution is what prevents quality collapse under aggressive compression, because neighbouring positions can exchange information in the latent space *before* the attention scores are computed.
+
+Headline numbers from the [CCA whitepaper (arXiv:2510.04476)](https://arxiv.org/abs/2510.04476):
+
+- **8× KV-cache compression** vs. standard multi-head attention with no measurable quality drop.
+- **1.7× faster prefill** at 16k sequence length on H100.
+- **1.3× faster backward pass** on the same hardware.
+- Because parameters, cache, and FLOPs all compress by the same factor, you can dial the compression toward memory or compute depending on what your hardware is short on.
+
+The variant Zyphra actually ships in Zaya1 is **CCGQA**, which layers grouped-query head sharing on top of the latent-space compression. In MoE settings the paper claims it consistently outperforms both GQA and MLA at equal KV-cache compression — with up to **4× fewer FLOPs at the same cache budget**.
+
+This is the part of Zaya1 with the biggest implications for *other* models. If CCGQA holds up under independent evaluation, it is portable to virtually any future MoE.
+
+## Markovian RSA — reasoning that's co-trained, not bolted on
+
+Test-time compute has been the dominant lever for reasoning quality. The catch: longer chains of thought eat your context window. Markovian RSA is Zyphra's answer, and it has two halves.
+
+**Recursive Self-Aggregation (RSA)** — the model generates several reasoning traces in parallel for the same prompt, extracts the tail tokens of each, and feeds those tails into an aggregation prompt that asks the model to reconcile them into a single better answer. This pattern [has been explored before](https://github.com/rsa-llm/RSA), but Zaya1 is the first publicly released model built specifically to facilitate it.
+
+**Markovian Thinker** — instead of one long sequential chain, reason in fixed-duration chunks and pass only the tail of each chunk forward. Combine the two and you get reasoning that runs as long as you want on a context window that stays bounded the entire time.
+
+Crucially, Zyphra **co-trained** Zaya1 on this aggregation format. Synthetic aggregation prompts were injected throughout SFT, the reasoning warmup, RL from verifiable environments, and the math/code RL stages. The parallel-trace-and-merge behaviour is something the **weights expect**, not something a prompt has to coax out of them. Applied naively to another model that wasn't trained on the format, the same scaffold loses most of its benefit.
+
+With a 40k-token per-rollout reasoning budget and 4k tokens forwarded between chunks, Zyphra reports the model approaches DeepSeek-V3.2 and Qwen3-A22B on hard math.
+
+## MLP router with PID bias balancing
+
+MoE routers fail in predictable ways: a handful of experts get over-subscribed, the rest under-train, the gating signal collapses, and the model is nominally sparse but practically dense across a few hot experts.
+
+Zaya1 replaces the linear router with a small **MLP**, plus a **PID-style bias-balancing update implemented via AdamW over the routing-bias terms**. If an expert is being over-selected the controller pushes its bias down; under-selected, the bias goes up. The proportional, integral, and derivative terms together stabilise routing without a heavy auxiliary load-balancing loss. A learned residual scaling layer on top of that controls how the residual norm grows through depth at, per Zyphra, negligible parameter and FLOP cost.
+
+## Running it locally — what works today
+
+Two paths exist right now, neither of them painless.
+
+### ROCm / AMD consumer cards (7900 XTX)
+
+Zaya1 needs Zyphra's vLLM fork on the `zaya1-pr` branch, built from source. As [Adam Conway at XDA documented](https://www.xda-developers.com/tried-new-8b-local-llm-deepseek-r1-design/), the sampler kernel `topKPerRowDecode` in `csrc/sampler.cu` requests 66 KB of shared memory per block. RDNA3 (gfx1100) has only 64 KB of LDS; CDNA3 (MI300) has 160 KB. The kernel was sized for the hardware Zyphra trained and validated on. Patching it is non-trivial — the obvious workaround silently corrupts top-K indices, so the model returns the correct token 1 then collapses into `transition transition transition…`. Add an unrelated `xgrammar` import that pulls in a CUDA-only `torch_c_dlpack_ext`, and you are three layers deep in patches before anything runs.
+
+**Translation: "trained on AMD" ≠ "runs on AMD consumer cards" yet.** It will get there, but right now this is a technical demo.
+
+### Apple Silicon (M-series)
+
+The realistic path today. Two configurations work:
+
+1. **Full BF16 weights via Zyphra's custom transformers code** on an M4 Pro MacBook → ~7 tokens/sec. Technically functional, but unusably slow for a reasoning model that wants thousands of thinking tokens per answer.
+2. **MXFP4 quant via [vMLX](https://github.com/Anemll/vMLX)** (MLX-native inference server with OpenAI-compatible API) → **~42 tokens/sec on the same hardware**. Output quality on the prompts Conway tested was indistinguishable from BF16.
+
+The cleanest demonstration so far: a modified AIME 2024 problem (three logarithmic equations in three variables, asked to compute `m+n` where `|log_3(x^5 y^2 z^3)| = m/n`). Zaya1-8B on MXFP4 produced a correct, audited derivation in ~7,400 reasoning tokens — solving via an elegant linear combination rather than the brute-force "solve for a, b, c then plug back in" approach. Claude failed it; GPT-5.5 got it inconsistently. A single anecdote is not a benchmark, but it is a strong signal that the published numbers are directionally correct.
+
+## The big caveat: no local RSA yet
+
+The one piece you **cannot** run locally is Markovian RSA at inference time. The weights know how to do the parallel-trace-and-merge dance — they were trained for it — but the scaffold itself only runs in Zyphra's cloud deployment for now. There is no local implementation pointed at the MXFP4 quant.
+
+In practice this matters. On a 12k-token reasoning cap on a complex multi-timezone meeting-finder problem, the local MXFP4 build did all the right intermediate work — converting busy intervals to UTC, handling work-hour boundaries, sketching the minute-by-minute search loop, debating inclusive vs. exclusive end-of-day — and ran out of budget before emitting the final function. The cloud version, with RSA active, finished the same problem in ~28k reasoning tokens with working code at the end. The architecture that makes long reasoning bounded-context **isn't deployable locally yet**.
+
+If you intend to self-host Zaya1, plan for that gap.
+
+## And a bonus — Zaya1-8B-Diffusion-Preview
+
+Zyphra has already used the Zaya1 base for something even more interesting: [Zaya1-8B-Diffusion-Preview](https://www.zyphra.com/post/zaya1-8b-diffusion-preview), a discrete diffusion language model built on the autoregressive checkpoint that **drafts 16 tokens at once**. Zyphra reports 4.6× speedup with a lossless sampler and 7.7× with a mixed-logits sampler. Still preview, but a serious result.
+
+## Why this matters
+
+For a small, open-weight, Apache-2.0 reasoning model with three legitimately new architectural ideas underpinning it, Zaya1-8B is genuinely a big deal. The headline benchmark numbers are still Zyphra-reported and need independent verification, and the post-training recipe is specialised enough that it's noticeably better at math and code than at generalist tasks.
+
+But CCGQA, co-trained Markovian RSA, and the MLP+PID router are each a real research contribution, and any of the three is portable to other models. The AMD MI300X pretraining story has had most of the press coverage — and it *is* a milestone for AMD's software stack — but the cards are honestly a footnote. **The architecture is the story.**
+
+If you want to dig in:
+
+- 📄 [CCA whitepaper (arXiv:2510.04476)](https://arxiv.org/abs/2510.04476)
+- 🧪 [Zyphra Zaya1-8B-Diffusion-Preview announcement](https://www.zyphra.com/post/zaya1-8b-diffusion-preview)
+- 📰 [Adam Conway's hands-on at XDA](https://www.xda-developers.com/tried-new-8b-local-llm-deepseek-r1-design/) — covers the ROCm patching saga and the AIME demonstration in detail.
+
+Related reading on local LLMs and inference architecture:
+
+- [Edge AI: private LLM assistants for offline use](/blog/edge-ai-llm-private-assistants-offline/)
+- [AI observability with OpenTelemetry and LLM tracing](/blog/ai-observability-opentelemetry-llm-tracing/)
+- [Context architecture for AI agents — accuracy in 2026](/blog/context-architecture-ai-agents-accuracy-2026/)
+
+<BlogPromoCard />

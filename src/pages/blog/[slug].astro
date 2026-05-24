@@ -61,6 +61,60 @@ const relatedPosts = allPosts
   .sort((a, b) => new Date(b.data.publishDate).getTime() - new Date(a.data.publishDate).getTime())
   .slice(0, 4);
 
+// VideoObject structured data — emit one per YouTube embed found in body so
+// posts using <YouTube id="..." /> directly (not just video: frontmatter) are
+// eligible for Google video rich results and counted in Search Console.
+const rawBody = entry.body || "";
+const ytIdRegex = /(?:<YouTube\s+id=["']|youtube\.com\/watch\?v=|youtube-nocookie\.com\/embed\/|youtube\.com\/embed\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/g;
+const ytIds = Array.from(new Set(Array.from(rawBody.matchAll(ytIdRegex), (m) => m[1])));
+const frontmatterVideo = (entry.data as any).video;
+if (frontmatterVideo?.id && !ytIds.includes(frontmatterVideo.id)) {
+  ytIds.unshift(frontmatterVideo.id);
+}
+const uploadDateIso = (() => {
+  const d = entry.data.publishDate instanceof Date
+    ? entry.data.publishDate.toISOString()
+    : new Date(entry.data.publishDate).toISOString();
+  return d;
+})();
+const videoSchemas = ytIds.map((id, idx) => {
+  const isPrimary = frontmatterVideo?.id === id;
+  const name = isPrimary && frontmatterVideo?.title
+    ? frontmatterVideo.title
+    : (idx === 0 ? entry.data.title : `${entry.data.title} — clip ${idx + 1}`);
+  const description = isPrimary && frontmatterVideo?.description
+    ? frontmatterVideo.description
+    : (entry.data.snippet || entry.data.description || entry.data.title);
+  const thumbnailUrl = isPrimary && frontmatterVideo?.thumbnailUrl
+    ? frontmatterVideo.thumbnailUrl
+    : `https://img.youtube.com/vi/${id}/maxresdefault.jpg`;
+  const obj: Record<string, any> = {
+    "@context": "https://schema.org",
+    "@type": "VideoObject",
+    "name": name,
+    "description": description,
+    "thumbnailUrl": thumbnailUrl,
+    "uploadDate": uploadDateIso,
+    "embedUrl": `https://www.youtube-nocookie.com/embed/${id}`,
+    "contentUrl": `https://www.youtube.com/watch?v=${id}`,
+    "publisher": {
+      "@type": "Organization",
+      "name": "Luca Berton",
+      "url": "https://lucaberton.com",
+      "logo": { "@type": "ImageObject", "url": "https://lucaberton.com/opengraph.jpg" },
+    },
+    "author": {
+      "@type": "Person",
+      "name": entry.data.author || "Luca Berton",
+      "url": "https://lucaberton.com",
+    },
+  };
+  if (isPrimary && frontmatterVideo?.duration) {
+    obj.duration = frontmatterVideo.duration;
+  }
+  return obj;
+});
+
 // BlogPosting structured data
 const blogSchema = {
   "@context": "https://schema.org",
@@ -89,6 +143,9 @@ const hasImage = entry.data.image?.src;
 >
 <ReadingProgress />
 <script type="application/ld+json" set:html={JSON.stringify(blogSchema)} />
+{videoSchemas.map((v) => (
+  <script type="application/ld+json" set:html={JSON.stringify(v)} />
+))}
 <Breadcrumb items={[{ name: "Blog", url: "/blog/" }, { name: entry.data.title }]} />
 
 <!-- Hero Image (full-bleed like XDA) -->

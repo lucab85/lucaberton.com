@@ -76,6 +76,7 @@ export default defineConfig({
           '/team/',
           '/booklist/',
           '/redhat-summit',
+          '/rejekts/',
           '/services/kubernetes-consulting/',
           '/services/platform-engineering/',
         ];

@@ -3,9 +3,15 @@
  * Add trailing slash to internal markdown links missing one.
  * Pattern: ](/path/without/trailing/slash) -> ](/path/without/trailing/slash/)
  * Skips: asset files (.jpg|.png|.svg|.webp|.pdf|...), anchors (#), query (?), already-slashed.
+ *
+ * Usage:
+ *   node scripts/fix-trailing-slash.cjs           # dry-run (no files modified)
+ *   node scripts/fix-trailing-slash.cjs --write   # actually write changes
  */
 const fs = require("fs");
 const path = require("path");
+
+const WRITE = process.argv.includes("--write");
 
 const DIRS = ["src/content/blog", "src/content"];
 const ASSET_EXT = /\.(jpg|jpeg|png|svg|webp|gif|pdf|xml|txt|ico|css|js|mp4|json|md|mdx|ya?ml|csv|zip|tar|gz|woff2?|ttf|eot|wasm|map|html?)$/i;
@@ -38,10 +44,16 @@ for (const f of files) {
     return `](${urlPath}/)`;
   });
   if (changes > 0) {
-    fs.writeFileSync(f, src);
+    if (WRITE) fs.writeFileSync(f, src);
     totalChanges += changes;
     filesChanged++;
   }
 }
 
-console.log(JSON.stringify({ filesScanned: files.length, filesChanged, totalChanges }, null, 2));
+console.log(JSON.stringify({
+  mode: WRITE ? "write" : "dry-run",
+  filesScanned: files.length,
+  filesChanged,
+  totalChanges,
+  hint: WRITE ? undefined : "Re-run with --write to apply changes.",
+}, null, 2));

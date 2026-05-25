@@ -35,6 +35,12 @@ module.exports = {
         // When LHCI_BASE_URL is set (live origin), raise this back to 0.9.
         'categories:best-practices': ['warn', { minScore: 0.5 }],
         'categories:seo': ['error', { minScore: 0.9 }],
+        // Cloudflare injects a `Content-Signal:` directive into robots.txt at
+        // the edge. Lighthouse flags it as "Unknown directive" even though it
+        // is part of an emerging standard. We can't strip it from the repo, so
+        // downgrade this single audit to a warning. Disable Cloudflare's
+        // managed robots.txt content to clear it for real.
+        'robots-txt': 'warn',
       },
     },
   },

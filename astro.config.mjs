@@ -9,7 +9,10 @@ import partytown from "@astrojs/partytown"; // Corrected import
 // https://astro.build/config
 export default defineConfig({
   image: {
-    service: { entrypoint: "astro/assets/services/noop" },
+    // Use Sharp to generate AVIF/WebP variants and responsive widths.
+    // (Previous 'noop' service silently skipped all encoding, leaving Picture
+    // outputs as the source JPG/PNG only — major Lighthouse perf hit.)
+    service: { entrypoint: "astro/assets/services/sharp" },
   },
   site: "https://lucaberton.com",
   base: "/",

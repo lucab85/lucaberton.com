@@ -4,7 +4,6 @@ import mdx from "@astrojs/mdx";
 import sitemap from "@astrojs/sitemap";
 import icon from "astro-icon";
 import react from '@astrojs/react';
-import partytown from "@astrojs/partytown"; // Corrected import
 
 // https://astro.build/config
 export default defineConfig({
@@ -17,6 +16,11 @@ export default defineConfig({
   site: "https://lucaberton.com",
   base: "/",
   trailingSlash: "always",
+  build: {
+    // Inline small stylesheets (~4 KB) directly into HTML to eliminate
+    // render-blocking CSS chains while letting larger sheets be cached.
+    inlineStylesheets: "auto",
+  },
   integrations: [
     mdx(),
     react(),
@@ -126,7 +130,6 @@ export default defineConfig({
       }
     }),
     icon(),
-    partytown({ config: { forward: ["dataLayer.push"] } }), // Using the correct import
     (await import("astro-compress")).default({
       CSS: true,  // Astro-compress for minify
       HTML: {

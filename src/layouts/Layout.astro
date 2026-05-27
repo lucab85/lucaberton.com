@@ -5,8 +5,6 @@ import Navbar from "@components/navbar/navbar.astro";
 import AnnouncementBanner from "@components/AnnouncementBanner.astro";
 import WebVitals from "@components/WebVitals.astro";
 import StickyCta from "@components/StickyCta.astro";
-import "@fontsource-variable/inter/index.css";
-import "@fontsource-variable/bricolage-grotesque";
 import "../styles/global.css";
 
 export interface Props {
@@ -83,6 +81,9 @@ const metaDescription = customDescription
   : (title === "Home" || !title
     ? "Luca Berton — AI & Cloud Advisor, Docker Captain. 18+ years, 8 books, KubeCon & Red Hat Summit speaker. Consulting in AI platforms, GPU orchestration & Kubernetes."
     : "Expert AI, Kubernetes, and Cloud Consulting by Luca Berton. Automation, GPU orchestration, and platform engineering insights from 18+ years of experience.");
+
+// Detect homepage so we can preload only the hero slideshow LCP image there.
+const isHome = Astro.url.pathname === "/" || Astro.url.pathname === "";
 ---
 
 <!doctype html>
@@ -100,6 +101,34 @@ const metaDescription = customDescription
     <link rel="preconnect" href="https://www.googletagmanager.com" crossorigin />
     <link rel="preconnect" href="https://www.google-analytics.com" crossorigin />
     <link rel="dns-prefetch" href="https://f.convertkit.com" />
+
+    <!-- Self-hosted variable fonts: preload + non-blocking @font-face (font-display: swap) -->
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/inter-variable-latin.woff2" crossorigin />
+    <link rel="preload" as="font" type="font/woff2" href="/fonts/bricolage-grotesque-variable-latin.woff2" crossorigin />
+    <style is:inline>
+      @font-face {
+        font-family: 'Inter Variable';
+        font-style: normal;
+        font-display: swap;
+        font-weight: 100 900;
+        src: url('/fonts/inter-variable-latin.woff2') format('woff2-variations'),
+             url('/fonts/inter-variable-latin.woff2') format('woff2');
+        unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+      }
+      @font-face {
+        font-family: 'Bricolage Grotesque Variable';
+        font-style: normal;
+        font-display: swap;
+        font-weight: 200 800;
+        src: url('/fonts/bricolage-grotesque-variable-latin.woff2') format('woff2-variations'),
+             url('/fonts/bricolage-grotesque-variable-latin.woff2') format('woff2');
+        unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+      }
+    </style>
+
+    {isHome && (
+      <link rel="preload" as="image" href="/hero-stage-1.webp" fetchpriority="high" />
+    )}
     
     <!-- Additional SEO meta tags -->
     <meta http-equiv="Strict-Transport-Security" content="max-age=31536000; includeSubDomains" />
@@ -254,17 +283,51 @@ const metaDescription = customDescription
       media="print"
       onload="this.media='all'"
     />
-    <!-- Google tag (gtag.js) - loaded via Partytown to keep main thread free -->
-    <script type="text/partytown" async src="https://www.googletagmanager.com/gtag/js?id=G-5NMM6ZT4E4"></script>
-    <script type="text/partytown">
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-      gtag('config', 'G-5NMM6ZT4E4');
+    <!-- Google tag (gtag.js) — deferred until first user interaction or idle.
+         Avoids Partytown sandbox iframe (CSP frame-src) and reduces TBT on the
+         critical path. Falls back to a 4 s timeout if no interaction happens. -->
+    <script is:inline>
+      (function () {
+        window.dataLayer = window.dataLayer || [];
+        window.gtag = window.gtag || function () { window.dataLayer.push(arguments); };
+        var loaded = false;
+        function loadGtag() {
+          if (loaded) return;
+          loaded = true;
+          var s = document.createElement('script');
+          s.async = true;
+          s.src = 'https://www.googletagmanager.com/gtag/js?id=G-5NMM6ZT4E4';
+          document.head.appendChild(s);
+          gtag('js', new Date());
+          gtag('config', 'G-5NMM6ZT4E4');
+        }
+        var idle = window.requestIdleCallback || function (fn) { return setTimeout(fn, 2500); };
+        idle(loadGtag, { timeout: 4000 });
+        ['scroll', 'click', 'touchstart', 'keydown'].forEach(function (evt) {
+          window.addEventListener(evt, loadGtag, { once: true, passive: true });
+        });
+      })();
     </script>
 
-    <!-- Kit.com (formerly ConvertKit) -->
-    <script async src="https://f.convertkit.com/9153490/ce74a48bfa.js" data-uid="ce74a48bfa"></script>
+    <!-- Kit.com (formerly ConvertKit) — lazy-loaded on first interaction to avoid
+         eagerly setting the __cf_bm third-party cookie on every page load. -->
+    <script is:inline>
+      (function () {
+        var loaded = false;
+        function loadKit() {
+          if (loaded) return;
+          loaded = true;
+          var s = document.createElement('script');
+          s.async = true;
+          s.src = 'https://f.convertkit.com/9153490/ce74a48bfa.js';
+          s.setAttribute('data-uid', 'ce74a48bfa');
+          document.head.appendChild(s);
+        }
+        ['scroll', 'click', 'touchstart', 'keydown'].forEach(function (evt) {
+          window.addEventListener(evt, loadKit, { once: true, passive: true });
+        });
+      })();
+    </script>
     <!-- End Kit.com -->
 
     <!-- Microsoft Clarity (deferred until user interaction) -->
@@ -294,7 +357,26 @@ const metaDescription = customDescription
     <AnnouncementBanner {...kubeconBanner} />
     <AnnouncementBanner {...redHatSummitBanner} />
     <Navbar />
-    <script type="module" src="/scripts/cookieconsent-config.js"></script>
+    <script is:inline>
+      // Lazy-load cookie consent only when user starts interacting with the page
+      // (saves ~22 KB of script eval on initial load → improves TBT).
+      (function () {
+        var loaded = false;
+        function loadConsent() {
+          if (loaded) return;
+          loaded = true;
+          var s = document.createElement('script');
+          s.type = 'module';
+          s.src = '/scripts/cookieconsent-config.js';
+          document.head.appendChild(s);
+        }
+        var idle = window.requestIdleCallback || function (fn) { return setTimeout(fn, 2500); };
+        idle(loadConsent, { timeout: 4000 });
+        ['scroll', 'click', 'touchstart', 'keydown'].forEach(function (evt) {
+          window.addEventListener(evt, loadConsent, { once: true, passive: true });
+        });
+      })();
+    </script>
     <main id="main-content">
       <slot />
     </main>

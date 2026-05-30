@@ -1,0 +1,136 @@
+---
+draft: false
+title: "Fix Claude Code Installation on macOS: Homebrew, Node.js 26, and Gatekeeper"
+snippet: "Step-by-step troubleshooting guide for installing Claude Code on macOS when Homebrew conflicts with npm, Node.js v26 causes crashes, or Gatekeeper blocks the binary."
+description: "Step-by-step troubleshooting guide for installing Claude Code on macOS when Homebrew conflicts with npm, Node.js v26 causes crashes, or Gatekeeper blocks the binary."
+image: { src: "/blog/thumbnails/fix-claude-code-homebrew-macos-2026.jpg", alt: "Fix Claude Code installation on macOS Homebrew" }
+publishDate: "2026-05-30"
+lastModified: "2026-05-30"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["claude code", "macos", "homebrew", "node.js", "troubleshooting"]
+---
+
+## The Problem
+
+You try to run `claude` on macOS and hit one (or all) of these:
+
+1. **Binary conflict** — `/opt/homebrew/bin/claude` already exists from an old npm global install
+2. **Node.js v26 crash** — the CLI launches via Node.js v26.0.0 and immediately crashes
+3. **Gatekeeper block** — "Apple could not verify claude is free of malware"
+
+This guide walks through the complete fix I used to get Claude Code v2.1.149 running cleanly.
+
+## Root Cause
+
+The install is half-conflicting: Homebrew tries to install the new `claude-code` cask, but `/opt/homebrew/bin/claude` already exists from a previous `npm install -g @anthropic-ai/claude-code`. The existing binary runs through Node.js v26.0.0, which is too new and causes compatibility crashes.
+
+## Step 1: Identify the Conflict
+
+```bash
+# See what currently owns the claude binary
+which claude
+ls -l /opt/homebrew/bin/claude
+```
+
+If it points to a Node.js script or npm global, that's your problem.
+
+## Step 2: Remove the Old npm Install
+
+```bash
+# Remove the global npm package
+npm uninstall -g @anthropic-ai/claude-code
+
+# Remove the stale binary if still there
+rm -f /opt/homebrew/bin/claude
+```
+
+## Step 3: Reinstall via Homebrew Cask
+
+```bash
+# Clean install of the official cask
+brew install --cask claude-code
+
+# Verify
+claude --version
+```
+
+Expected output:
+
+```
+2.1.149 (Claude Code)
+```
+
+## Step 4: Fix Node.js Version (If Still Crashing)
+
+If Claude still launches via Node and crashes, switch from v26 to LTS:
+
+```bash
+brew uninstall node
+brew install node@22
+brew link --overwrite --force node@22
+
+# Verify
+node -v   # Should show v22.x.x
+claude    # Should work now
+```
+
+## Step 5: Fix macOS Gatekeeper Block
+
+When you see "Apple could not verify claude is free of malware":
+
+**Option A — System Settings UI:**
+
+1. Run `claude` (it will fail)
+2. Go to **System Settings → Privacy & Security → Security**
+3. Click **"Open Anyway"** (appears for about 1 hour after the blocked attempt)
+4. Run `claude` again
+
+**Option B — Terminal (if you trust the Homebrew source):**
+
+```bash
+xattr -dr com.apple.quarantine /opt/homebrew/bin/claude
+xattr -dr com.apple.quarantine /opt/homebrew/Caskroom/claude-code
+claude
+```
+
+## Step 6: Nuclear Option (Clean Reinstall)
+
+If nothing else works:
+
+```bash
+brew uninstall --cask claude-code
+rm -f /opt/homebrew/bin/claude
+brew install --cask claude-code
+claude
+```
+
+## First-Time Setup
+
+Once Claude Code launches, you'll see the welcome screen with a theme selector:
+
+```
+1. Auto (match terminal)
+2. Dark mode ✔
+3. Light mode
+4. Dark mode (colorblind-friendly)
+5. Light mode (colorblind-friendly)
+6. Dark mode (ANSI colors only)
+7. Light mode (ANSI colors only)
+```
+
+Use arrow keys to select, press Enter. You can change this later with `/theme`.
+
+## Summary
+
+| Problem | Fix |
+|---------|-----|
+| Binary conflict | `npm uninstall -g @anthropic-ai/claude-code` then `brew install --cask claude-code` |
+| Node.js v26 crash | Switch to `node@22` via Homebrew |
+| Gatekeeper block | System Settings → Open Anyway, or `xattr -dr com.apple.quarantine` |
+
+## Related Content
+
+- [Claude Code Bootcamp Workshop — May 30, 2026](/blog/claude-code-bootcamp-workshop-2026/)
+- [Karpathy's CLAUDE.md: Encoding LLM Discipline](/blog/karpathy-claude-md-llm-coding-discipline-2026/)
+- [Garry Tan's gstack: 23 AI Specialist Tools](/blog/garry-tan-gstack-claude-code-setup-2026/)

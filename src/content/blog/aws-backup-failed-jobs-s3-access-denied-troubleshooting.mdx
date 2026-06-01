@@ -1,0 +1,238 @@
+---
+draft: false
+title: "AWS Backup: 112 Failed Jobs in 14 Days — Fix S3 Access Denied and Clean Up Snapshot Sprawl"
+snippet: "Troubleshoot AWS Backup failed jobs caused by S3 access denied errors, clean up Backup-managed EBS snapshots, fix IAM role permissions, and configure retention policies to prevent snapshot accumulation."
+description: "Troubleshoot AWS Backup failed jobs caused by S3 access denied errors, clean up Backup-managed EBS snapshots, fix IAM role permissions, and configure retention policies to prevent snapshot accumulation."
+image: { src: "/blog/thumbnails/aws-backup-failed-jobs-s3-troubleshooting-2026.jpg", alt: "AWS Backup failed jobs S3 access denied troubleshooting" }
+publishDate: "2026-06-01"
+lastModified: "2026-06-01"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["aws", "backup", "s3", "iam", "ebs", "troubleshooting"]
+---
+
+## The Problem
+
+You open the AWS Backup Jobs Dashboard and see:
+
+- **168 completed** jobs
+- **112 failed** jobs
+- Failure reason: **Access denied**
+- Affected resource type: **S3**
+
+Meanwhile, your EBS snapshots page shows 195 snapshots you cannot delete because they are "managed by AWS Backup." Your Backup plan is working for EC2 but failing for S3 — every single day.
+
+This is one of the most common AWS Backup misconfigurations, and it stems from a single missing IAM policy.
+
+## Root Cause: Missing S3 Backup Permissions
+
+When you create a Backup plan that includes S3 buckets, the Backup service role needs **specific S3 permissions** beyond what the default role provides. The default `AWSBackupDefaultServiceRole` often ships with EC2/EBS permissions but not S3.
+
+The daily pattern looks like this:
+
+```
+03:00 UTC — Backup plan triggers
+  ✅ EC2 AMI backup → Creates snapshot → Completed
+  ❌ S3 backup → Access Denied → Failed
+```
+
+## Fix 1: Add S3 Backup Permissions to the IAM Role
+
+### Find Your Backup Role
+
+```bash
+# List backup plans
+aws backup list-backup-plans \
+  --query "BackupPlansList[].{Name:BackupPlanName,ID:BackupPlanId}" \
+  --output table
+
+# Get the plan details (shows the IAM role ARN)
+aws backup get-backup-selection \
+  --backup-plan-id <your-plan-id> \
+  --selection-id <your-selection-id>
+```
+
+Or in the Console: **AWS Backup → Backup plans → your plan → Resource assignments → IAM role**
+
+### Attach the S3 Backup Policy
+
+```bash
+# Attach the AWS managed policy for S3 backups
+aws iam attach-role-policy \
+  --role-name AWSBackupDefaultServiceRole \
+  --policy-arn arn:aws:iam::aws:policy/AWSBackupServiceRolePolicyForS3Backup
+```
+
+This policy grants:
+
+- `s3:GetBucketTagging`
+- `s3:GetInventoryConfiguration`
+- `s3:ListBucketVersions`
+- `s3:ListBucket`
+- `s3:GetBucketVersioning`
+- `s3:GetBucketLocation`
+- `s3:GetBucketAcl`
+- `s3:PutInventoryConfiguration`
+- `s3:GetBucketNotification`
+- `s3:PutBucketNotification`
+- `s3:GetObject` / `s3:GetObjectVersion` / `s3:GetObjectAcl`
+
+### Also Attach the S3 Restore Policy
+
+If you ever need to restore from S3 backups:
+
+```bash
+aws iam attach-role-policy \
+  --role-name AWSBackupDefaultServiceRole \
+  --policy-arn arn:aws:iam::aws:policy/AWSBackupServiceRolePolicyForS3Restore
+```
+
+## Fix 2: Remove S3 If You Don't Need It
+
+If you never intended to back up S3 buckets:
+
+```bash
+# List resource assignments in your backup plan
+aws backup list-backup-selections \
+  --backup-plan-id <your-plan-id>
+
+# Update the selection to exclude S3
+# Or in Console: Backup plans → Edit resource assignment → remove S3
+```
+
+In the Console: **Backup plans → your plan → Resource assignments → Edit → Remove S3 resource type**
+
+## Clean Up Backup-Managed Snapshots
+
+EBS snapshots created by AWS Backup cannot be deleted from the EC2 Console. You must delete the **recovery points** from the Backup Vault.
+
+### Console Method
+
+1. **AWS Backup → Vaults** → select your vault (usually "Default")
+2. Filter by **Resource type: EC2** or search by resource ID `i-0a30bab507a1adaf5`
+3. Select the old recovery points you want to remove
+4. **Actions → Delete**
+
+### CLI Method (Bulk)
+
+```bash
+VAULT_NAME="Default"
+
+# List all recovery points in the vault
+aws backup list-recovery-points-by-backup-vault \
+  --backup-vault-name "$VAULT_NAME" \
+  --query "RecoveryPoints[?ResourceType=='EC2'].{ARN:RecoveryPointArn,Created:CreationDate,Resource:ResourceArn}" \
+  --output table
+
+# Delete recovery points older than 14 days
+CUTOFF=$(date -d '14 days ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -v-14d +%Y-%m-%dT%H:%M:%S)
+
+aws backup list-recovery-points-by-backup-vault \
+  --backup-vault-name "$VAULT_NAME" \
+  --query "RecoveryPoints[?CreationDate<'$CUTOFF' && ResourceType=='EC2'].RecoveryPointArn" \
+  --output text | tr '\t' '\n' | while read arn; do
+    echo "Deleting: $arn"
+    aws backup delete-recovery-point \
+      --backup-vault-name "$VAULT_NAME" \
+      --recovery-point-arn "$arn"
+    sleep 0.5  # Avoid throttling
+done
+```
+
+Once recovery points are deleted, the associated EBS snapshots are automatically released and removed.
+
+## Fix Retention to Prevent Future Accumulation
+
+Your current setup retains 40+ days of daily snapshots. If you only need 7 or 14 days:
+
+### Console
+
+**Backup plans → your plan → Edit rule → Retention period → 14 days**
+
+### CLI
+
+```bash
+# Update the backup rule with a 14-day retention
+aws backup update-backup-plan \
+  --backup-plan-id <your-plan-id> \
+  --backup-plan '{
+    "BackupPlanName": "DailyBackup",
+    "Rules": [{
+      "RuleName": "DailyRule",
+      "TargetBackupVaultName": "Default",
+      "ScheduleExpression": "cron(0 3 * * ? *)",
+      "StartWindowMinutes": 60,
+      "CompletionWindowMinutes": 180,
+      "Lifecycle": {
+        "DeleteAfterDays": 14
+      }
+    }]
+  }'
+```
+
+### Storage Cost Impact
+
+Each 8 GiB daily snapshot (incremental) costs roughly:
+
+```
+Incremental size: ~0.5-2 GiB/day (typical for OS volume)
+At $0.05/GB-month:
+  14-day retention: ~$0.50-2.00/month
+  40-day retention: ~$1.50-5.00/month
+  195 snapshots (current): ~$10-40/month
+```
+
+Not catastrophic, but unnecessary cost that compounds.
+
+## Handle the One AMI-Linked Snapshot
+
+One snapshot (`snap-0d09b71f596d91e71`) is tied to AMI `ami-020b2f4148cc60cc8` (created September 2025). This is NOT Backup-managed — it was a manual `CreateImage` call.
+
+```bash
+# Check if any instance still uses this AMI
+aws ec2 describe-instances \
+  --filters "Name=image-id,Values=ami-020b2f4148cc60cc8" \
+  --query "Reservations[].Instances[].InstanceId" \
+  --output text
+
+# If empty (no instances), safe to deregister
+aws ec2 deregister-image --image-id ami-020b2f4148cc60cc8
+
+# Now delete the snapshot
+aws ec2 delete-snapshot --snapshot-id snap-0d09b71f596d91e71
+```
+
+## Complete Cleanup Checklist
+
+| Step | Action | Where |
+|------|--------|-------|
+| 1 | Fix IAM: attach `AWSBackupServiceRolePolicyForS3Backup` | IAM Console |
+| 2 | Or remove S3 from Backup plan resource assignments | Backup Console |
+| 3 | Delete old recovery points from vault | Backup → Vaults |
+| 4 | Set retention to 14 days in Backup rule | Backup → Plans |
+| 5 | Deregister AMI `ami-020b2f4148cc60cc8` | EC2 → AMIs |
+| 6 | Delete orphaned snapshot `snap-0d09b71f596d91e71` | EC2 → Snapshots |
+| 7 | Verify next day: 0 failed jobs | Backup → Jobs Dashboard |
+
+## Monitor Going Forward
+
+Set a CloudWatch alarm for Backup job failures:
+
+```bash
+aws cloudwatch put-metric-alarm \
+  --alarm-name "BackupJobFailures" \
+  --metric-name "NumberOfBackupJobsFailed" \
+  --namespace "AWS/Backup" \
+  --statistic Sum \
+  --period 86400 \
+  --threshold 1 \
+  --comparison-operator GreaterThanOrEqualToThreshold \
+  --evaluation-periods 1 \
+  --alarm-actions arn:aws:sns:us-east-1:025066287134:alerts
+```
+
+## Related Content
+
+- [AWS EBS Snapshots: Failed to Delete — AMI Cleanup Guide](/blog/aws-ebs-snapshots-failed-to-delete-ami-backup-guide/)
+- [AWS RDS PostgreSQL Minor Version Deprecation](/blog/aws-rds-postgresql-minor-version-deprecation-may-2026/)
+- [HashiCorp Vault vs AWS Secrets Manager](/blog/hashicorp-vault-vs-aws-secrets-manager-2026/)

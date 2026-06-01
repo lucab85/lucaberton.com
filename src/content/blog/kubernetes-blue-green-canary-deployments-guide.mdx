@@ -1,0 +1,387 @@
+---
+draft: false
+title: "Blue-Green and Canary Deployments on Kubernetes: Complete Implementation Guide"
+snippet: "Implement blue-green and canary deployment strategies on Kubernetes using native resources, Argo Rollouts, and Istio traffic splitting with progressive delivery patterns."
+description: "Implement blue-green and canary deployment strategies on Kubernetes using native resources, Argo Rollouts, and Istio traffic splitting with progressive delivery patterns."
+image: { src: "/blog/thumbnails/kubernetes-blue-green-canary-deployments-2026.jpg", alt: "Kubernetes blue-green canary deployments guide" }
+publishDate: "2026-06-02"
+lastModified: "2026-06-02"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "deployment", "canary", "blue-green", "argo rollouts"]
+---
+
+## Why Rolling Updates Are Not Enough
+
+The default Kubernetes `RollingUpdate` strategy works for most cases but lacks:
+- **Instant rollback** — rolling back takes as long as rolling forward
+- **Traffic control** — you cannot send 5% of traffic to the new version
+- **Automated analysis** — no built-in metric checks to halt a bad deploy
+- **Full environment validation** — new pods join gradually, not tested as a complete set
+
+Blue-green and canary strategies solve these gaps.
+
+## Blue-Green Deployment
+
+**Concept**: Run two identical environments. "Blue" is live, "Green" is the new version. Switch traffic instantly.
+
+### Native Kubernetes Implementation
+
+```yaml
+# blue-deployment.yaml (currently live)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app-blue
+  labels:
+    app: my-app
+    version: blue
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-app
+      version: blue
+  template:
+    metadata:
+      labels:
+        app: my-app
+        version: blue
+    spec:
+      containers:
+        - name: app
+          image: my-app:1.0.0
+          ports:
+            - containerPort: 8080
+---
+# green-deployment.yaml (new version, not receiving traffic yet)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app-green
+  labels:
+    app: my-app
+    version: green
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-app
+      version: green
+  template:
+    metadata:
+      labels:
+        app: my-app
+        version: green
+    spec:
+      containers:
+        - name: app
+          image: my-app:2.0.0
+          ports:
+            - containerPort: 8080
+---
+# Service pointing to blue (live)
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-app
+spec:
+  selector:
+    app: my-app
+    version: blue  # Switch to "green" to cutover
+  ports:
+    - port: 80
+      targetPort: 8080
+```
+
+**Switch traffic:**
+
+```bash
+# Cutover: switch service selector from blue to green
+kubectl patch service my-app \
+  -p '{"spec":{"selector":{"version":"green"}}}'
+
+# Rollback: switch back to blue
+kubectl patch service my-app \
+  -p '{"spec":{"selector":{"version":"blue"}}}'
+```
+
+### Advantages and Disadvantages
+
+| Pros | Cons |
+|------|------|
+| Instant cutover (milliseconds) | 2x resource cost during deployment |
+| Instant rollback | Database schema changes are complex |
+| Full environment tested before switch | All-or-nothing (no gradual rollout) |
+
+## Canary Deployment
+
+**Concept**: Route a small percentage of traffic to the new version. Increase gradually if metrics look good. Roll back if they do not.
+
+### Native Kubernetes (Approximate)
+
+Using replica ratios:
+
+```yaml
+# Stable: 9 replicas
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app-stable
+spec:
+  replicas: 9
+  selector:
+    matchLabels:
+      app: my-app
+      track: stable
+  template:
+    metadata:
+      labels:
+        app: my-app
+        track: stable
+    spec:
+      containers:
+        - name: app
+          image: my-app:1.0.0
+---
+# Canary: 1 replica (~10% traffic)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app-canary
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-app
+      track: canary
+  template:
+    metadata:
+      labels:
+        app: my-app
+        track: canary
+    spec:
+      containers:
+        - name: app
+          image: my-app:2.0.0
+---
+# Service selects both (traffic split by pod ratio)
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-app
+spec:
+  selector:
+    app: my-app  # Matches both stable and canary
+  ports:
+    - port: 80
+      targetPort: 8080
+```
+
+**Limitation**: Traffic split depends on replica count. For precise percentages, use a service mesh or Argo Rollouts.
+
+## Argo Rollouts: Production-Grade Progressive Delivery
+
+```bash
+kubectl create namespace argo-rollouts
+kubectl apply -n argo-rollouts \
+  -f https://github.com/argoproj/argo-rollouts/releases/latest/download/install.yaml
+```
+
+### Canary with Automated Analysis
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: my-app
+spec:
+  replicas: 10
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+        - name: app
+          image: my-app:2.0.0
+          ports:
+            - containerPort: 8080
+  strategy:
+    canary:
+      steps:
+        - setWeight: 5
+        - pause: { duration: 2m }
+        - analysis:
+            templates:
+              - templateName: success-rate
+        - setWeight: 20
+        - pause: { duration: 5m }
+        - analysis:
+            templates:
+              - templateName: success-rate
+        - setWeight: 50
+        - pause: { duration: 5m }
+        - setWeight: 100
+      canaryService: my-app-canary
+      stableService: my-app-stable
+      trafficRouting:
+        istio:
+          virtualService:
+            name: my-app-vsvc
+            routes:
+              - primary
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: success-rate
+spec:
+  metrics:
+    - name: success-rate
+      interval: 30s
+      count: 3
+      successCondition: result[0] >= 0.95
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: |
+            sum(rate(http_requests_total{app="my-app",status=~"2.."}[2m])) /
+            sum(rate(http_requests_total{app="my-app"}[2m]))
+    - name: error-rate
+      interval: 30s
+      count: 3
+      failureCondition: result[0] > 0.05
+      provider:
+        prometheus:
+          address: http://prometheus.monitoring:9090
+          query: |
+            sum(rate(http_requests_total{app="my-app",status=~"5.."}[2m])) /
+            sum(rate(http_requests_total{app="my-app"}[2m]))
+```
+
+### Blue-Green with Argo Rollouts
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: my-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: my-app
+  template:
+    metadata:
+      labels:
+        app: my-app
+    spec:
+      containers:
+        - name: app
+          image: my-app:2.0.0
+  strategy:
+    blueGreen:
+      activeService: my-app-active
+      previewService: my-app-preview
+      autoPromotionEnabled: false
+      prePromotionAnalysis:
+        templates:
+          - templateName: success-rate
+      scaleDownDelaySeconds: 300
+```
+
+Monitor rollout status:
+
+```bash
+kubectl argo rollouts get rollout my-app --watch
+kubectl argo rollouts promote my-app          # Promote canary/preview
+kubectl argo rollouts abort my-app            # Abort and rollback
+kubectl argo rollouts undo my-app             # Rollback to previous
+```
+
+## Traffic Splitting with Istio
+
+For precise percentage-based routing without Argo Rollouts:
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: my-app
+spec:
+  hosts:
+    - my-app
+  http:
+    - route:
+        - destination:
+            host: my-app
+            subset: stable
+          weight: 90
+        - destination:
+            host: my-app
+            subset: canary
+          weight: 10
+---
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: my-app
+spec:
+  host: my-app
+  subsets:
+    - name: stable
+      labels:
+        version: v1
+    - name: canary
+      labels:
+        version: v2
+```
+
+## Choosing a Strategy
+
+| Factor | Rolling Update | Blue-Green | Canary |
+|--------|:-:|:-:|:-:|
+| Rollback speed | Minutes | Instant | Seconds (abort) |
+| Resource overhead | Low | 2x during deploy | Low-Medium |
+| Risk exposure | All users gradually | All users at switch | Small % first |
+| Complexity | Built-in | Medium | High |
+| Best for | Low-risk changes | Critical services | High-traffic APIs |
+
+## Deployment Pipeline Example
+
+```yaml
+# GitOps with ArgoCD + Argo Rollouts
+# .github/workflows/deploy.yaml
+name: Deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Update image tag
+        run: |
+          cd k8s/overlays/production
+          kustomize edit set image my-app=my-app:${{ github.sha }}
+      - name: Commit and push
+        run: |
+          git add .
+          git commit -m "Deploy ${{ github.sha }}"
+          git push
+      # ArgoCD syncs automatically
+      # Argo Rollouts handles progressive delivery
+      # AnalysisTemplate validates metrics at each step
+```
+
+## Related Content
+
+- [Kubernetes Graceful Shutdown and PreStop Hooks](/blog/kubernetes-graceful-shutdown-prestop-hooks/)
+- [Kubernetes HPA Custom Metrics with Prometheus Adapter](/blog/kubernetes-hpa-custom-metrics-prometheus-adapter/)
+- [Linkerd mTLS Zero-Trust Service Mesh](/blog/linkerd-mtls-zero-trust-service-mesh/)
+- [Kustomize Advanced Patching Guide](/blog/kustomize-advanced-patching-overlays-guide/)

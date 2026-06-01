@@ -1,0 +1,323 @@
+---
+draft: false
+title: "CloudNativePG: Production PostgreSQL on Kubernetes"
+snippet: "Deploy and operate production PostgreSQL clusters on Kubernetes with CloudNativePG — automated failover, continuous backup to S3, connection pooling, monitoring, and disaster recovery."
+description: "Deploy and operate production PostgreSQL clusters on Kubernetes with CloudNativePG — automated failover, continuous backup to S3, connection pooling, monitoring, and disaster recovery."
+image: { src: "/blog/thumbnails/cloudnativepg-postgresql-kubernetes-2026.jpg", alt: "CloudNativePG PostgreSQL on Kubernetes operator" }
+publishDate: "2026-06-02"
+lastModified: "2026-06-02"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "postgresql", "cloudnativepg", "database", "operator"]
+---
+
+## Why CloudNativePG?
+
+CloudNativePG is the most Kubernetes-native PostgreSQL operator. Unlike others that bolt Patroni on top, CNPG was built from scratch for Kubernetes:
+
+- **No external dependencies** — no etcd, no Consul, no Patroni
+- **Declarative API** — single `Cluster` CRD manages everything
+- **WAL archiving** — continuous backup to S3/GCS/Azure Blob
+- **Automated failover** — promotion in seconds, no split-brain
+- **Connection pooling** — built-in PgBouncer integration
+- **Fencing and maintenance** — safe node drains
+- **CNPG Plugin for kubectl** — native CLI experience
+
+## Installation
+
+```bash
+helm repo add cnpg https://cloudnative-pg.github.io/charts
+helm repo update
+
+helm install cnpg cnpg/cloudnative-pg \
+  --namespace cnpg-system \
+  --create-namespace
+```
+
+Verify:
+
+```bash
+kubectl get pods -n cnpg-system
+# cnpg-cloudnative-pg-xxx  Running
+
+# Install kubectl plugin
+curl -sSfL https://github.com/cloudnative-pg/cloudnative-pg/raw/main/hack/install-cnpg-plugin.sh | sh
+```
+
+## Deploy a PostgreSQL Cluster
+
+### Minimal 3-Node HA Cluster
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: my-postgres
+spec:
+  instances: 3
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+
+  storage:
+    size: 50Gi
+    storageClass: gp3
+
+  postgresql:
+    parameters:
+      shared_buffers: "256MB"
+      effective_cache_size: "768MB"
+      work_mem: "8MB"
+      maintenance_work_mem: "128MB"
+      max_connections: "200"
+      max_wal_size: "1GB"
+
+  bootstrap:
+    initdb:
+      database: myapp
+      owner: myapp
+      encoding: UTF8
+      localeCType: en_US.utf8
+      localeCollate: en_US.utf8
+
+  superuserSecret:
+    name: postgres-superuser
+
+  monitoring:
+    enablePodMonitor: true
+```
+
+Create the superuser secret:
+
+```bash
+kubectl create secret generic postgres-superuser \
+  --from-literal=username=postgres \
+  --from-literal=password=$(openssl rand -base64 24)
+```
+
+### Check Status
+
+```bash
+kubectl cnpg status my-postgres
+# Cluster Summary:
+#   Name:              my-postgres
+#   Instances:         3
+#   Ready Instances:   3
+#   Primary:           my-postgres-1
+#   Status:            Cluster in healthy state
+```
+
+## Continuous Backup to S3
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: my-postgres
+spec:
+  instances: 3
+  storage:
+    size: 50Gi
+
+  backup:
+    barmanObjectStore:
+      destinationPath: s3://my-backups/postgres/
+      s3Credentials:
+        accessKeyId:
+          name: aws-creds
+          key: ACCESS_KEY_ID
+        secretAccessKey:
+          name: aws-creds
+          key: SECRET_ACCESS_KEY
+      wal:
+        compression: gzip
+        maxParallel: 4
+      data:
+        compression: gzip
+    retentionPolicy: "30d"
+
+---
+# Schedule regular base backups
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: daily-backup
+spec:
+  schedule: "0 2 * * *"
+  cluster:
+    name: my-postgres
+  backupOwnerReference: self
+  immediate: true
+```
+
+### Point-in-Time Recovery
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: my-postgres-recovered
+spec:
+  instances: 3
+  storage:
+    size: 50Gi
+
+  bootstrap:
+    recovery:
+      source: my-postgres
+      recoveryTarget:
+        targetTime: "2026-06-01T14:30:00Z"
+
+  externalClusters:
+    - name: my-postgres
+      barmanObjectStore:
+        destinationPath: s3://my-backups/postgres/
+        s3Credentials:
+          accessKeyId:
+            name: aws-creds
+            key: ACCESS_KEY_ID
+          secretAccessKey:
+            name: aws-creds
+            key: SECRET_ACCESS_KEY
+```
+
+## Connection Pooling with PgBouncer
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Pooler
+metadata:
+  name: my-postgres-pooler
+spec:
+  cluster:
+    name: my-postgres
+  instances: 2
+  type: rw  # or "ro" for read replicas
+  pgbouncer:
+    poolMode: transaction
+    parameters:
+      max_client_conn: "1000"
+      default_pool_size: "25"
+      min_pool_size: "5"
+```
+
+Applications connect to the Pooler service instead of the Cluster directly:
+
+```bash
+# Read-write (via pooler)
+psql postgresql://myapp:pass@my-postgres-pooler:5432/myapp
+
+# Read-only (direct to replicas)
+psql postgresql://myapp:pass@my-postgres-ro:5432/myapp
+```
+
+## Application Connection
+
+Services created automatically:
+
+| Service | Purpose |
+|---------|---------|
+| `my-postgres-rw` | Always points to primary (read-write) |
+| `my-postgres-ro` | Round-robin across replicas (read-only) |
+| `my-postgres-r` | Round-robin across all instances |
+
+```yaml
+# Application deployment
+env:
+  - name: DATABASE_URL
+    value: postgresql://myapp:$(DB_PASSWORD)@my-postgres-rw:5432/myapp
+  - name: DATABASE_URL_READONLY
+    value: postgresql://myapp:$(DB_PASSWORD)@my-postgres-ro:5432/myapp
+```
+
+## Monitoring
+
+CNPG exports 200+ metrics to Prometheus:
+
+```yaml
+spec:
+  monitoring:
+    enablePodMonitor: true
+    customQueriesConfigMap:
+      - name: custom-queries
+        key: queries
+```
+
+Key metrics to alert on:
+
+```yaml
+groups:
+  - name: cnpg-alerts
+    rules:
+      - alert: PostgreSQLReplicationLag
+        expr: cnpg_pg_replication_lag > 30
+        for: 5m
+        labels:
+          severity: warning
+
+      - alert: PostgreSQLClusterNotHealthy
+        expr: cnpg_collector_up == 0
+        for: 1m
+        labels:
+          severity: critical
+
+      - alert: PostgreSQLHighConnections
+        expr: cnpg_backends_total / cnpg_pg_settings_setting{name="max_connections"} > 0.8
+        for: 5m
+        labels:
+          severity: warning
+```
+
+## Maintenance Operations
+
+```bash
+# Switchover (planned failover)
+kubectl cnpg promote my-postgres my-postgres-2
+
+# Restart a single instance
+kubectl cnpg restart my-postgres my-postgres-3
+
+# Fence an instance (for maintenance)
+kubectl cnpg fencing on my-postgres my-postgres-2
+
+# Online resize storage
+kubectl patch cluster my-postgres \
+  --type merge \
+  -p '{"spec":{"storage":{"size":"100Gi"}}}'
+
+# Rolling update (change image)
+kubectl patch cluster my-postgres \
+  --type merge \
+  -p '{"spec":{"imageName":"ghcr.io/cloudnative-pg/postgresql:16.5"}}'
+```
+
+## Production Checklist
+
+- [ ] 3+ instances across availability zones
+- [ ] Anti-affinity rules (pods on different nodes)
+- [ ] Continuous WAL archiving to object storage
+- [ ] Scheduled base backups (daily)
+- [ ] Test PITR recovery quarterly
+- [ ] PodMonitor for Prometheus metrics
+- [ ] Connection pooler for high-connection apps
+- [ ] Resource requests and limits set
+- [ ] PDB (PodDisruptionBudget) configured
+- [ ] Network policies restricting database access
+
+```yaml
+# Anti-affinity and topology spread
+spec:
+  affinity:
+    topologyKey: topology.kubernetes.io/zone
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: node-role.kubernetes.io/database
+                operator: Exists
+```
+
+## Related Content
+
+- [Databases on Kubernetes: When It Makes Sense and Memory Overcommit](/blog/databases-on-kubernetes-memory-overcommit/)
+- [Kubernetes Secrets Management Best Practices](/blog/kubernetes-secrets-management-best-practices-2026/)
+- [Velero Backup and Disaster Recovery](/blog/velero-backup-disaster-recovery-kubernetes/)
+- [Kubernetes VPA Vertical Pod Autoscaler Guide](/blog/kubernetes-vpa-vertical-pod-autoscaler-guide/)

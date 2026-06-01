@@ -1,0 +1,164 @@
+---
+draft: false
+title: "AWS RDS PostgreSQL Minor Version Deprecation: What You Need to Do Before the Auto-Upgrade"
+snippet: "Amazon RDS is deprecating PostgreSQL minor versions 14.14-14.17, 15.9-15.12, 16.5-16.8, 17.1-17.4, and 11.22 on May 31, 2026. Here is how to upgrade proactively using Blue/Green Deployments to minimize downtime."
+description: "Amazon RDS is deprecating PostgreSQL minor versions 14.14-14.17, 15.9-15.12, 16.5-16.8, 17.1-17.4, and 11.22 on May 31, 2026. Here is how to upgrade proactively using Blue/Green Deployments to minimize downtime."
+image: { src: "/blog/thumbnails/aws-rds-postgresql-deprecation-2026.jpg", alt: "AWS RDS PostgreSQL minor version deprecation upgrade guide" }
+publishDate: "2026-06-01"
+lastModified: "2026-06-01"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["aws", "rds", "postgresql", "database", "upgrade", "cloud"]
+---
+
+## The Deadline
+
+**May 31, 2026** — Amazon RDS will automatically upgrade PostgreSQL instances running deprecated minor versions during their next scheduled maintenance window. This is a **mandatory engine upgrade with downtime**.
+
+If you have not upgraded proactively by this date, AWS will do it for you — at a time you may not control.
+
+## Affected Versions
+
+| Major Version | Deprecated Minors | Auto-Upgrade Target |
+|---------------|-------------------|---------------------|
+| PostgreSQL 14 | 14.14, 14.15, 14.16, 14.17 | 14.20+ |
+| PostgreSQL 15 | 15.9, 15.10, 15.11, 15.12 | 15.15+ |
+| PostgreSQL 16 | 16.5, 16.6, 16.7, 16.8 | 16.11+ |
+| PostgreSQL 17 | 17.1, 17.2, 17.3, 17.4 | 17.7+ |
+| PostgreSQL 11 | 11.22-RDS.20241121 | End of life |
+
+**Since May 1, 2026**, you can no longer create new instances on these versions via Console or CLI.
+
+## Why This Matters
+
+Minor version upgrades usually include:
+
+- **Security patches** for known CVEs
+- **Bug fixes** that prevent data corruption or crashes
+- **Performance improvements** from the PostgreSQL community
+- **Compliance alignment** — running deprecated versions may violate your security baseline
+
+The risk of *not* upgrading proactively is simple: AWS picks the maintenance window, and you get downtime when you are not ready.
+
+## Option 1: Blue/Green Deployment (Recommended)
+
+AWS Blue/Green Deployments create a staging environment that replicates your production database, applies the upgrade, and then switches over with minimal downtime.
+
+### Step-by-Step
+
+```bash
+# 1. Create a Blue/Green deployment
+aws rds create-blue-green-deployment \
+  --blue-green-deployment-name pg-upgrade-june2026 \
+  --source arn:aws:rds:us-east-1:025066287134:db:my-production-db \
+  --target-engine-version 16.11
+
+# 2. Monitor the Green environment
+aws rds describe-blue-green-deployments \
+  --blue-green-deployment-identifier pg-upgrade-june2026
+
+# 3. Run your test suite against the Green endpoint
+
+# 4. Switchover when ready (typically under 1 minute of downtime)
+aws rds switchover-blue-green-deployment \
+  --blue-green-deployment-identifier pg-upgrade-june2026
+
+# 5. Delete the old Blue environment after validation
+aws rds delete-blue-green-deployment \
+  --blue-green-deployment-identifier pg-upgrade-june2026 \
+  --delete-target
+```
+
+### Benefits
+
+- **Minimal downtime** — switchover typically completes in under 1 minute
+- **Rollback capability** — if something goes wrong, the Blue (original) is still there
+- **Test before cutover** — run your full test suite against the Green environment
+- **No snapshot restore needed** — replication keeps Green in sync
+
+## Option 2: Manual Minor Version Upgrade
+
+For simpler setups or dev/staging environments:
+
+```bash
+# Apply immediately (causes downtime)
+aws rds modify-db-instance \
+  --db-instance-identifier my-database \
+  --engine-version 16.11 \
+  --apply-immediately
+
+# Or schedule for next maintenance window
+aws rds modify-db-instance \
+  --db-instance-identifier my-database \
+  --engine-version 16.11 \
+  --no-apply-immediately
+```
+
+## Option 3: Terraform/IaC Update
+
+If you manage RDS with Infrastructure as Code:
+
+```hcl
+resource "aws_db_instance" "production" {
+  engine         = "postgres"
+  engine_version = "16.11"  # Updated from 16.8
+  
+  # Apply during maintenance window
+  apply_immediately = false
+}
+```
+
+Run `terraform plan` to preview, then `terraform apply` during your scheduled maintenance.
+
+## Pre-Upgrade Checklist
+
+Before upgrading any production database:
+
+1. **Take a manual snapshot** — safety net regardless of method
+2. **Check extension compatibility** — `SELECT * FROM pg_extension;` and verify versions
+3. **Review pg_upgrade release notes** — check for breaking changes between your current and target version
+4. **Test application queries** — run your ORM migrations and critical queries against the new version
+5. **Check connection pooler compatibility** — PgBouncer, RDS Proxy, or application-level pools
+6. **Verify parameter group compatibility** — custom parameters may need adjustment
+7. **Schedule during low-traffic window** — even Blue/Green has a brief switchover moment
+8. **Notify your team** — communicate the maintenance window
+
+## Finding Affected Instances
+
+Check your AWS Health Dashboard:
+
+```bash
+# List all RDS PostgreSQL instances and their versions
+aws rds describe-db-instances \
+  --query "DBInstances[?Engine=='postgres'].{ID:DBInstanceIdentifier,Version:EngineVersion,Status:DBInstanceStatus}" \
+  --output table
+```
+
+Or check the **Affected resources** tab in the [AWS Health Dashboard](https://health.aws.amazon.com/health/home).
+
+## PostgreSQL 11: End of Life
+
+If you are still running PostgreSQL 11.22, this is not just a minor upgrade — PostgreSQL 11 reached community end of life in November 2023. You need a **major version upgrade** to 14, 15, 16, or 17.
+
+Major version upgrades require more testing:
+
+- Data type changes between major versions
+- Deprecated functions and syntax
+- Extension compatibility (PostGIS, pg_stat_statements, etc.)
+- Application code changes for removed features
+
+Use Blue/Green Deployments for major version upgrades as well — they handle the `pg_upgrade` process transparently.
+
+## Timeline Summary
+
+| Date | What Happens |
+|------|--------------|
+| May 1, 2026 | Cannot create new instances on deprecated versions |
+| May 31, 2026 | Deprecation deadline |
+| After May 31 | Auto-upgrade during next maintenance window |
+
+## Related Content
+
+- [Databases on Kubernetes: Why Memory Overcommit Breaks Everything](/blog/databases-kubernetes-memory-overcommit-off-production/)
+- [Platform Engineering at Scale](/blog/platform-engineering-kubernetes-enterprise-scale/)
+- [Infrastructure Matters More Than the Model](/blog/ai-infrastructure-matters-more-than-model-production/)

@@ -131,26 +131,132 @@ done
 
 If the snapshot was created by AWS Backup, you will see a different error:
 
-> This snapshot is managed by AWS Backup. Use the AWS Backup console to manage this resource.
+> This snapshot is managed by the AWS Backup service and cannot be deleted via EC2 APIs. If you wish to delete this snapshot, please do so via the Backup console.
 
-These snapshots have a `aws:backup:source-resource` tag. To delete:
+Similarly, AMIs created by Backup return:
 
-1. Go to **AWS Backup → Backup vaults**
-2. Find the vault containing the recovery point
-3. Delete the recovery point (this releases the snapshot)
+> This image is managed by AWS Backup and cannot be deleted via EC2 APIs. To delete this image, please use the AWS Backup APIs, CLI, or console.
 
-Or via CLI:
+**You cannot use `aws ec2 delete-snapshot` or `aws ec2 deregister-image` for Backup-managed resources.** The EC2 API will reject every attempt. You must go through the Backup API.
+
+### Step-by-Step: Delete All Backup-Managed Snapshots
+
+**1. List your backup vaults:**
 
 ```bash
-# Find backup recovery points for a snapshot
-aws backup describe-recovery-point \
-  --backup-vault-name Default \
-  --recovery-point-arn arn:aws:ec2:us-east-1::snapshot/snap-0abc123
+REGION=us-east-1
 
-# Delete the recovery point
-aws backup delete-recovery-point \
-  --backup-vault-name Default \
-  --recovery-point-arn arn:aws:ec2:us-east-1:123456789012:snapshot/snap-0abc123
+aws backup list-backup-vaults \
+  --region "$REGION" \
+  --query 'BackupVaultList[].BackupVaultName' \
+  --output table
+```
+
+**2. Check recovery point count:**
+
+```bash
+VAULT=Default
+
+aws backup describe-backup-vault \
+  --backup-vault-name "$VAULT" \
+  --region "$REGION" \
+  --query '{Vault:BackupVaultName,RecoveryPoints:NumberOfRecoveryPoints,Locked:Locked}'
+```
+
+If `Locked: true`, the vault has a lock policy — you cannot delete recovery points until the lock expires or is removed.
+
+**3. Delete all recovery points in a vault:**
+
+```bash
+REGION=us-east-1
+VAULT=Default
+
+while true; do
+  RPS=$(aws backup list-recovery-points-by-backup-vault \
+    --backup-vault-name "$VAULT" \
+    --region "$REGION" \
+    --query 'RecoveryPoints[].RecoveryPointArn' \
+    --output text)
+
+  [ -z "$RPS" ] && break
+
+  for RP in $RPS; do
+    echo "Deleting recovery point: $RP"
+    aws backup delete-recovery-point \
+      --backup-vault-name "$VAULT" \
+      --recovery-point-arn "$RP" \
+      --region "$REGION" || true
+  done
+
+  sleep 5
+done
+```
+
+The `while true` loop handles pagination — AWS returns results in batches. The `sleep 5` avoids API throttling.
+
+**4. Delete the backup vault itself:**
+
+```bash
+aws backup delete-backup-vault \
+  --backup-vault-name "$VAULT" \
+  --region "$REGION"
+```
+
+A vault must have 0 recovery points before it can be deleted.
+
+**5. Delete the backup plan (prevents recreation):**
+
+```bash
+# List plans
+aws backup list-backup-plans --region "$REGION" \
+  --query 'BackupPlansList[].{Name:BackupPlanName,ID:BackupPlanId}' --output table
+
+# Delete each plan
+aws backup delete-backup-plan \
+  --backup-plan-id <PLAN_ID> \
+  --region "$REGION"
+```
+
+### What Happens After Deletion
+
+Once all recovery points are deleted:
+- EC2 snapshots previously owned by Backup **disappear automatically** (usually within minutes)
+- Backup-managed AMIs are also released and deregistered
+- You do **not** need to re-run `aws ec2 delete-snapshot` — AWS handles the cleanup
+
+### Multi-Vault, Multi-Region Cleanup
+
+```bash
+for REGION in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do
+  for VAULT in $(aws backup list-backup-vaults --region "$REGION" \
+    --query 'BackupVaultList[].BackupVaultName' --output text 2>/dev/null); do
+
+    echo "=== $REGION / $VAULT ==="
+
+    while true; do
+      RPS=$(aws backup list-recovery-points-by-backup-vault \
+        --backup-vault-name "$VAULT" \
+        --region "$REGION" \
+        --query 'RecoveryPoints[].RecoveryPointArn' \
+        --output text 2>/dev/null)
+
+      [ -z "$RPS" ] && break
+
+      for RP in $RPS; do
+        echo "  Deleting: $RP"
+        aws backup delete-recovery-point \
+          --backup-vault-name "$VAULT" \
+          --recovery-point-arn "$RP" \
+          --region "$REGION" 2>/dev/null || true
+      done
+      sleep 5
+    done
+
+    aws backup delete-backup-vault \
+      --backup-vault-name "$VAULT" \
+      --region "$REGION" 2>/dev/null || true
+  done
+done
 ```
 
 ## Automation: Full Cleanup Script

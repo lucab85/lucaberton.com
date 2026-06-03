@@ -1,0 +1,202 @@
+---
+title: "Red Hat AI Model-as-a-Service with llm-d: Enterprise GenAI Inference Platform"
+snippet: "How Red Hat's llm-d transforms LLM inference into a composable Kubernetes-native architecture — disaggregated serving, smart autoscaling on token throughput, Model-as-a-Service with subscription tiers, and the new Enterprise GenAI Inference Platform running on OpenShift and xKS/Linux."
+description: "How Red Hat's llm-d transforms LLM inference into a composable Kubernetes-native architecture — disaggregated serving, smart autoscaling on token throughput, Model-as-a-Service with subscription tiers, and the new Enterprise GenAI Inference Platform running on OpenShift and xKS/Linux."
+publishDate: "2026-06-03"
+lastModified: "2026-06-03"
+image: { src: "/blog/events/rh-tech-day-nl-maas-1.jpg", alt: "Red Hat OpenShift AI Gen AI Studio Playground demo at Tech Day Netherlands 2026" }
+tags: ["llm-d", "red hat", "openshift ai", "model-as-a-service", "inference", "kubernetes", "platform engineering"]
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+At **Red Hat Tech Day Netherlands** (June 2026), the second half of the vLLM deep dive shifted to what comes *after* optimized inference: **llm-d** for distributed serving and the full **Model-as-a-Service** platform that makes enterprise AI consumable.
+
+This post covers the production platform layer — from the problems llm-d solves through the live demo of RHOAI's Gen AI Studio with API key management and subscription tiers.
+
+![Red Hat OpenShift AI Playground - live model interaction](/blog/events/rh-tech-day-nl-maas-1.jpg)
+
+## The Problem: LLM Routing Today
+
+Current LLM serving has fundamental limitations:
+
+- **Round-robin routing** — No awareness of GPU load or cache state
+- **No KV cache reuse** — Every request starts cold
+- **Static model selection** — Cannot route based on request complexity
+- **CPU/memory autoscaling** — Meaningless for token-based workloads
+
+The result: underutilized GPUs, poor latency under load, and architectures that do not scale with demand.
+
+## What is llm-d?
+
+**llm-d** is an open-source Kubernetes-native distributed LLM inference system, jointly developed by:
+
+- Red Hat
+- Google
+- NVIDIA
+- Hugging Face
+
+It extends vLLM with a disaggregated architecture where prefill, decode, and KV cache run as independent microservices.
+
+### llm-d Architecture
+
+```
+Request → Inference Gateway → Validation + Prompt Logging
+                                    ↓
+              ┌─────────────────────┼─────────────────────┐
+              │                     │                     │
+           Prefill            Scheduler              Decode
+              │                     │                     │
+              └─────────────── KV Cache ──────────────────┘
+                                    ↓
+                          Distributed Nodes/GPUs
+```
+
+### How llm-d Delivers
+
+1. **Microservice-based**: Prefill, decode, and KV cache run independently
+2. **Integrated observability**: Metrics for each component separately
+3. **Smart autoscaling**: Based on token throughput and SLOs (not CPU/memory)
+4. **Independent scaling**: Scale prefill, decode, or cache phases separately
+5. **Efficient GPU use**: Better utilization across variable workloads
+
+> *"llm-d transforms LLM inference into a composable Kubernetes-native architecture, making AI as manageable as any microservice."*
+
+![Model deployments showing llm-d distributed inference](/blog/events/rh-tech-day-nl-maas-2.jpg)
+
+## Model-as-a-Service in OpenShift AI
+
+The Platform Engineering vision for AI:
+
+- **IT serves common models centrally** — Generative AI focus, applicable to any model
+- **Centralized pool of hardware** — Shared GPU resources managed by ITOps
+- **Models available through RHOAI console** — Self-service for developers
+- **Developers consume models, build AI applications** — For end users (assistants) or to improve products
+- **Shared resource business model** — Keeps costs down across the organization
+
+### The MaaS Stack
+
+| Layer | Managed By |
+|-------|-----------|
+| End user apps | End users |
+| Development environments | Developers |
+| AI Gateway | ITOps |
+| Available Models | AI Engineers |
+| GPU utilization | ITOps |
+
+## Live Demo: RHOAI Model Deployments
+
+The presenter showed 4 models deployed in the live cluster:
+
+| Model | Project | Resource | Endpoint | Mode |
+|-------|---------|----------|----------|------|
+| llama3.2-3b | autoscaling-keda-http-addon | vLLM | Pending | Single-model |
+| llama3.2-3b | autoscaling-keda | vLLM | Internal | Single-model |
+| facebook-opt-125m-simulated | llm | **llm-d** | Internal + External | Distributed |
+| OpenAI gpt-oss-20b | llm | **llm-d** | Internal + External | Distributed |
+
+Both vLLM single-model serving AND llm-d distributed inference running side by side with KEDA autoscaling.
+
+## Gen AI Studio Playground
+
+The Playground (Tech Preview) provides a ChatGPT-like interface directly in RHOAI:
+
+- Model selection: `maas-vllm-inference-1/OpenAI gpt-oss-20b`
+- Tabs: **Model** | **Prompt** | **Knowledge** | **Off** | **MCP**
+- MCP integration means tool-use capabilities right in the playground
+- Subscription: `gpt-oss-20b Free Tier`
+- Temperature slider: 0–2
+- Streaming toggle
+- Metrics visible per response: 357ms latency, TTFT 347ms
+
+![Gen AI Studio with model metrics and streaming](/blog/events/rh-tech-day-nl-maas-3.jpg)
+
+### Prompt Templates
+
+For `facebook/opt-125m`, the playground shows starter prompts:
+- **Code Explanation**: "Explain how binary search works and write a Python implementation with comments"
+- **Data Structuring**: "Convert this text into a JSON array..."
+
+## Tokenomics: Real Production Numbers
+
+The speaker shared actual usage data:
+
+### Single Model Usage (Llama-4-Scout W4A16)
+- **1,843,069 hits**
+- **354M prompt tokens**
+- **379M total tokens**
+- **25M completion tokens**
+
+Rule of thumb: **100 agent users = 1M tokens**
+
+### LiteMaaS Admin Analytics (90 days)
+- 215.3K requests
+- 386.4M total tokens
+- 710.6M prompt tokens
+- 55.7M completion tokens
+- **$361.82 total cost**
+- 128 active users
+- 42% success rate
+
+### Filtered View (Qwen, 7 days)
+- 1.2K requests
+- 52.9M tokens
+- $53.25
+- 16 users
+- 95.9% success rate
+
+## API Key Management
+
+Self-service API key creation with subscription scoping:
+
+### Subscription Tiers
+
+| Tier | Rate Limit | Models |
+|------|-----------|--------|
+| gpt-oss-20b Premium | 10,000 tokens/min | 1 model |
+| Simulator Premium | 10,000 tokens/min | 1 model |
+| gpt-oss-20b Free | 100 tokens/min | 1 model |
+| Simulator Free | 100 tokens/min | 1 model |
+
+Keys are:
+- Named (e.g., `api-key-dev-day-nl`)
+- Scoped to a subscription
+- Time-limited (1–365 days, default 30)
+- One-time display (save immediately)
+
+![API key creation with subscription tiers](/blog/events/rh-tech-day-nl-maas-4.jpg)
+
+## Enterprise GenAI Inference Platform
+
+Red Hat announced **two products** for enterprise inference:
+
+### Red Hat AI Enterprise (Early Access)
+- Runs on **OpenShift AI**
+- Model as a Service via llm-d
+- vLLM on NVIDIA GPU / AMD Instinct / Google TPU
+- Platform: OpenShift/RHEL
+
+### Red Hat AI Inference (Early Access)
+- Runs on **xKS/Linux** — not just OpenShift!
+- Same llm-d + vLLM stack
+- Same multi-accelerator support
+- Red Hat AI Inference Server (standalone)
+
+This is significant: Red Hat is making the inference platform available **outside OpenShift**, running on any Kubernetes distribution or bare Linux.
+
+## Key Takeaways
+
+1. **llm-d is production-ready** — Joint effort by Red Hat, Google, NVIDIA, and Hugging Face
+2. **Disaggregated serving** solves the monolithic container problem
+3. **MaaS is Platform Engineering for AI** — IT serves models, developers consume
+4. **Subscription-based access control** with per-model rate limits
+5. **Not OpenShift-only** — Red Hat AI Inference runs on xKS/Linux too
+6. **Real costs are low** — $362 for 128 users over 90 days with 215K requests
+
+## Related Content
+
+- [vLLM Inference Optimizations on Red Hat OpenShift AI](/blog/vllm-inference-optimizations-red-hat-openshift-ai-tech-day-2026/)
+- [llm-d KV-Cache Aware Routing for Distributed Inference](/blog/llm-d-kubernetes-native-distributed-inference/)
+- [NVIDIA NIM Multi-Node Kubernetes Deployment](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/)
+- [Upgrading to Ansible Automation Platform 2.6+](/blog/ansible-automation-platform-upgrade-2-6-eol-timeline-2026/)

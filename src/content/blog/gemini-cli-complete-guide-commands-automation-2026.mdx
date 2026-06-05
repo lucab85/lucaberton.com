@@ -1,0 +1,583 @@
+---
+title: "Gemini CLI: The Complete Guide to Commands, Context & Automation (2026)"
+seoTitle: "Gemini CLI Guide 2026: Commands, GEMINI.md & Automation"
+snippet: "Master Google's Gemini CLI: architecture, built-in and custom commands, GEMINI.md context files, sandboxing, memory, and CI/CD automation with the GitHub Action."
+description: "Master Google's Gemini CLI: architecture, built-in and custom commands, GEMINI.md context files, sandboxing, memory, and CI/CD automation with the GitHub Action."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+image:
+  src: "/blog/thumbnails/gemini-cli-complete-guide-commands-automation-2026.jpg"
+  alt: "Gemini CLI: The Complete Guide to Commands, Context & Automation (2026)"
+tags:
+  - "gemini"
+  - "gemini-cli"
+  - "ai"
+  - "developer-tools"
+  - "automation"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+## What Is Gemini CLI?
+
+Gemini CLI is Google's open-source, terminal-first AI agent. It brings the Gemini model directly into your shell so you can read and write files, run commands, search the web, and automate engineering workflows — all without leaving the terminal.
+
+Unlike a chat window, Gemini CLI is an **agent**: it plans multi-step tasks, calls tools, observes the results, and iterates until the job is done. This guide covers the architecture, the tool system, context files, the command surface, and how to wire it into automation.
+
+## Architecture: Core and CLI Packages
+
+Gemini CLI is split into two main packages with clear responsibilities.
+
+**The CLI package** owns everything the user sees and interacts with:
+
+- Rendering and customizing the **UI**
+- Reading user input and displaying output
+- Managing the **session history** shown on screen
+
+**The Core package** is the engine. Its two primary roles are:
+
+- **Orchestrating interactions with the Gemini model** — building requests, streaming responses, and handling the model's tool-call decisions
+- **Managing the execution of tools** — deciding which tool runs, with what arguments, and feeding the result back to the model
+
+> Quick check: implementing file system tools like `read_file` and `write_file` belongs to the **tool layer**, not the Core orchestration responsibilities. Customizing the UI and managing on-screen history are **CLI package** jobs. Core is about *orchestration* and *tool execution*.
+
+## The Tool System
+
+Tools are how the agent affects the world. Gemini CLI ships with several categories:
+
+| Tool type | Responsibility | Examples |
+|-----------|----------------|----------|
+| **File system** | Read and write files in the workspace | `read_file`, `write_file`, `list_directory` |
+| **Shell** | Run commands in your system shell | `run_shell_command` |
+| **Web** | Fetch pages and run web searches | `web_fetch`, `google_web_search` |
+| **Memory** | Save information **across sessions** | `save_memory` |
+
+The key distinction to remember: **Memory** is the tool responsible for persisting information across sessions. The shell runs commands, the file system reads and writes project files, and web tools reach the internet — but only Memory carries knowledge forward from one session to the next.
+
+## Built-in Tools in Depth
+
+Built-in tools are what unlock the real power of Gemini CLI — they bridge the gap between the Gemini model, your local machine, and the internet. They all operate within a **root directory** (usually the working directory where you launched the CLI), which keeps file operations scoped to your project.
+
+### File System Tools
+
+| Tool | What it does |
+|------|--------------|
+| `ls` | Lists files and subdirectories directly within a directory path |
+| `read_file` | Reads a single file's content — handles text, images, and PDFs |
+| `write_file` | Writes content to a file, overwriting it if it already exists |
+| `glob` | Finds files matching wildcard patterns (e.g. `src/**/*.ts`), returns absolute paths, and can respect `.gitignore` |
+| `search_file_content` | Searches for a regular-expression pattern across files in a directory |
+| `replace` | Replaces text in a file — a single occurrence or many |
+| `read_many_files` | Reads multiple files by path or glob; concatenates text, and returns images, PDFs, audio, and video as base64 data |
+
+### Shell and Web Tools
+
+- **Shell** (`run_shell_command`) executes commands on your system. Combined with sandboxing, this is how the agent builds, tests, and lints.
+- **Web tools** (`web_fetch`, `google_web_search`) let the model pull live information from the internet into its reasoning.
+
+## Model Context Protocol (MCP) Servers
+
+When you want the model to reach beyond the built-in tools, you connect **Model Context Protocol (MCP) servers**. An MCP server is an application that exposes tools and resources through a standard protocol, letting the model interact with external systems and data sources.
+
+On every prompt, Gemini CLI sends the model a structured list of both built-in **and** MCP tools, plus guidance on how to request them. This is what powers the agent's **ReAct** loop (below).
+
+### Configuration
+
+MCP servers are defined in the `mcpServers` object in `settings.json`. A server can be a local executable or a remote HTTP endpoint (synchronous or streaming), and Gemini CLI supports **OAuth 2.0** for remote servers:
+
+```json
+// .gemini/settings.json
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" }
+    },
+    "company-api": {
+      "httpUrl": "https://mcp.example.com/sse",
+      "authProviderType": "oauth"
+    }
+  }
+}
+```
+
+Each server can expose many tools, and you can restrict `settings.json` to allow only the ones you want. Gemini CLI uses this configuration to **discover** the available tools at startup.
+
+### Tool Execution Flow
+
+When the model decides to use a tool, three stages occur:
+
+1. **Tool invocation** — guided by the prompt, the model emits a `FunctionCall` containing the **tool name** (its registered name) and **arguments** (a JSON object matching the tool's parameter schema).
+2. **Confirmation process** — Gemini CLI asks you to confirm before running anything with side effects. This **user confirmation** is the safety gate that ensures the model doesn't silently damage your files or systems.
+3. **Execution** — the tool runs, and its result is fed back to the model to continue reasoning.
+
+### Inspecting Servers with `/mcp`
+
+The `/mcp` slash command reports on your MCP setup:
+
+- **Server list** — every configured MCP server
+- **Connection status** — `CONNECTED`, `CONNECTING`, or `DISCONNECTED`
+- **Server details** — configuration summary (sensitive data excluded)
+- **Available tools** — the tools each server exposes
+- **Discovery state** — the overall discovery status
+
+## ReAct: Reasoning and Action
+
+The model's ability to call tools is what enables **ReAct** (Reasoning and Action). ReAct prompts the model to perform **dynamic reasoning** — creating and adjusting plans for acting — while it interacts with external environments and folds the results back into its reasoning.
+
+In practice, Gemini CLI runs a loop:
+
+1. **Reason** about the goal and the current state
+2. **Act** by calling a built-in or MCP tool
+3. **Observe** the result
+4. **Adjust** the plan and repeat until the task is done
+
+This loop — mirroring how humans tackle hard problems — is what lets Gemini CLI fix bugs, build new features, and add test coverage rather than just emitting text.
+
+## Extensions
+
+**Extensions** package prompts, MCP servers, and custom commands into a single, shareable, easily installable unit. They let you expand Gemini CLI's capabilities and distribute them across your organization — or consume extensions built by Google Cloud and others.
+
+For example, Google Cloud extensions add workflow-specific commands:
+
+- A **security extension** runs a comprehensive security scan of your code locally
+- A **Cloud Run extension** deploys your application to Cloud Run, Google's managed serverless platform
+
+```bash
+# Install and list extensions
+gemini extensions install <source>
+gemini extensions list
+```
+
+An extension is the natural next step up from custom commands: where a single `.toml` file is one shortcut, an extension bundles many commands, the MCP servers they depend on, and supporting prompts into one package.
+
+## Troubleshooting
+
+Gemini CLI is a fast-moving open-source project with hundreds of contributors, so the occasional issue is part of life. The [official troubleshooting guide](https://geminicli.com/docs/resources/troubleshooting/) tracks the current best practices, but a few concepts cover most situations.
+
+### Update to the Latest Version
+
+Your issue may already be fixed upstream — updating is usually the right first step. If you installed via npm:
+
+```bash
+npm install -g @google/gemini-cli@latest
+```
+
+### Manage Configuration
+
+Gemini CLI's configuration lives in a `.gemini` directory, found in two places: the user's home directory (`~/.gemini`) and the project root. Beyond settings, MCP servers, and extensions, it also holds commands, logs, chat history, and checkpoints — all useful to inspect when something breaks.
+
+If you want a clean slate, **don't delete `.gemini`** — rename it so your custom commands and configuration are preserved. The next run creates a fresh, clean directory:
+
+```bash
+# Preserve your setup instead of deleting it
+mv ~/.gemini ~/.gemini.bak
+```
+
+### Exit Codes
+
+When Gemini CLI terminates, it uses [specific exit codes](https://geminicli.com/docs/resources/troubleshooting/#exit-codes) to signal *why*. For example:
+
+- `FatalAuthenticationError` — something failed during authentication
+- `FatalConfigError` — a configuration file is invalid
+
+When scripting Gemini CLI, checking the exit code lets you mitigate the error automatically or give the user precise guidance.
+
+### Still Stuck?
+
+- Start the CLI with `--debug` to print logs inside the tool:
+
+  ```bash
+  gemini --debug
+  ```
+
+- Paste the error straight into the Gemini CLI prompt — the tool can often help debug itself.
+- Search the [GitHub issue tracker](https://github.com/google-gemini/gemini-cli/issues). If nothing matches, open a new issue with a detailed description.
+
+## Sandboxing: Protecting the Host
+
+When the agent runs shell commands or modifies files, it can perform unsafe operations. **Sandboxing** isolates that execution so the agent runs in a restricted environment.
+
+The primary function of sandboxing is **to protect the host system from potentially unsafe operations** — not to save history, not to auto-approve destructive calls, and not to snapshot state before running a tool. It is a containment boundary.
+
+Enable it per-session or persist it in settings:
+
+```bash
+# Per session
+gemini --sandbox
+
+# Or via environment variable
+export GEMINI_SANDBOX=true
+```
+
+```json
+// .gemini/settings.json
+{
+  "sandbox": "docker"
+}
+```
+
+When sandboxing is enabled, file writes and shell commands execute inside a container, so a destructive command can't damage your host environment.
+
+## Context Files: GEMINI.md
+
+To tailor the model's behavior — project-specific instructions, coding style, architectural constraints — you use a **context file named `GEMINI.md`**.
+
+This is distinct from the other configuration surfaces, and the difference matters:
+
+| File | Purpose |
+|------|---------|
+| `GEMINI.md` | **Instructional context** for the model (style, conventions, project rules) |
+| `.gemini/settings.json` | **Project settings** (sandbox, tools, model selection) |
+| `.env` | Environment variables (API keys, secrets) |
+| `/etc/gemini-cli/system-defaults.json` | System-wide defaults |
+
+A typical `GEMINI.md` looks like this:
+
+```markdown
+# Project Conventions
+
+- Language: TypeScript with strict mode enabled
+- Package manager: pnpm (never npm or yarn)
+- Tests live next to source as *.test.ts
+- Prefer pure functions; avoid shared mutable state
+- API responses follow REST conventions with cursor pagination
+- Never commit secrets; read config from environment variables
+```
+
+Gemini CLI loads `GEMINI.md` from your project root (and merges user-level context), so every prompt is grounded in your project's rules without you repeating them.
+
+Don't want to write one from scratch? Run the **`/init`** command and Gemini CLI analyzes the current directory and generates a tailored `GEMINI.md` for you.
+
+## Scoping Tools with .geminiignore
+
+Just as `.gitignore` keeps files out of Git, a **`.geminiignore`** file excludes matching files and directories from being acted upon by tools that support the feature. It's how you keep build artifacts, secrets directories, vendored dependencies, or large data files out of the agent's reach:
+
+```text
+# .geminiignore
+node_modules/
+dist/
+.env*
+secrets/
+*.log
+```
+
+This is a tool-scoping mechanism, not a Git setting and not a confirmation gate — it simply narrows what the agent's tools can see and touch.
+
+## Built-in Commands
+
+Inside the Gemini CLI session, special inputs are prefixed to signal they are commands rather than prompts. There are three prefixes:
+
+- `/` — **slash commands** that control the CLI's behavior and configuration
+- `@` — **at commands** that inject file or directory contents into the prompt
+- `!` — **shell passthrough** to run commands in your system shell
+
+### Slash Commands (`/`)
+
+Slash commands manage the session and configuration:
+
+| Command | What it does |
+|---------|--------------|
+| `/auth` | Configure authentication |
+| `/chat` | Manage saved chat sessions |
+| `/directory` | Manage workspace directories |
+| `/init` | Analyze the current directory and generate a tailored `GEMINI.md` |
+| `/mcp` | List and manage MCP servers |
+| `/memory` | Inspect and manage saved memory |
+| `/settings` | View and edit settings |
+| `/tools` | List available tools |
+| `/restore` | Restore a previous checkpoint |
+| `/quit` | Exit the CLI |
+
+### At Commands (`@`)
+
+At commands pull file or directory contents into your prompt so the model has the exact context it needs:
+
+```text
+> Summarize the failure modes handled in @src/middleware/error-handler.ts
+
+> Review the entire module for security issues: @src/auth/
+```
+
+### Shell Mode and Passthrough (`!`)
+
+The `!` prefix runs commands directly in your shell:
+
+```text
+> !npm test
+```
+
+Typing `!` on its own **toggles shell mode**, where subsequent input is treated as shell commands until you toggle back.
+
+> Caution: commands executed in shell mode have the same permissions and impact as if you ran them directly in your terminal. There is no sandbox unless you explicitly enable one.
+
+## Custom Commands
+
+Custom commands let you save and reuse frequent prompts as personal shortcuts. They are defined in **TOML files** with the `.toml` extension.
+
+### File Locations and Namespaces
+
+Gemini CLI reads command files from two places:
+
+- **User commands** — `~/.gemini/commands/`, available in every project
+- **Project commands** — `<project-root>/.gemini/commands/`, scoped to one project and checkable into version control for the whole team
+
+A project command overrides a user command with the same name. Subdirectories create **namespaces**: a file at `~/.gemini/commands/git/fix.toml` is invoked as `/git:fix`.
+
+### A Simple Argument-Substituting Command
+
+```toml
+# In: ~/.gemini/commands/git/fix.toml
+# Invoked via: /git:fix "Button is misaligned"
+
+description = "Generates a fix for a given issue."
+prompt = "Please provide a code fix for the issue described here: {{args}}."
+```
+
+`{{args}}` is replaced with the user's input before the prompt is sent to the model.
+
+### Using Arguments Safely in Shell Commands
+
+Shell injection blocks `!{...}` run a command and splice its output into the prompt. Arguments inside these blocks are automatically **shell-escaped**:
+
+```toml
+# In: ~/.gemini/commands/grep-code.toml
+# Invoked via: /grep-code Lee's fix
+
+prompt = """
+Please summarize the findings for the pattern `{{args}}`.
+
+Search Results:
+!{grep -r {{args}} .}
+"""
+```
+
+The first `{{args}}` (in plain prose) is inserted verbatim; the second, inside `!{...}`, is escaped to `"Lee's fix"`, so the shell command is safe. Gemini CLI confirms the command, runs it, replaces the block with the output, then submits the final prompt.
+
+### Letting the Model Parse Input
+
+If you omit `{{args}}`, the arguments are appended to the end of the prompt (separated by two newlines), and you rely on the model to parse them:
+
+```toml
+# In: <project>/.gemini/commands/changelog.toml
+# Invoked via: /changelog 1.2.0 added "Support for default argument parsing."
+
+description = "Adds a new entry to the project's CHANGELOG.md file."
+prompt = """
+# Task: Update Changelog
+
+You are an expert maintainer of this project. Parse the <version>,
+<change_type>, and <message> from the user's input and use the write_file
+tool to update CHANGELOG.md.
+
+## Expected Format
+`/changelog <version> <type> <message>`
+- <type> must be one of: "added", "changed", "fixed", "removed".
+
+## Behavior
+1. Read CHANGELOG.md.
+2. Find the section for <version>.
+3. Add <message> under the correct <type> heading.
+4. If the version or type section doesn't exist, create it.
+5. Adhere strictly to the "Keep a Changelog" format.
+"""
+```
+
+## Automation with Gemini CLI
+
+Gemini CLI shines in automation because it runs non-interactively. Two patterns matter most:
+
+**1. The `--prompt` flag for scripted, one-shot runs.** Pipe a prompt in and capture the result in any script or cron job:
+
+```bash
+gemini --prompt "Analyze the last 200 lines of /var/log/app.log and list any fatal configuration errors with file and line."
+```
+
+**2. The Gemini CLI GitHub Action for CI/CD.** Integrate the agent into pull-request and push workflows to triage issues, review diffs, or generate boilerplate:
+
+```yaml
+# .github/workflows/gemini-review.yml
+name: Gemini Review
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: google-gemini/gemini-cli-action@v1
+        with:
+          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          prompt: "Review the PR diff for security issues and missing tests. Comment a concise summary."
+```
+
+Both of these are genuine automation methods: scripting with `--prompt` and integrating the **GitHub Action** into workflows. Tasks like interactively analyzing logs, generating a boilerplate project, or handling a complex rebase are useful *uses* of the CLI, but the **automation mechanisms** are the non-interactive prompt flag and the CI/CD action.
+
+## Memory and Sessions
+
+The `save_memory` tool (surfaced via `/memory`) writes durable facts the agent should remember across sessions — your name, recurring preferences, project quirks. Combined with `GEMINI.md` for static project rules, you get two complementary layers:
+
+- **`GEMINI.md`** — version-controlled, shared, declarative project context
+- **Memory** — dynamic, accumulated facts the agent saves as you work
+
+## Hands-On Walkthrough: From Install to a Working App
+
+Let me walk you through the exact flow I use when I introduce Gemini CLI in a workshop. Everything below runs on a plain Linux box (or Google Cloud Shell, where it's pre-installed). Follow along and you'll go from zero to a working web app.
+
+### 1. Install and Run
+
+Cloud Shell already ships with Gemini CLI, so there you just type `gemini`. On a fresh VM I install Node with `nvm` first, then the CLI itself:
+
+```bash
+# Install nvm, then the latest Node
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/master/install.sh | bash
+source ~/.bashrc
+nvm install node
+
+# Install Gemini CLI globally
+npm install -g @google/gemini-cli
+```
+
+Inside the CLI, `/help` lists everything you can do, and `/auth` shows your current authentication method. When I run against Google Cloud I authenticate with the Agent Platform (formerly Vertex AI) by exporting a few environment variables before launching:
+
+```bash
+export GOOGLE_CLOUD_PROJECT=YOUR_PROJECT_ID
+export GOOGLE_CLOUD_LOCATION=YOUR_REGION
+export GEMINI_MODEL=gemini-2.5-flash
+gemini
+```
+
+Type `/quit` to exit at any time.
+
+### 2. Understand the Settings Hierarchy
+
+Configuration lives in `settings.json` at three levels, applied in order of precedence:
+
+| Level | Path | Scope |
+|-------|------|-------|
+| **System** | `/etc/gemini-cli/settings.json` | Every user on the machine (admin-only) |
+| **Project** | `<project>/.gemini/settings.json` | One project |
+| **User** | `~/.gemini/settings.json` | All your sessions |
+
+System overrides project, and project overrides user. You can edit these interactively with the `/settings` command — for example, search for "hide banner", flip it to `true`, and apply it to User Settings. I usually verify the result from shell mode (press `!`) with `cat ~/.gemini/settings.json`.
+
+### 3. Give Gemini Context with GEMINI.md
+
+This is where the magic happens. Out of the box, "describe this codebase" gives you a generic summary. But drop a `GEMINI.md` context file in place and you reshape how the model behaves. Here's a trimmed version of an **Explain Mode** persona I like — a read-only "Senior Engineer" that guides you through a codebase interactively:
+
+```markdown
+# Gemini CLI: Explain Mode
+
+You are Gemini CLI in **Explain Mode** — a virtual Senior Engineer and
+System Architect. Act as an interactive guide that helps users understand
+complex codebases through guided discovery.
+
+## Core Principles
+- Guided discovery: break big topics into parts; ask where to begin.
+- Read-only: map dependencies and trace execution paths.
+- No modifications: you are an analysis tool, never change the project.
+- Always end with context-aware next steps.
+
+## Interactive Steps
+1. Confirm you are in Explain Mode and decompose broad queries into sub-topics.
+2. Investigate the chosen sub-topic and summarize your investigation path.
+3. Synthesize a clear, structured explanation.
+4. Propose specific next steps for a deeper dive.
+```
+
+Save it to `~/.gemini/GEMINI.md` (user level) or the project root, then ask *"Tell me about the codebase in the current directory."* — Gemini now responds as a tour guide instead of dumping a wall of text. Run `/memory show` to see exactly which context files (user **and** project) are in play.
+
+### 4. Turn the Persona into a Custom Command
+
+A context file changes *every* prompt. If you'd rather invoke a persona on demand, move it into a custom command instead. Delete the context file and create a TOML command:
+
+```toml
+# ~/.gemini/commands/explain.toml
+description = "use Explain Mode"
+prompt = '''
+# Gemini CLI: Explain Mode
+You are Gemini CLI in Explain Mode — a read-only Senior Engineer who guides
+users through a codebase via guided discovery, ending each reply with
+logical next steps.
+'''
+```
+
+Now `/explain Provide a high-level description of the codebase` triggers the persona only when you ask for it. Ask *"What mode are you in?"* and it'll confirm it's still in Explain Mode, because the chat history is part of the context.
+
+### 5. Use Tools to Touch the Filesystem (Safely)
+
+Built-in tools let Gemini act on your machine — and every change is gated behind your confirmation. A workflow I demo often: pull an RSS feed, then let Gemini reorganize it.
+
+```text
+# In shell mode (press !)
+> wget -O ~/project1/rss.xml "https://cloudblog.withgoogle.com/rss/"
+
+# Back in prompt mode
+> summarize the content of the RSS XML file
+> Create a directory called "data", move the rss file into it, and rename it to "feed.xml".
+```
+
+Gemini proposes each file operation and waits for you to approve it. In a lab you accept everything; in real work, **read each proposed change before approving**. If you want a safety net, enable **checkpointing** (`--checkpointing` or in `settings.json`) — Gemini snapshots your project into a shadow Git repo before any file edit, and `/restore` rolls back files, conversation, and the pending tool call.
+
+### 6. Vibe-Code a Web App
+
+Finally, the fun part — building an app from natural language. I always tell Gemini to **plan first and wait for approval** before writing anything:
+
+```text
+> @data/feed.xml what data fields does a feed entry have?
+
+> Before making changes, design a plan and ask me to approve it.
+  1. Use a Python venv.
+  2. Build a Flask app that reads feed.xml as its data source.
+  3. index.html lists blog entries, newest first, each linking to the post in a new tab.
+  4. Host on port 5000 and start the server.
+```
+
+Approve the plan, accept each step, and Gemini scaffolds the venv, installs Flask, writes `app.py` and the templates, and starts the server. From there you iterate conversationally — *"add an entry.html detail page and style it with Google's blue and green"* — always reviewing the plan before it runs.
+
+That "plan → approve → execute → iterate" rhythm is the single most important habit with any agentic tool. It keeps you in control while the agent does the heavy lifting.
+
+## Quick Reference
+
+| Concept | Answer |
+|---------|--------|
+| Tool that persists across sessions | **Memory** |
+| Purpose of sandboxing | **Protect the host from unsafe operations** |
+| Automation methods | **GitHub Action** + **`--prompt` flag** |
+| Core package roles | **Orchestrate the model** + **manage tool execution** |
+| File that tailors model behavior | **`GEMINI.md`** context file |
+| Purpose of an extension | **Package prompts, MCP servers, and custom commands for sharing** |
+| Safety for args in `!{...}` blocks | **Arguments are shell-escaped before replacement** |
+| Purpose of `.geminiignore` | **Exclude files from tools that support the feature** |
+| First troubleshooting step | **Update the CLI to the latest version** |
+| Command to generate a `GEMINI.md` | **`/init`** |
+| Dynamic reasoning + acting technique | **ReAct** |
+
+## Glossary Match
+
+| Term | Description |
+|------|-------------|
+| **Built-in tool** | A Gemini CLI method for interacting with the internet, file system, or memory |
+| **MCP server** | An application that exposes tools through a standard protocol |
+| **ReAct** | Using dynamic reasoning to create and adjust plans for acting |
+| **glob** | A type of wildcard pattern for matching files |
+| **User confirmation** | A method for ensuring the model does not damage your files |
+| **Extension** | A package of prompts, MCP servers, and custom commands |
+
+## Conclusion
+
+Gemini CLI turns the terminal into an autonomous engineering surface. Understand the split between the **CLI** (UI, history) and **Core** (model orchestration, tool execution); use **built-in tools** and **MCP servers** to give the model real capabilities; trust the **ReAct** loop to reason and act, with **user confirmation** as your safety gate; lean on **Memory** for cross-session knowledge and **`GEMINI.md`** for project rules; package and share workflows as **extensions**; keep **sandboxing** on to protect your host; and reach for the **`--prompt` flag** and **GitHub Action** when you're ready to automate.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [GitHub Copilot Agent Mode in VS Code: Full Guide](/blog/github-copilot-agent-mode-vscode-complete-guide/)
+- [Claude Code Masterclass](/blog/claude-code-masterclass-udemy-free-course-2026/)
+- [Karpathy's 4 CLAUDE.md Rules](/blog/karpathy-claude-md-llm-coding-principles-2026/)

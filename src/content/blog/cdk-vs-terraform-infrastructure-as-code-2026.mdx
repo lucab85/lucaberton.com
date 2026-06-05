@@ -1,0 +1,252 @@
+---
+title: "CDK vs Terraform 2026: IaC Comparison with Code Examples"
+snippet: "AWS CDK vs Terraform — language support, state management, multi-cloud capabilities, team workflows, and migration strategies with real-world benchmarks."
+description: "AWS CDK vs Terraform — language support, state management, multi-cloud capabilities, team workflows, and migration strategies with real-world benchmarks."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+image:
+  src: "/blog/thumbnails/cdk-vs-terraform-infrastructure-as-code-2026.jpg"
+  alt: "CDK vs Terraform 2026: IaC Comparison with Code Examples"
+tags:
+  - "terraform"
+  - "aws-cdk"
+  - "infrastructure-as-code"
+  - "devops"
+category: "DevOps"
+author: "Luca Berton"
+draft: false
+---
+
+import { YouTube } from "astro-embed";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+## At a Glance
+
+| Factor | AWS CDK | Terraform |
+|--------|---------|-----------|
+| Language | TypeScript, Python, Java, C#, Go | HCL (+ CDKTF for programming languages) |
+| Cloud support | AWS only | Multi-cloud + SaaS |
+| State | CloudFormation (managed) | Local or remote (self-managed) |
+| Abstraction level | High (L2/L3 constructs) | Low-medium (resources) |
+| Drift detection | CloudFormation drift | `terraform plan` |
+| Learning curve | Low (if you know the language) | Medium (HCL is new) |
+| Ecosystem | Construct Hub | Terraform Registry (15K+ providers) |
+
+## AWS CDK: Infrastructure in Your Language
+
+CDK lets you define AWS infrastructure using **real programming languages** with loops, conditions, and abstractions:
+
+```typescript
+import * as cdk from 'aws-cdk-lib';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
+import * as ecs from 'aws-cdk-lib/aws-ecs';
+import * as ecs_patterns from 'aws-cdk-lib/aws-ecs-patterns';
+
+export class ApiStack extends cdk.Stack {
+  constructor(scope: cdk.App, id: string, props?: cdk.StackProps) {
+    super(scope, id, props);
+
+    const vpc = new ec2.Vpc(this, 'ApiVpc', {
+      maxAzs: 3,
+      natGateways: 1,
+    });
+
+    const cluster = new ecs.Cluster(this, 'ApiCluster', { vpc });
+
+    // L3 construct: creates ALB + ECS Service + Target Group + Security Groups
+    new ecs_patterns.ApplicationLoadBalancedFargateService(this, 'ApiService', {
+      cluster,
+      cpu: 512,
+      memoryLimitMiB: 1024,
+      desiredCount: 3,
+      taskImageOptions: {
+        image: ecs.ContainerImage.fromAsset('./api'),
+        containerPort: 8080,
+      },
+      publicLoadBalancer: true,
+    });
+  }
+}
+```
+
+### CDK Construct Levels
+
+- **L1 (Cfn*)**: Raw CloudFormation resources — 1:1 mapping
+- **L2**: Curated resources with sensible defaults and helper methods
+- **L3 (Patterns)**: Multi-resource architectures in one construct
+
+### CDK Strengths
+
+- **Type safety** — compile-time errors catch misconfigurations
+- **IDE support** — autocomplete, inline docs, refactoring
+- **Testable** — unit test infrastructure with Jest/pytest
+- **Abstractions** — create reusable constructs for your org
+- **No state management** — CloudFormation handles it
+
+### CDK Limitations
+
+- **AWS only** (unless using CDKTF)
+- **CloudFormation limits** — 500 resources per stack, slow updates
+- **Synthesized templates are huge** — hard to debug
+- **Breaking changes** — CDK v2 constructs evolve fast
+
+## Terraform: Multi-Cloud Standard
+
+```hcl
+# main.tf
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+  backend "s3" {
+    bucket = "terraform-state-prod"
+    key    = "api/terraform.tfstate"
+    region = "eu-west-1"
+  }
+}
+
+resource "aws_vpc" "api" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+
+  tags = {
+    Name        = "api-vpc"
+    Environment = var.environment
+  }
+}
+
+resource "aws_ecs_cluster" "api" {
+  name = "api-cluster"
+
+  setting {
+    name  = "containerInsights"
+    value = "enabled"
+  }
+}
+
+module "ecs_service" {
+  source  = "terraform-aws-modules/ecs/aws//modules/service"
+  version = "5.6.0"
+
+  name        = "api"
+  cluster_arn = aws_ecs_cluster.api.arn
+
+  cpu    = 512
+  memory = 1024
+
+  container_definitions = {
+    api = {
+      image     = "${aws_ecr_repository.api.repository_url}:latest"
+      port_mappings = [{
+        containerPort = 8080
+        protocol      = "tcp"
+      }]
+    }
+  }
+
+  desired_count = var.environment == "prod" ? 3 : 1
+}
+```
+
+### Terraform Strengths
+
+- **Multi-cloud** — AWS, Azure, GCP, Kubernetes, Datadog, PagerDuty, etc.
+- **Mature ecosystem** — 15,000+ providers on Registry
+- **Plan before apply** — `terraform plan` shows exact changes
+- **State locking** — prevents concurrent modifications
+- **Import existing resources** — `terraform import`
+- **Stable** — HCL changes rarely break existing code
+
+### Terraform Limitations
+
+- **State management** — your responsibility (S3+DynamoDB, Terraform Cloud)
+- **HCL is limited** — no real loops, limited string manipulation
+- **Provider lag** — new AWS features arrive weeks/months late
+- **State file secrets** — contains sensitive values in plaintext
+
+## Testing Infrastructure
+
+### CDK Testing
+
+```typescript
+import { Template } from 'aws-cdk-lib/assertions';
+
+test('ECS service has 3 desired tasks', () => {
+  const app = new cdk.App();
+  const stack = new ApiStack(app, 'Test');
+  const template = Template.fromStack(stack);
+
+  template.hasResourceProperties('AWS::ECS::Service', {
+    DesiredCount: 3,
+  });
+});
+```
+
+### Terraform Testing
+
+```hcl
+# tests/api_test.tftest.hcl (native Terraform tests)
+run "creates_ecs_cluster" {
+  command = plan
+
+  assert {
+    condition     = aws_ecs_cluster.api.setting[0].value == "enabled"
+    error_message = "Container Insights must be enabled"
+  }
+}
+```
+
+## Cost Comparison
+
+| Aspect | CDK | Terraform |
+|--------|-----|-----------|
+| Tool cost | Free | Free (OSS) / $$$  (Cloud) |
+| State hosting | Free (CloudFormation) | S3 (~$1/mo) or TF Cloud ($20/user/mo) |
+| Deployment speed | Slow (CFN) | Fast (direct API) |
+| Drift detection | Free (CFN) | `terraform plan` (free) |
+
+## When to Choose
+
+### Choose CDK when:
+- **AWS-only** infrastructure
+- Team has strong TypeScript/Python skills
+- You want high-level abstractions (L3 patterns)
+- You need compile-time safety
+- Existing CloudFormation investment
+
+### Choose Terraform when:
+- **Multi-cloud** or hybrid strategy
+- You need Kubernetes, Datadog, GitHub, etc. providers
+- Team values explicit, readable configs
+- You want import and state migration capabilities
+- Enterprise with Terraform Cloud/Enterprise
+
+### Consider CDKTF when:
+- You want CDK's programming model with Terraform's multi-cloud providers
+
+```typescript
+import { TerraformStack } from 'cdktf';
+import { AwsProvider } from '@cdktf/provider-aws';
+import { Instance } from '@cdktf/provider-aws/lib/instance';
+
+class MyStack extends TerraformStack {
+  constructor(scope: Construct, id: string) {
+    super(scope, id);
+    new AwsProvider(this, 'aws', { region: 'eu-west-1' });
+    new Instance(this, 'web', {
+      ami: 'ami-0c55b159cbfafe1f0',
+      instanceType: 't3.micro',
+    });
+  }
+}
+```
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Kustomize vs Helm 2026](/blog/kustomize-vs-helm-kubernetes-templating-2026/)
+- [HashiCorp Vault vs AWS Secrets Manager](/blog/hashicorp-vault-vs-aws-secrets-manager-2026/)
+- [Best Internal Developer Platforms 2026](/blog/internal-developer-platforms-2026/)

@@ -1,0 +1,168 @@
+---
+title: "OpenTelemetry on Kubernetes: Complete Observability Stack"
+snippet: "Instrument applications with OpenTelemetry — auto-instrumentation, collector deployment, traces to Jaeger/Tempo, metrics to Prometheus, logs to Loki."
+description: "Instrument applications with OpenTelemetry — auto-instrumentation, collector deployment, traces to Jaeger/Tempo, metrics to Prometheus, logs to Loki."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['Kubernetes', 'Observability', 'DevOps']
+image:
+  src: "/blog/thumbnails/opentelemetry-kubernetes-distributed-tracing-2026.jpg"
+  alt: "OpenTelemetry on Kubernetes: Complete Observability Stack"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+## What Is OpenTelemetry?
+
+[OpenTelemetry](https://github.com/open-telemetry/opentelemetry-collector) (OTel) is the CNCF standard for observability — collecting traces, metrics, and logs from applications. Vendor-neutral, supports 40+ backends.
+
+## The Three Pillars
+
+```
+┌─────────────────────────────────────────────────┐
+│              Your Application                    │
+│                                                 │
+│  Traces ─────┐                                  │
+│  Metrics ────┼──▶ OTel SDK ──▶ OTel Collector  │
+│  Logs ───────┘                      │           │
+└─────────────────────────────────────┼───────────┘
+                                      │
+                    ┌─────────────────┼────────────────┐
+                    │                 │                │
+                    ▼                 ▼                ▼
+              ┌──────────┐    ┌────────────┐   ┌──────────┐
+              │  Jaeger  │    │ Prometheus │   │   Loki   │
+              │ (traces) │    │ (metrics)  │   │  (logs)  │
+              └──────────┘    └────────────┘   └──────────┘
+```
+
+## Collector Deployment
+
+```yaml
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: otel-collector
+spec:
+  mode: daemonset  # One per node (for logs) or deployment (for traces)
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+      prometheus:
+        config:
+          scrape_configs:
+            - job_name: 'kubernetes-pods'
+              kubernetes_sd_configs:
+                - role: pod
+
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 1000
+      memory_limiter:
+        limit_mib: 512
+      k8sattributes:
+        extract:
+          metadata:
+            - k8s.pod.name
+            - k8s.namespace.name
+            - k8s.deployment.name
+
+    exporters:
+      otlp/jaeger:
+        endpoint: jaeger-collector:4317
+        tls:
+          insecure: true
+      prometheus:
+        endpoint: 0.0.0.0:8889
+      loki:
+        endpoint: http://loki:3100/loki/api/v1/push
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, batch]
+          exporters: [otlp/jaeger]
+        metrics:
+          receivers: [otlp, prometheus]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus]
+        logs:
+          receivers: [otlp]
+          processors: [memory_limiter, k8sattributes, batch]
+          exporters: [loki]
+```
+
+## Auto-Instrumentation (Zero Code)
+
+```yaml
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: auto-instrumentation
+spec:
+  exporter:
+    endpoint: http://otel-collector:4317
+  propagators:
+    - tracecontext
+    - baggage
+  sampler:
+    type: parentbased_traceidratio
+    argument: "0.1"  # Sample 10% of traces
+  python:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-python:latest
+  java:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:latest
+  nodejs:
+    image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-nodejs:latest
+```
+
+Then annotate your pods:
+
+```yaml
+metadata:
+  annotations:
+    instrumentation.opentelemetry.io/inject-python: "true"
+    # or inject-java, inject-nodejs, inject-dotnet, inject-go
+```
+
+**Zero application code changes.** The operator injects the SDK automatically.
+
+## Sampling Strategies
+
+| Strategy | Overhead | Completeness |
+|----------|----------|--------------|
+| Always on | High (100% traces) | ✅ Complete |
+| Ratio (10%) | Low | ⚠️ Missing rare events |
+| Tail-based | Medium | ✅ Keeps errors + slow |
+| Parent-based | Low | ✅ Consistent per request |
+
+For production: use **tail-based sampling** — keeps 100% of errors and slow requests, samples everything else.
+
+## Cost Comparison (Backends)
+
+| Backend | Type | Cost (1TB/mo) |
+|---------|------|---------------|
+| Jaeger + Elasticsearch | Self-hosted | ~$200 (infra) |
+| Grafana Tempo | Self-hosted | ~$50 (object storage) |
+| Datadog | SaaS | ~$1,700 |
+| New Relic | SaaS | ~$800 |
+| Grafana Cloud | SaaS | ~$200 |
+
+Self-hosted Tempo + MinIO is the most cost-effective for Kubernetes-native teams.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Prometheus + Thanos](/blog/prometheus-thanos-long-term-metrics-kubernetes-2026/)
+- [Istio Service Mesh](/blog/istio-service-mesh-kubernetes-production-2026/)
+- [Falco: Runtime Security](/blog/falco-runtime-security-kubernetes-threat-detection-2026/)

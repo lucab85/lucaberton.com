@@ -1,0 +1,148 @@
+---
+title: "Keycloak: Enterprise Identity and Access Management on Kubernetes"
+snippet: "Deploy Keycloak for SSO, OIDC, SAML, and RBAC — integrate with Kubernetes, Grafana, ArgoCD, and any OAuth2-compatible application."
+description: "Deploy Keycloak for SSO, OIDC, SAML, and RBAC — integrate with Kubernetes, Grafana, ArgoCD, and any OAuth2-compatible application."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Security', 'Kubernetes', 'Open Source']
+image:
+  src: "/blog/thumbnails/keycloak-identity-access-management-kubernetes-2026.jpg"
+  alt: "Keycloak: Enterprise Identity and Access Management on Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+## What Is Keycloak?
+
+[Keycloak](https://github.com/keycloak/keycloak) provides SSO, identity federation, and fine-grained authorization for applications. CNCF project (donated by Red Hat). Supports OIDC, SAML 2.0, OAuth 2.0, and LDAP/AD integration.
+
+## Core Capabilities
+
+- **Single Sign-On (SSO)** — one login for all applications
+- **Identity Federation** — connect Google, GitHub, LDAP, SAML IdPs
+- **Fine-grained RBAC** — roles, groups, client scopes
+- **Multi-tenancy** — isolated realms per tenant/environment
+- **Admin console** — full web UI for user/role management
+- **Token exchange** — impersonation, cross-realm trust
+
+## Kubernetes Deployment
+
+```yaml
+apiVersion: k8s.keycloak.org/v2alpha1
+kind: Keycloak
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  instances: 3
+  hostname:
+    hostname: auth.yourdomain.com
+  db:
+    vendor: postgres
+    host: postgres.keycloak.svc
+    usernameSecret:
+      name: keycloak-db
+      key: username
+    passwordSecret:
+      name: keycloak-db
+      key: password
+  http:
+    tlsSecret: keycloak-tls
+  features:
+    enabled:
+      - docker
+      - token-exchange
+```
+
+## Integrate with Kubernetes OIDC
+
+```bash
+# kube-apiserver flags
+--oidc-issuer-url=https://auth.yourdomain.com/realms/kubernetes
+--oidc-client-id=kubernetes
+--oidc-username-claim=preferred_username
+--oidc-groups-claim=groups
+```
+
+Now kubectl uses Keycloak tokens:
+
+```bash
+# kubelogin plugin
+kubectl oidc-login setup \
+  --oidc-issuer-url=https://auth.yourdomain.com/realms/kubernetes \
+  --oidc-client-id=kubernetes
+```
+
+## Integrate with ArgoCD
+
+```yaml
+# argocd-cm ConfigMap
+data:
+  oidc.config: |
+    name: Keycloak
+    issuer: https://auth.yourdomain.com/realms/argocd
+    clientID: argocd
+    clientSecret: $oidc.keycloak.clientSecret
+    requestedScopes: ["openid", "profile", "email", "groups"]
+```
+
+## Integrate with Grafana
+
+```ini
+[auth.generic_oauth]
+enabled = true
+name = Keycloak
+client_id = grafana
+client_secret = xxx
+auth_url = https://auth.yourdomain.com/realms/monitoring/protocol/openid-connect/auth
+token_url = https://auth.yourdomain.com/realms/monitoring/protocol/openid-connect/token
+api_url = https://auth.yourdomain.com/realms/monitoring/protocol/openid-connect/userinfo
+role_attribute_path = contains(groups[*], 'grafana-admin') && 'Admin' || 'Viewer'
+```
+
+## High Availability
+
+```
+┌─────────────────────────────────────────┐
+│           Load Balancer                  │
+└──────┬──────────┬──────────┬────────────┘
+       │          │          │
+┌──────▼──┐ ┌────▼────┐ ┌───▼──────┐
+│Keycloak │ │Keycloak │ │Keycloak  │
+│ Pod 1   │ │ Pod 2   │ │ Pod 3    │
+└────┬────┘ └────┬────┘ └────┬─────┘
+     │           │            │
+     └───────────┼────────────┘
+                 │
+        ┌────────▼────────┐
+        │   PostgreSQL    │
+        │   (HA cluster)  │
+        └─────────────────┘
+```
+
+Keycloak uses Infinispan distributed cache — sessions shared across all pods. Zero-downtime rolling updates.
+
+## Security Hardening
+
+```yaml
+# Realm settings for production
+bruteForceDetection:
+  enabled: true
+  maxFailureWaitSeconds: 900
+  maxLoginFailures: 5
+  waitIncrementSeconds: 60
+passwordPolicy: "length(12) and upperCase(1) and digit(1) and specialChars(1)"
+sslRequired: "all"
+loginWithEmail: false
+duplicateEmailsAllowed: false
+```
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [External Secrets Operator](/blog/external-secrets-operator-kubernetes-vault-2026/)
+- [Cilium: eBPF Security](/blog/cilium-ebpf-kubernetes-networking-security-2026/)
+- [Falco: Runtime Threat Detection](/blog/falco-runtime-security-kubernetes-threat-detection-2026/)

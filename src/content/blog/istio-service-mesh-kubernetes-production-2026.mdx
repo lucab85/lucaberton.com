@@ -1,0 +1,171 @@
+---
+title: "Istio Service Mesh: Production Setup on Kubernetes (2026)"
+snippet: "Deploy Istio with ambient mode — no sidecars, mTLS everywhere, traffic management, observability, and canary deployments at scale."
+description: "Deploy Istio with ambient mode — no sidecars, mTLS everywhere, traffic management, observability, and canary deployments at scale."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Kubernetes', 'Networking', 'Security']
+image:
+  src: "/blog/thumbnails/istio-service-mesh-kubernetes-production-2026.jpg"
+  alt: "Istio Service Mesh: Production Setup on Kubernetes (2026)"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+## What Is Istio?
+
+[Istio](https://github.com/istio/istio) is the most widely deployed service mesh — providing traffic management, security (mTLS), and observability between microservices. In 2024, Istio introduced **ambient mode** — eliminating sidecars entirely.
+
+## Sidecar vs Ambient Mode
+
+| Feature | Sidecar (Classic) | Ambient (2026 Default) |
+|---------|-------------------|------------------------|
+| Architecture | Envoy per pod | ztunnel (L4) + waypoint (L7) |
+| Memory overhead | 50-100MB per pod | ~0 per pod |
+| Latency added | 1-3ms | 0.5ms (L4 only) |
+| Upgrade | Rolling restart all pods | Update ztunnel DaemonSet |
+| L7 features | Always on | Opt-in per namespace |
+
+## Installation (Ambient Mode)
+
+```bash
+istioctl install --set profile=ambient
+
+# Or Helm
+helm install istio-base istio/base -n istio-system
+helm install istiod istio/istiod -n istio-system
+helm install ztunnel istio/ztunnel -n istio-system
+helm install istio-cni istio/cni -n istio-system
+```
+
+## Enable mTLS (Zero Config)
+
+```bash
+# Add namespace to mesh
+kubectl label namespace production istio.io/dataplane-mode=ambient
+
+# All pods in 'production' now have mTLS automatically
+# No sidecars, no restarts, no application changes
+```
+
+Every service-to-service call is now encrypted with mutual TLS — without touching a single deployment.
+
+## Traffic Management
+
+### Canary Deployment (90/10 Split)
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: VirtualService
+metadata:
+  name: payment-service
+spec:
+  hosts:
+    - payment-service
+  http:
+    - route:
+        - destination:
+            host: payment-service
+            subset: v1
+          weight: 90
+        - destination:
+            host: payment-service
+            subset: v2
+          weight: 10
+---
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: payment-service
+spec:
+  host: payment-service
+  subsets:
+    - name: v1
+      labels:
+        version: v1
+    - name: v2
+      labels:
+        version: v2
+```
+
+### Circuit Breaker
+
+```yaml
+apiVersion: networking.istio.io/v1
+kind: DestinationRule
+metadata:
+  name: payment-service
+spec:
+  host: payment-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 100
+      http:
+        h2UpgradePolicy: UPGRADE
+        maxRequestsPerConnection: 10
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 60s
+      maxEjectionPercent: 50
+```
+
+## Observability (Free)
+
+With Istio installed, you get automatic:
+
+- **Distributed traces** (Jaeger/Zipkin) — no code instrumentation
+- **Metrics** (Prometheus) — request rate, latency, error rate per service
+- **Service graph** (Kiali) — visual dependency map
+
+```bash
+# Install Kiali dashboard
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.24/samples/addons/kiali.yaml
+istioctl dashboard kiali
+```
+
+## Authorization Policies
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: payment-access
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      app: payment-service
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/production/sa/api-gateway"]
+      to:
+        - operation:
+            methods: ["POST"]
+            paths: ["/api/v1/payments/*"]
+```
+
+Only `api-gateway` service account can POST to payment endpoints. Everything else denied.
+
+## When to Use Istio vs Cilium Service Mesh
+
+| Need | Istio | Cilium |
+|------|-------|--------|
+| L7 traffic management (canary, retries) | ✅ Best | ⚠️ Basic |
+| mTLS (zero-trust) | ✅ | ✅ |
+| Network policy | ⚠️ | ✅ Best |
+| Performance-critical (eBPF) | ⚠️ | ✅ Best |
+| Multi-cluster federation | ✅ Best | ⚠️ |
+| Legacy apps (no code changes) | ✅ | ✅ |
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Cilium: eBPF Networking](/blog/cilium-ebpf-kubernetes-networking-security-2026/)
+- [cert-manager: TLS Automation](/blog/cert-manager-kubernetes-tls-automation-2026/)
+- [OpenTelemetry on Kubernetes](/blog/opentelemetry-kubernetes-distributed-tracing-2026/)

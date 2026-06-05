@@ -16,6 +16,12 @@ export default defineConfig({
   site: "https://lucaberton.com",
   base: "/",
   trailingSlash: "always",
+  // Prefetch linked pages on hover/tap so internal navigation feels instant
+  // without eagerly fetching every link in the viewport.
+  prefetch: {
+    prefetchAll: true,
+    defaultStrategy: "hover",
+  },
   build: {
     // Inline small stylesheets (~4 KB) directly into HTML to eliminate
     // render-blocking CSS chains while letting larger sheets be cached.

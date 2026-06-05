@@ -1,0 +1,187 @@
+---
+title: "Kubernetes Resource Limits and Requests: Best Practices (2026)"
+snippet: "Set CPU and memory requests correctly — avoid OOMKilled pods, CPU throttling, and wasted capacity with practical sizing strategies."
+description: "Set CPU and memory requests correctly — avoid OOMKilled pods, CPU throttling, and wasted capacity with practical sizing strategies."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Kubernetes', 'DevOps', 'Performance']
+image:
+  src: "/blog/thumbnails/kubernetes-resource-limits-requests-best-practices-2026.jpg"
+  alt: "Kubernetes Resource Limits and Requests: Best Practices (2026)"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+## The Resource Sizing Problem
+
+Most Kubernetes clusters waste 60-70% of allocated resources. Teams over-provision out of fear, or under-provision and get OOMKilled. Getting this right saves thousands per month.
+
+## Requests vs Limits
+
+```yaml
+resources:
+  requests:        # Guaranteed minimum (scheduler uses this)
+    memory: "256Mi"
+    cpu: "250m"
+  limits:          # Maximum allowed (enforcement)
+    memory: "512Mi"
+    cpu: "1000m"   # Consider NOT setting CPU limits
+```
+
+| | Requests | Limits |
+|---|---------|--------|
+| Purpose | Scheduling guarantee | Hard ceiling |
+| CPU behavior | Guaranteed cycles | Throttled beyond |
+| Memory behavior | Guaranteed allocation | OOMKilled beyond |
+| Best practice | Always set | Memory: yes, CPU: debatable |
+
+## The CPU Limit Controversy
+
+**Hot take: Don't set CPU limits.**
+
+```yaml
+# Recommended for most workloads
+resources:
+  requests:
+    cpu: "500m"
+    memory: "512Mi"
+  limits:
+    memory: "1Gi"
+    # No CPU limit! Let pods burst when capacity is available
+```
+
+Why? CPU throttling causes latency spikes even when the node has idle capacity. With no CPU limit, pods can burst — using idle cycles that would otherwise be wasted.
+
+**When to set CPU limits:**
+- Multi-tenant clusters (noisy neighbor prevention)
+- Batch workloads (prevent starving interactive services)
+- Cost attribution (exact per-pod tracking)
+
+## Memory: Always Set Limits
+
+Memory is incompressible — unlike CPU, the kernel can't throttle memory. It can only OOMKill.
+
+```
+Pod requests 256Mi, uses 600Mi, limit is 512Mi
+→ OOMKilled (exit code 137)
+
+Pod requests 256Mi, uses 600Mi, no limit
+→ Node runs out of memory → Random pod OOMKilled
+```
+
+**Always set memory limits.** The only question is how much headroom.
+
+## Right-Sizing Strategy
+
+### 1. Observe Actual Usage
+
+```bash
+# VPA recommender (install Vertical Pod Autoscaler)
+kubectl get vpa -o yaml
+
+# Or use metrics-server
+kubectl top pods -n production --sort-by=memory
+
+# Or Prometheus query for P95 memory over 7 days
+max_over_time(
+  container_memory_working_set_bytes{namespace="production"}[7d]
+)
+```
+
+### 2. Apply the Formula
+
+```
+Request = P95 actual usage + 20% buffer
+Limit  = P99 actual usage + 50% buffer (memory)
+Limit  = None (CPU, for most workloads)
+```
+
+### 3. Use VPA in Recommendation Mode
+
+```yaml
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: my-app-vpa
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: my-app
+  updatePolicy:
+    updateMode: "Off"  # Recommend only, don't apply
+  resourcePolicy:
+    containerPolicies:
+      - containerName: "*"
+        minAllowed:
+          cpu: 100m
+          memory: 128Mi
+        maxAllowed:
+          cpu: 4
+          memory: 8Gi
+```
+
+## QoS Classes
+
+Kubernetes assigns QoS based on your resource config:
+
+| QoS Class | When | OOMKill Priority |
+|-----------|------|------------------|
+| Guaranteed | requests = limits (both set) | Last (most protected) |
+| Burstable | requests set, limits differ or missing | Middle |
+| BestEffort | No requests or limits | First (evicted first) |
+
+**Critical services** should be Guaranteed. **Batch jobs** can be BestEffort.
+
+## LimitRange (Namespace Defaults)
+
+```yaml
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: default-limits
+  namespace: production
+spec:
+  limits:
+    - default:
+        memory: "512Mi"
+        cpu: "500m"
+      defaultRequest:
+        memory: "256Mi"
+        cpu: "100m"
+      max:
+        memory: "4Gi"
+        cpu: "4"
+      min:
+        memory: "64Mi"
+        cpu: "50m"
+      type: Container
+```
+
+## ResourceQuota (Namespace Budgets)
+
+```yaml
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-quota
+  namespace: team-payments
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: "40Gi"
+    limits.cpu: "40"
+    limits.memory: "80Gi"
+    pods: "50"
+    persistentvolumeclaims: "10"
+```
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Kubernetes Cost Optimization](/blog/kubernetes-cost-optimization-kubecost-opencost-2026/)
+- [KEDA: Event-Driven Autoscaling](/blog/kubernetes-keda-event-driven-autoscaling/)
+- [Pod Disruption Budgets](/blog/kubernetes-pod-disruption-budgets-rolling-updates-2026/)

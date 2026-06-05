@@ -1,0 +1,178 @@
+---
+title: "Kubernetes RBAC: Least-Privilege Access Control for Production"
+snippet: "Lock down your cluster — Roles, ClusterRoles, ServiceAccounts, audit logging, and common RBAC mistakes that expose production systems."
+description: "Lock down your cluster — Roles, ClusterRoles, ServiceAccounts, audit logging, and common RBAC mistakes that expose production systems."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Kubernetes', 'Security', 'DevOps']
+image:
+  src: "/blog/thumbnails/kubernetes-rbac-least-privilege-production-2026.jpg"
+  alt: "Kubernetes RBAC: Least-Privilege Access Control for Production"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+## RBAC Fundamentals
+
+```
+Who (Subject) → Can do what (Verb) → On which resources (Resource)
+    │                    │                        │
+    ▼                    ▼                        ▼
+  User/Group/SA    get,list,create,         pods, secrets,
+                   delete,update,patch      deployments...
+```
+
+## Role vs ClusterRole
+
+| | Role | ClusterRole |
+|---|------|-------------|
+| Scope | Single namespace | Cluster-wide |
+| Use for | Team access to their namespace | Cluster admins, cross-namespace |
+| Bound by | RoleBinding | ClusterRoleBinding (or RoleBinding) |
+
+## Common Roles
+
+### Developer (read-write in own namespace)
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: developer
+  namespace: team-payments
+rules:
+  - apiGroups: ["", "apps", "batch"]
+    resources: ["pods", "deployments", "services", "configmaps", "jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/exec"]
+    verbs: ["get", "create"]
+  # Explicitly DENY secrets access
+  # (not listed = denied by default)
+```
+
+### Read-Only (for monitoring/auditing)
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: readonly
+rules:
+  - apiGroups: ["", "apps", "batch", "networking.k8s.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: []  # Explicitly no secret access
+```
+
+### CI/CD ServiceAccount (deploy only)
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ci-deployer
+  namespace: production
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer
+  namespace: production
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "patch", "update"]
+    resourceNames: ["api-server", "worker"]  # Only specific deployments!
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "create", "update"]
+```
+
+## Common Mistakes
+
+### 1. Using cluster-admin for everything
+
+```yaml
+# ❌ NEVER do this for normal users
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: developer-admin
+subjects:
+  - kind: User
+    name: developer@company.com
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin  # Full access to EVERYTHING
+```
+
+### 2. Wildcard verbs
+
+```yaml
+# ❌ Too permissive
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+```
+
+### 3. No audit logging
+
+```yaml
+# ✅ Enable audit logging
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  - level: RequestResponse
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps"]
+  - level: Metadata
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources: ["clusterroles", "clusterrolebindings"]
+```
+
+## Audit Who Has Access
+
+```bash
+# Who can delete pods in production?
+kubectl auth can-i delete pods -n production --as=developer@company.com
+
+# List all roles in namespace
+kubectl get rolebindings -n production -o wide
+
+# Find overprivileged ServiceAccounts
+kubectl auth can-i --list --as=system:serviceaccount:default:default
+```
+
+## ServiceAccount Token Security
+
+```yaml
+# ✅ Disable auto-mount for pods that don't need API access
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: my-app
+automountServiceAccountToken: false
+---
+# Only mount when explicitly needed
+spec:
+  serviceAccountName: my-app
+  automountServiceAccountToken: true  # Override per-pod if needed
+```
+
+90% of pods don't need Kubernetes API access — disable the token mount.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Network Policies: Zero Trust](/blog/kubernetes-network-policies-zero-trust-guide-2026/)
+- [Pod Security Standards](/blog/kubernetes-pod-security-standards-admission-2026/)
+- [Keycloak: IAM](/blog/keycloak-identity-access-management-kubernetes-2026/)

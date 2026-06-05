@@ -1,0 +1,159 @@
+---
+title: "Grafana Loki: Cost-Effective Log Aggregation for Kubernetes"
+snippet: "Replace Elasticsearch with Loki for Kubernetes logging — 10x cheaper, label-based queries, LogQL, and seamless Grafana integration."
+description: "Replace Elasticsearch with Loki for Kubernetes logging — 10x cheaper, label-based queries, LogQL, and seamless Grafana integration."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['Kubernetes', 'Observability', 'DevOps']
+image:
+  src: "/blog/thumbnails/grafana-loki-kubernetes-log-aggregation-2026.jpg"
+  alt: "Grafana Loki: Cost-Effective Log Aggregation for Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+## Why Loki over Elasticsearch?
+
+| Metric | Elasticsearch | Loki |
+|--------|--------------|------|
+| Storage cost (1TB/day) | ~$3,000/mo | ~$300/mo |
+| RAM required | 64GB+ | 4-8GB |
+| Index strategy | Full-text (expensive) | Labels only (cheap) |
+| Query language | KQL/Lucene | LogQL (PromQL-like) |
+| Grafana integration | Plugin | Native (first-class) |
+| Operational complexity | High (shards, mappings) | Low |
+
+Loki's key insight: **don't index log content, only index metadata labels.** Query by labels, grep for content.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Loki Cluster                       │
+│                                                      │
+│  ┌──────────┐  ┌───────────┐  ┌──────────────────┐ │
+│  │Distributor│  │  Ingester │  │  Query Frontend  │ │
+│  └─────┬────┘  └─────┬─────┘  └────────┬─────────┘ │
+│        │              │                  │           │
+│        └──────────────┼──────────────────┘           │
+│                       │                              │
+│              ┌────────▼────────┐                     │
+│              │  Object Storage │                     │
+│              │  (S3/MinIO/GCS) │                     │
+│              └─────────────────┘                     │
+└──────────────────────────────────────────────────────┘
+         ▲
+         │ Push logs
+┌────────┴────────┐
+│   Promtail /    │  (DaemonSet on every node)
+│   Grafana Agent │
+└─────────────────┘
+```
+
+## Installation
+
+```bash
+helm repo add grafana https://grafana.github.io/helm-charts
+
+# Loki (Simple Scalable mode)
+helm install loki grafana/loki \
+  --namespace monitoring \
+  --set loki.storage.type=s3 \
+  --set loki.storage.s3.endpoint=minio.minio.svc:9000 \
+  --set loki.storage.s3.bucketnames=loki-chunks \
+  --set loki.storage.s3.access_key_id=minioadmin \
+  --set loki.storage.s3.secret_access_key=minioadmin
+
+# Promtail (log collector)
+helm install promtail grafana/promtail \
+  --namespace monitoring \
+  --set config.clients[0].url=http://loki:3100/loki/api/v1/push
+```
+
+## LogQL Queries
+
+```logql
+# All logs from payment service
+{namespace="production", app="payment-service"}
+
+# Filter for errors
+{namespace="production", app="payment-service"} |= "error"
+
+# Regex extract and filter
+{namespace="production"} | regexp `status=(?P<status>\d+)` | status >= 500
+
+# Count errors per minute
+count_over_time({namespace="production"} |= "error" [1m])
+
+# Top 10 error messages
+topk(10, count by (msg)(
+  {namespace="production"} | json | level="error"
+))
+
+# Latency percentiles from structured logs
+quantile_over_time(0.95,
+  {app="api-gateway"} | json | unwrap duration [5m]
+) by (endpoint)
+```
+
+## Structured Logging Best Practice
+
+```json
+{"timestamp":"2026-06-05T07:00:00Z","level":"error","msg":"payment failed","service":"payment","user_id":"u123","amount":99.99,"error":"insufficient_funds","trace_id":"abc123"}
+```
+
+```logql
+# Query structured logs efficiently
+{app="payment-service"} | json | level="error" | error="insufficient_funds" | amount > 100
+```
+
+## Retention and Cost
+
+```yaml
+# Loki config
+limits_config:
+  retention_period: 30d        # Auto-delete after 30 days
+  max_streams_per_user: 10000
+  ingestion_rate_mb: 10
+  ingestion_burst_size_mb: 20
+
+compactor:
+  retention_enabled: true
+  delete_request_store: s3
+```
+
+| Retention | Daily Volume | Monthly Storage Cost (S3) |
+|-----------|-------------|--------------------------|
+| 7 days | 50GB/day | ~$8 |
+| 30 days | 50GB/day | ~$35 |
+| 90 days | 50GB/day | ~$100 |
+| 365 days | 50GB/day | ~$400 |
+
+Compare: Elasticsearch for the same volume would cost $3,000-10,000/month.
+
+## Alerting on Logs
+
+```yaml
+# Loki ruler config
+groups:
+  - name: payment-alerts
+    rules:
+      - alert: HighErrorRate
+        expr: |
+          sum(count_over_time({app="payment-service"} |= "error" [5m])) > 50
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Payment service error rate is high"
+```
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Prometheus + Thanos](/blog/prometheus-thanos-long-term-metrics-kubernetes-2026/)
+- [OpenTelemetry on Kubernetes](/blog/opentelemetry-kubernetes-distributed-tracing-2026/)
+- [MinIO: S3 Storage](/blog/minio-s3-compatible-object-storage-kubernetes-2026/)

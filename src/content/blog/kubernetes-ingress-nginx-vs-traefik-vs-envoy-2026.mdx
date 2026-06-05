@@ -1,0 +1,171 @@
+---
+title: "Kubernetes Ingress: NGINX vs Traefik vs Envoy Gateway (2026)"
+snippet: "Choose the right ingress controller — performance benchmarks, TLS termination, rate limiting, and Gateway API support comparison."
+description: "Choose the right ingress controller — performance benchmarks, TLS termination, rate limiting, and Gateway API support comparison."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['Kubernetes', 'Networking', 'DevOps']
+image:
+  src: "/blog/thumbnails/kubernetes-ingress-nginx-vs-traefik-vs-envoy-2026.jpg"
+  alt: "Kubernetes Ingress: NGINX vs Traefik vs Envoy Gateway (2026)"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+## Ingress Controllers Compared
+
+| Feature | NGINX Ingress | Traefik | Envoy Gateway |
+|---------|--------------|---------|---------------|
+| Performance (RPS) | 50K+ | 40K+ | 60K+ |
+| Memory (idle) | 100MB | 50MB | 150MB |
+| Config reload | nginx reload (brief drop) | Hot reload (zero-drop) | Hot reload |
+| Gateway API | ✅ (v1.2+) | ✅ | ✅ (native) |
+| Rate limiting | ✅ (annotation) | ✅ (middleware) | ✅ (native) |
+| mTLS | ✅ | ✅ | ✅ |
+| WASM plugins | ❌ | ❌ | ✅ |
+| Dashboard | ❌ | ✅ Built-in | ❌ |
+| License | Apache 2.0 | MIT | Apache 2.0 |
+| Backing | F5/NGINX | Traefik Labs | Envoy/CNCF |
+
+## NGINX Ingress Controller
+
+The most widely deployed (40%+ market share):
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  annotations:
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://app.example.com"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [api.example.com]
+      secretName: api-tls
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-service
+                port:
+                  number: 8080
+```
+
+## Traefik
+
+Auto-discovers services, built-in dashboard:
+
+```yaml
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: api
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - match: Host(`api.example.com`)
+      kind: Rule
+      services:
+        - name: api-service
+          port: 8080
+      middlewares:
+        - name: rate-limit
+        - name: compress
+  tls:
+    certResolver: letsencrypt
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: rate-limit
+spec:
+  rateLimit:
+    average: 100
+    burst: 200
+```
+
+## Envoy Gateway (Gateway API Native)
+
+The future — built on Gateway API standard:
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: main
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - name: wildcard-tls
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api-route
+spec:
+  parentRefs:
+    - name: main
+  hostnames:
+    - "api.example.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      backendRefs:
+        - name: api-v1
+          port: 8080
+          weight: 90
+        - name: api-v2
+          port: 8080
+          weight: 10  # Canary!
+```
+
+## When to Choose Which
+
+| Scenario | Best Choice |
+|----------|-------------|
+| Simple apps, proven stability | NGINX |
+| Auto-discovery, Docker/Swarm migration | Traefik |
+| Advanced traffic management, Gateway API | Envoy Gateway |
+| Existing NGINX expertise | NGINX |
+| Need built-in dashboard | Traefik |
+| gRPC-heavy, HTTP/3 | Envoy Gateway |
+| Maximum raw performance | Envoy Gateway |
+
+## Gateway API: The Future
+
+Gateway API replaces Ingress as the standard. All three controllers now support it:
+
+```yaml
+# Same spec works across NGINX, Traefik, and Envoy
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+```
+
+**My recommendation for 2026:** Start new projects with Gateway API. Migrate existing Ingress resources gradually.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [cert-manager: TLS Automation](/blog/cert-manager-kubernetes-tls-automation-2026/)
+- [Cilium: eBPF Networking](/blog/cilium-ebpf-kubernetes-networking-security-2026/)
+- [Istio Service Mesh](/blog/istio-service-mesh-kubernetes-production-2026/)

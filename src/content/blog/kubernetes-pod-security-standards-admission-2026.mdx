@@ -1,0 +1,178 @@
+---
+title: "Kubernetes Pod Security Standards: Restrict, Baseline, and Privileged"
+snippet: "Enforce pod security with built-in admission control — replace PodSecurityPolicy with Pod Security Standards, OPA Gatekeeper, and Kyverno."
+description: "Enforce pod security with built-in admission control — replace PodSecurityPolicy with Pod Security Standards, OPA Gatekeeper, and Kyverno."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Kubernetes', 'Security', 'DevOps']
+image:
+  src: "/blog/thumbnails/kubernetes-pod-security-standards-admission-2026.jpg"
+  alt: "Kubernetes Pod Security Standards: Restrict, Baseline, and Privileged"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+## The PodSecurityPolicy Deprecation
+
+PodSecurityPolicy (PSP) was removed in Kubernetes 1.25. The replacement: **Pod Security Standards (PSS)** — built-in, no extra controllers needed.
+
+## Three Security Levels
+
+| Level | What It Allows | Use Case |
+|-------|---------------|----------|
+| **Privileged** | Everything | System/infra pods (CNI, storage drivers) |
+| **Baseline** | Sane defaults, blocks known escalations | General workloads |
+| **Restricted** | Strictest, runs as non-root, no capabilities | Security-sensitive |
+
+## Enable Per-Namespace
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: production
+  labels:
+    # Enforce restricted (reject violations)
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    # Warn on baseline violations (log but allow)
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kube-system
+  labels:
+    # System namespace needs privileged
+    pod-security.kubernetes.io/enforce: privileged
+```
+
+## What Restricted Blocks
+
+```yaml
+# ❌ This pod will be REJECTED in a restricted namespace
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+    - name: app
+      image: myapp
+      securityContext:
+        privileged: true          # ❌ Blocked
+        runAsUser: 0              # ❌ Must be non-root
+        allowPrivilegeEscalation: true  # ❌ Blocked
+      volumeMounts:
+        - name: host
+          mountPath: /host
+  volumes:
+    - name: host
+      hostPath:                   # ❌ Blocked
+        path: /
+```
+
+```yaml
+# ✅ This pod PASSES restricted
+apiVersion: v1
+kind: Pod
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: myapp
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        readOnlyRootFilesystem: true
+        runAsUser: 1000
+```
+
+## Migration from PSP
+
+```bash
+# 1. Audit what would break
+kubectl label ns production pod-security.kubernetes.io/warn=restricted --dry-run=server
+
+# 2. Check violations
+kubectl get events --field-selector reason=FailedCreate -A | grep "violates PodSecurity"
+
+# 3. Fix pods, then enforce
+kubectl label ns production pod-security.kubernetes.io/enforce=restricted
+```
+
+## Kyverno (Policy-as-Code Alternative)
+
+For more granular control than built-in PSS:
+
+```yaml
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-non-root
+spec:
+  validationFailureAction: Enforce
+  rules:
+    - name: check-non-root
+      match:
+        resources:
+          kinds: [Pod]
+          namespaces: [production]
+      validate:
+        message: "Containers must run as non-root"
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  runAsNonRoot: true
+                  allowPrivilegeEscalation: false
+```
+
+## OPA Gatekeeper
+
+```yaml
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredSecurityContext
+metadata:
+  name: must-run-as-nonroot
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces: ["production"]
+  parameters:
+    runAsNonRoot: true
+    allowPrivilegeEscalation: false
+```
+
+## Comparison
+
+| Feature | Built-in PSS | Kyverno | OPA Gatekeeper |
+|---------|-------------|---------|----------------|
+| No extra install | ✅ | ❌ | ❌ |
+| Granularity | 3 levels only | Any policy | Any policy |
+| Mutation | ❌ | ✅ (auto-fix) | ⚠️ |
+| Generate resources | ❌ | ✅ | ❌ |
+| Learning curve | Low | Medium | High (Rego) |
+| Performance | Native (fastest) | Fast | Medium |
+
+## Recommended Strategy
+
+1. **Start with PSS** — label all namespaces (baseline for dev, restricted for prod)
+2. **Add Kyverno** — for policies PSS can't express (image allowlists, label requirements)
+3. **Audit mode first** — warn before enforce
+4. **Exempt system namespaces** — kube-system, monitoring, cert-manager need privileged
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Kubernetes RBAC](/blog/kubernetes-rbac-least-privilege-production-2026/)
+- [Falco: Runtime Security](/blog/falco-runtime-security-kubernetes-threat-detection-2026/)
+- [Network Policies: Zero Trust](/blog/kubernetes-network-policies-zero-trust-guide-2026/)

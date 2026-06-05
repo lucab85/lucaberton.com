@@ -1,0 +1,147 @@
+---
+title: "Prometheus + Thanos: Long-Term Metrics Storage for Kubernetes"
+snippet: "Scale Prometheus beyond single-cluster with Thanos — global query view, unlimited retention, downsampling, and object storage backend."
+description: "Scale Prometheus beyond single-cluster with Thanos — global query view, unlimited retention, downsampling, and object storage backend."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['Kubernetes', 'Observability', 'DevOps']
+image:
+  src: "/blog/thumbnails/prometheus-thanos-long-term-metrics-kubernetes-2026.jpg"
+  alt: "Prometheus + Thanos: Long-Term Metrics Storage for Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+## The Prometheus Scaling Problem
+
+Prometheus is excellent for single-cluster monitoring. But at enterprise scale:
+
+- **No long-term storage** — default retention is 15 days
+- **No global view** — each Prometheus sees only its cluster
+- **No downsampling** — raw data at full resolution forever
+- **Single point of failure** — one instance per cluster
+
+Thanos solves all four problems.
+
+## Thanos Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Thanos Query                      │
+│            (Global Query Frontend)                   │
+└────────────────────────┬────────────────────────────┘
+                         │
+         ┌───────────────┼───────────────┐
+         │               │               │
+┌────────▼───────┐ ┌─────▼──────┐ ┌──────▼──────┐
+│ Thanos Sidecar │ │   Thanos   │ │   Thanos   │
+│ (Cluster 1)    │ │   Store    │ │   Sidecar  │
+│                │ │  Gateway   │ │ (Cluster 2) │
+└───────┬────────┘ └──────┬─────┘ └──────┬──────┘
+        │                  │              │
+┌───────▼────────┐  ┌─────▼──────┐ ┌─────▼──────┐
+│  Prometheus 1  │  │ Object     │ │Prometheus 2│
+│  (cluster-a)   │  │ Storage    │ │(cluster-b) │
+└────────────────┘  │ (S3/GCS)   │ └────────────┘
+                    └────────────┘
+```
+
+## Installation (Helm)
+
+```bash
+# Prometheus with Thanos sidecar
+helm install prometheus prometheus-community/kube-prometheus-stack \
+  --namespace monitoring \
+  --set prometheus.prometheusSpec.thanos.enabled=true \
+  --set prometheus.prometheusSpec.thanos.objectStorageConfig.secretName=thanos-objstore \
+  --set prometheus.prometheusSpec.retention=6h  # Short local retention
+
+# Thanos components
+helm install thanos bitnami/thanos \
+  --namespace monitoring \
+  --set query.enabled=true \
+  --set storegateway.enabled=true \
+  --set compactor.enabled=true \
+  --set ruler.enabled=true \
+  --set objstoreConfig=<config>
+```
+
+### Object Storage Config
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: thanos-objstore
+stringData:
+  objstore.yml: |
+    type: S3
+    config:
+      bucket: thanos-metrics
+      endpoint: s3.eu-west-1.amazonaws.com
+      region: eu-west-1
+      access_key: ${AWS_ACCESS_KEY}
+      secret_key: ${AWS_SECRET_KEY}
+```
+
+## Downsampling
+
+Thanos Compactor automatically reduces resolution:
+
+| Age | Resolution | Storage Impact |
+|-----|-----------|----------------|
+| 0-2 days | Raw (15s/30s) | 100% |
+| 2-30 days | 5 minutes | ~20% |
+| 30+ days | 1 hour | ~3% |
+
+**Result:** Store years of metrics at minimal cost.
+
+## Multi-Cluster Global View
+
+Query across all clusters from a single Grafana:
+
+```yaml
+# Grafana datasource pointing to Thanos Query
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+data:
+  thanos.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Thanos
+        type: prometheus
+        url: http://thanos-query.monitoring:9090
+        access: proxy
+        isDefault: true
+```
+
+## Cost Optimization
+
+| Storage | 1 Year Raw (30s) | 1 Year with Thanos |
+|---------|------------------|--------------------|
+| 100 time series | 30GB | 3GB |
+| 10K time series | 3TB | 300GB |
+| 100K time series | 30TB | 3TB |
+
+S3 cost for 300GB: ~$7/month. Storing the same metrics in Prometheus local storage would require 3TB of expensive SSD.
+
+## When to Use Thanos vs Alternatives
+
+| Solution | Best For |
+|----------|----------|
+| **Thanos** | Existing Prometheus + need long-term + multi-cluster |
+| **Cortex/Mimir** | High-cardinality, multi-tenant write path |
+| **VictoriaMetrics** | High performance, simpler operations |
+| **Grafana Cloud** | Managed, don't want to run infrastructure |
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [AI Observability on Kubernetes](/blog/ai-observability-kubernetes-llm-monitoring-2026/)
+- [Velero: K8s Backup and DR](/blog/velero-kubernetes-backup-disaster-recovery-2026/)
+- [Cilium: eBPF Networking](/blog/cilium-ebpf-kubernetes-networking-security-2026/)

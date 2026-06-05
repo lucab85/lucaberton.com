@@ -1,0 +1,166 @@
+---
+title: "Crossplane: Manage Cloud Infrastructure from Kubernetes"
+snippet: "Use Crossplane to provision AWS, Azure, and GCP resources with Kubernetes manifests. The universal cloud control plane."
+description: "Use Crossplane to provision AWS, Azure, and GCP resources with Kubernetes manifests. The universal cloud control plane."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Kubernetes', 'Infrastructure as Code', 'Platform Engineering']
+image:
+  src: "/blog/thumbnails/crossplane-kubernetes-infrastructure-control-plane-2026.jpg"
+  alt: "Crossplane: Manage Cloud Infrastructure from Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+## What Is Crossplane?
+
+[Crossplane](https://github.com/crossplane/crossplane) extends Kubernetes to manage **any cloud resource** using kubectl. Provision RDS databases, S3 buckets, Azure VNets, and GCP BigQuery — all with Kubernetes manifests. CNCF Graduated project.
+
+## How It Works
+
+```
+┌──────────────────────────────────────────┐
+│         Kubernetes Cluster               │
+│                                          │
+│  ┌──────────────────────────────────┐   │
+│  │      Crossplane Controller        │   │
+│  └───────────────┬──────────────────┘   │
+│                  │                       │
+│  ┌───────────────┼───────────────────┐  │
+│  │               │                   │  │
+│  ▼               ▼                   ▼  │
+│ AWS Provider  Azure Provider  GCP Provider
+│  │               │                   │  │
+└──┼───────────────┼───────────────────┼──┘
+   │               │                   │
+   ▼               ▼                   ▼
+┌──────┐    ┌───────────┐    ┌──────────┐
+│ AWS  │    │   Azure   │    │   GCP    │
+│ RDS  │    │ CosmosDB  │    │ BigQuery │
+│ S3   │    │ AKS       │    │ GKE     │
+└──────┘    └───────────┘    └──────────┘
+```
+
+## Provision Cloud Resources
+
+### RDS Database
+
+```yaml
+apiVersion: rds.aws.upbound.io/v1beta2
+kind: Instance
+metadata:
+  name: production-db
+spec:
+  forProvider:
+    region: eu-west-1
+    instanceClass: db.r6g.xlarge
+    engine: postgres
+    engineVersion: "16"
+    allocatedStorage: 100
+    storageType: gp3
+    masterUsername: admin
+    masterPasswordSecretRef:
+      name: db-password
+      namespace: crossplane-system
+      key: password
+    vpcSecurityGroupIds:
+      - sg-xxx
+    dbSubnetGroupName: production-subnet-group
+  providerConfigRef:
+    name: aws-production
+```
+
+### S3 Bucket
+
+```yaml
+apiVersion: s3.aws.upbound.io/v1beta2
+kind: Bucket
+metadata:
+  name: ml-artifacts
+spec:
+  forProvider:
+    region: eu-west-1
+    tags:
+      Environment: production
+      Team: ml-platform
+```
+
+## Compositions (Platform Abstractions)
+
+Create high-level APIs that hide cloud complexity:
+
+```yaml
+# Define what a "Database" means for your org
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: databases.platform.company.com
+spec:
+  group: platform.company.com
+  names:
+    kind: Database
+    plural: databases
+  versions:
+    - name: v1
+      schema:
+        openAPIV3Schema:
+          properties:
+            spec:
+              properties:
+                size:
+                  type: string
+                  enum: [small, medium, large]
+                engine:
+                  type: string
+                  enum: [postgres, mysql]
+---
+# Teams request a database simply:
+apiVersion: platform.company.com/v1
+kind: Database
+metadata:
+  name: orders-db
+spec:
+  size: medium
+  engine: postgres
+```
+
+The Composition translates this into RDS + security groups + subnet groups + parameter groups automatically.
+
+## Crossplane vs Terraform
+
+| Feature | Crossplane | Terraform |
+|---------|-----------|-----------|
+| Reconciliation | ✅ Continuous (K8s controller) | ❌ Run-once |
+| Drift detection | ✅ Automatic (every 60s) | ❌ Manual `terraform plan` |
+| State | Kubernetes etcd | Separate state file |
+| Language | YAML (K8s manifests) | HCL |
+| Self-service | ✅ Teams use kubectl | ❌ Requires Terraform access |
+| GitOps | ✅ Native (Argo CD/Flux) | ⚠️ Requires wrapper |
+| Multi-tenancy | ✅ Namespaces + RBAC | ⚠️ Workspaces |
+
+**Key insight:** Crossplane **continuously reconciles** — if someone manually changes a resource in the AWS console, Crossplane fixes it automatically. Terraform only detects drift on the next `plan`.
+
+## When to Use Crossplane
+
+- ✅ Platform team providing self-service infrastructure
+- ✅ GitOps workflow (Argo CD manages everything)
+- ✅ Multi-cloud or hybrid cloud
+- ✅ Want continuous drift detection
+- ✅ Kubernetes-native teams
+
+## When to Use Terraform Instead
+
+- ✅ Small team, simple infrastructure
+- ✅ Team already proficient in HCL
+- ✅ No Kubernetes cluster to run Crossplane
+- ✅ One-time provisioning (not continuous)
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Terraform vs OpenTofu](/blog/terraform-vs-opentofu-migration-guide-2026/)
+- [Argo CD: GitOps Deployment](/blog/argo-cd-gitops-kubernetes-deployment-2026/)
+- [Backstage: Internal Developer Portal](/blog/backstage-internal-developer-portal-setup-2026/)

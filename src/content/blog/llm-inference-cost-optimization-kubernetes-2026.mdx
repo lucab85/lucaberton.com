@@ -1,0 +1,270 @@
+---
+title: "Cut LLM Inference Costs 70% on Kubernetes (Proven Tactics)"
+snippet: "Reduce AI inference costs with spot GPUs, KV-cache sharing, request batching, model quantization, and intelligent routing. Real-world savings from production deployments."
+description: "Reduce AI inference costs with spot GPUs, KV-cache sharing, request batching, model quantization, and intelligent routing. Real-world savings from production deployments."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+image:
+  src: "/blog/thumbnails/llm-inference-cost-optimization-kubernetes-2026.jpg"
+  alt: "Cut LLM Inference Costs 70% on Kubernetes (Proven Tactics)"
+tags:
+  - "ai"
+  - "kubernetes"
+  - "cost-optimization"
+  - "inference"
+  - "gpu"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import { YouTube } from "astro-embed";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+## The Cost Problem
+
+Running LLMs in production is expensive. A single A100 80GB costs $2-4/hour on cloud. At scale:
+
+| Model | Min GPU | Cloud Cost/Hour | Monthly (24/7) |
+|-------|---------|----------------|----------------|
+| Llama 3.1 8B | 1x A10G | $1.00 | $730 |
+| Llama 3.1 70B | 2x A100 80GB | $6.50 | $4,745 |
+| Mixtral 8x22B | 4x A100 80GB | $13.00 | $9,490 |
+| Llama 3.1 405B | 8x H100 | $32.00 | $23,360 |
+
+The good news: most teams overspend by 50-70%. Here's how to fix that.
+
+## 1. Spot/Preemptible GPUs (Save 60-70%)
+
+### AWS Spot Instances with Karpenter
+
+```yaml
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool
+metadata:
+  name: gpu-spot
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["g5.xlarge", "g5.2xlarge", "p4d.24xlarge"]
+        - key: nvidia.com/gpu
+          operator: Exists
+      nodeClassRef:
+        name: gpu-nodes
+  limits:
+    nvidia.com/gpu: "16"
+  disruption:
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m
+```
+
+### Handling Spot Interruptions
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  template:
+    spec:
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: vllm
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 90"]  # Drain in-flight requests
+```
+
+**Key insight:** Inference workloads are **stateless** — perfect for spot. Unlike training, a killed inference pod loses nothing (no checkpoints needed). Just route traffic to remaining pods.
+
+## 2. Model Quantization (Save 50% GPU Memory)
+
+### GPTQ (4-bit) vs AWQ vs GGUF
+
+| Method | Memory Reduction | Quality Loss | Speed Impact |
+|--------|-----------------|-------------|--------------|
+| FP16 (baseline) | 0% | 0% | 0% |
+| INT8 | 50% | < 1% | +5% slower |
+| GPTQ 4-bit | 75% | 1-3% | +10% slower |
+| AWQ 4-bit | 75% | < 1% | Similar to FP16 |
+| GGUF Q4_K_M | 75% | 1-2% | CPU-friendly |
+
+### vLLM with AWQ Quantized Model
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-llama70b-awq
+spec:
+  template:
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest
+          args:
+            - "--model"
+            - "TheBloke/Llama-3.1-70B-AWQ"
+            - "--quantization"
+            - "awq"
+            - "--max-model-len"
+            - "4096"
+            - "--gpu-memory-utilization"
+            - "0.95"
+          resources:
+            limits:
+              nvidia.com/gpu: "1"  # 70B on SINGLE A100 with AWQ!
+```
+
+**Cost impact:** Llama 70B goes from 2x A100 ($6.50/hr) to 1x A100 ($3.25/hr) = **50% savings** with negligible quality loss.
+
+## 3. KV-Cache Optimization
+
+KV-cache is the #1 memory consumer during inference. Optimizing it directly reduces GPU count.
+
+### PagedAttention (vLLM)
+
+vLLM's PagedAttention manages KV-cache like virtual memory pages:
+
+```yaml
+args:
+  - "--model"
+  - "meta-llama/Llama-3.1-70B"
+  - "--gpu-memory-utilization"
+  - "0.92"           # Use 92% of GPU memory for KV-cache
+  - "--max-num-seqs"
+  - "256"            # Max concurrent sequences
+  - "--enable-prefix-caching"  # Reuse KV for shared prefixes
+```
+
+### Prefix Caching (System Prompt Sharing)
+
+If all requests share the same system prompt (common in production):
+
+```yaml
+args:
+  - "--enable-prefix-caching"
+  # Saves 20-40% KV-cache memory when system prompts are shared
+```
+
+### KV-Cache Compression (llm-d / Dynamo)
+
+The latest approach: disaggregated KV-cache with compression:
+
+```
+┌──────────┐    ┌──────────────┐    ┌──────────┐
+│ Prefill  │───▶│  KV Store    │◀───│  Decode  │
+│  Node    │    │ (Compressed) │    │  Nodes   │
+└──────────┘    └──────────────┘    └──────────┘
+```
+
+## 4. Request Batching (Double Throughput)
+
+### Continuous Batching
+
+vLLM and TGI use continuous batching — new requests join the batch as soon as any sequence finishes:
+
+```yaml
+args:
+  - "--max-num-seqs"
+  - "64"              # Batch up to 64 concurrent requests
+  - "--max-num-batched-tokens"
+  - "32768"           # Total tokens in a batch
+```
+
+### Batch Size vs Latency Trade-off
+
+| Batch Size | Throughput (tok/s) | P50 Latency | P99 Latency |
+|-----------|-------------------|-------------|-------------|
+| 1 | 45 | 22ms | 28ms |
+| 8 | 320 | 25ms | 45ms |
+| 32 | 1,100 | 35ms | 120ms |
+| 64 | 1,800 | 55ms | 250ms |
+| 128 | 2,200 | 95ms | 500ms |
+
+**Sweet spot:** 32-64 batch size balances throughput and latency for most production workloads.
+
+## 5. Intelligent Routing (Match Model to Task)
+
+Not every request needs your largest model. Route by complexity:
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-router
+  annotations:
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      # Route based on request header
+      if ($http_x_model_tier = "fast") {
+        proxy_pass http://llama-8b.ai-inference:8000;
+      }
+      if ($http_x_model_tier = "quality") {
+        proxy_pass http://llama-70b.ai-inference:8000;
+      }
+```
+
+### Cost Impact of Model Routing
+
+| Request Type | Model | Cost/1M tokens | Quality |
+|-------------|-------|----------------|---------|
+| Classification | Llama 8B | $0.05 | 95% accuracy |
+| Summarization | Llama 8B | $0.05 | 90% quality |
+| Code generation | Llama 70B | $0.40 | 95% quality |
+| Complex reasoning | Llama 70B | $0.40 | 98% quality |
+
+Route 60% of traffic to the small model = **60% cost reduction** with minimal quality impact.
+
+## 6. Right-Size GPU Selection
+
+| Model Size | Minimum GPU | Optimal GPU | Monthly Cost |
+|-----------|-------------|-------------|--------------|
+| 7-8B | A10G (24GB) | L4 (24GB) | $350 |
+| 13B | A10G (24GB) | A100 40GB | $730 |
+| 34B | A100 40GB | A100 80GB | $1,825 |
+| 70B | 2x A100 80GB | H100 80GB | $3,650 |
+| 70B (AWQ) | A100 80GB | H100 80GB | $1,825 |
+
+**L4 GPUs** are the sweet spot for 7-8B models — 50% cheaper than A10G with better inference performance.
+
+## 7. Auto-Scale to Zero (Dev/Test)
+
+KEDA scale-to-zero eliminates idle GPU costs entirely:
+
+```yaml
+spec:
+  minReplicaCount: 0
+  triggers:
+    - type: prometheus
+      metadata:
+        query: sum(rate(vllm:num_requests_running[5m]))
+        threshold: "1"
+```
+
+**Dev clusters:** Scale to zero outside working hours = **70% savings** on GPU compute.
+
+## Total Savings Calculator
+
+| Optimization | Savings | Cumulative |
+|-------------|---------|------------|
+| Spot GPUs | 60% | 60% |
+| Quantization (AWQ 4-bit) | 50% of remaining | 80% |
+| Request batching | 2x throughput = 50% fewer pods | 90% |
+| Model routing | 30% of remaining | 93% |
+| Scale-to-zero (dev) | 70% of dev costs | - |
+
+**Real example:** A team spending $20K/month on inference reduced to $6K/month by implementing spot + quantization + routing — **70% reduction**.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Autoscale AI Inference with KEDA + GPUs](/blog/kubernetes-ai-inference-autoscaling-keda-gpu-2026/)
+- [GPU Sharing on Kubernetes: MIG vs MPS vs Time-Slicing](/blog/gpu-sharing-kubernetes-mig-mps-time-slicing-2026/)
+- [AI Model Serving: vLLM vs Triton vs NIM](/blog/ai-model-serving-kubernetes-vllm-triton-nim-2026/)
+- [The Inference Gold Rush: Economics of AI Serving](/blog/inference-gold-rush-ai-startups-kubernetes-2026/)

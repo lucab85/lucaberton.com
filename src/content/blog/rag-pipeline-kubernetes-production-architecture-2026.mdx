@@ -1,0 +1,282 @@
+---
+title: "RAG Pipeline on Kubernetes: Production Architecture Guide"
+snippet: "Deploy a production Retrieval-Augmented Generation pipeline on Kubernetes. Vector databases, embedding services, chunking strategies, and orchestration with Argo Workflows."
+description: "Deploy a production Retrieval-Augmented Generation pipeline on Kubernetes. Vector databases, embedding services, chunking strategies, and orchestration with Argo Workflows."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+image:
+  src: "/blog/thumbnails/rag-pipeline-kubernetes-production-architecture-2026.jpg"
+  alt: "RAG Pipeline on Kubernetes: Production Architecture Guide"
+tags:
+  - "rag"
+  - "kubernetes"
+  - "ai"
+  - "vector-database"
+  - "architecture"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import { YouTube } from "astro-embed";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+## Production RAG Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Kubernetes Cluster                    │
+│                                                         │
+│  ┌──────────┐    ┌──────────┐    ┌──────────────────┐  │
+│  │  Ingress │───▶│ API      │───▶│ Orchestrator     │  │
+│  │  (Kong)  │    │ Gateway  │    │ (Argo Workflows) │  │
+│  └──────────┘    └──────────┘    └────────┬─────────┘  │
+│                                           │             │
+│         ┌─────────────────────────────────┼──────┐      │
+│         │                                 │      │      │
+│         ▼                                 ▼      ▼      │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────┐   │
+│  │  Embedding   │  │   Vector DB  │  │    LLM     │   │
+│  │  Service     │  │   (Qdrant)   │  │  (vLLM)    │   │
+│  │  (TEI)       │  │              │  │            │   │
+│  └──────────────┘  └──────────────┘  └────────────┘   │
+│                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────┐   │
+│  │  Document    │  │  Reranker    │  │   Redis    │   │
+│  │  Processor   │  │  (cross-enc) │  │  (cache)   │   │
+│  └──────────────┘  └──────────────┘  └────────────┘   │
+└─────────────────────────────────────────────────────────┘
+```
+
+## Component Breakdown
+
+### 1. Document Ingestion Pipeline
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: document-ingestion
+spec:
+  entrypoint: ingest
+  templates:
+    - name: ingest
+      steps:
+        - - name: extract
+            template: extract-text
+        - - name: chunk
+            template: chunk-documents
+        - - name: embed
+            template: generate-embeddings
+        - - name: store
+            template: store-vectors
+
+    - name: extract-text
+      container:
+        image: unstructured-io/unstructured:latest
+        args: ["--input-dir", "/data/raw", "--output-dir", "/data/extracted"]
+
+    - name: chunk-documents
+      container:
+        image: myregistry/chunker:latest
+        env:
+          - name: CHUNK_SIZE
+            value: "512"
+          - name: CHUNK_OVERLAP
+            value: "50"
+          - name: STRATEGY
+            value: "semantic"  # semantic > fixed-size > recursive
+
+    - name: generate-embeddings
+      container:
+        image: ghcr.io/huggingface/text-embeddings-inference:latest
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+
+    - name: store-vectors
+      container:
+        image: myregistry/vector-store:latest
+        env:
+          - name: QDRANT_URL
+            value: "http://qdrant.vector-db:6333"
+```
+
+### 2. Embedding Service (TEI)
+
+HuggingFace Text Embeddings Inference — optimized for throughput:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: embedding-service
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: tei
+          image: ghcr.io/huggingface/text-embeddings-inference:1.5
+          args:
+            - "--model-id"
+            - "BAAI/bge-large-en-v1.5"
+            - "--max-batch-tokens"
+            - "16384"
+            - "--max-concurrent-requests"
+            - "512"
+          ports:
+            - containerPort: 80
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              memory: "4Gi"
+```
+
+### 3. Retrieval + Reranking Service
+
+```python
+# retrieval_service.py
+from fastapi import FastAPI
+from qdrant_client import QdrantClient
+from sentence_transformers import CrossEncoder
+
+app = FastAPI()
+qdrant = QdrantClient(host="qdrant.vector-db.svc", port=6333)
+reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-12-v2")
+
+@app.post("/retrieve")
+async def retrieve(query: str, top_k: int = 10, rerank_top_k: int = 5):
+    # Step 1: Embed query
+    query_embedding = await embed(query)
+
+    # Step 2: Vector search (fast, approximate)
+    results = qdrant.search(
+        collection_name="documents",
+        query_vector=query_embedding,
+        limit=top_k,
+        score_threshold=0.7,
+    )
+
+    # Step 3: Rerank (precise, cross-encoder)
+    passages = [r.payload["text"] for r in results]
+    scores = reranker.predict([(query, p) for p in passages])
+
+    # Step 4: Return top reranked results
+    ranked = sorted(zip(results, scores), key=lambda x: x[1], reverse=True)
+    return [{"text": r.payload["text"], "score": s} for r, s in ranked[:rerank_top_k]]
+```
+
+### 4. Generation with Retrieved Context
+
+```python
+@app.post("/generate")
+async def generate(query: str):
+    # Retrieve relevant context
+    context_docs = await retrieve(query, top_k=10, rerank_top_k=5)
+    context = "\n\n".join([d["text"] for d in context_docs])
+
+    # Generate with LLM
+    response = await vllm_client.chat.completions.create(
+        model="meta-llama/Llama-3.1-70B-Instruct",
+        messages=[
+            {"role": "system", "content": f"Answer based on this context:\n{context}"},
+            {"role": "user", "content": query}
+        ],
+        temperature=0.1,
+        max_tokens=1024,
+    )
+    return {"answer": response.choices[0].message.content, "sources": context_docs}
+```
+
+## Chunking Strategies
+
+| Strategy | Best For | Chunk Size |
+|----------|----------|------------|
+| Fixed-size | Simple documents | 512 tokens |
+| Recursive | Structured text (markdown, code) | 512-1024 tokens |
+| Semantic | Complex documents | Variable |
+| Sentence-window | Q&A systems | 3-5 sentences |
+| Parent-child | Hierarchical docs | Parent: 2048, Child: 256 |
+
+### Semantic Chunking Example
+
+```python
+from langchain.text_splitter import SemanticChunker
+from langchain.embeddings import HuggingFaceEmbeddings
+
+embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
+splitter = SemanticChunker(
+    embeddings,
+    breakpoint_threshold_type="percentile",
+    breakpoint_threshold_amount=95,
+)
+
+chunks = splitter.split_text(document_text)
+```
+
+## Caching Layer
+
+Redis caches both embeddings and LLM responses:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-cache
+spec:
+  template:
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          args: ["--maxmemory", "4gb", "--maxmemory-policy", "allkeys-lru"]
+          resources:
+            limits:
+              memory: "5Gi"
+```
+
+```python
+import hashlib, redis, json
+
+cache = redis.Redis(host="redis-cache.ai-inference.svc")
+
+def cached_retrieve(query: str):
+    key = f"rag:{hashlib.md5(query.encode()).hexdigest()}"
+    cached = cache.get(key)
+    if cached:
+        return json.loads(cached)
+    result = retrieve(query)
+    cache.setex(key, 3600, json.dumps(result))  # 1 hour TTL
+    return result
+```
+
+## Scaling Considerations
+
+| Component | Scaling Strategy | Bottleneck |
+|-----------|-----------------|------------|
+| Embedding service | Horizontal (KEDA on queue depth) | GPU compute |
+| Vector DB | Sharding + replicas | Memory + disk I/O |
+| Reranker | Horizontal (CPU or GPU) | Cross-encoder inference |
+| LLM | Horizontal (KEDA on TTFT) | GPU memory |
+| Cache | Redis Cluster | Memory |
+
+## Production Checklist
+
+- [ ] Document versioning (re-embed on update, not append)
+- [ ] Metadata filtering (date, source, category)
+- [ ] Hybrid search (vector + BM25 keyword)
+- [ ] Citation extraction (return source documents)
+- [ ] Guardrails (content filtering, hallucination detection)
+- [ ] A/B testing (chunking strategies, embedding models)
+- [ ] Monitoring (retrieval precision, generation quality)
+- [ ] Cost tracking (embedding + search + generation per query)
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Vector Databases: Qdrant vs Milvus vs pgvector](/blog/vector-database-kubernetes-qdrant-milvus-pgvector-2026/)
+- [AI Model Serving: vLLM vs Triton vs NIM](/blog/ai-model-serving-kubernetes-vllm-triton-nim-2026/)
+- [LLM Inference Cost Optimization](/blog/llm-inference-cost-optimization-kubernetes-2026/)
+- [AI Observability on Kubernetes](/blog/ai-observability-kubernetes-llm-monitoring-2026/)

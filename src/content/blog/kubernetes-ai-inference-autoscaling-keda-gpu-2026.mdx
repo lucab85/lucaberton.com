@@ -1,0 +1,326 @@
+---
+title: "Autoscale AI Inference on Kubernetes with KEDA + GPUs"
+snippet: "Scale LLM inference pods based on queue depth, token throughput, and GPU utilization using KEDA. Production patterns for vLLM, TGI, and NIM on Kubernetes."
+description: "Scale LLM inference pods based on queue depth, token throughput, and GPU utilization using KEDA. Production patterns for vLLM, TGI, and NIM on Kubernetes."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+image:
+  src: "/blog/thumbnails/kubernetes-ai-inference-autoscaling-keda-gpu-2026.jpg"
+  alt: "Autoscale AI Inference on Kubernetes with KEDA + GPUs"
+tags:
+  - "kubernetes"
+  - "ai"
+  - "keda"
+  - "gpu"
+  - "inference"
+  - "autoscaling"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import { YouTube } from "astro-embed";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+## Why Standard HPA Fails for AI Inference
+
+Horizontal Pod Autoscaler uses CPU/memory metrics — but AI inference workloads have unique scaling signals:
+
+- **Queue depth** — requests waiting for GPU availability
+- **Token throughput** — tokens/second per pod
+- **GPU utilization** — DCGM metrics showing compute saturation
+- **Time-to-first-token (TTFT)** — latency degradation signals overload
+- **KV-cache pressure** — memory exhaustion before CPU/GPU max out
+
+KEDA solves this with **event-driven scaling** from 60+ sources, including Prometheus metrics that expose these AI-specific signals.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                  KEDA Operator                   │
+│  ┌────────────┐  ┌────────────┐  ┌──────────┐  │
+│  │ Prometheus │  │   Kafka    │  │   Cron   │  │
+│  │  Scaler   │  │  Scaler   │  │  Scaler  │  │
+│  └─────┬──────┘  └─────┬──────┘  └────┬─────┘  │
+└────────┼────────────────┼──────────────┼────────┘
+         │                │              │
+         ▼                ▼              ▼
+┌─────────────────────────────────────────────────┐
+│              HPA (auto-managed)                  │
+└────────────────────┬────────────────────────────┘
+                     │
+         ┌───────────┼───────────┐
+         ▼           ▼           ▼
+   ┌──────────┐┌──────────┐┌──────────┐
+   │ vLLM Pod ││ vLLM Pod ││ vLLM Pod │
+   │  (GPU)   ││  (GPU)   ││  (GPU)   │
+   └──────────┘└──────────┘└──────────┘
+```
+
+## KEDA ScaledObject for vLLM
+
+### Scale on Pending Requests (Queue Depth)
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vllm-inference
+  namespace: ai-inference
+spec:
+  scaleTargetRef:
+    name: vllm-deployment
+  pollingInterval: 10
+  cooldownPeriod: 120
+  minReplicaCount: 1
+  maxReplicaCount: 8
+  triggers:
+    # Scale when pending requests exceed 5 per pod
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        query: |
+          sum(vllm:num_requests_waiting) /
+          count(kube_pod_info{namespace="ai-inference",pod=~"vllm.*"})
+        threshold: "5"
+        activationThreshold: "2"
+    # Scale on GPU utilization
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring:9090
+        query: |
+          avg(DCGM_FI_DEV_GPU_UTIL{namespace="ai-inference",pod=~"vllm.*"})
+        threshold: "80"
+    # Pre-scale for business hours
+    - type: cron
+      metadata:
+        timezone: Europe/Amsterdam
+        start: "30 7 * * 1-5"
+        end: "0 20 * * 1-5"
+        desiredReplicas: "3"
+```
+
+### Scale on KV-Cache Pressure
+
+```yaml
+triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring:9090
+      query: |
+        avg(vllm:gpu_cache_usage_perc{namespace="ai-inference"})
+      threshold: "85"
+      metricName: kv_cache_pressure
+```
+
+### Scale on Token Throughput Degradation
+
+```yaml
+triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.monitoring:9090
+      query: |
+        avg(rate(vllm:generation_tokens_total[2m])) /
+        count(kube_pod_info{namespace="ai-inference",pod=~"vllm.*"})
+      # Scale when per-pod throughput drops below 500 tokens/s
+      threshold: "500"
+      activationThreshold: "400"
+```
+
+## Scale-to-Zero for Dev/Staging
+
+Save GPU costs when no requests are queued:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: vllm-dev
+spec:
+  scaleTargetRef:
+    name: vllm-dev-deployment
+  minReplicaCount: 0  # Scale to zero!
+  maxReplicaCount: 2
+  triggers:
+    - type: prometheus
+      metadata:
+        query: |
+          sum(increase(vllm:num_requests_running[5m]))
+        threshold: "1"
+        activationThreshold: "0"
+  advanced:
+    restoreToOriginalReplicaCount: false
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: 300
+```
+
+**Cold start consideration:** GPU pod initialization takes 30-120 seconds (model loading). Use a startup probe with generous timeout:
+
+```yaml
+startupProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  failureThreshold: 30  # Up to 5 minutes for large models
+```
+
+## NVIDIA DCGM Metrics for Scaling
+
+Deploy DCGM Exporter to expose GPU metrics to Prometheus:
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: gpu-monitoring
+spec:
+  selector:
+    matchLabels:
+      app: dcgm-exporter
+  template:
+    spec:
+      containers:
+        - name: dcgm-exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.1-ubuntu22.04
+          ports:
+            - containerPort: 9400
+          env:
+            - name: DCGM_EXPORTER_COLLECTORS
+              value: /etc/dcgm-exporter/dcp-metrics-included.csv
+          volumeMounts:
+            - name: nvidia
+              mountPath: /usr/local/nvidia
+      volumes:
+        - name: nvidia
+          hostPath:
+            path: /usr/local/nvidia
+```
+
+### Key GPU Metrics for Autoscaling
+
+| Metric | Description | Scale Trigger |
+|--------|-------------|---------------|
+| `DCGM_FI_DEV_GPU_UTIL` | GPU compute utilization % | > 80% |
+| `DCGM_FI_DEV_MEM_COPY_UTIL` | Memory bandwidth utilization | > 70% |
+| `DCGM_FI_DEV_FB_USED` | Framebuffer memory used (MB) | > 90% capacity |
+| `DCGM_FI_DEV_POWER_USAGE` | Power draw (Watts) | Approaching TDP |
+
+## Multi-Signal Scaling Strategy
+
+Production systems combine multiple signals:
+
+```yaml
+triggers:
+  # Primary: queue depth (immediate demand)
+  - type: prometheus
+    metadata:
+      query: sum(vllm:num_requests_waiting)
+      threshold: "10"
+  # Secondary: latency degradation (quality signal)
+  - type: prometheus
+    metadata:
+      query: histogram_quantile(0.95, rate(vllm:request_latency_bucket[5m]))
+      threshold: "5"  # P95 > 5s = overloaded
+  # Tertiary: GPU saturation (capacity signal)
+  - type: prometheus
+    metadata:
+      query: avg(DCGM_FI_DEV_GPU_UTIL{pod=~"vllm.*"})
+      threshold: "85"
+  # Scheduled pre-scaling (predictive)
+  - type: cron
+    metadata:
+      timezone: UTC
+      start: "0 8 * * 1-5"
+      end: "0 10 * * 1-5"
+      desiredReplicas: "5"
+```
+
+## Scaling Best Practices for AI Inference
+
+### 1. Use Activation Thresholds
+
+Prevent unnecessary scale-ups from noise:
+
+```yaml
+metadata:
+  threshold: "80"
+  activationThreshold: "60"  # Only activate scaling at 60%
+```
+
+### 2. Asymmetric Scale Behavior
+
+Scale up fast, scale down slow (GPU pods are expensive to restart):
+
+```yaml
+advanced:
+  horizontalPodAutoscalerConfig:
+    behavior:
+      scaleUp:
+        stabilizationWindowSeconds: 0
+        policies:
+          - type: Pods
+            value: 2
+            periodSeconds: 30
+      scaleDown:
+        stabilizationWindowSeconds: 600
+        policies:
+          - type: Pods
+            value: 1
+            periodSeconds: 120
+```
+
+### 3. Pod Disruption Budget
+
+Never kill all inference pods simultaneously:
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vllm-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: vllm-inference
+```
+
+### 4. Topology-Aware Scheduling
+
+Ensure new pods land on GPU nodes:
+
+```yaml
+affinity:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: nvidia.com/gpu.product
+              operator: In
+              values:
+                - NVIDIA-A100-SXM4-80GB
+                - NVIDIA-H100-SXM5-80GB
+```
+
+## Cost Impact
+
+| Scenario | Without KEDA | With KEDA | Savings |
+|----------|-------------|-----------|---------|
+| Dev cluster (8h/day usage) | 24/7 GPU = $2,400/mo | 8h/day = $800/mo | 67% |
+| Prod (variable traffic) | 8 pods always = $19,200/mo | 2-8 pods = $9,600/mo | 50% |
+| Batch inference (nights) | Manual scaling | 0→4 pods on schedule | 80% |
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [KEDA vs HPA: Kubernetes Autoscaling Compared](/blog/keda-vs-hpa-kubernetes-autoscaling-2026/)
+- [AI Model Serving on K8s: vLLM vs Triton vs NIM](/blog/ai-model-serving-kubernetes-vllm-triton-nim-2026/)
+- [LLM Inference Cost Optimization on Kubernetes](/blog/llm-inference-cost-optimization-kubernetes-2026/)
+- [GPU Sharing on Kubernetes: MIG vs MPS vs Time-Slicing](/blog/gpu-sharing-kubernetes-mig-mps-time-slicing-2026/)

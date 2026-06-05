@@ -1,0 +1,303 @@
+---
+title: "AI Gateway on Kubernetes: Route and Load-Balance LLM Traffic"
+snippet: "Deploy an AI gateway on Kubernetes for intelligent LLM request routing, model fallback, rate limiting, cost tracking, and multi-provider load balancing."
+description: "Deploy an AI gateway on Kubernetes for intelligent LLM request routing, model fallback, rate limiting, cost tracking, and multi-provider load balancing."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+image:
+  src: "/blog/thumbnails/ai-gateway-kubernetes-routing-load-balancing-2026.jpg"
+  alt: "AI Gateway on Kubernetes: Route and Load-Balance LLM Traffic"
+tags:
+  - "ai"
+  - "kubernetes"
+  - "api-gateway"
+  - "llm"
+  - "load-balancing"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import { YouTube } from "astro-embed";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+## What Is an AI Gateway?
+
+An AI gateway sits between your application and LLM providers, adding:
+
+- **Intelligent routing** — send requests to the best model/provider
+- **Load balancing** — distribute across GPU pools
+- **Fallback** — automatic failover when a provider is down
+- **Rate limiting** — protect backends from traffic spikes
+- **Cost tracking** — per-request cost attribution
+- **Caching** — semantic deduplication of similar queries
+
+```
+┌──────────┐     ┌─────────────────┐     ┌──────────────┐
+│  Client  │────▶│   AI Gateway    │────▶│  vLLM Pool   │
+│  Apps    │     │                 │────▶│  NIM Pool    │
+│          │     │  • Route        │────▶│  OpenAI API  │
+│          │     │  • Rate limit   │────▶│  Anthropic   │
+│          │     │  • Cache        │     └──────────────┘
+│          │     │  • Track cost   │
+└──────────┘     └─────────────────┘
+```
+
+## Architecture on Kubernetes
+
+### Option 1: Envoy + AI-Specific Filters
+
+```yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: ai-gateway
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: ai-api
+      protocol: HTTPS
+      port: 443
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: ai-routes
+spec:
+  parentRefs:
+    - name: ai-gateway
+  rules:
+    # Route to fast model for simple queries
+    - matches:
+        - headers:
+            - name: x-model-tier
+              value: fast
+      backendRefs:
+        - name: vllm-8b
+          port: 8000
+    # Route to quality model for complex queries
+    - matches:
+        - headers:
+            - name: x-model-tier
+              value: quality
+      backendRefs:
+        - name: vllm-70b
+          port: 8000
+    # Weighted traffic split (canary)
+    - backendRefs:
+        - name: vllm-70b
+          port: 8000
+          weight: 90
+        - name: nim-70b
+          port: 8000
+          weight: 10
+```
+
+### Option 2: LiteLLM Proxy
+
+LiteLLM provides a unified OpenAI-compatible API across 100+ LLM providers:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm-proxy
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:main-latest
+          ports:
+            - containerPort: 4000
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: master-key
+          volumeMounts:
+            - name: config
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config
+```
+
+```yaml
+# litellm-config.yaml
+model_list:
+  - model_name: "gpt-4-turbo"
+    litellm_params:
+      model: "openai/gpt-4-turbo"
+      api_key: "os.environ/OPENAI_API_KEY"
+
+  - model_name: "llama-70b"
+    litellm_params:
+      model: "openai/meta-llama/Llama-3.1-70B-Instruct"
+      api_base: "http://vllm-70b.ai-inference:8000/v1"
+      api_key: "dummy"
+
+  - model_name: "llama-70b"  # Second backend for load balancing
+    litellm_params:
+      model: "openai/meta-llama/Llama-3.1-70B-Instruct"
+      api_base: "http://nim-70b.ai-inference:8000/v1"
+      api_key: "os.environ/NGC_API_KEY"
+
+router_settings:
+  routing_strategy: "least-busy"
+  num_retries: 3
+  timeout: 60
+  fallbacks:
+    - model_name: "llama-70b"
+      fallback: "gpt-4-turbo"
+
+general_settings:
+  master_key: "os.environ/LITELLM_MASTER_KEY"
+  database_url: "os.environ/DATABASE_URL"
+```
+
+### Routing Strategies
+
+| Strategy | Description | Use Case |
+|----------|-------------|----------|
+| `least-busy` | Route to least loaded backend | Even distribution |
+| `simple-shuffle` | Random selection | Basic load balancing |
+| `latency-based` | Route to fastest responding | Latency-sensitive |
+| `cost-based` | Route to cheapest option first | Budget optimization |
+| `usage-based` | Rotate based on token usage | Fair sharing |
+
+## Rate Limiting
+
+### Per-User Token Budget
+
+```yaml
+# Envoy rate limit config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ratelimit-config
+data:
+  config.yaml: |
+    domain: ai-gateway
+    descriptors:
+      - key: user_id
+        rate_limit:
+          unit: hour
+          requests_per_unit: 100  # 100 requests/hour per user
+      - key: user_id
+        descriptors:
+          - key: model_tier
+            value: "quality"
+            rate_limit:
+              unit: hour
+              requests_per_unit: 20  # Only 20 quality-tier requests/hour
+```
+
+### Token-Based Rate Limiting (LiteLLM)
+
+```yaml
+litellm_settings:
+  max_budget: 100.0  # $100/month per API key
+  budget_duration: "1mo"
+
+  # Per-model limits
+  model_max_budget:
+    gpt-4-turbo: 50.0
+    llama-70b: 30.0
+```
+
+## Semantic Caching
+
+Cache responses for semantically similar queries:
+
+```python
+import hashlib
+from qdrant_client import QdrantClient
+
+cache_db = QdrantClient(host="qdrant-cache.ai-inference.svc")
+
+async def semantic_cache_lookup(query: str, threshold: float = 0.95):
+    query_embedding = await embed(query)
+
+    results = cache_db.search(
+        collection_name="response_cache",
+        query_vector=query_embedding,
+        limit=1,
+        score_threshold=threshold,  # Only return if >95% similar
+    )
+
+    if results:
+        return results[0].payload["response"]  # Cache hit!
+    return None  # Cache miss — proceed to LLM
+```
+
+**Impact:** 20-40% of requests hit cache in production (FAQ, repeated queries, similar phrasings).
+
+## Cost Attribution
+
+Track spend per team/project/user:
+
+```python
+# Custom metrics for cost tracking
+from prometheus_client import Counter, Histogram
+
+tokens_used = Counter(
+    'ai_gateway_tokens_total',
+    'Total tokens consumed',
+    ['model', 'team', 'direction']  # direction: input/output
+)
+
+request_cost = Histogram(
+    'ai_gateway_request_cost_dollars',
+    'Cost per request',
+    ['model', 'team'],
+    buckets=[0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
+)
+```
+
+### Grafana Cost Dashboard
+
+```yaml
+# Cost per team per day
+sum by (team) (increase(ai_gateway_request_cost_dollars_sum[24h]))
+
+# Most expensive model
+topk(5, sum by (model) (rate(ai_gateway_request_cost_dollars_sum[1h])) * 3600)
+
+# Token efficiency (output/input ratio)
+sum(rate(ai_gateway_tokens_total{direction="output"}[1h])) /
+sum(rate(ai_gateway_tokens_total{direction="input"}[1h]))
+```
+
+## Failover Configuration
+
+```yaml
+# Automatic failover chain
+router_settings:
+  fallbacks:
+    - model_name: "llama-70b"      # Primary: self-hosted
+      fallback: "gpt-4-turbo"       # Fallback: OpenAI
+
+  retry_policy:
+    num_retries: 2
+    retry_after_seconds: 1
+    retry_on_status_codes: [429, 500, 502, 503]
+
+  # Health check backends
+  health_check:
+    enabled: true
+    interval_seconds: 30
+    unhealthy_threshold: 3
+```
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [AI Model Serving: vLLM vs Triton vs NIM](/blog/ai-model-serving-kubernetes-vllm-triton-nim-2026/)
+- [Envoy vs Traefik vs Kong: API Gateway Showdown](/blog/envoy-vs-traefik-vs-kong-api-gateway-2026/)
+- [LLM Inference Cost Optimization](/blog/llm-inference-cost-optimization-kubernetes-2026/)
+- [AI Observability on Kubernetes](/blog/ai-observability-kubernetes-llm-monitoring-2026/)

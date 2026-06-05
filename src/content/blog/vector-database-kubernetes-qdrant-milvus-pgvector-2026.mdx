@@ -1,0 +1,297 @@
+---
+title: "Vector Databases on Kubernetes: Qdrant vs Milvus vs pgvector"
+snippet: "Deploy and compare vector databases on Kubernetes for AI applications. Performance benchmarks, scaling patterns, and production configuration for RAG and semantic search."
+description: "Deploy and compare vector databases on Kubernetes for AI applications. Performance benchmarks, scaling patterns, and production configuration for RAG and semantic search."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+image:
+  src: "/blog/thumbnails/vector-database-kubernetes-qdrant-milvus-pgvector-2026.jpg"
+  alt: "Vector Databases on Kubernetes: Qdrant vs Milvus vs pgvector"
+tags:
+  - "vector-database"
+  - "kubernetes"
+  - "ai"
+  - "qdrant"
+  - "milvus"
+  - "pgvector"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import { YouTube } from "astro-embed";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+## Why Vector Databases for AI?
+
+Every RAG pipeline, semantic search, and recommendation system needs vector storage:
+
+```
+User Query → Embedding Model → Vector Search → Top-K Results → LLM Context
+```
+
+The vector database stores millions of embeddings and returns the nearest neighbors in milliseconds.
+
+## Quick Comparison
+
+| Feature | Qdrant | Milvus | pgvector |
+|---------|--------|--------|----------|
+| Architecture | Rust, purpose-built | Go/C++, distributed | PostgreSQL extension |
+| Scaling | Horizontal sharding | Distributed native | Single node (+ Citus) |
+| Max vectors | Billions | Billions | ~10M practical |
+| Query speed (1M, 768d) | 2ms | 3ms | 15ms |
+| Memory mode | Disk + memory-mapped | Tiered storage | Shared buffers |
+| Filtering | Native payload filters | Attribute filtering | SQL WHERE |
+| Kubernetes | Helm chart, operator | Helm chart, operator | Any PG operator |
+| License | Apache 2.0 | Apache 2.0 | PostgreSQL |
+| Managed service | Qdrant Cloud | Zilliz Cloud | Neon, Supabase, RDS |
+
+## Qdrant on Kubernetes
+
+Qdrant is a **Rust-built vector database** optimized for speed and reliability.
+
+### Helm Deployment
+
+```bash
+helm repo add qdrant https://qdrant.github.io/qdrant-helm
+helm install qdrant qdrant/qdrant \
+  --namespace vector-db \
+  --create-namespace \
+  --set replicaCount=3 \
+  --set persistence.size=100Gi \
+  --set resources.limits.memory=16Gi \
+  --set config.storage.performance.optimizer_cpu_budget=4
+```
+
+### Production Configuration
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: qdrant
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:v1.12.0
+          ports:
+            - containerPort: 6333  # REST
+            - containerPort: 6334  # gRPC
+          resources:
+            requests:
+              memory: "8Gi"
+              cpu: "4"
+            limits:
+              memory: "16Gi"
+              cpu: "8"
+          volumeMounts:
+            - name: storage
+              mountPath: /qdrant/storage
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Gi
+        storageClassName: gp3
+```
+
+### Create Collection and Index
+
+```python
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, OptimizersConfigDiff
+
+client = QdrantClient(host="qdrant.vector-db.svc", port=6333)
+
+client.create_collection(
+    collection_name="documents",
+    vectors_config=VectorParams(
+        size=1536,  # OpenAI ada-002 dimensions
+        distance=Distance.COSINE,
+    ),
+    optimizers_config=OptimizersConfigDiff(
+        indexing_threshold=20000,  # Build HNSW after 20K vectors
+        memmap_threshold=50000,   # Memory-map after 50K vectors
+    ),
+    shard_number=3,  # Distribute across 3 nodes
+    replication_factor=2,  # 2 copies for HA
+)
+```
+
+### Qdrant Strengths
+
+- **Fastest queries** — Rust + HNSW = sub-millisecond at scale
+- **Payload filtering** — filter by metadata without post-filtering
+- **Memory-mapped storage** — handle datasets larger than RAM
+- **Snapshot + WAL** — point-in-time recovery
+- **Quantization** — scalar and product quantization for 4x memory reduction
+
+## Milvus on Kubernetes
+
+Milvus is a **cloud-native distributed vector database** designed for billion-scale deployments.
+
+### Helm Deployment
+
+```bash
+helm repo add milvus https://zilliz.com/milvus-helm
+helm install milvus milvus/milvus \
+  --namespace vector-db \
+  --set cluster.enabled=true \
+  --set etcd.replicaCount=3 \
+  --set minio.mode=distributed \
+  --set pulsar.enabled=true \
+  --set queryNode.replicas=3
+```
+
+### Architecture
+
+```
+┌──────────────────────────────────────────┐
+│              Milvus Cluster              │
+│                                          │
+│  ┌─────────┐  ┌────────┐  ┌─────────┐  │
+│  │  Proxy  │  │  Coord │  │  Coord  │  │
+│  │ (Load   │  │ (Query)│  │ (Data)  │  │
+│  │ Balance)│  └────────┘  └─────────┘  │
+│  └────┬────┘                            │
+│       │      ┌──────────────────────┐   │
+│       ├─────▶│    Query Nodes (3)   │   │
+│       │      └──────────────────────┘   │
+│       │      ┌──────────────────────┐   │
+│       └─────▶│    Data Nodes (3)    │   │
+│              └──────────────────────┘   │
+│                                          │
+│  ┌──────┐  ┌────────┐  ┌───────────┐   │
+│  │ etcd │  │ MinIO  │  │  Pulsar   │   │
+│  └──────┘  └────────┘  └───────────┘   │
+└──────────────────────────────────────────┘
+```
+
+### Milvus Strengths
+
+- **True distributed** — scales to billions of vectors
+- **Multi-index** — IVF, HNSW, DiskANN, GPU-IVF
+- **GPU acceleration** — NVIDIA GPU for index building and search
+- **Tiered storage** — hot/warm/cold data management
+- **Multi-vector** — store and search multiple vector fields
+
+### Milvus Considerations
+
+- **Complex deployment** — requires etcd, MinIO, Pulsar
+- **Resource heavy** — minimum 3 nodes recommended for production
+- **Operational overhead** — more components to monitor and maintain
+
+## pgvector: PostgreSQL Extension
+
+For teams already running PostgreSQL, pgvector adds vector search without a new database:
+
+### Installation
+
+```sql
+CREATE EXTENSION vector;
+
+CREATE TABLE documents (
+    id BIGSERIAL PRIMARY KEY,
+    content TEXT,
+    embedding vector(1536),  -- OpenAI dimensions
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- HNSW index (recommended for most use cases)
+CREATE INDEX ON documents
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+```
+
+### Kubernetes with CloudNativePG
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: vectordb
+spec:
+  instances: 3
+  postgresql:
+    parameters:
+      shared_buffers: "4GB"
+      effective_cache_size: "12GB"
+      maintenance_work_mem: "2GB"
+      max_parallel_workers_per_gather: "4"
+    shared_preload_libraries:
+      - "vector"
+  storage:
+    size: 200Gi
+    storageClass: gp3
+```
+
+### pgvector Strengths
+
+- **Zero new infrastructure** — extension to existing PostgreSQL
+- **SQL joins** — combine vector search with relational queries
+- **ACID transactions** — vector updates are transactional
+- **Existing tooling** — pgdump, replication, monitoring all work
+- **Hybrid search** — full-text search + vector search in one query
+
+### pgvector Limitations
+
+- **Single-node scaling** — practical limit ~5-10M vectors
+- **No sharding** — Citus adds complexity
+- **Slower queries** — 5-10x slower than purpose-built solutions at scale
+- **Memory-bound** — needs enough RAM for HNSW graph
+
+## Performance Benchmarks
+
+1M vectors, 1536 dimensions, top-10 search, single node:
+
+| Database | QPS | P50 Latency | P99 Latency | Memory |
+|----------|-----|-------------|-------------|--------|
+| Qdrant | 12,500 | 1.8ms | 4.2ms | 6.2GB |
+| Milvus | 9,800 | 2.5ms | 6.1ms | 7.8GB |
+| pgvector (HNSW) | 3,200 | 8.5ms | 22ms | 9.1GB |
+
+At 100M vectors (distributed):
+
+| Database | QPS | P99 Latency | Nodes |
+|----------|-----|-------------|-------|
+| Qdrant (3 nodes) | 35,000 | 12ms | 3 |
+| Milvus (5 nodes) | 45,000 | 15ms | 5 |
+| pgvector | N/A (single-node limit) | - | - |
+
+## Decision Framework
+
+### Choose Qdrant when:
+- ✅ Need fastest possible query latency
+- ✅ Dataset under 100M vectors
+- ✅ Want simple deployment (single binary)
+- ✅ Need payload filtering in searches
+- ✅ Rust ecosystem preference
+
+### Choose Milvus when:
+- ✅ Billion-scale vector datasets
+- ✅ Need GPU-accelerated index building
+- ✅ Multi-vector search requirements
+- ✅ Enterprise distributed requirements
+- ✅ Team has operational capacity for complex stack
+
+### Choose pgvector when:
+- ✅ Already running PostgreSQL
+- ✅ Dataset under 5-10M vectors
+- ✅ Need SQL joins with vector search
+- ✅ Want minimal operational complexity
+- ✅ Prototype or early-stage AI product
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [RAG Pipeline on Kubernetes: Production Architecture](/blog/rag-pipeline-kubernetes-production-architecture-2026/)
+- [AI Model Serving: vLLM vs Triton vs NIM](/blog/ai-model-serving-kubernetes-vllm-triton-nim-2026/)
+- [CloudNativePG: PostgreSQL on Kubernetes](/blog/cloudnativepg-postgresql-kubernetes-operator/)
+- [LLM Inference Cost Optimization](/blog/llm-inference-cost-optimization-kubernetes-2026/)

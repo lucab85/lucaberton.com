@@ -1,0 +1,299 @@
+---
+title: "Fine-Tune LLMs on Kubernetes: Distributed Training Guide"
+snippet: "Run distributed LLM fine-tuning on Kubernetes with PyTorch FSDP, DeepSpeed, and multi-node GPU training. Job scheduling, checkpointing, and cost management."
+description: "Run distributed LLM fine-tuning on Kubernetes with PyTorch FSDP, DeepSpeed, and multi-node GPU training. Job scheduling, checkpointing, and cost management."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+image:
+  src: "/blog/thumbnails/fine-tuning-llm-kubernetes-distributed-training-2026.jpg"
+  alt: "Fine-Tune LLMs on Kubernetes: Distributed Training Guide"
+tags:
+  - "ai"
+  - "kubernetes"
+  - "fine-tuning"
+  - "distributed-training"
+  - "gpu"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import { YouTube } from "astro-embed";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+## When to Fine-Tune
+
+| Scenario | Fine-Tune? | Alternative |
+|----------|-----------|-------------|
+| Domain-specific terminology | ✅ Yes | RAG (if just lookup) |
+| Output format/style | ✅ Yes | System prompt |
+| New knowledge (facts) | ❌ No | RAG |
+| Reduce hallucination | ✅ Yes | RAG + guardrails |
+| Smaller model + same quality | ✅ Yes | Distillation |
+| Cost reduction (fewer tokens) | ✅ Yes | Shorter prompts |
+
+## Distributed Training on Kubernetes
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│                Training Job                      │
+│                                                  │
+│  ┌───────────┐ ┌───────────┐ ┌───────────┐     │
+│  │  Worker 0 │ │  Worker 1 │ │  Worker 2 │     │
+│  │  (Rank 0) │ │  (Rank 1) │ │  (Rank 2) │     │
+│  │  4x H100  │ │  4x H100  │ │  4x H100  │     │
+│  └─────┬─────┘ └─────┬─────┘ └─────┬─────┘     │
+│        │              │              │           │
+│        └──────────────┼──────────────┘           │
+│                       │                          │
+│              ┌────────▼────────┐                 │
+│              │   NCCL / RDMA   │                 │
+│              │  (AllReduce)    │                 │
+│              └─────────────────┘                 │
+│                                                  │
+│  ┌──────────────────────────────────────────┐   │
+│  │         Shared Storage (NFS/Lustre)       │   │
+│  │  • Model checkpoints                     │   │
+│  │  • Training data                         │   │
+│  │  • Logs                                  │   │
+│  └──────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────┘
+```
+
+### PyTorch FSDP on Kubernetes (Training Operator)
+
+```yaml
+apiVersion: kubeflow.org/v1
+kind: PyTorchJob
+metadata:
+  name: llama-finetune
+  namespace: ml-training
+spec:
+  pytorchReplicaSpecs:
+    Master:
+      replicas: 1
+      template:
+        spec:
+          containers:
+            - name: trainer
+              image: myregistry/llm-trainer:latest
+              command:
+                - torchrun
+                - "--nproc_per_node=4"
+                - "--nnodes=3"
+                - "--node_rank=0"
+                - "--master_addr=$(MASTER_ADDR)"
+                - "--master_port=29500"
+                - "train.py"
+                - "--model_name=meta-llama/Llama-3.1-8B"
+                - "--dataset=my-domain-data"
+                - "--output_dir=/checkpoints/llama-8b-ft"
+                - "--fsdp_strategy=FULL_SHARD"
+                - "--bf16=true"
+                - "--per_device_train_batch_size=4"
+                - "--gradient_accumulation_steps=8"
+                - "--learning_rate=2e-5"
+                - "--num_train_epochs=3"
+                - "--save_steps=500"
+              resources:
+                limits:
+                  nvidia.com/gpu: "4"
+                  rdma/rdma_shared_device_a: "1"
+              volumeMounts:
+                - name: checkpoints
+                  mountPath: /checkpoints
+                - name: data
+                  mountPath: /data
+                - name: shm
+                  mountPath: /dev/shm
+          volumes:
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: "64Gi"
+            - name: checkpoints
+              persistentVolumeClaim:
+                claimName: training-checkpoints
+            - name: data
+              persistentVolumeClaim:
+                claimName: training-data
+    Worker:
+      replicas: 2
+      template:
+        spec:
+          containers:
+            - name: trainer
+              image: myregistry/llm-trainer:latest
+              command:
+                - torchrun
+                - "--nproc_per_node=4"
+                - "--nnodes=3"
+                - "--master_addr=$(MASTER_ADDR)"
+                - "--master_port=29500"
+                - "train.py"
+              resources:
+                limits:
+                  nvidia.com/gpu: "4"
+                  rdma/rdma_shared_device_a: "1"
+```
+
+### LoRA Fine-Tuning (Single Node)
+
+For most use cases, LoRA is more practical than full fine-tuning:
+
+```yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: lora-finetune
+spec:
+  template:
+    spec:
+      containers:
+        - name: trainer
+          image: myregistry/llm-trainer:latest
+          command:
+            - python
+            - train_lora.py
+            - "--model_name=meta-llama/Llama-3.1-70B-Instruct"
+            - "--dataset=/data/my-domain.jsonl"
+            - "--output_dir=/checkpoints/lora-adapter"
+            - "--lora_r=16"
+            - "--lora_alpha=32"
+            - "--lora_target_modules=q_proj,k_proj,v_proj,o_proj"
+            - "--per_device_train_batch_size=4"
+            - "--gradient_accumulation_steps=4"
+            - "--bf16=true"
+            - "--num_train_epochs=3"
+            - "--learning_rate=1e-4"
+          resources:
+            limits:
+              nvidia.com/gpu: "2"  # 70B LoRA fits on 2x A100
+```
+
+### Training Script (train_lora.py)
+
+```python
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from peft import LoraConfig, get_peft_model, TaskType
+from trl import SFTTrainer
+import torch
+
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.1-70B-Instruct",
+    torch_dtype=torch.bfloat16,
+    device_map="auto",
+    attn_implementation="flash_attention_2",
+)
+
+lora_config = LoraConfig(
+    task_type=TaskType.CAUSAL_LM,
+    r=16,
+    lora_alpha=32,
+    lora_dropout=0.05,
+    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
+)
+
+model = get_peft_model(model, lora_config)
+print(f"Trainable params: {model.print_trainable_parameters()}")
+# Output: trainable params: 83,886,080 || all params: 70,553,706,496 || 0.12%
+
+trainer = SFTTrainer(
+    model=model,
+    train_dataset=dataset,
+    args=TrainingArguments(
+        output_dir="/checkpoints/lora-adapter",
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=4,
+        num_train_epochs=3,
+        learning_rate=1e-4,
+        bf16=True,
+        save_steps=500,
+        logging_steps=10,
+    ),
+    max_seq_length=2048,
+)
+
+trainer.train()
+trainer.save_model()
+```
+
+## Cost Management
+
+### Spot Instances for Training
+
+```yaml
+# Karpenter NodePool for training
+apiVersion: karpenter.sh/v1beta1
+kind: NodePool
+metadata:
+  name: training-spot
+spec:
+  template:
+    spec:
+      requirements:
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot"]
+        - key: node.kubernetes.io/instance-type
+          operator: In
+          values: ["p4d.24xlarge", "p5.48xlarge"]
+  disruption:
+    consolidationPolicy: WhenEmpty
+```
+
+### Checkpointing for Preemption Recovery
+
+```python
+# Save checkpoint every N steps
+training_args = TrainingArguments(
+    save_steps=100,
+    save_total_limit=3,
+    resume_from_checkpoint=True,  # Auto-resume after spot interruption
+)
+```
+
+### Cost Comparison
+
+| Method | GPU Hours | Cost (spot) | Quality |
+|--------|-----------|-------------|---------|
+| Full fine-tune 8B | 24h × 4 GPU | $120 | Best |
+| LoRA 8B | 8h × 1 GPU | $8 | 95% of full |
+| QLoRA 70B | 16h × 2 GPU | $32 | 90% of full |
+| Full fine-tune 70B | 72h × 8 GPU | $1,440 | Best |
+| LoRA 70B | 24h × 2 GPU | $48 | 95% of full |
+
+**LoRA is 10-30x cheaper** than full fine-tuning with minimal quality loss.
+
+## Serving Fine-Tuned Models
+
+### vLLM with LoRA Adapter
+
+```yaml
+containers:
+  - name: vllm
+    args:
+      - "--model"
+      - "meta-llama/Llama-3.1-70B-Instruct"
+      - "--enable-lora"
+      - "--lora-modules"
+      - "my-domain=/checkpoints/lora-adapter"
+      - "--max-loras"
+      - "4"  # Serve multiple LoRA adapters simultaneously
+```
+
+Request specific adapter:
+```bash
+curl http://vllm:8000/v1/chat/completions \
+  -d '{"model": "my-domain", "messages": [...]}'
+```
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [AI Model Serving: vLLM vs Triton vs NIM](/blog/ai-model-serving-kubernetes-vllm-triton-nim-2026/)
+- [GPU Sharing: MIG vs MPS vs Time-Slicing](/blog/gpu-sharing-kubernetes-mig-mps-time-slicing-2026/)
+- [LLM Inference Cost Optimization](/blog/llm-inference-cost-optimization-kubernetes-2026/)
+- [NVIDIA Dynamo: Distributed LLM Inference](/blog/nvidia-dynamo-inference-framework-distributed-serving-2026/)

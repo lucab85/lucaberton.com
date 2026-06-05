@@ -1,0 +1,172 @@
+---
+title: "Ghost CMS: Headless Publishing Platform on Kubernetes"
+snippet: "Run Ghost as a headless CMS with native memberships, newsletters, and a blazing-fast Node.js backend — self-hosted on Kubernetes."
+description: "Run Ghost as a headless CMS with native memberships, newsletters, and a blazing-fast Node.js backend — self-hosted on Kubernetes."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Open Source"
+tags: ['Open Source', 'CMS', 'Kubernetes']
+image:
+  src: "/blog/thumbnails/ghost-cms-headless-self-hosted-kubernetes-2026.jpg"
+  alt: "Ghost CMS: Headless Publishing Platform on Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+## What Is Ghost?
+
+[Ghost](https://github.com/TryGhost/Ghost) is a professional publishing platform built on Node.js — 48K+ GitHub stars. It powers publications from NASA to Cloudflare.
+
+### Ghost vs WordPress
+
+| Feature | Ghost | WordPress |
+|---------|-------|-----------|
+| Performance | ⚡ Blazing fast (Node.js) | 🐌 Heavy (PHP + plugins) |
+| Security | Minimal attack surface | Plugin vulnerabilities |
+| Native newsletter | ✅ Built-in | ❌ Plugin required |
+| Memberships/paywall | ✅ Built-in | ❌ Plugin required |
+| SEO | ✅ Automatic | ❌ Plugin (Yoast) |
+| Headless API | ✅ Content API + Admin API | ⚠️ REST/GraphQL plugins |
+| Self-hosted | ✅ | ✅ |
+| Maintenance | Low (auto-updates) | High (plugins break) |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────┐
+│              Ghost Platform             │
+│                                         │
+│  ┌───────────────┐  ┌───────────────┐  │
+│  │  Admin Panel  │  │  Content API  │  │
+│  │  (write/edit) │  │  (headless)   │  │
+│  └───────┬───────┘  └───────┬───────┘  │
+│          │                   │          │
+│          └─────────┬─────────┘          │
+│                    │                    │
+│           ┌────────▼────────┐           │
+│           │   Ghost Core    │           │
+│           │   (Node.js)     │           │
+│           └────────┬────────┘           │
+│                    │                    │
+│           ┌────────▼────────┐           │
+│           │     MySQL       │           │
+│           └─────────────────┘           │
+│                                         │
+│  Built-in: Newsletter, Members,        │
+│  Payments (Stripe), Themes, SEO        │
+└─────────────────────────────────────────┘
+```
+
+## Kubernetes Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ghost
+  namespace: cms
+spec:
+  replicas: 1  # Ghost doesn't support multi-replica without shared storage
+  template:
+    spec:
+      containers:
+        - name: ghost
+          image: ghost:5-alpine
+          ports:
+            - containerPort: 2368
+          env:
+            - name: url
+              value: "https://blog.yourdomain.com"
+            - name: database__client
+              value: "mysql"
+            - name: database__connection__host
+              value: "mysql.cms.svc"
+            - name: database__connection__user
+              value: "ghost"
+            - name: database__connection__password
+              valueFrom:
+                secretKeyRef:
+                  name: ghost-secrets
+                  key: db-password
+            - name: database__connection__database
+              value: "ghost"
+            - name: mail__transport
+              value: "SMTP"
+            - name: mail__options__host
+              value: "smtp.mailgun.org"
+          volumeMounts:
+            - name: content
+              mountPath: /var/lib/ghost/content
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "200m"
+            limits:
+              memory: "1Gi"
+      volumes:
+        - name: content
+          persistentVolumeClaim:
+            claimName: ghost-content
+```
+
+## Headless Mode (Content API)
+
+Use Ghost as a headless CMS with any frontend (Astro, Next.js, Nuxt):
+
+```javascript
+// Fetch posts from Ghost Content API
+const response = await fetch(
+  'https://blog.yourdomain.com/ghost/api/content/posts/?key=YOUR_CONTENT_API_KEY&include=tags,authors&limit=10'
+);
+const { posts } = await response.json();
+
+// Each post has HTML content, meta, images
+posts.forEach(post => {
+  console.log(post.title, post.html, post.feature_image);
+});
+```
+
+### Astro Integration
+
+```javascript
+// src/lib/ghost.ts
+import GhostContentAPI from '@tryghost/content-api';
+
+const api = new GhostContentAPI({
+  url: 'https://blog.yourdomain.com',
+  key: import.meta.env.GHOST_CONTENT_API_KEY,
+  version: 'v5.0',
+});
+
+export async function getPosts() {
+  return await api.posts.browse({limit: 'all', include: ['tags', 'authors']});
+}
+```
+
+## Built-In Monetization
+
+Ghost includes native membership + Stripe payments:
+
+- **Free tier** — email newsletter subscribers
+- **Paid tier** — gated content, premium posts
+- **Tiered pricing** — multiple subscription levels
+- **No platform fees** — just Stripe's 2.9% + $0.30
+
+## Use Cases
+
+| Scenario | Why Ghost |
+|----------|-----------|
+| Tech blog | Fast, clean, markdown editor |
+| Newsletter business | Built-in email + members |
+| Documentation site | Content API + custom frontend |
+| Paid content/courses | Native paywalls |
+| Company blog | Team permissions, scheduling |
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Listmonk: Open-Source Email Newsletter](/blog/listmonk-open-source-email-newsletter-2026/)
+- [Plausible: Privacy-First Analytics](/blog/plausible-analytics-privacy-first-self-hosted-2026/)
+- [Coolify: Deploy Anything Self-Hosted](/blog/coolify-open-source-heroku-self-hosted-paas-2026/)

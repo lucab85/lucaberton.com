@@ -29,10 +29,16 @@ const ROOT = path.join(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT, "public");
 const BLOG_DIR = path.join(ROOT, "src", "content", "blog");
 
+// `--source-only` skips checks that require a built ./public (used by the git
+// pre-commit hook so commits stay fast and deterministic). Full HTML validation
+// runs via `pnpm validate:seo` after a build (and in CI).
+const SOURCE_ONLY = process.argv.includes("--source-only");
+
 const MAX_TITLE = 60;
 const MIN_TITLE = 30;
 const MAX_DESC = 160;
 const MIN_DESC = 120;
+const MIN_WORDS = 300; // thin-content threshold for indexable listing pages
 
 // Orphan pages that must now have incoming internal links.
 const ORPHAN_SLUGS = [
@@ -101,6 +107,16 @@ function decodeEntities(s) {
 function getAttr(tag, name) {
   const m = tag.match(new RegExp("\\b" + name + "=(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))", "i"));
   return m ? (m[1] ?? m[2] ?? m[3] ?? null) : null;
+}
+
+// Count visible words by stripping scripts, styles, tags, and entities.
+function visibleWordCount(html) {
+  const text = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&[a-z#0-9]+;/gi, " ");
+  return text.split(/\s+/).filter(Boolean).length;
 }
 
 // Return the first <tagName ...> whose text matches markerRe.
@@ -293,10 +309,26 @@ function checkBuiltHtml() {
   record("PASS", "indexable pages scanned", `${indexableCount} of ${pages.length} built pages`);
 }
 
+// Category listing pages must clear the thin-content threshold (>= 300 words).
+function checkCategoryWordCount() {
+  const dir = path.join(PUBLIC_DIR, "blog", "categories");
+  const pages = walk(dir, (p) => path.basename(p) === "index.html");
+  if (!pages.length) return; // no build or no category pages
+  let thin = 0;
+  for (const fp of pages) {
+    const rel = path.relative(PUBLIC_DIR, fp).replace(/\/index\.html$/, "");
+    const html = read(fp);
+    if (!parsePage(html).indexable) continue;
+    const words = visibleWordCount(html);
+    if (words < MIN_WORDS) { thin++; record("FAIL", "category words<300", `${rel} (${words})`); }
+  }
+  record(thin ? "FAIL" : "PASS", "category pages >= 300 words", `${thin} thin category page(s)`);
+}
+
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
-console.log("\nSEO fix validation — lucaberton.com\n" + "=".repeat(38));
+console.log("\nSEO fix validation — lucaberton.com" + (SOURCE_ONLY ? " (source-only)" : "") + "\n" + "=".repeat(38));
 
 checkRobotsSlides();
 checkSlidesHeader();
@@ -306,7 +338,12 @@ checkMasterclassRename();
 checkNoAstroEmbed();
 checkOrphanIncomingLinks();
 checkRedirects();
-checkBuiltHtml();
+if (!SOURCE_ONLY) {
+  checkBuiltHtml();
+  checkCategoryWordCount();
+} else {
+  record("PASS", "built-HTML checks", "skipped (--source-only); run `pnpm validate:seo` after build");
+}
 
 const fails = results.filter((r) => r.level === "FAIL");
 const warns = results.filter((r) => r.level === "WARN");

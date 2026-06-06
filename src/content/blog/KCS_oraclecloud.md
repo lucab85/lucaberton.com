@@ -1,5 +1,5 @@
 ---
-draft: false
+draft: true
 title: "How to configure Postfix to Send Email in Oracle Cloud?"
 snippet: "Learn how to configure Postfix to send emails using Oracle Cloud Infrastructure’s Email Delivery service with step-by-step setup for SMTP authentication."
 publishDate: "2021-11-09"

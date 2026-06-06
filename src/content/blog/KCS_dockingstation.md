@@ -1,5 +1,5 @@
 ---
-draft: false
+draft: true
 title: "Why monitor flicks on my ThinkPad Thunderbolt 3 Dock (40AC) Gen1?"
 snippet: "Experiencing screen flickering when using a ThinkPad Thunderbolt 3 Dock with macOS? Learn why it happens and how to work around the issue using supported alternatives."
 publishDate: "2021-09-06"

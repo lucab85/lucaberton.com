@@ -1,5 +1,5 @@
 ---
-draft: false
+draft: true
 title: "Fix Ansible and Python fork on macOS High Sierra+"
 snippet: "Running into Python or Ansible crashes on macOS High Sierra+? This guide explains why fork-related errors happen—and how to fix them for good with a."
 publishDate: "2021-08-19"

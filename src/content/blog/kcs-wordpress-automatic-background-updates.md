@@ -1,5 +1,5 @@
 ---
-draft: false
+draft: true
 title: "How to enable WordPress Automatic background updates"
 snippet: "Learn how to enable WordPress automatic updates for core, plugins, themes, and translations using a must-use plugin for better security and hands-off."
 publishDate: "2021-05-29"

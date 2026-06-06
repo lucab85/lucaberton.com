@@ -1,0 +1,333 @@
+#!/usr/bin/env node
+/**
+ * SEO Fix Validation Suite
+ * ------------------------
+ * Verifies every SEO remediation applied to lucaberton.com:
+ *
+ *   1. Title length      <= 60 chars on indexable pages          (built HTML)
+ *   2. Meta description   <= 160 chars on indexable pages         (built HTML)
+ *   3. Title length      >= 30 chars (warn)                       (built HTML)
+ *   4. Meta description  >= 120 chars (warn)                      (built HTML)
+ *   5. og:url === canonical on indexable pages                   (built HTML)
+ *   6. Video pages (VideoObject JSON-LD) expose a real <iframe>  (built HTML)
+ *   7. robots.txt does NOT Disallow /slides/                     (source)
+ *   8. /slides/* keeps the X-Robots-Tag: noindex header          (source)
+ *   9. /blog/search facet links carry rel="nofollow"             (source)
+ *  10. No outgoing links to deleted/renamed URLs                 (source)
+ *  11. Renamed masterclass slug present, old slug absent         (source)
+ *  12. No astro-embed <YouTube> facade imports remain            (source)
+ *  13. Orphan pages each receive >= 1 incoming internal link     (source)
+ *  14. Key 301 redirects exist in static/_redirects              (source)
+ *
+ * Source-only checks always run. HTML checks run when ./public exists
+ * (run `pnpm build` first). Exits 1 if any FAIL-level check fails.
+ */
+const fs = require("fs");
+const path = require("path");
+
+const ROOT = path.join(__dirname, "..");
+const PUBLIC_DIR = path.join(ROOT, "public");
+const BLOG_DIR = path.join(ROOT, "src", "content", "blog");
+
+const MAX_TITLE = 60;
+const MIN_TITLE = 30;
+const MAX_DESC = 160;
+const MIN_DESC = 120;
+
+// Orphan pages that must now have incoming internal links.
+const ORPHAN_SLUGS = [
+  "tnw-conference-2025",
+  "new-delhi-international-book-fair-2024",
+  "london-book-fair-2024",
+  "de-nederlandse-kubernetes-podcast",
+];
+
+// Outgoing-link targets that must no longer appear in source content/components.
+const FORBIDDEN_LINK_PATTERNS = [
+  "/booklist/",
+  "claude-code-masterclass-udemy-free-course-2026",
+  "claude-code-masterclass-free-udemy-course-ai-development",
+  "/services/kubernetes-consulting/",
+  "/services/platform-engineering/",
+  "/services/ai-integration-green-code/",
+  "/services/automation-strategy-consulting/",
+  "/services/cloud-infrastructure-design/",
+  "/services/kubernetes-containerization-workshops/",
+  "/services/performance-optimization-custom-solutions/",
+  "/blog/kcs_",
+];
+
+// Required 301 redirect source patterns in static/_redirects.
+const REQUIRED_REDIRECTS = [
+  "/booklist",
+  "/tags/*",
+  "/blog/claude-code-masterclass-udemy-free-course-2026",
+  "/services/kubernetes-consulting",
+  "/services/platform-engineering",
+];
+
+const results = []; // { level: 'PASS'|'FAIL'|'WARN', check, detail }
+const record = (level, check, detail = "") => results.push({ level, check, detail });
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+const read = (p) => fs.readFileSync(p, "utf8");
+const exists = (p) => fs.existsSync(p);
+
+function walk(dir, predicate, out = []) {
+  if (!exists(dir)) return out;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const p = path.join(dir, entry.name);
+    if (entry.isDirectory()) walk(p, predicate, out);
+    else if (predicate(p)) out.push(p);
+  }
+  return out;
+}
+
+function decodeEntities(s) {
+  return s
+    .replace(/&amp;|&#38;|&#x26;/gi, "&")
+    .replace(/&lt;|&#60;|&#x3c;/gi, "<")
+    .replace(/&gt;|&#62;|&#x3e;/gi, ">")
+    .replace(/&quot;|&#34;|&#x22;/gi, '"')
+    .replace(/&#39;|&#x27;|&apos;/gi, "'")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
+    .trim();
+}
+
+// Extract an attribute value, tolerating quoted or unquoted (minified) forms.
+function getAttr(tag, name) {
+  const m = tag.match(new RegExp("\\b" + name + "=(?:\"([^\"]*)\"|'([^']*)'|([^\\s>]+))", "i"));
+  return m ? (m[1] ?? m[2] ?? m[3] ?? null) : null;
+}
+
+// Return the first <tagName ...> whose text matches markerRe.
+function findTag(html, tagName, markerRe) {
+  const re = new RegExp("<" + tagName + "\\b[^>]*>", "gi");
+  let m;
+  while ((m = re.exec(html))) if (markerRe.test(m[0])) return m[0];
+  return null;
+}
+
+function parsePage(html) {
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = titleMatch ? decodeEntities(titleMatch[1]) : null;
+
+  const descTag = findTag(html, "meta", /\bname=["']?description\b/i);
+  const description = descTag ? decodeEntities(getAttr(descTag, "content") || "") : null;
+
+  const robotsTag = findTag(html, "meta", /\bname=["']?robots\b/i);
+  const robots = robotsTag ? (getAttr(robotsTag, "content") || "") : "";
+  const indexable = !/noindex/i.test(robots);
+
+  const canonTag = findTag(html, "link", /\brel=["']?canonical\b/i);
+  const canonical = canonTag ? getAttr(canonTag, "href") : null;
+
+  const ogTag = findTag(html, "meta", /\bproperty=["']?og:url\b/i);
+  const ogUrl = ogTag ? getAttr(ogTag, "content") : null;
+
+  const hasVideoObject = /"@type":\s*"VideoObject"/.test(html);
+  const hasRealEmbed = /<iframe\b[^>]*\bsrc=["']?https:\/\/www\.youtube(?:-nocookie)?\.com\/embed\/[A-Za-z0-9_-]{11}/i.test(html);
+
+  return { title, description, indexable, canonical, ogUrl, hasVideoObject, hasRealEmbed };
+}
+
+// ---------------------------------------------------------------------------
+// SOURCE checks (no build required)
+// ---------------------------------------------------------------------------
+function sourceScanFiles() {
+  return [
+    ...walk(BLOG_DIR, (p) => p.endsWith(".mdx")),
+    ...walk(path.join(ROOT, "src", "pages"), (p) => p.endsWith(".astro")),
+    ...walk(path.join(ROOT, "src", "components"), (p) => p.endsWith(".astro")),
+    ...walk(path.join(ROOT, "src", "layouts"), (p) => p.endsWith(".astro")),
+  ];
+}
+
+function checkRobotsSlides() {
+  const robots = read(path.join(ROOT, "static", "robots.txt"));
+  if (/^\s*Disallow:\s*\/slides\/\s*$/im.test(robots)) {
+    record("FAIL", "robots.txt /slides/", "still contains 'Disallow: /slides/' (blocks crawlers from seeing noindex header)");
+  } else {
+    record("PASS", "robots.txt /slides/", "no redundant Disallow: /slides/");
+  }
+}
+
+function checkSlidesHeader() {
+  const headers = read(path.join(ROOT, "static", "_headers"));
+  const ok = /\/slides\/\*\s*\n\s*X-Robots-Tag:\s*noindex/i.test(headers);
+  record(ok ? "PASS" : "FAIL", "_headers /slides/ noindex", ok ? "X-Robots-Tag: noindex present" : "missing noindex header for /slides/*");
+}
+
+function checkSearchNofollow() {
+  const files = [
+    "src/pages/blog/index.astro",
+    "src/pages/blog/[page].astro",
+    "src/layouts/BlogLayout.astro",
+  ];
+  for (const rel of files) {
+    const fp = path.join(ROOT, rel);
+    if (!exists(fp)) continue;
+    const src = read(fp);
+    // Every anchor that targets /blog/search must declare rel="nofollow".
+    const anchors = src.match(/<a\b[^>]*\/blog\/search[^>]*>/gi) || [];
+    const missing = anchors.filter((a) => !/rel=["'][^"']*nofollow/i.test(a));
+    if (anchors.length === 0) {
+      record("WARN", `nofollow ${rel}`, "no /blog/search anchors found");
+    } else if (missing.length) {
+      record("FAIL", `nofollow ${rel}`, `${missing.length}/${anchors.length} /blog/search link(s) missing rel=nofollow`);
+    } else {
+      record("PASS", `nofollow ${rel}`, `${anchors.length} /blog/search link(s) all rel=nofollow`);
+    }
+  }
+}
+
+function checkForbiddenLinks() {
+  const files = sourceScanFiles();
+  let violations = 0;
+  for (const fp of files) {
+    const src = read(fp);
+    for (const pat of FORBIDDEN_LINK_PATTERNS) {
+      // Only flag when it appears as a link target (href= or markdown link).
+      const re = new RegExp("(href=[\"'`{]?|\\]\\()" + pat.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+      if (re.test(src)) {
+        violations++;
+        record("FAIL", "forbidden link", `${path.relative(ROOT, fp)} links to ${pat}`);
+      }
+    }
+  }
+  if (!violations) record("PASS", "forbidden links", "no links to deleted/renamed URLs in source");
+}
+
+function checkMasterclassRename() {
+  const newSlug = path.join(BLOG_DIR, "claude-code-masterclass-udemy-course-2026.mdx");
+  const oldSlug = path.join(BLOG_DIR, "claude-code-masterclass-udemy-free-course-2026.mdx");
+  record(exists(newSlug) ? "PASS" : "FAIL", "masterclass slug", exists(newSlug) ? "renamed post present" : "renamed post missing");
+  record(!exists(oldSlug) ? "PASS" : "FAIL", "masterclass old slug", !exists(oldSlug) ? "old slug removed" : "old slug still present");
+}
+
+function checkNoAstroEmbed() {
+  const offenders = walk(BLOG_DIR, (p) => p.endsWith(".mdx")).filter((p) =>
+    /from\s+["']astro-embed["']/.test(read(p))
+  );
+  if (offenders.length) {
+    record("FAIL", "video import swap", `${offenders.length} post(s) still import astro-embed: ${offenders.map((f) => path.basename(f)).join(", ")}`);
+  } else {
+    record("PASS", "video import swap", "no astro-embed <YouTube> facade imports remain");
+  }
+}
+
+function checkOrphanIncomingLinks() {
+  const files = sourceScanFiles();
+  for (const slug of ORPHAN_SLUGS) {
+    const target = `/blog/${slug}/`;
+    const linkers = files.filter((fp) => {
+      if (path.basename(fp) === `${slug}.mdx`) return false; // ignore self
+      return read(fp).includes(target);
+    });
+    if (linkers.length) {
+      record("PASS", `orphan ${slug}`, `${linkers.length} incoming link(s)`);
+    } else {
+      record("FAIL", `orphan ${slug}`, "no incoming internal links found");
+    }
+  }
+}
+
+function checkRedirects() {
+  const redirects = read(path.join(ROOT, "static", "_redirects"));
+  for (const pat of REQUIRED_REDIRECTS) {
+    const ok = redirects.split("\n").some((line) => line.trim().startsWith(pat) && /\b301\b/.test(line));
+    record(ok ? "PASS" : "FAIL", "redirect", ok ? `301 for ${pat}` : `missing 301 for ${pat}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BUILT HTML checks (require ./public)
+// ---------------------------------------------------------------------------
+function checkBuiltHtml() {
+  const pages = walk(PUBLIC_DIR, (p) => path.basename(p) === "index.html");
+  if (!pages.length) {
+    record("WARN", "built HTML", "public/ has no pages — run `pnpm build` to enable HTML checks");
+    return;
+  }
+
+  let titleLong = 0, titleShort = 0, descLong = 0, descShort = 0;
+  let ogMismatch = 0, videoNoEmbed = 0, indexableCount = 0;
+
+  for (const fp of pages) {
+    const rel = path.relative(PUBLIC_DIR, fp).replace(/\/index\.html$/, "") || "/";
+    const html = read(fp);
+    const p = parsePage(html);
+
+    // Video: any page asserting a VideoObject must expose a real iframe.
+    if (p.hasVideoObject && !p.hasRealEmbed) {
+      videoNoEmbed++;
+      record("FAIL", "video watch page", `${rel}: VideoObject without a real <iframe> embed`);
+    }
+
+    if (!p.indexable) continue; // length/canonical rules apply to indexable pages only
+    indexableCount++;
+
+    if (p.title != null) {
+      if (p.title.length > MAX_TITLE) { titleLong++; record("FAIL", "title>60", `${rel} (${p.title.length})`); }
+      else if (p.title.length < MIN_TITLE) { titleShort++; record("WARN", "title<30", `${rel} (${p.title.length})`); }
+    }
+    if (p.description != null && p.description.length > 0) {
+      if (p.description.length > MAX_DESC) { descLong++; record("FAIL", "meta>160", `${rel} (${p.description.length})`); }
+      else if (p.description.length < MIN_DESC) { descShort++; record("WARN", "meta<120", `${rel} (${p.description.length})`); }
+    }
+    if (p.canonical && p.ogUrl && p.canonical !== p.ogUrl) {
+      ogMismatch++;
+      record("FAIL", "og:url≠canonical", `${rel}: ${p.ogUrl} vs ${p.canonical}`);
+    }
+  }
+
+  record(titleLong ? "FAIL" : "PASS", "titles <= 60", `${titleLong} indexable page(s) over 60 chars`);
+  record(descLong ? "FAIL" : "PASS", "meta <= 160", `${descLong} indexable page(s) over 160 chars`);
+  record(ogMismatch ? "FAIL" : "PASS", "og:url = canonical", `${ogMismatch} mismatch(es)`);
+  record(videoNoEmbed ? "FAIL" : "PASS", "video watch pages", `${videoNoEmbed} VideoObject page(s) without a real embed`);
+  if (titleShort) record("WARN", "titles >= 30", `${titleShort} indexable page(s) under 30 chars`);
+  if (descShort) record("WARN", "meta >= 120", `${descShort} indexable page(s) under 120 chars`);
+  record("PASS", "indexable pages scanned", `${indexableCount} of ${pages.length} built pages`);
+}
+
+// ---------------------------------------------------------------------------
+// Run
+// ---------------------------------------------------------------------------
+console.log("\nSEO fix validation — lucaberton.com\n" + "=".repeat(38));
+
+checkRobotsSlides();
+checkSlidesHeader();
+checkSearchNofollow();
+checkForbiddenLinks();
+checkMasterclassRename();
+checkNoAstroEmbed();
+checkOrphanIncomingLinks();
+checkRedirects();
+checkBuiltHtml();
+
+const fails = results.filter((r) => r.level === "FAIL");
+const warns = results.filter((r) => r.level === "WARN");
+const passes = results.filter((r) => r.level === "PASS");
+
+const icon = { PASS: "\u2713", FAIL: "\u2717", WARN: "!" };
+for (const r of results) {
+  if (r.level === "PASS") continue; // keep noise down; show only issues inline
+  console.log(`  ${icon[r.level]} [${r.level}] ${r.check}${r.detail ? " — " + r.detail : ""}`);
+}
+
+console.log("\nGroup results:");
+for (const r of results.filter((r) => r.level === "PASS")) {
+  console.log(`  ${icon.PASS} ${r.check}${r.detail ? " — " + r.detail : ""}`);
+}
+
+console.log("\n" + "=".repeat(38));
+console.log(`PASS ${passes.length}   WARN ${warns.length}   FAIL ${fails.length}`);
+
+if (fails.length) {
+  console.log("\nValidation FAILED — see [FAIL] items above.\n");
+  process.exit(1);
+}
+console.log("\nAll SEO fixes validated successfully.\n");

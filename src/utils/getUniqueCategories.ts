@@ -11,7 +11,7 @@ interface Category {
 }
 
 const getUniqueCategories = async () => {
-  const posts = await getCollection("blog");
+  const posts = await getCollection("blog", ({ data }) => !data.draft);
 
   const categories: Category[] = posts
     .flatMap(post => {

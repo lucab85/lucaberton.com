@@ -1,8 +1,8 @@
 import { getCollection } from 'astro:content';
 
 export async function GET() {
-  // Get all blog posts
-  const allBlogPosts = await getCollection('blog');
+  // Get all blog posts (exclude drafts so de-indexed posts are not in the video sitemap)
+  const allBlogPosts = await getCollection('blog', ({ data }) => !data.draft);
   
   // Filter posts that have video metadata OR contain YouTube components
   const videoPosts = allBlogPosts.filter(post => {

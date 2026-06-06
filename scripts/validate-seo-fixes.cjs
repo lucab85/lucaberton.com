@@ -70,6 +70,8 @@ const REQUIRED_REDIRECTS = [
   "/blog/claude-code-masterclass-udemy-free-course-2026",
   "/services/kubernetes-consulting",
   "/services/platform-engineering",
+  "/blog/categories/kcs",
+  "/blog/categories/wordpress",
 ];
 
 const results = []; // { level: 'PASS'|'FAIL'|'WARN', check, detail }
@@ -259,6 +261,31 @@ function checkRedirects() {
   }
 }
 
+// Source guard: any code path that LISTS blog posts (and links to them) must
+// exclude drafts, or it will link to de-indexed posts that no longer build.
+function checkDraftFilters() {
+  const mustFilter = [
+    "src/utils/getUniqueCategories.ts",
+    "src/pages/blog/categories/[slug]/index.astro",
+    "src/pages/blog/[slug].astro",
+    "src/pages/video-sitemap.xml.ts",
+    "src/pages/rss.xml.ts",
+  ];
+  let missing = 0;
+  for (const rel of mustFilter) {
+    const fp = path.join(ROOT, rel);
+    if (!exists(fp)) continue;
+    const src = read(fp);
+    const hasFilteredGet = /getCollection\(\s*["']blog["']\s*,[\s\S]*?draft/.test(src);
+    const hasArrayFilter = /\.filter\([\s\S]*?draft/.test(src);
+    if (!hasFilteredGet && !hasArrayFilter) {
+      missing++;
+      record("FAIL", "draft filter missing", `${rel} lists blog posts without excluding drafts`);
+    }
+  }
+  record(missing ? "FAIL" : "PASS", "draft filters on listings", `${missing} listing file(s) missing draft filter`);
+}
+
 // ---------------------------------------------------------------------------
 // BUILT HTML checks (require ./public)
 // ---------------------------------------------------------------------------
@@ -325,6 +352,40 @@ function checkCategoryWordCount() {
   record(thin ? "FAIL" : "PASS", "category pages >= 300 words", `${thin} thin category page(s)`);
 }
 
+// Built-HTML guard: category listing pages must not link to blog posts that
+// no longer exist in the build (e.g. drafts), which would be broken links.
+// NOTE: comparison is case-insensitive. Slugs come from lowercase source
+// filenames, but a case-insensitive local FS (macOS) can preserve stale
+// mixed-case build dirs; lowercasing both sides avoids that false positive
+// while still catching genuinely-missing slugs.
+function checkListingLinksResolve() {
+  const blogDir = path.join(PUBLIC_DIR, "blog");
+  if (!exists(blogDir)) return;
+  const valid = new Set();
+  for (const entry of fs.readdirSync(blogDir, { withFileTypes: true })) {
+    if (entry.isDirectory() && exists(path.join(blogDir, entry.name, "index.html"))) {
+      valid.add(entry.name.toLowerCase());
+    }
+  }
+  const ignore = new Set(["categories", "tags", "search"]);
+  const pages = walk(path.join(blogDir, "categories"), (p) => path.basename(p) === "index.html");
+  const hrefRe = /href=(?:"|')?\/blog\/([A-Za-z0-9._-]+)\/(?:"|'|\s|>)/g;
+  let broken = 0;
+  for (const fp of pages) {
+    const rel = path.relative(PUBLIC_DIR, fp).replace(/\/index\.html$/, "");
+    const html = read(fp);
+    const seen = new Set();
+    let m;
+    while ((m = hrefRe.exec(html))) {
+      const seg = m[1].toLowerCase();
+      if (ignore.has(seg) || /^\d+$/.test(seg) || seen.has(seg)) continue;
+      seen.add(seg);
+      if (!valid.has(seg)) { broken++; record("FAIL", "listing links to missing post", `${rel} -> /blog/${m[1]}/`); }
+    }
+  }
+  record(broken ? "FAIL" : "PASS", "category listing links resolve", `${broken} link(s) to missing/draft posts`);
+}
+
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
@@ -338,9 +399,11 @@ checkMasterclassRename();
 checkNoAstroEmbed();
 checkOrphanIncomingLinks();
 checkRedirects();
+checkDraftFilters();
 if (!SOURCE_ONLY) {
   checkBuiltHtml();
   checkCategoryWordCount();
+  checkListingLinksResolve();
 } else {
   record("PASS", "built-HTML checks", "skipped (--source-only); run `pnpm validate:seo` after build");
 }

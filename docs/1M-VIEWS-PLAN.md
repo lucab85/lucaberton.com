@@ -1,187 +1,141 @@
-# 🎯 1 Million Views/Month — 90-Day Execution Plan
+# Road to 1M Views/Month — Data-Accurate Growth Plan
 
-## Current Baseline (GSC Data)
-- **Pages indexed**: ~1,383 blog posts
-- **Monthly impressions**: ~633K (extrapolated from available data)
-- **Monthly clicks**: ~2K
-- **Average CTR**: 0.32%
-- **Top traffic driver**: OpenClaw configuration guides (917 clicks, 248K impressions)
-- **Average position**: 5-7 for top pages
+> **Last updated:** 2026-06-07. This plan replaces an earlier version that was based on
+> inaccurate numbers (it claimed 633K impressions/month at 0.32% CTR). The figures below are
+> taken directly from the GSC exports in `/reports/`. 1M views/**month** is treated here as a
+> **long-term (18–36 month) north star**, with realistic interim milestones.
 
-## The Gap Analysis
-| Metric | Current | Target | Multiplier |
-|--------|---------|--------|-----------|
-| Monthly views | ~2,000 | 1,000,000 | 500x |
-| Indexed pages | 1,383 | 5,000+ | 3.6x |
-| Avg CTR | 0.32% | 3-5% | 10-15x |
-| Impressions | 633K | 20-30M | 30-50x |
+## Real Baseline (GSC, 11 Feb – 9 May 2026)
 
-## The Formula
-**1M views = High-volume keywords × Top-3 rankings × High CTR**
+Source: `reports/lucaberton.com_SearchPerformanceOverview_All_5_11_2026.csv` and
+`reports/lucaberton.com_KeywordReport_5_11_2026.csv`.
 
----
+| Metric | Actual value |
+|--------|--------------|
+| Impressions | **3,210 total** over 88 days (~1,400/month) |
+| Clicks | **150 total** (~64/month) |
+| Average CTR | **4.67%** (healthy — this is **not** the problem) |
+| Indexed/published posts | **1,448** (0 drafts) |
+| Impressions per page | **~1 per page per month** |
+| Position profile | 92 queries pos 1–3 (137 impr), 316 queries pos 4–10 (1,856 impr) |
 
-## Phase 1: Quick Wins (Days 1-30)
+**CTR is fine. The bottleneck is impressions — almost nobody sees these pages in search.**
 
-### 1.1 CTR Optimization (0.32% → 2%) = 10x clicks immediately
-Your pages already get 633K impressions but only 0.32% CTR. This is the fastest lever.
+## The #1 Insight: 95% of traffic comes from 5.6% of the content
 
-**Actions:**
-- [ ] Rewrite ALL titles to include power words + numbers ("2026 Guide", "Step-by-Step", "Fix in 5 Minutes")
-- [ ] Add FAQ schema to top 50 pages (rich results = higher CTR)
-- [ ] Add HowTo schema to all tutorial posts
-- [ ] A/B test meta descriptions with urgency/specificity
+| Theme | Posts | Queries | Impressions | Clicks |
+|-------|-------|---------|-------------|--------|
+| **OpenClaw** | 81 | 341 | 1,889 | **133 (95%)** |
+| Everything else | ~1,367 | 68 | ~105 | ~8 (5%) |
 
-**Expected impact**: 633K × 2% CTR = **12,660 clicks/month** (6x current)
+Despite **930 Kubernetes, 487 Docker, 383 GPU, 366 Ansible** posts, those competitive topics
+generate ≈0 search traffic. OpenClaw wins because it is a **low-competition, emerging-tool
+niche** where specific, accurate, first-mover error/how-to content ranks (positions 5–7).
 
-### 1.2 Capture Zero-Click Queries
-You have massive impressions with 0% CTR on many queries. These need dedicated landing pages optimized exactly for that search intent.
+**That is the repeatable playbook. The mistake to avoid is publishing more competitive-topic
+content that cannot rank at the current domain authority.**
 
-**Top opportunities (0% CTR, high impressions):**
-- `openclaw gateway.controlui.allowedorigins configuration` — 4,347 imp
-- `openclaw "non-loopback control ui"` — 2,273 imp
-- `openclaw "dangerouslyallowhostheaderoriginfallback"` — 1,098 imp
-- `nvidia nim container vllm` — 7,099 imp (position 3.93!)
+## What changed the strategy
 
-**Actions:**
-- [ ] Create exact-match pages for top 20 zero-click queries
-- [ ] Optimize existing pages to directly answer the query in first paragraph (featured snippet capture)
+The previous plan prescribed "publish 3,000 more programmatic pages, 20/day." The site already
+ran that experiment — **871 posts were published in April 2026 alone** (215 Feb, 114 Mar,
+91 May, 93 Jun) — and search visibility stayed flat at ~1,400 impressions/month. Mass
+publishing on competitive topics without authority does not work and risks Google's
+Helpful-Content quality discount. **This plan does the opposite: focus, authority, quality.**
 
-### 1.3 Internal Linking Overhaul
-- [ ] Add contextual links from every OpenClaw post to related posts (hub & spoke)
-- [ ] Create topic cluster pillar pages: `/openclaw/`, `/nvidia-nim/`, `/kubernetes/`, `/ansible/`
-- [ ] Ensure every post links to at least 3 other posts
+## Gap to 1M Views/Month (honest math)
 
----
+At a healthy ~5% CTR, 1M clicks/month ≈ **20M impressions/month** — roughly **14,000× today**.
+That is a multi-year outcome, reachable only by (a) winning many OpenClaw-style niches,
+(b) building domain authority so existing pages rank, and (c) adding non-Google traffic
+(YouTube, email, social). Interim milestones below are the real plan; 1M/month is the horizon.
 
-## Phase 2: Scale Content Production (Days 30-60)
-
-### 2.1 Programmatic SEO — 3,000 Pages
-Target high-volume "vs" and "how to" queries programmatically:
-
-**Category A: Tool Comparisons (2,000 pages)**
-- Every DevOps/Cloud tool combination: `X vs Y 2026`
-- Templates: Feature table, pricing, use cases, verdict
-- Target keywords: 500-5,000 monthly searches each
-
-**Category B: Error/Fix Pages (500 pages)**
-- Stack every common error message as a page
-- Format: Error → Cause → Fix → Prevention
-- These pages have 10-30% CTR from frustrated developers
-
-**Category C: "How to" Tutorials (500 pages)**
-- `how to install X on Y`
-- `how to configure X for Y`
-- `how to migrate from X to Y`
-
-### 2.2 High-Volume Pillar Content
-Create definitive 5,000+ word guides targeting:
-
-| Keyword | Monthly Volume | Difficulty |
-|---------|---------------|-----------|
-| ansible tutorial | 40,000 | Medium |
-| kubernetes tutorial | 33,000 | High |
-| docker compose tutorial | 22,000 | Medium |
-| terraform tutorial | 18,000 | Medium |
-| github actions tutorial | 14,000 | Low |
-| helm tutorial | 8,000 | Low |
-| argocd tutorial | 6,000 | Low |
-
-**7 pillar pages × 5,000 words each = cornerstone content**
-
-### 2.3 YouTube Synergy
-- [ ] Create companion blog post for every YouTube video (793+ tutorials on channel)
-- [ ] Embed videos in existing posts (increases dwell time)
-- [ ] Add "Read the full guide →" in video descriptions
-- [ ] YouTube Shorts → blog traffic pipeline
+| Horizon | Realistic monthly views | How |
+|--------|--------------------------|-----|
+| Month 3 | 500 – 1,500 | Harvest OpenClaw quick wins + stop dilution |
+| Month 6 | 3,000 – 10,000 | Authority engine starts; 2–3 new niches landing |
+| Month 12 | 30,000 – 100,000 | Authority compounds; niche portfolio + distribution |
+| Month 18–36 | 250,000 → 1,000,000 | Portfolio of won niches + backlinks + YouTube/email flywheel |
 
 ---
 
-## Phase 3: Distribution & Authority (Days 60-90)
+## Phase 1 — Stop dilution & harvest quick wins (Weeks 1–4)
 
-### 3.1 Backlink Acquisition
-- [ ] Guest posts on: DevOps.com, The New Stack, InfoQ, DZone
-- [ ] Conference talk slides → SlideShare/Speaker Deck with links
-- [ ] HARO/Connectively responses for AI/DevOps topics
-- [ ] Broken link building on competitor pages
+The fastest clicks are already-ranking OpenClaw queries sitting at position 5–8.
 
-### 3.2 Social Traffic Engine
-- [ ] LinkedIn: 5 posts/week → drive to pillar content
-- [ ] Reddit: Weekly posts in r/devops, r/kubernetes, r/ansible (genuine value, not spam)
-- [ ] Hacker News: Submit original research/opinion pieces
-- [ ] Dev.to/Hashnode: Syndicate with canonical tags
+- [x] De-cannibalize the 3 competing `allowedOrigins` posts (done 2026-06-06).
+- [ ] **Pause mass publishing** on competitive topics (Kubernetes/Docker/Ansible "tutorial"
+      style). Velocity is a liability, not an asset, until authority catches up.
+- [ ] Push these striking-distance queries from pos 5–8 toward top-3 (richer answer in the
+      first 100 words, FAQ/HowTo schema, exact-match H2s):
+  - `origin not allowed (open the control ui …)` — 920 impr, pos 5.7 → **+145 clicks/mo potential**
+  - `gateway.controlui.allowedorigins` — 135 impr, pos 6.2
+  - `openclaw gateway run` — 65 impr, pos 8.2, 0 clicks (gap now filled in CLI reference)
+  - `gateway.controlui.basepath` — 22 impr, pos 6.7, 0 clicks
+- [ ] Add FAQ/HowTo structured data to the top ~20 OpenClaw posts (rich results lift CTR).
 
-### 3.3 Email List → Repeat Traffic
-- [ ] Grow Kit.com list to 5,000 subscribers
-- [ ] Weekly newsletter with 3 curated posts
-- [ ] At 5K subs × 30% open × 10% click = 1,500 visits/week = 6,000/month
+## Phase 2 — Authority engine (Weeks 1–12, the real gating factor)
 
-### 3.4 Technical SEO at Scale
-- [ ] Core Web Vitals: all green (CLS, LCP, FID)
-- [ ] Sitemaps: split by category for faster crawling
-- [ ] IndexNow: instant indexing on publish
-- [ ] Edge caching: CDN for sub-100ms TTFB globally
+Domain authority is what lets your existing 1,448 pages rank for more queries. The author is a
+**Docker Captain, 8-book author, KubeCon EU & Red Hat Summit 2026 speaker** — currently
+under-leveraged for links and E-E-A-T.
 
----
+- [ ] Strengthen author E-E-A-T: complete `Person`/`author` schema, bylines, author bio blocks
+      with credentials on every post (links to books, talks, GitHub, LinkedIn).
+- [ ] Earn backlinks from owned assets first: conference slide decks (SpeakerDeck/SlideShare),
+      book pages (Leanpub/Amazon author links), GitHub repos → site.
+- [ ] Guest posts / syndication with canonical tags: dev.to, Hashnode, DZone, The New Stack.
+- [ ] Targeted outreach: when an OpenClaw/tool post is genuinely the best resource, pitch it to
+      relevant docs, awesome-lists, and community wikis.
 
-## Phase 4: Compounding Growth (Days 90+)
+## Phase 3 — Replicate the OpenClaw playbook (Ongoing, quality-gated)
 
-### 4.1 Topic Authority Domination
-Google rewards sites that cover a topic exhaustively. Target:
-- **OpenClaw**: 50+ pages (already strong, expand)
-- **NVIDIA NIM**: 20+ pages (growing)
-- **Kubernetes**: 100+ pages
-- **Ansible**: 100+ pages (leverage YouTube content)
-- **AI Infrastructure**: 50+ pages
+Find the *next* OpenClaw: emerging tools with rising search demand and weak competition.
 
-### 4.2 Conversion to Views Flywheel
-- Views → Email subscribers → Return visits → More views
-- Views → YouTube subscribers → Video views → Blog visits
-- Views → Social followers → Content shares → More views
+- [ ] Maintain a shortlist of emerging dev tools / AI-agent frameworks (new releases, new error
+      messages, new config surfaces). Publish accurate, first-mover error/how-to content.
+- [ ] **One niche at a time, fully** (hub + 10–20 spokes, interlinked) before starting the next.
+- [ ] Quality bar: every post must answer a real query better than the current top result.
+      No thin programmatic dumps.
 
-### 4.3 International Expansion
-- Italian content (native language advantage)
-- German market (high-value DevOps market)
-- Translation of top 100 posts = 3x audience
+## Phase 4 — Consolidate & prune the dead weight (Weeks 4–16)
 
----
+1,448 thin pages dilute crawl budget and authority. Fewer, stronger pages rank better.
 
-## Key Metrics to Track Weekly
+- [ ] Identify zero-impression posts (no GSC impressions in 90 days).
+- [ ] Merge near-duplicate/thin posts into canonical pillar guides; 301 the rest.
+- [ ] Keep only posts that are either ranking, part of a hub, or genuinely best-in-class.
 
-| Week | Target Impressions | Target Clicks | Target CTR |
-|------|-------------------|---------------|-----------|
-| 1-4 | 800K | 8,000 | 1.0% |
-| 5-8 | 1.5M | 30,000 | 2.0% |
-| 9-12 | 3M | 75,000 | 2.5% |
-| 13-16 | 6M | 180,000 | 3.0% |
-| 17-24 | 12M | 420,000 | 3.5% |
-| 25-36 | 25M | 1,000,000 | 4.0% |
+## Phase 5 — Traffic independent of Google (Ongoing)
 
-## Realistic Timeline
-- **Month 3**: 50K-75K views/month (from CTR + new content)
-- **Month 6**: 200K-300K views/month (programmatic SEO kicks in)
-- **Month 9**: 500K-700K views/month (authority + backlinks compound)
-- **Month 12**: 1M views/month 🎯
+Reduce single-channel dependence and create return visits.
+
+- [ ] **YouTube → blog**: companion post for top videos; "read the full guide" links in
+      descriptions. (Channel already has a large back catalog to mine.)
+- [ ] **Email**: grow the Kit list; weekly digest of best posts → repeat visits.
+- [ ] **Social**: LinkedIn (author's strength) + targeted Reddit/HN for genuinely original pieces.
 
 ---
 
-## What I Can Execute Immediately
+## Metrics to track (monthly)
 
-1. **This week**: Rewrite titles/descriptions for top 50 pages (CTR boost)
-2. **This week**: Add FAQ/HowTo schema to top pages
-3. **This week**: Generate 50 "how to install X on Y" articles
-4. **Next week**: Create 7 pillar pages (5,000+ words each)
-5. **Next week**: Map YouTube videos → companion blog posts
-6. **Ongoing**: 20 new programmatic pages/day until 5,000 total
+| Metric | Baseline | M3 | M6 | M12 |
+|--------|----------|----|----|-----|
+| Impressions/mo | 1,400 | 10K | 60K | 500K |
+| Clicks/mo | 64 | 800 | 4K | 30K |
+| Queries in pos 1–3 | 92 | 200 | 600 | 3,000 |
+| Referring domains | (baseline TBD) | +10 | +40 | +150 |
+| Niches "owned" (hub+spokes ranking) | 1 (OpenClaw) | 2 | 4 | 8 |
 
----
+## Immediately executable (this week)
 
-## The #1 Insight
+1. Harvest Phase 1 quick wins on the OpenClaw cluster (schema + first-paragraph answers).
+2. Add author E-E-A-T schema/bio blocks sitewide (Phase 2 foundation).
+3. Pause/redirect competitive-topic publishing; draft the niche-replication shortlist.
 
-Your site already has **633K impressions/month**. That means Google is SHOWING your pages but people aren't clicking. Fixing CTR alone (0.32% → 3%) would give you **19,000 clicks/month** — a 10x improvement with ZERO new content.
+## The one-sentence summary
 
-**Priority order:**
-1. Fix CTR (fastest, highest ROI)
-2. Capture zero-click queries (dedicated landing pages)
-3. Scale content (programmatic SEO)
-4. Build authority (backlinks, social, email)
+You do not have a CTR problem or a content-volume problem — you have an **authority and focus**
+problem: 95% of traffic comes from one low-competition niche, so the path to scale is to
+**replicate that niche-winning playbook and build the domain authority** that lets your existing
+content finally rank — not to publish more pages that can't.

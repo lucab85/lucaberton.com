@@ -84,6 +84,17 @@ under-leveraged for links and E-E-A-T.
       with credentials on every post (links to books, talks, GitHub, LinkedIn).
 - [ ] Earn backlinks from owned assets first: conference slide decks (SpeakerDeck/SlideShare),
       book pages (Leanpub/Amazon author links), GitHub repos → site.
+- [ ] **Owned sister-site cross-links (immediate, fully controlled):** contextual links from
+      **ansiblepilot.com**, **kubernetes.recipes**, **copypastelearn.com**, **lucaberton.com**, and
+      **terraformpilot.com** into the matching Ansible guides — Terraform+Ansible, Ansible+K8s,
+      Ansible+OpenClaw. These are owned properties, so the links are immediate and need no outreach.
+  - Link targets on lucaberton.com:
+    - Terraform+Ansible: `/blog/terraform-vs-ansible-when-to-use-which-2026/`, `/blog/migrating-terraform-to-ansible-cloud/`
+    - Ansible+K8s: `/blog/ansible-for-kubernetes-by-example/`, `/blog/ansible-kubernetes-operators-day2/`
+    - Ansible+OpenClaw: `/blog/openclaw-agentic-automation-ansible-cve-remediation-red-hat-2026/`, `/blog/ansible-automation-intelligent-assistant-mcp-server-byok-rag-2026/`
+  - lucaberton.com side: the six guides above are interlinked into a cluster (done 2026-06-07).
+    The four external sites (ansiblepilot / terraformpilot / kubernetes.recipes / copypastelearn) are
+    edited in their own repos; sister-site deep-link URLs are TBD.
 - [ ] Guest posts / syndication with canonical tags: dev.to, Hashnode, DZone, The New Stack.
 - [ ] Targeted outreach: when an OpenClaw/tool post is genuinely the best resource, pitch it to
       relevant docs, awesome-lists, and community wikis.

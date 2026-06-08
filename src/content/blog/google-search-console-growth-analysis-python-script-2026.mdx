@@ -1,0 +1,320 @@
+---
+title: "Turn Google Search Console Data Into a Growth Plan"
+seoTitle: "GSC Growth Analysis: Free Python Script (2026)"
+snippet: "Run one dependency-free Python script on your Search Console export to surface the SEO levers that move traffic: CTR bands and striking-distance pages."
+description: "Run a single dependency-free Python script on your Google Search Console export to find the SEO levers that move traffic and prioritize your next content."
+image:
+  src: "/blog/thumbnails/google-search-console-growth-analysis-python-script-2026.jpg"
+  alt: "Google Search Console growth analysis with a Python script"
+publishDate: "2026-06-07"
+lastModified: "2026-06-07"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["SEO", "Google Search Console", "Python", "Analytics", "Growth"]
+faq:
+  - question: "What Google Search Console data do I need to export?"
+    answer: >-
+      Open Search Console, go to Performance, then Search results, set your date
+      range, and click Export. Unzip the download into reports/gsc/. Keep the
+      default file names: Queries.csv, Pages.csv, Chart.csv, Countries.csv, and
+      Devices.csv. The script reads those files directly.
+  - question: "What does 'striking distance' mean in SEO?"
+    answer: >-
+      Striking-distance pages rank in positions 11 to 20 — the top of page two —
+      with real impressions behind them. They already match the query; they just
+      need a small ranking nudge. Moving one of these to page one captures the
+      vast majority of clicks, so they are the highest-leverage pages to improve.
+  - question: "Why is my click-through rate low even on page one?"
+    answer: >-
+      Low CTR on page-one rankings is usually one of three things: a young or
+      low-authority domain, SERP features (AI overviews, featured snippets, video
+      carousels) pushing your blue link down, or a title and description that
+      don't match search intent. The CTR-by-position-band view tells you whether
+      the problem is systemic across the site or isolated to specific pages.
+  - question: "Do I need any Python libraries to run this script?"
+    answer: >-
+      No. The script uses only the Python standard library (csv, os, and sys), so
+      it runs on any Python 3.7+ install with nothing to pip install. It is
+      read-only — it never modifies your exports or touches your live site.
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Google Search Console already knows which of your pages are one ranking nudge away from real traffic. It just buries that signal under a dozen columns and thousands of rows. Every month I export the data and run a single Python script that turns the dump into a ranked action list: what to write more of, which page-two posts to push, and which titles to rewrite.
+
+No dashboard, no SaaS subscription, no dependencies — just the standard library and a CSV export. Here is the whole thing, and more importantly, how to read what it tells you.
+
+## Why the Search Console UI Isn't Enough
+
+The Performance report is great for answering a question you already have. It's terrible at telling you *which question to ask*. You get clicks, impressions, CTR, and average position across queries, pages, countries, and devices — but the interface makes you pivot one dimension at a time, and it never ranks your opportunities for you.
+
+The levers that actually move organic traffic are hidden in the *relationships* between those columns:
+
+- A page on **position 12 with 4,000 impressions** is worth ten of your position-45 pages — but the UI sorts them the same way.
+- A **0.4% CTR on a page-one ranking** is a title problem you can fix this afternoon. The UI shows the number; it doesn't flag it.
+- The **queries that already win clicks** tell you exactly what kind of content converts for your domain. That's a content strategy, not a row in a table.
+
+A short script can compute all of that in one pass and print a prioritized to-do list. That's the entire idea.
+
+## Step 1: Export Your Search Console Data
+
+1. Open [Google Search Console](https://search.google.com/search-console/) and select your property.
+2. Go to **Performance → Search results**.
+3. Set the date range (I use the last 3 months for trend, or 28 days for a fast monthly check).
+4. Click **Export** (top right) → **Download CSV**.
+5. Unzip the archive into `reports/gsc/`.
+
+Keep the default file names — the script expects them:
+
+| File | What it contains |
+|------|------------------|
+| `Queries.csv` | Search terms, with clicks, impressions, CTR, position |
+| `Pages.csv` | Your URLs, with the same four metrics |
+| `Chart.csv` | The daily time series (used for the trend) |
+| `Countries.csv` | Per-market breakdown |
+| `Devices.csv` | Desktop / mobile / tablet split |
+
+## Step 2: The Script — `analyze-gsc.py`
+
+Drop this into `scripts/analyze-gsc.py`. It's dependency-free and read-only.
+
+```python
+#!/usr/bin/env python3
+"""Turn a Google Search Console export into a prioritized growth action list.
+
+GSC → Performance → Search results → Export → unzip into reports/gsc/ (the
+default file names are kept: Queries.csv, Pages.csv, Chart.csv, Countries.csv,
+Devices.csv). Then:
+
+    python3 scripts/analyze-gsc.py [path-to-gsc-dir]   # default: reports/gsc
+
+It reports the levers that actually move traffic for this site:
+  - headline metrics + trend (is the site climbing?)
+  - CTR by position band (is CTR systemically low → young-domain/SERP issue?)
+  - CTR by country (spot a single-market anomaly)
+  - click-winning queries (what content type actually converts → do more of it)
+  - ranking striking distance (pos 11-20, high impressions → push to page 1)
+  - high-impression / low-CTR pages (title/description review candidates)
+
+No third-party dependencies. Read-only.
+"""
+
+from __future__ import annotations
+
+import csv
+import os
+import sys
+
+
+def load(path: str) -> list[dict]:
+    if not os.path.exists(path):
+        return []
+    rows = list(csv.reader(open(path, encoding="utf-8")))
+    if not rows:
+        return []
+    head, data = rows[0], rows[1:]
+    out = []
+    for row in data:
+        d = dict(zip(head, row))
+        for k in ("Clicks", "Impressions"):
+            if k in d:
+                d[k] = int(d[k] or 0)
+        for k in ("CTR", "Position"):
+            if k in d:
+                d[k] = float((d[k] or "0").replace("%", ""))
+        out.append(d)
+    return out
+
+
+def bar(pct: float, width: int = 24) -> str:
+    n = int(round(pct / 100 * width))
+    return "█" * n + "·" * (width - n)
+
+
+def section(title: str) -> None:
+    print(f"\n{title}\n" + "-" * len(title))
+
+
+def main() -> int:
+    base = sys.argv[1] if len(sys.argv) > 1 else "reports/gsc"
+    Q = load(os.path.join(base, "Queries.csv"))
+    P = load(os.path.join(base, "Pages.csv"))
+    C = load(os.path.join(base, "Chart.csv"))
+    G = load(os.path.join(base, "Countries.csv"))
+    if not Q and not P:
+        print(f"No GSC CSVs found in {base}/ (expected Queries.csv, Pages.csv, ...).")
+        return 1
+
+    print("=" * 64)
+    print("  GSC GROWTH ANALYSIS")
+    print("=" * 64)
+
+    # --- headline + trend ---
+    if C:
+        key = next((k for k in C[0] if k.lower().startswith("date")), None)
+        C.sort(key=lambda r: r.get(key, ""))
+        clk = sum(r["Clicks"] for r in C)
+        imp = sum(r["Impressions"] for r in C)
+        ctr = clk / imp * 100 if imp else 0
+        first, last = C[0], C[-1]
+        section("Headline (period total)")
+        print(f"  clicks={clk}  impressions={imp}  CTR={ctr:.2f}%")
+        print(f"  position trend: {first.get(key)} pos {first['Position']:.1f}  ->  "
+              f"{last.get(key)} pos {last['Position']:.1f}"
+              f"  ({'improving' if last['Position'] < first['Position'] else 'worsening'})")
+
+    # --- CTR by position band (systemic diagnostic) ---
+    if P:
+        section("CTR by position band  (expected: 1-3 ~20-40%, 4-6 ~6-12%, 7-10 ~2-4%)")
+        bands = [("1-3", 1, 3), ("4-6", 4, 6), ("7-10", 7, 10), ("11-20", 11, 20), ("21+", 21, 999)]
+        for label, lo, hi in bands:
+            ps = [p for p in P if lo <= p["Position"] <= hi]
+            if not ps:
+                continue
+            imp = sum(p["Impressions"] for p in ps)
+            clk = sum(p["Clicks"] for p in ps)
+            c = clk / imp * 100 if imp else 0
+            print(f"  {label:6s} {len(ps):4d} pages  imp={imp:7d}  CTR={c:5.2f}%  {bar(min(c, 100))}")
+
+    # --- CTR by country (anomaly spotter) ---
+    if G:
+        section("Top markets by impressions (watch for a low-CTR outlier)")
+        for r in sorted(G, key=lambda x: -x["Impressions"])[:6]:
+            name = next(iter(r.values()))
+            print(f"  {name:18.18s} imp={r['Impressions']:7d}  clicks={r['Clicks']:4d}  CTR={r['CTR']:5.2f}%  pos={r['Position']:.1f}")
+
+    # --- click-winning queries (content strategy signal) ---
+    if Q:
+        won = sorted((q for q in Q if q["Clicks"] >= 1), key=lambda x: -x["Clicks"])
+        section(f"What actually converts: {len(won)} of {len(Q)} queries win a click")
+        for q in won[:20]:
+            name = next(iter(q.values()))
+            print(f"  clk={q['Clicks']:3d} pos={q['Position']:4.1f} CTR={q['CTR']:5.1f}%  {name[:50]}")
+
+    # --- ranking striking distance (push to page 1) ---
+    if P:
+        rk = [p for p in P if 11 <= p["Position"] <= 20 and p["Impressions"] >= 800]
+        rk.sort(key=lambda x: -x["Impressions"])
+        section(f"Ranking striking distance: {len(rk)} pages on page 2 with traffic (push to page 1)")
+        for p in rk[:15]:
+            url = next(iter(p.values())).replace("https://kubernetes.recipes", "")
+            print(f"  imp={p['Impressions']:6d} pos={p['Position']:5.1f} clk={p['Clicks']:3d}  {url[:52]}")
+
+    # --- high-impression / low-CTR pages (title review) ---
+    if P:
+        lc = [p for p in P if p["Impressions"] >= 2000 and p["Position"] <= 10 and p["CTR"] < 1.0]
+        lc.sort(key=lambda x: -x["Impressions"])
+        section(f"High-impression / low-CTR ({len(lc)} pages: page 1 but <1% CTR — review title/intent)")
+        for p in lc[:15]:
+            url = next(iter(p.values())).replace("https://kubernetes.recipes", "")
+            print(f"  imp={p['Impressions']:6d} pos={p['Position']:5.1f} CTR={p['CTR']:4.2f}%  {url[:52]}")
+
+    print("\n" + "=" * 64)
+    print("  Levers: 1) more content like the click-winners (long-tail/error/niche),")
+    print("          2) push striking-distance pages to page 1, 3) authority over time.")
+    print("=" * 64)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+```
+
+Run it:
+
+```bash
+python3 scripts/analyze-gsc.py           # reads reports/gsc/ by default
+python3 scripts/analyze-gsc.py ~/Downloads/gsc-export   # or pass a path
+```
+
+> One thing to change: the two `.replace("https://kubernetes.recipes", "")` lines strip my domain so the page paths print cleanly. Swap in your own origin (for example `"https://example.com"`) before you run it.
+
+## Step 3: How the Script Works
+
+There are only three helpers, and then six analyses. Understanding the helpers makes the rest obvious.
+
+- **`load(path)`** reads a CSV into a list of dicts and coerces the four metric columns into numbers. `Clicks` and `Impressions` become `int`; `CTR` and `Position` become `float` (stripping the `%` sign that GSC adds to CTR). A missing file returns an empty list, so the script degrades gracefully if you only exported some tabs.
+- **`bar(pct)`** draws a tiny text bar (`█` and `·`) so you can *see* CTR differences between position bands without squinting at numbers.
+- **`section(title)`** just prints a heading with an underline.
+
+Each analysis is guarded by `if Q:`, `if P:`, `if C:`, or `if G:` so it only runs when that export is present. The first column of each CSV is read with `next(iter(d.values()))` — that's the query, page URL, or country name, whichever the file leads with — which keeps the script agnostic to GSC's exact column header for that first field.
+
+## Step 4: Reading the Output
+
+Here's a trimmed, illustrative run so you know what to look for:
+
+```text
+================================================================
+  GSC GROWTH ANALYSIS
+================================================================
+
+Headline (period total)
+-----------------------
+  clicks=1842  impressions=214097  CTR=0.86%
+  position trend: 2026-03-08 pos 28.4  ->  2026-06-06 pos 19.1  (improving)
+
+CTR by position band  (expected: 1-3 ~20-40%, 4-6 ~6-12%, 7-10 ~2-4%)
+---------------------------------------------------------------------
+  1-3      12 pages  imp=  18420  CTR=14.20%  ███·····················
+  4-6      31 pages  imp=  40110  CTR= 6.80%  ██······················
+  7-10     58 pages  imp=  52680  CTR= 2.90%  █·······················
+  11-20   140 pages  imp=  61240  CTR= 0.40%  ························
+  21+     410 pages  imp=  41647  CTR= 0.08%  ························
+
+What actually converts: 96 of 1413 queries win a click
+-------------------------------------------------------
+  clk= 71 pos= 3.2 CTR= 9.8%  kubernetes imagepullbackoff fix
+  clk= 44 pos= 5.1 CTR= 6.1%  ansible jinja2 undefined variable
+  clk= 31 pos= 7.4 CTR= 3.9%  docker no space left on device
+  ...
+
+Ranking striking distance: 9 pages on page 2 with traffic (push to page 1)
+--------------------------------------------------------------------------
+  imp=  4120 pos= 12.3 clk=  6  /blog/fix-kubernetes-oomkilled-error/
+  imp=  3380 pos= 14.1 clk=  4  /blog/docker-error-port-already-in-use/
+  ...
+
+High-impression / low-CTR (5 pages: page 1 but <1% CTR — review title/intent)
+-----------------------------------------------------------------------------
+  imp=  6900 pos=  8.4 CTR=0.61%  /blog/kubernetes-cheat-sheet-kubectl-commands-2026/
+  ...
+```
+
+The shape of the **CTR-by-position-band** block is the single most useful diagnostic. If your bands roughly follow the expected curve (1-3 ≈ 20-40%, 4-6 ≈ 6-12%, 7-10 ≈ 2-4%), your titles are healthy and you should pour effort into *ranking* better. If even your top-three band is in the low single digits, the problem is systemic — usually a young domain, a SERP crowded with AI overviews and carousels, or weak titles — and the fix is authority and intent-matching, not more posts.
+
+## The Three Levers That Actually Move Traffic
+
+The script ends by printing the same three levers every time, because for almost every site they're the ones that pay off.
+
+### 1. Make More of What Already Wins
+
+The *"What actually converts"* list is your content strategy, handed to you. These are the queries that earn clicks today — and they cluster around a content *type*. On my technical sites it's clearly long-tail, error-message, and niche how-to queries (`fix kubernetes oomkilled`, `ansible undefined variable`). That's a mandate: write more of that exact shape. Don't guess what your audience wants — copy the pattern that's already converting.
+
+### 2. Push Striking-Distance Pages to Page One
+
+The *striking distance* list (positions 11-20 with ≥ 800 impressions) is the highest-ROI work on the whole report. These pages already rank and already match the query; they sit just below the fold of page one, where [roughly 90% of clicks](https://search.google.com/search-console/) never reach them. A modest improvement — tighter intro, an FAQ block, an internal link or two from related posts, a clearer heading — is often enough to cross onto page one and multiply the clicks.
+
+### 3. Fix Titles on High-Impression, Low-CTR Pages
+
+The final list is pure quick wins: pages ranking on **page one** but earning **under 1% CTR**. The ranking is fine — searchers see you and scroll past. That's a title-and-description problem you can fix in minutes: lead with the benefit or the exact error string, add the year, drop the fluff. No new content required.
+
+<BlogPromoCard />
+
+## Step 5: Put It on a Schedule
+
+A growth signal you read once is a curiosity; one you read every month is a habit. I keep the export-and-run loop monthly. Two ways to make it stick:
+
+- **Local reminder + diff.** Re-export on the first of the month, drop the CSVs into `reports/gsc/`, run the script, and compare the striking-distance list to last month's. Pages that dropped *off* the list either reached page one (a win) or lost impressions (investigate).
+- **CI artifact.** If you already publish from a pipeline, add a job that runs the script against a committed export and saves the output as a build artifact — see my [GitHub Actions CI/CD pipeline tutorial](/blog/github-actions-cicd-pipeline-tutorial-2026/) for the pattern. You get a dated growth report attached to every run.
+
+You can also tune the thresholds to your traffic level. The defaults (`>= 800` impressions for striking distance, `>= 2000` and `< 1.0%` CTR for the title-review list) suit a mid-size site. On a smaller property, lower them; on a large one, raise them so the lists stay short and actionable.
+
+## Conclusion
+
+Search Console is not short on data — it's short on prioritization. One small, dependency-free script closes that gap: it tells you whether the site is climbing, whether your CTR problem is systemic or page-specific, what content type converts, which page-two posts are worth a push, and which titles are leaking clicks. Export, run, act on the three lists, repeat next month. That loop has done more for my organic traffic than any single optimization.
+
+## Related Articles
+
+- [Google Disavow Links: How to Find and Remove Toxic Backlinks](/blog/google-disavow-links-guide-toxic-backlinks-2026/)
+- [Plausible Analytics: Privacy-First, Self-Hosted Web Analytics](/blog/plausible-analytics-privacy-first-self-hosted-2026/)
+- [GitHub Actions CI/CD Pipeline Tutorial](/blog/github-actions-cicd-pipeline-tutorial-2026/)

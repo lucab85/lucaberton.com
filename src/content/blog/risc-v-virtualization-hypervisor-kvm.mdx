@@ -1,0 +1,100 @@
+---
+title: "RISC-V Virtualization: The H Extension & KVM"
+snippet: "How virtualization works on RISC-V — the hypervisor (H) extension, two-stage translation, KVM, and running virtual machines on open silicon. A systems guide."
+description: "How virtualization works on RISC-V — the hypervisor (H) extension, two-stage translation, KVM, and running virtual machines on open silicon. A systems guide."
+publishDate: "2026-06-11"
+lastModified: "2026-06-11"
+author: "Luca Berton"
+category: "RISC-V"
+tags: ["RISC-V", "virtualization", "hypervisor", "KVM", "systems"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-52.jpg"
+  alt: "RISC-V server and datacenter hardware at RISC-V Summit Europe 2026"
+faq:
+  - question: "Does RISC-V support hardware virtualization?"
+    answer: "Yes. The RISC-V hypervisor (H) extension adds hardware-assisted virtualization, including two new privilege modes (VS and VU) and two-stage address translation. It is part of the RVA23 application profile, so modern application-class RISC-V chips are expected to support it, enabling efficient virtual machines and KVM."
+  - question: "What is two-stage address translation in RISC-V?"
+    answer: "Two-stage translation lets a guest operating system manage its own virtual-to-physical mapping (stage 1) while the hypervisor independently maps guest-physical to host-physical addresses (stage 2). This hardware support means VMs get near-native memory performance without the hypervisor trapping every page-table update."
+  - question: "Can I run KVM on RISC-V?"
+    answer: "Yes. KVM has been upstreamed into the Linux kernel for RISC-V and uses the H extension. On hardware that implements the hypervisor extension you can run full virtual machines with QEMU/KVM, just as on x86 and Arm, with hardware-accelerated CPU and memory virtualization."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Virtualization is the foundation of the cloud — and for RISC-V to compete in the [datacenter](/blog/risc-v-datacenter-servers-sovereign-ai-2026/), it needs first-class hardware virtualization. It has it: the **hypervisor (H) extension**. This guide explains how RISC-V runs virtual machines, what the H extension adds, and how KVM brings it all to Linux.
+
+![RISC-V server and datacenter hardware at the Summit](/blog/events/riscv-summit-2026/riscv-summit-52.jpg)
+
+## Why Hardware Virtualization Matters
+
+You *can* virtualize a CPU purely in software, but it is slow — the hypervisor must trap and emulate privileged operations. **Hardware-assisted virtualization** adds CPU support so guests run directly on the hardware, with the hypervisor stepping in only when necessary. This is what makes modern clouds efficient, and it is essential for RISC-V's [server ambitions](/blog/risc-v-ecosystem-2026-vendors-profiles-momentum/).
+
+## The H Extension: New Privilege Modes
+
+RISC-V's normal [privilege model](/blog/risc-v-security-privilege-pmp-confidential-computing/) has Machine (M), Supervisor (S), and User (U) modes. The **hypervisor (H) extension** extends Supervisor mode into a hypervisor-capable **HS mode** and adds two *virtualized* modes for guests:
+
+- **VS (Virtual Supervisor)** — where a guest OS kernel runs
+- **VU (Virtual User)** — where guest applications run
+
+A hypervisor runs in **HS mode** and controls the virtual machines beneath it. The genius is that a guest kernel runs in VS mode believing it is in real S mode — its existing supervisor-level code works unchanged, but the hypervisor retains ultimate control. New CSRs (the `hstatus`, `hgatp`, and the `vs*` shadow registers) manage this cleanly.
+
+## Two-Stage Address Translation
+
+The key memory feature is **two-stage translation**:
+
+1. **Stage 1** — the guest OS translates its *guest-virtual* addresses to *guest-physical* addresses, using its own page tables (it thinks it owns the machine).
+2. **Stage 2** — the hypervisor translates *guest-physical* to *host-physical* addresses via `hgatp`, transparently to the guest.
+
+This hardware support means a VM gets near-native memory performance: the MMU walks both stages without the hypervisor having to trap every guest page-table change. It is the RISC-V equivalent of Intel EPT or Arm Stage-2 translation.
+
+## Interrupt Virtualization and the AIA
+
+Efficient VMs also need virtualized interrupts. This is where the [Advanced Interrupt Architecture (AIA)](/blog/risc-v-interrupts-plic-clint-aia/) shines: the IMSIC and APLIC were designed with virtualization in mind, so message-signaled interrupts can be delivered directly to a guest with minimal hypervisor involvement. Without this, every device interrupt would bounce through the hypervisor — a major bottleneck on busy servers.
+
+## KVM on RISC-V
+
+The Linux **KVM** (Kernel-based Virtual Machine) hypervisor has been **upstreamed for RISC-V** and uses the H extension. On capable hardware, the familiar stack just works:
+
+```bash
+# Check that KVM is available (needs H-extension hardware)
+ls /dev/kvm
+
+# Launch a VM with QEMU using hardware acceleration
+qemu-system-riscv64 -machine virt,accel=kvm -cpu host \
+  -m 4G -smp 4 -nographic \
+  -kernel guest-kernel.bin \
+  -drive file=guest.img,format=raw,if=virtio
+```
+
+`accel=kvm` switches from slow emulation to hardware-accelerated virtualization. From there, the entire Linux virtualization ecosystem — libvirt, cloud-init, container runtimes using microVMs — extends to RISC-V.
+
+## Part of the RVA23 Profile
+
+Crucially, the H extension is **mandatory in the [RVA23 application profile](/blog/risc-v-profiles-rva23-explained/)**. That matters enormously: it means any chip claiming RVA23 compliance *will* support virtualization, so cloud and OS vendors can rely on it being present. This is exactly the kind of guarantee that turns RISC-V from a collection of chips into a dependable server platform.
+
+## Nested Virtualization and Confidential VMs
+
+Two advanced directions worth knowing:
+
+- **Nested virtualization** — running a hypervisor inside a guest (a VM within a VM) is supported by the architecture, useful for cloud-in-cloud and development scenarios.
+- **Confidential VMs** — combined with [confidential-computing](/blog/risc-v-security-privilege-pmp-confidential-computing/) work (CoVE), the goal is VMs whose memory is protected even from the hypervisor and host operator — vital for multi-tenant cloud and sovereign workloads.
+
+## Use Cases
+
+Hardware virtualization unlocks the things servers are bought for:
+
+- **Cloud / multi-tenancy** — isolate customers on shared [RISC-V servers](/blog/risc-v-datacenter-servers-sovereign-ai-2026/).
+- **Consolidation** — run many workloads on one machine.
+- **Mixed-criticality** — partition safety-critical and best-effort workloads (relevant to [automotive](/blog/risc-v-automotive-functional-safety/)).
+- **Development** — spin up disposable VMs for testing and CI.
+
+<BlogPromoCard variant="course" />
+
+## The Bottom Line
+
+The **hypervisor (H) extension** gives RISC-V real, hardware-assisted virtualization: new VS/VU guest modes, **two-stage address translation** for near-native memory performance, AIA-based interrupt virtualization, and upstream **KVM** support. Because the H extension is **mandatory in RVA23**, virtualization is a guaranteed capability on modern application-class RISC-V — removing one of the last big blockers to RISC-V in the cloud and datacenter.
+
+---
+
+*Part of my RISC-V series. See also [RISC-V interrupts (AIA)](/blog/risc-v-interrupts-plic-clint-aia/) and [profiles & RVA23](/blog/risc-v-profiles-rva23-explained/).*

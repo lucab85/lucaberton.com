@@ -29,6 +29,8 @@ export const descriptions = {
     "Knowledge-Centered Service (KCS) articles focused on structured problem-solving and support knowledge sharing.",
   Linux:
     "Guides, commands, and system administration tips for mastering Linux distributions and environments.",
+  "RISC-V":
+    "Everything RISC-V — the free, open instruction set architecture. Deep dives on the ISA and extensions, dev boards, toolchains, Linux, embedded and datacenter silicon, security, and the open-hardware ecosystem, plus conference coverage.",
   wordpress:
     "Tips, tutorials, and fixes for WordPress development, optimization, and management.",
 };

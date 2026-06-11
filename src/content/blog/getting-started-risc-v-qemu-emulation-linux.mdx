@@ -1,0 +1,179 @@
+---
+title: "Getting Started with RISC-V on QEMU"
+snippet: "Emulate a full RISC-V Linux system on your laptop with QEMU — no hardware required. A step-by-step guide to booting Ubuntu and running your first RV64 binary."
+description: "Emulate a full RISC-V Linux system on your laptop with QEMU — no hardware required. A step-by-step guide to booting Ubuntu and running your first RV64 binary."
+publishDate: "2026-06-11"
+lastModified: "2026-06-11"
+author: "Luca Berton"
+category: "Open Source"
+tags: ["RISC-V", "QEMU", "Linux", "tutorial", "emulation"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-69.jpg"
+  alt: "Holding a RISC-V development board at the Summit, representing hands-on RISC-V"
+faq:
+  - question: "Do I need a RISC-V board to learn RISC-V?"
+    answer: "No. QEMU emulates a complete RISC-V system on your existing x86 or ARM machine, so you can boot Linux, compile code, and run RV64 binaries without buying hardware."
+  - question: "What is the difference between QEMU user mode and system mode for RISC-V?"
+    answer: "User mode (qemu-riscv64) runs a single Linux binary by translating its instructions, reusing your host kernel. System mode (qemu-system-riscv64) emulates an entire virtual machine — CPU, memory, devices, and a guest kernel — so you can boot a full RISC-V Linux distribution."
+  - question: "Is RISC-V emulation slow?"
+    answer: "Emulation is slower than native execution because instructions are translated at runtime, but for learning, cross-compiling, and testing it is perfectly usable. For performance work you eventually want real silicon."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+The best way to understand [RISC-V](/blog/what-is-risc-v-open-isa-explained/) is to run it — and you do not need to buy a board to start. With **QEMU**, you can emulate a complete RISC-V Linux system on the laptop you already own, whether it is x86 or Apple Silicon. This is exactly how I started before getting real [RISC-V hardware](/blog/risc-v-development-boards-2026-guide/).
+
+In this tutorial we will install QEMU, run a single RISC-V binary in user mode, then boot a full RISC-V Ubuntu system in system mode.
+
+> Commands below are written for Linux and macOS. On Windows, run them inside WSL2.
+
+## What You'll Need
+
+- A host machine (x86-64 or ARM64) with a few GB of free disk
+- A package manager (`apt`, `dnf`, or Homebrew)
+- Basic comfort with the terminal
+
+## Step 1: Install QEMU
+
+QEMU ships RISC-V targets in its standard packages.
+
+**Debian / Ubuntu:**
+
+```bash
+sudo apt update
+sudo apt install -y qemu-system-misc qemu-user-static qemu-utils
+```
+
+**Fedora / RHEL:**
+
+```bash
+sudo dnf install -y qemu-system-riscv qemu-user-static qemu-img
+```
+
+**macOS (Homebrew):**
+
+```bash
+brew install qemu
+```
+
+Verify the RISC-V targets are present:
+
+```bash
+qemu-system-riscv64 --version
+qemu-riscv64 --version   # user-mode emulator
+```
+
+## Step 2: Run a Single RISC-V Binary (User Mode)
+
+User-mode emulation is the fastest way to execute a RISC-V program. It translates the binary's instructions to your host CPU and reuses your host kernel — no full VM required.
+
+First, cross-compile a small C program for RV64. Install the toolchain:
+
+```bash
+# Debian/Ubuntu
+sudo apt install -y gcc-riscv64-linux-gnu
+```
+
+Create `hello.c`:
+
+```c
+#include <stdio.h>
+
+int main(void) {
+    printf("Hello from RISC-V (RV64)!\n");
+    return 0;
+}
+```
+
+Cross-compile it statically and run it through QEMU user mode:
+
+```bash
+riscv64-linux-gnu-gcc -static -o hello hello.c
+file hello          # -> ELF 64-bit LSB executable, UCB RISC-V
+qemu-riscv64 ./hello
+# Hello from RISC-V (RV64)!
+```
+
+You just executed native RISC-V machine code on a non-RISC-V machine. The `-static` flag avoids having to point QEMU at a RISC-V sysroot for shared libraries; for dynamic binaries, pass `-L /usr/riscv64-linux-gnu`.
+
+## Step 3: Boot a Full RISC-V Linux System (System Mode)
+
+System mode emulates an entire virtual machine. The cleanest path in 2026 is a prebuilt distro image. Ubuntu publishes RISC-V images for the generic QEMU `virt` machine.
+
+Download the cloud image and prepare a disk:
+
+```bash
+# Ubuntu RISC-V cloud image (preinstalled)
+wget https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-riscv64.img -O ubuntu-riscv64.img
+
+# Give it some room to grow
+qemu-img resize ubuntu-riscv64.img +10G
+```
+
+You also need the UEFI firmware (U-Boot/EDK2). On Debian/Ubuntu it comes with `qemu-efi-riscv64`:
+
+```bash
+sudo apt install -y u-boot-qemu opensbi
+```
+
+Boot the machine:
+
+```bash
+qemu-system-riscv64 \
+  -machine virt -nographic \
+  -m 4G -smp 4 \
+  -bios /usr/lib/riscv64-linux-gnu/opensbi/generic/fw_jump.bin \
+  -kernel /usr/lib/u-boot/qemu-riscv64_smode/uboot.elf \
+  -drive file=ubuntu-riscv64.img,format=qcow2,if=virtio \
+  -device virtio-net-device,netdev=net0 \
+  -netdev user,id=net0,hostfwd=tcp::2222-:22
+```
+
+Key flags explained:
+
+- `-machine virt` — QEMU's generic RISC-V board, the de-facto standard target
+- `-bios fw_jump.bin` — **OpenSBI**, the Supervisor Binary Interface firmware that runs in M-mode and hands off to the kernel (a concept unique to RISC-V's privilege model)
+- `-smp 4 -m 4G` — four virtual harts (hardware threads) and 4 GB RAM
+- `hostfwd=tcp::2222-:22` — forwards host port 2222 to the guest's SSH so you can `ssh -p 2222 ...`
+
+When it boots, log in and confirm the architecture:
+
+```bash
+uname -m        # riscv64
+cat /proc/cpuinfo | grep isa
+# isa : rv64imafdc_...   (the extensions your virtual CPU exposes)
+```
+
+That `isa` line is RISC-V's modularity made visible — it lists exactly which extensions are active, the same letters described in [What Is RISC-V](/blog/what-is-risc-v-open-isa-explained/).
+
+## Step 4: Pick the CPU and Extensions
+
+QEMU lets you choose the emulated core and toggle extensions, which is great for testing portability against the RVA23 profile:
+
+```bash
+# List available RISC-V CPUs
+qemu-system-riscv64 -cpu help
+
+# Emulate a specific profile-like config, enabling the vector extension
+qemu-system-riscv64 -machine virt -cpu rv64,v=true,vlen=128 ...
+```
+
+Being able to flip the **V (vector)** extension on and off is handy when you are validating AI or HPC code — the same workloads pushing RISC-V into [the datacenter](/blog/risc-v-datacenter-servers-sovereign-ai-2026/).
+
+## Troubleshooting
+
+- **Boot hangs at OpenSBI:** check the `-bios` path; firmware locations differ slightly across distros.
+- **No network in guest:** confirm the `virtio-net-device` + `-netdev user` pair; user networking needs no host setup.
+- **Slow boot:** expected — emulation translates every instruction. Reduce `-smp` if your host is constrained.
+- **Apple Silicon:** QEMU runs fine, but it is emulation (TCG), not virtualization, so do not expect native speed.
+
+## Where to Go Next
+
+Once you are comfortable in the emulator, the natural next step is real silicon. My [RISC-V development boards guide](/blog/risc-v-development-boards-2026-guide/) covers what to buy in 2026, and if you are curious about AI on open hardware, see [running OpenClaw and Ollama on RISC-V](/blog/openclaw-ollama-risc-v-local-llm/).
+
+<BlogPromoCard variant="course" />
+
+---
+
+*QEMU made RISC-V approachable for me long before I held a board at [RISC-V Summit Europe 2026](/blog/risc-v-summit-europe-2026-bologna-highlights/). It is the cheapest, fastest on-ramp to the open ISA.*

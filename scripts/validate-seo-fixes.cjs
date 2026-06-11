@@ -286,6 +286,42 @@ function checkDraftFilters() {
   record(missing ? "FAIL" : "PASS", "draft filters on listings", `${missing} listing file(s) missing draft filter`);
 }
 
+// Source-side length guard for blog frontmatter, so over-length meta
+// descriptions/titles are caught at pre-commit time (not only post-build in CI).
+// The rendered meta description comes from `snippet`; the rendered <title> base
+// is `seoTitle || title` (the " | Luca Berton" suffix is only appended when the
+// total still fits in 60, so only a base title > 60 actually fails).
+function checkSourceFrontmatterLength() {
+  const files = walk(BLOG_DIR, (p) => p.endsWith(".mdx"));
+  let descLong = 0, titleLong = 0;
+  const fmValue = (fm, key) => {
+    const m = fm.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, "m"));
+    if (!m) return null;
+    return m[1].replace(/^["']/, "").replace(/["']$/, "");
+  };
+  for (const fp of files) {
+    const src = read(fp);
+    const fmMatch = src.match(/^---\n([\s\S]*?)\n---/);
+    if (!fmMatch) continue;
+    const fm = fmMatch[1];
+    if (/^draft:\s*true\b/m.test(fm)) continue; // drafts are noindex
+    const rel = "blog/" + path.basename(fp, ".mdx");
+
+    const snippet = fmValue(fm, "snippet");
+    if (snippet != null && snippet.length > MAX_DESC) {
+      descLong++;
+      record("FAIL", "meta>160 (source)", `${rel} (${snippet.length})`);
+    }
+    const baseTitle = fmValue(fm, "seoTitle") ?? fmValue(fm, "title");
+    if (baseTitle != null && baseTitle.length > MAX_TITLE) {
+      titleLong++;
+      record("FAIL", "title>60 (source)", `${rel} (${baseTitle.length})`);
+    }
+  }
+  record(descLong ? "FAIL" : "PASS", "source snippet <= 160", `${descLong} blog post(s) over 160 chars`);
+  record(titleLong ? "FAIL" : "PASS", "source title <= 60", `${titleLong} blog post(s) over 60 chars`);
+}
+
 // ---------------------------------------------------------------------------
 // BUILT HTML checks (require ./public)
 // ---------------------------------------------------------------------------
@@ -400,6 +436,7 @@ checkNoAstroEmbed();
 checkOrphanIncomingLinks();
 checkRedirects();
 checkDraftFilters();
+checkSourceFrontmatterLength();
 if (!SOURCE_ONLY) {
   checkBuiltHtml();
   checkCategoryWordCount();

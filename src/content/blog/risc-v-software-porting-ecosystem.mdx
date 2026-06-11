@@ -1,0 +1,121 @@
+---
+title: "Porting Software to RISC-V: A Practical Guide"
+snippet: "How to port applications and libraries to RISC-V — cross-compiling, common pitfalls, intrinsics, CI, and the state of the riscv64 software ecosystem in 2026."
+description: "How to port applications and libraries to RISC-V — cross-compiling, common pitfalls, intrinsics, CI, and the state of the riscv64 software ecosystem in 2026."
+publishDate: "2026-06-11"
+lastModified: "2026-06-11"
+author: "Luca Berton"
+category: "Open Source"
+tags: ["RISC-V", "porting", "cross-compile", "software", "ecosystem"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-51.jpg"
+  alt: "RISC-V software and tooling showcased at RISC-V Summit Europe 2026"
+faq:
+  - question: "How hard is it to port software to RISC-V?"
+    answer: "For most portable, high-level code (C, C++, Rust, Go, Python, Java) it is straightforward — often just a recompile, because the toolchains and runtimes already support riscv64. Difficulty rises only where code has architecture-specific assembly, SIMD intrinsics, or assumptions about pointer size, endianness, or memory ordering."
+  - question: "What are the most common problems when porting to RISC-V?"
+    answer: "The usual culprits are hand-written x86/Arm assembly, SIMD intrinsics that need rewriting for the Vector extension, build systems that don't recognize the riscv64 triple, hardcoded architecture assumptions, and weak-memory-model bugs (RVWMO) in concurrent code that happened to work on stronger-ordered x86."
+  - question: "Can I cross-compile for RISC-V from an x86 machine?"
+    answer: "Yes — cross-compiling is the recommended approach. Install a riscv64-linux-gnu toolchain, build with the cross compiler, and test the result under QEMU user-mode emulation or on real hardware. This is far faster than building natively on current RISC-V hardware."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+As RISC-V hardware spreads from [microcontrollers](/blog/risc-v-embedded-iot-microcontroller-guide/) to [servers](/blog/risc-v-datacenter-servers-sovereign-ai-2026/), the practical question for many developers becomes: *how do I get my software running on it?* The encouraging news is that for most modern, portable code, the answer is "recompile and go." This guide covers the workflow, the genuine pitfalls, and where the ecosystem stands in 2026.
+
+![RISC-V software and tooling showcased at the Summit](/blog/events/riscv-summit-2026/riscv-summit-51.jpg)
+
+## The Good News: Most Code Just Works
+
+If your software is written in a portable high-level language, the heavy lifting is already done for you:
+
+- **C / C++** — GCC and LLVM/Clang have mature [RISC-V backends](/blog/build-risc-v-toolchain-gcc-llvm/); recompile for `riscv64`.
+- **Rust** — first-class `riscv64gc-unknown-linux-gnu` (and bare-metal) targets.
+- **Go** — native `GOARCH=riscv64` support.
+- **Python, Java, Node.js, Ruby** — interpreters/JITs run on RISC-V; pure-language code is portable, and most native extensions are already packaged on [Debian/Ubuntu/Fedora](/blog/risc-v-linux-distributions-guide/).
+
+The vast open-source archive already builds for RISC-V precisely because thousands of these "just recompile" ports have been done.
+
+## The Cross-Compilation Workflow
+
+Building *on* current RISC-V hardware can be slow, so **cross-compiling** from your x86/Arm machine is the standard approach:
+
+```bash
+# Install a cross toolchain (Debian/Ubuntu)
+sudo apt install gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
+
+# Cross-compile a simple program
+riscv64-linux-gnu-gcc -O2 -o app app.c
+
+# Verify the architecture
+file app   # ELF 64-bit LSB ... UCB RISC-V ...
+
+# Test under QEMU user-mode emulation — no hardware needed
+qemu-riscv64 -L /usr/riscv64-linux-gnu ./app
+```
+
+For CMake or autotools projects, point them at the cross toolchain:
+
+```bash
+# CMake
+cmake -DCMAKE_TOOLCHAIN_FILE=riscv64.cmake -B build
+# Autotools
+./configure --host=riscv64-linux-gnu
+```
+
+[QEMU](/blog/getting-started-risc-v-qemu-emulation-linux/) user-mode is the secret weapon here — it runs RISC-V binaries transparently on your dev box, so you can build and test in one place.
+
+## The Real Pitfalls
+
+Where porting *does* take effort, it is almost always one of these:
+
+### 1. Hand-Written Assembly
+
+Any `x86`/`ARM` assembly (crypto routines, codecs, allocators) must be rewritten or you must fall back to a portable C path. This is the single most common blocker. Check for `#ifdef __x86_64__` / `__aarch64__` blocks and add a `__riscv` path.
+
+### 2. SIMD / Intrinsics
+
+Code using SSE/AVX or NEON intrinsics needs porting to the [RISC-V Vector extension (RVV)](/blog/risc-v-vector-extension-rvv-programming/). RVV's *vector-length-agnostic* model is different from fixed-width SIMD, so this is a genuine rewrite — though often a chance to write cleaner, more scalable vector code.
+
+### 3. Build-System Awareness
+
+Older `configure` scripts, `config.guess`, or hardcoded arch lists may not recognize `riscv64`. Updating to current autotools/CMake usually fixes it.
+
+### 4. Hardcoded Assumptions
+
+Watch for code that assumes a specific pointer size, page size, cache-line size, or — rarely — endianness. RISC-V is little-endian and LP64 on `riscv64`, which matches most Linux platforms, so this is usually mild.
+
+### 5. Memory-Ordering Bugs
+
+This is the sneaky one. Concurrent code that "worked" on strongly-ordered x86 can expose latent races on RISC-V's weaker [RVWMO memory model](/blog/risc-v-memory-model-atomics-rvwmo/). These bugs are real and intermittent — audit lock-free code and trust `std::atomic`/proper fences rather than incidental x86 ordering.
+
+## Set Up CI for RISC-V
+
+To keep a port healthy, add RISC-V to continuous integration. Two common approaches:
+
+- **QEMU in CI** — run your test suite under `qemu-riscv64`. Easy to add to GitHub Actions and catches most regressions.
+- **Native runners** — as [RISC-V servers](/blog/risc-v-datacenter-servers-sovereign-ai-2026/) become available, native CI runners give the most accurate results, including performance and timing-sensitive tests.
+
+Multi-arch container builds (`docker buildx --platform linux/riscv64`) make shipping RISC-V images part of a normal release.
+
+## The State of the Ecosystem in 2026
+
+From conversations at [RISC-V Summit Europe 2026](/blog/risc-v-summit-europe-2026-bologna-highlights/), the picture is healthy:
+
+- **Toolchains and runtimes:** mature and upstream — RISC-V is a first-class target.
+- **Distros:** tens of thousands of packages already built for `riscv64`.
+- **Remaining work:** mostly the long tail of assembly/SIMD-heavy libraries and proprietary software.
+- **Vector/AI libraries:** actively being optimized for RVV — an area of rapid progress.
+
+In short, porting in 2026 is less "can it be done?" and more "optimize the hot paths."
+
+<BlogPromoCard variant="course" />
+
+## The Bottom Line
+
+Porting to RISC-V is mostly a recompile thanks to mature GCC/LLVM, Rust, and Go support and a huge already-ported package archive. Cross-compile from your existing machine, test under **QEMU**, and add RISC-V to CI to stay green. Budget real effort only for **hand-written assembly, SIMD intrinsics (→ RVV), stale build systems, and latent memory-ordering bugs**. Tackle those and your software will run on everything from a $5 microcontroller to a datacenter server — all on the same open ISA.
+
+---
+
+*Part of my RISC-V series. See also the [toolchain guide](/blog/build-risc-v-toolchain-gcc-llvm/) and [running Linux on RISC-V](/blog/risc-v-linux-distributions-guide/).*

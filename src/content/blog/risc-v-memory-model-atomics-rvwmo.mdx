@@ -1,0 +1,106 @@
+---
+title: "The RISC-V Memory Model: RVWMO and Atomics"
+snippet: "Understand the RISC-V memory model (RVWMO), atomic instructions, LR/SC, and fences. A practical guide to concurrency and lock-free programming on RISC-V."
+description: "Understand the RISC-V memory model (RVWMO), atomic instructions, LR/SC, and fences. A practical guide to concurrency and lock-free programming on RISC-V."
+publishDate: "2026-06-11"
+lastModified: "2026-06-11"
+author: "Luca Berton"
+category: "Open Source"
+tags: ["RISC-V", "memory model", "atomics", "concurrency", "systems"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-59.jpg"
+  alt: "Multi-core RISC-V systems at RISC-V Summit Europe 2026"
+faq:
+  - question: "What is RVWMO?"
+    answer: "RVWMO (RISC-V Weak Memory Ordering) is the formal memory consistency model that defines how memory operations from different harts become visible to each other. It is a weak (relaxed) model: the hardware may reorder loads and stores for performance, so programmers must use fences and atomic instructions to enforce ordering where it matters."
+  - question: "What is the difference between LR/SC and AMO in RISC-V?"
+    answer: "The A extension provides two atomic mechanisms. AMO (Atomic Memory Operations) instructions like amoadd and amoswap perform a read-modify-write atomically in one instruction. LR/SC (Load-Reserved / Store-Conditional) is a pair: LR reserves an address, SC succeeds only if no other hart wrote it meanwhile — ideal for compare-and-swap and lock-free algorithms."
+  - question: "Why does RISC-V use a weak memory model?"
+    answer: "A weak model gives hardware designers freedom to reorder and pipeline memory accesses for higher performance and lower power, which is especially valuable for scalable multicore and server chips. The cost is that software must explicitly use fences and atomics — but compilers and standard libraries handle this for most developers."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+The moment your RISC-V system has more than one [hart](/blog/risc-v-interrupts-plic-clint-aia/), a subtle question appears: *when one core writes memory, when exactly does another core see it?* The answer is governed by the **memory model**, and RISC-V's is called **RVWMO**. Get it right and you can write fast, correct lock-free code; get it wrong and you get the worst kind of bug — the intermittent one. Here is what every systems programmer should know.
+
+![Multi-core RISC-V systems at the Summit](/blog/events/riscv-summit-2026/riscv-summit-59.jpg)
+
+## Why Memory Models Exist
+
+On a single core, instructions appear to run in order. Across multiple cores with caches and store buffers, the hardware **reorders** memory operations for speed — a store might sit in a buffer while later loads complete. A **memory model** is the contract that says which reorderings are allowed and how software can restrain them. Every modern ISA has one; RISC-V's is **RVWMO**.
+
+## RVWMO: Weak by Design
+
+**RVWMO (RISC-V Weak Memory Ordering)** is a *relaxed* model. By default, the hardware may reorder independent loads and stores from a single hart as observed by others. This is deliberate: weak ordering lets designers build faster, more scalable [multicore and server chips](/blog/risc-v-datacenter-servers-sovereign-ai-2026/) without the synchronization tax of a strongly-ordered model like x86's TSO.
+
+The trade-off: **you** must insert ordering where it matters. Fortunately, this is rare in everyday code — compilers, `std::atomic`, and kernel primitives handle it. But if you write lock-free data structures, drivers, or synchronization primitives, RVWMO is essential knowledge.
+
+There is also a stronger optional extension, **Ztso**, providing total-store-order semantics for easier porting of code written against x86 — useful for [software migration](/blog/risc-v-software-porting-ecosystem/).
+
+## Fences: Enforcing Order
+
+The `fence` instruction is how you restrain reordering. It orders memory operations *before* it against those *after* it, with predecessor/successor sets of reads (R) and writes (W):
+
+```asm
+fence rw, rw     # full barrier: all earlier R/W before all later R/W
+fence w, w       # order earlier writes before later writes
+fence r, r       # order earlier reads before later reads
+fence.i          # instruction-fetch fence (after writing code, e.g. JIT)
+```
+
+A classic use: producer writes data, then a flag. Without a fence a consumer might see the flag set before the data lands. `fence w, w` between the two writes (and `fence r, r` on the reader) prevents that.
+
+## The A Extension: Atomics
+
+The [**A (Atomic) extension**](/blog/risc-v-extensions-explained-isa-alphabet/) — part of the **G**/RV64GC baseline — provides two complementary mechanisms.
+
+### AMO: Atomic Memory Operations
+
+A single instruction does an atomic read-modify-write:
+
+```asm
+amoadd.w  a0, a1, (a2)   # atomically: a0 = *a2; *a2 = a0 + a1
+amoswap.w a0, a1, (a2)   # atomically swap
+amoor.w / amoand.w / amomax.w ...
+```
+
+AMOs also carry optional **`.aq`** (acquire) and **`.rl`** (release) ordering bits, so you can express acquire/release semantics directly on the atomic — exactly what C++ `memory_order_acquire`/`release` map to.
+
+### LR/SC: Load-Reserved / Store-Conditional
+
+For arbitrary atomic sequences (like compare-and-swap), RISC-V uses a reservation pair:
+
+```asm
+retry:
+    lr.w   t0, (a0)        # load-reserved: read and reserve the address
+    bne    t0, a1, fail    # not the expected value? bail
+    sc.w   t2, a2, (a0)    # store-conditional: succeeds only if reservation intact
+    bnez   t2, retry       # t2 != 0 => SC failed (someone else wrote), retry
+fail:
+```
+
+`sc` succeeds only if no other hart wrote the reserved address since the `lr`. This is the foundation for compare-and-swap and most lock-free algorithms. Keep the LR/SC body tiny — long or memory-touching sequences can cause the reservation to be lost and loop forever.
+
+## Acquire and Release in Practice
+
+Most concurrency reduces to two patterns:
+
+- **Acquire** (e.g. taking a lock): no later memory access may move *before* it.
+- **Release** (e.g. dropping a lock): no earlier access may move *after* it.
+
+RISC-V expresses these with the `.aq`/`.rl` bits on atomics, or with explicit fences. If you use a high-level language, `std::atomic` (C++), `atomic` (Rust), or kernel macros generate the correct instructions for you — you rarely hand-write them, but understanding the mapping helps you reason about correctness.
+
+## Why This Matters Beyond Theory
+
+Memory-model bugs are notoriously hard: they appear only under specific timing, on specific [microarchitectures](/blog/risc-v-open-source-cores-cva6-xiangshan/), and vanish under a [debugger](/blog/risc-v-debugging-openocd-gdb-jtag/). RVWMO's value is that it is **formally specified** — it was developed with rigorous formal methods and tooling (like the `herd`/`litmus` test suites), so hardware and software can be checked against a precise definition rather than folklore. That formality is a genuine strength of the RISC-V specification.
+
+<BlogPromoCard variant="newsletter" />
+
+## The Bottom Line
+
+RISC-V uses **RVWMO**, a weak memory model that trades default ordering guarantees for performance and scalability. You restore the ordering you need with **`fence`** instructions and the **A extension's** atomics — **AMOs** for single-instruction read-modify-write and **LR/SC** for lock-free compare-and-swap, both with optional acquire/release semantics. For most code your compiler and standard library handle this; for systems and concurrency work, RVWMO is one of the most important parts of the ISA to understand.
+
+---
+
+*Part of my RISC-V series. See also [RISC-V extensions explained](/blog/risc-v-extensions-explained-isa-alphabet/) and [open-source cores](/blog/risc-v-open-source-cores-cva6-xiangshan/).*

@@ -1,0 +1,100 @@
+---
+title: "The RISC-V ABI and Calling Convention Explained"
+snippet: "How RISC-V code actually fits together — registers, the psABI, argument passing, the stack, and ILP32 vs LP64. A practical guide to the calling convention."
+description: "How RISC-V code actually fits together — registers, the psABI, argument passing, the stack, and ILP32 vs LP64. A practical guide to the calling convention."
+publishDate: "2026-06-11"
+lastModified: "2026-06-11"
+author: "Luca Berton"
+category: "RISC-V"
+tags: ["RISC-V", "ABI", "calling convention", "assembly", "toolchain"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-9.jpg"
+  alt: "RISC-V developers discussing the ABI and toolchain at RISC-V Summit Europe 2026"
+faq:
+  - question: "What is an ABI?"
+    answer: "An Application Binary Interface (ABI) is the contract that lets separately compiled pieces of code work together at the binary level. It defines how functions pass arguments and return values, which registers must be preserved, how the stack is laid out, and the sizes and alignment of data types. The RISC-V psABI is the specification that pins all of this down for RISC-V."
+  - question: "What is the difference between ILP32 and LP64 on RISC-V?"
+    answer: "They are data models. ILP32 (used on RV32) makes int, long, and pointers 32 bits. LP64 (used on RV64) keeps int at 32 bits but makes long and pointers 64 bits. There are also hard-float and soft-float variants (e.g. lp64d uses double-precision FP registers), and the chosen ABI must match across all linked objects."
+  - question: "Which registers does a RISC-V function have to preserve?"
+    answer: "The callee-saved registers — s0–s11 (and the stack pointer sp) — must be preserved across a call, so a function that uses them saves and restores them. The caller-saved registers — t0–t6, a0–a7, and ra — may be clobbered, so the caller saves any it still needs. This split is defined by the calling convention."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+You can read every line of a function and still not know how it talks to the rest of your program. That conversation is governed by the **ABI** — the Application Binary Interface — and on RISC-V it is refreshingly clean and well documented. Understanding it turns [assembly](/blog/risc-v-assembly-language-tutorial/) from a puzzle into something you can read fluently.
+
+![RISC-V developers discussing the ABI and toolchain at the Summit](/blog/events/riscv-summit-2026/riscv-summit-9.jpg)
+
+## What the ABI Actually Is
+
+The **ABI** is the binary-level contract between pieces of code. While the [ISA](/blog/what-is-risc-v-open-isa-explained/) defines what instructions *mean*, the ABI defines the *conventions* that let independently compiled functions, libraries, and the operating system interoperate: how arguments are passed, what a function may clobber, how the stack grows, and how data is laid out. On RISC-V this is the **psABI** (processor-specific ABI), a public specification anyone can implement.
+
+## Register Roles
+
+RISC-V has 32 integer registers, and the calling convention assigns each a role. The names you see in assembly are ABI names, not raw numbers:
+
+| ABI name | Role | Preserved across call? |
+| --- | --- | --- |
+| `zero` | Hard-wired zero | — |
+| `ra` | Return address | No (caller-saved) |
+| `sp` | Stack pointer | Yes |
+| `a0`–`a7` | Arguments / return values | No |
+| `t0`–`t6` | Temporaries | No |
+| `s0`–`s11` | Saved registers | Yes |
+
+The split between **caller-saved** (`t*`, `a*`, `ra`) and **callee-saved** (`s*`, `sp`) is the heart of the convention: it decides who is responsible for preserving a value across a function call.
+
+## Passing Arguments and Returning Values
+
+The rules are simple enough to memorize:
+
+- The first **eight integer arguments** go in `a0`–`a7`.
+- Additional arguments **spill to the stack**.
+- Return values come back in `a0` (and `a1` for a second word).
+- With a hard-float ABI, floating-point arguments use the FP registers `fa0`–`fa7` — see the [floating-point extensions](/blog/risc-v-floating-point-extensions/) for how those registers work.
+
+```asm
+# int add(int a, int b) { return a + b; }
+add:
+    add   a0, a0, a1   # a0 = a + b  -> return value in a0
+    ret                # pseudo-instruction for: jalr zero, 0(ra)
+```
+
+Notice the result lands in `a0` and the function returns by jumping to `ra` — exactly what the convention promises.
+
+## The Stack Frame
+
+The **stack** grows *downward* and is kept **16-byte aligned**. A function that calls others (a "non-leaf" function) typically opens with a *prologue* that lowers `sp` and saves `ra` plus any `s*` registers it will use, and ends with an *epilogue* that restores them:
+
+```asm
+func:
+    addi  sp, sp, -16      # allocate a frame
+    sd    ra, 8(sp)        # save return address
+    sd    s0, 0(sp)        # save a callee-saved register
+    # ... body ...
+    ld    s0, 0(sp)        # restore
+    ld    ra, 8(sp)
+    addi  sp, sp, 16       # free the frame
+    ret
+```
+
+This discipline is what makes [debugging](/blog/risc-v-debugging-openocd-gdb-jtag/) and stack unwinding possible — a debugger can walk frames precisely because everyone follows the same layout.
+
+## Data Models: ILP32 vs LP64
+
+The ABI also fixes the **data model**. On **RV32** you typically use **ILP32**; on **RV64**, **LP64**. The letters describe type widths: under LP64, `long` and pointers are 64-bit while `int` stays 32-bit. There are float variants too — `lp64d` means LP64 with double-precision FP in registers. The crucial rule: **every object you link must share the same ABI**, which is why toolchain flags like `-mabi=lp64d` matter when you [build a toolchain](/blog/build-risc-v-toolchain-gcc-llvm/).
+
+## Why a Clean ABI Matters
+
+A well-specified ABI is what lets a Debian package, a vendor's closed library, and your own code all link together and run. It is the quiet foundation under the entire [software ecosystem](/blog/risc-v-software-porting-ecosystem/) — and because the RISC-V psABI is open, every compiler and OS implements the *same* contract, avoiding the fragmentation that plagued earlier architectures.
+
+<BlogPromoCard variant="course" />
+
+## The Bottom Line
+
+The RISC-V **ABI** is the contract that turns isolated functions into working programs: register roles, the eight-argument convention, a downward-growing 16-byte-aligned stack, and a clear data model. Once you internalize who saves what and where arguments live, RISC-V assembly stops looking cryptic and starts looking *obvious*. That clarity — an open, single, well-documented convention — is one of the underrated reasons the RISC-V ecosystem came together so fast.
+
+---
+
+*Part of my RISC-V series. See also the [assembly tutorial](/blog/risc-v-assembly-language-tutorial/) and [building a toolchain](/blog/build-risc-v-toolchain-gcc-llvm/).*

@@ -509,6 +509,32 @@ function checkSitemapNoStubs() {
   record(leaked ? "FAIL" : "PASS", "sitemap excludes stubs", `${leaked} redirect stub(s) in sitemap of ${stubSlugs.size} total`);
 }
 
+// Built-HTML guard: inline client-side scripts that build hrefs with a template
+// literal (e.g. `/blog/${post.slug}/`) leave the LITERAL placeholder in the page
+// source after minification (var renamed → `/blog/${e.slug}/`). Google's URL
+// extractor scrapes that literal as a real link and reports it as 404. Build the
+// href via string concatenation instead ("/blog/" + slug + "/"). This check
+// fails if any built page still contains a `/<seg>/${...}/` URL placeholder.
+function checkNoLeakedTemplateUrls() {
+  const pages = walk(PUBLIC_DIR, (p) => path.basename(p) === "index.html");
+  if (!pages.length) {
+    record("WARN", "leaked template URLs", "public/ has no pages — run `pnpm build`");
+    return;
+  }
+  const re = /\/[a-z0-9-]+\/\$\{[^}]+\}\//i; // e.g. /blog/${e.slug}/
+  let leaked = 0;
+  for (const fp of pages) {
+    const html = read(fp);
+    const m = html.match(re);
+    if (m) {
+      leaked++;
+      const rel = path.relative(PUBLIC_DIR, fp).replace(/\/index\.html$/, "") || "/";
+      record("FAIL", "leaked template URL", `${rel}: ${m[0]} (use string concatenation, not a template literal, for client-side hrefs)`);
+    }
+  }
+  record(leaked ? "FAIL" : "PASS", "no leaked template URLs", `${leaked} page(s) with literal /seg/$\{...\}/ URLs`);
+}
+
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
@@ -530,6 +556,7 @@ if (!SOURCE_ONLY) {
   checkCategoryWordCount();
   checkListingLinksResolve();
   checkSitemapNoStubs();
+  checkNoLeakedTemplateUrls();
 } else {
   record("PASS", "built-HTML checks", "skipped (--source-only); run `pnpm validate:seo` after build");
 }

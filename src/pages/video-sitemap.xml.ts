@@ -50,7 +50,7 @@ export async function GET() {
           : (post.data.snippet || post.data.description || post.data.title);
         const vThumb = isPrimary && video?.thumbnailUrl
           ? video.thumbnailUrl
-          : `https://img.youtube.com/vi/${id}/maxresdefault.jpg`;
+          : `https://img.youtube.com/vi/${id}/hqdefault.jpg`;
         const vDuration = isPrimary && video?.duration
           ? (typeof video.duration === 'string' && video.duration.startsWith('PT') ? '' : video.duration)
           : '';

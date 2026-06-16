@@ -4,6 +4,29 @@ import mdx from "@astrojs/mdx";
 import sitemap from "@astrojs/sitemap";
 import icon from "astro-icon";
 import react from '@astrojs/react';
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Auto-derive the set of meta-refresh stub redirect pages under
+// src/pages/blog/<slug>/index.astro. These are noindex,follow redirect stubs
+// (no real content) and MUST be excluded from the sitemap, otherwise Ahrefs/GSC
+// flag "Noindex page in sitemap". Scanning the source keeps this list in sync
+// automatically as stubs are added/removed (the old hardcoded allowlist drifted
+// and leaked 78 stubs into the sitemap).
+const stubBlogSlugs = (() => {
+  const blogPagesDir = fileURLToPath(new URL("./src/pages/blog/", import.meta.url));
+  const slugs = new Set();
+  if (!fs.existsSync(blogPagesDir)) return slugs;
+  for (const entry of fs.readdirSync(blogPagesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const indexPath = path.join(blogPagesDir, entry.name, "index.astro");
+    if (!fs.existsSync(indexPath)) continue;
+    const src = fs.readFileSync(indexPath, "utf8");
+    if (/http-equiv=["']refresh["']/i.test(src)) slugs.add(entry.name);
+  }
+  return slugs;
+})();
 
 // https://astro.build/config
 export default defineConfig({
@@ -38,6 +61,11 @@ export default defineConfig({
         if (page.includes('partytown')) return false;
         if (page.includes('?ref=')) return false;
         if (page.includes('?utm_')) return false;
+
+        // Skip meta-refresh stub redirect pages (noindex,follow) — auto-derived
+        // from src/pages/blog/<slug>/index.astro so the list never drifts.
+        const blogSlugMatch = page.match(/\/blog\/([^/]+)\/?$/);
+        if (blogSlugMatch && stubBlogSlugs.has(blogSlugMatch[1])) return false;
         
         // Skip root-level categories and tags (they redirect to /blog/categories/ and /blog/tags/)
         if (page.match(/\/categories\/[^/]+\/?$/) && !page.includes('/blog/categories/')) return false;

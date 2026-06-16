@@ -48,6 +48,12 @@ const ORPHAN_SLUGS = [
   "de-nederlandse-kubernetes-podcast",
 ];
 
+// Non-blog pages that must have incoming internal links (path is the exact link
+// target). /talk/ was flagged as an orphan by Ahrefs (no incoming links).
+const NON_BLOG_ORPHAN_PATHS = [
+  "/talk/",
+];
+
 // Outgoing-link targets that must no longer appear in source content/components.
 const FORBIDDEN_LINK_PATTERNS = [
   "/booklist/",
@@ -251,6 +257,57 @@ function checkOrphanIncomingLinks() {
       record("FAIL", `orphan ${slug}`, "no incoming internal links found");
     }
   }
+  for (const target of NON_BLOG_ORPHAN_PATHS) {
+    const linkers = files.filter((fp) => {
+      // ignore the page's own source (e.g. /talk/ -> src/pages/talk.astro)
+      const self = "src/pages" + target.replace(/\/$/, "") + ".astro";
+      if (path.relative(ROOT, fp) === self) return false;
+      return read(fp).includes(target);
+    });
+    record(linkers.length ? "PASS" : "FAIL", `orphan ${target}`,
+      linkers.length ? `${linkers.length} incoming link(s)` : "no incoming internal links found");
+  }
+}
+
+// Source guard: every local image referenced by a blog post — both the
+// frontmatter `image.src` and absolute-path body images `![alt](/path)` — must
+// exist on disk under static/. Catches "Page has broken image" / "Image broken"
+// (404) before a crawl does. External (http/https), data:, and Astro-import
+// (relative ../) references are skipped.
+function checkBlogImagesExist() {
+  const files = walk(BLOG_DIR, (p) => p.endsWith(".mdx"));
+  const STATIC_DIR = path.join(ROOT, "static");
+  let missing = 0;
+  const localImg = (src) =>
+    src && src.startsWith("/") && /\.(jpe?g|png|gif|webp|avif|svg)$/i.test(src);
+  const resolveOk = (src) => {
+    const clean = src.split("#")[0].split("?")[0];
+    return exists(path.join(STATIC_DIR, clean)) || exists(path.join(PUBLIC_DIR, clean));
+  };
+  for (const fp of files) {
+    const src = read(fp);
+    if (/^draft:\s*true\b/m.test(src)) continue; // drafts are noindex
+    const rel = "blog/" + path.basename(fp, ".mdx");
+
+    // Frontmatter image.src
+    const fmImg = src.match(/^\s*src:\s*["']([^"']+)["']/m);
+    if (fmImg && localImg(fmImg[1]) && !resolveOk(fmImg[1])) {
+      missing++;
+      record("FAIL", "broken frontmatter image", `${rel} -> ${fmImg[1]}`);
+    }
+    // Body markdown images ![alt](/path)
+    const bodyRe = /!\[[^\]]*\]\((\/[^)\s]+)\)/g;
+    let m;
+    const seen = new Set();
+    while ((m = bodyRe.exec(src))) {
+      const url = m[1];
+      if (seen.has(url) || !localImg(url) || resolveOk(url)) continue;
+      seen.add(url);
+      missing++;
+      record("FAIL", "broken body image", `${rel} -> ${url}`);
+    }
+  }
+  record(missing ? "FAIL" : "PASS", "blog images exist", `${missing} broken local image reference(s)`);
 }
 
 function checkRedirects() {
@@ -422,6 +479,36 @@ function checkListingLinksResolve() {
   record(broken ? "FAIL" : "PASS", "category listing links resolve", `${broken} link(s) to missing/draft posts`);
 }
 
+// Built-HTML guard: no meta-refresh stub redirect page (noindex,follow) may
+// appear in the built sitemap, or crawlers flag "Noindex page in sitemap".
+// Stub slugs are derived from src/pages/blog/<slug>/index.astro (same source
+// astro.config.mjs uses to exclude them), then matched against sitemap-0.xml.
+function checkSitemapNoStubs() {
+  const sitemap = path.join(PUBLIC_DIR, "sitemap-0.xml");
+  if (!exists(sitemap)) {
+    record("WARN", "sitemap stub exclusion", "public/sitemap-0.xml not found — run `pnpm build`");
+    return;
+  }
+  const blogPagesDir = path.join(ROOT, "src", "pages", "blog");
+  const stubSlugs = new Set();
+  if (exists(blogPagesDir)) {
+    for (const entry of fs.readdirSync(blogPagesDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const idx = path.join(blogPagesDir, entry.name, "index.astro");
+      if (exists(idx) && /http-equiv=["']refresh["']/i.test(read(idx))) stubSlugs.add(entry.name);
+    }
+  }
+  const xml = read(sitemap);
+  let leaked = 0;
+  for (const slug of stubSlugs) {
+    if (xml.includes(`/blog/${slug}/`)) {
+      leaked++;
+      record("FAIL", "stub in sitemap", `/blog/${slug}/ (noindex redirect stub)`);
+    }
+  }
+  record(leaked ? "FAIL" : "PASS", "sitemap excludes stubs", `${leaked} redirect stub(s) in sitemap of ${stubSlugs.size} total`);
+}
+
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
@@ -434,6 +521,7 @@ checkForbiddenLinks();
 checkMasterclassRename();
 checkNoAstroEmbed();
 checkOrphanIncomingLinks();
+checkBlogImagesExist();
 checkRedirects();
 checkDraftFilters();
 checkSourceFrontmatterLength();
@@ -441,6 +529,7 @@ if (!SOURCE_ONLY) {
   checkBuiltHtml();
   checkCategoryWordCount();
   checkListingLinksResolve();
+  checkSitemapNoStubs();
 } else {
   record("PASS", "built-HTML checks", "skipped (--source-only); run `pnpm validate:seo` after build");
 }

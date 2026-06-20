@@ -1,0 +1,128 @@
+---
+title: "GLM-5.2 744B: Sparse Attention Meets Efficient MoE"
+snippet: "GLM-5.2 is a 744B-parameter MoE model with DeepSeek Sparse Attention, 256 experts (8+1 active), 40B active params per step, and a 1M-token context window."
+description: "GLM-5.2 is a 744B-parameter MoE model with DeepSeek Sparse Attention, 256 experts (8+1 active), 40B active params per step, and a 1M-token context window."
+publishDate: "2026-06-20"
+lastModified: "2026-06-20"
+image:
+  src: "/blog/thumbnails/glm-5-2-744b-moe-architecture-2026.jpg"
+  alt: "GLM-5.2 744B Mixture-of-Experts architecture with DeepSeek Sparse Attention"
+category: "AI"
+tags:
+  - "GLM"
+  - "MoE"
+  - "Sparse Attention"
+  - "LLM"
+  - "Inference"
+  - "Open Source"
+  - "Zhipu AI"
+author: "Luca Berton"
+draft: false
+faq:
+  - question: "What is GLM-5.2 744B?"
+    answer: "GLM-5.2 is a large open-weight Mixture-of-Experts (MoE) language model with 744 billion total parameters. Despite its size, it activates only about 40B parameters per inference step by routing each token to 8 experts plus 1 shared expert out of 256 total experts."
+  - question: "What makes GLM-5.2's architecture efficient?"
+    answer: "Two design choices: a sparse MoE feed-forward layer (256 experts, 8 routed + 1 shared active per token, so only ~40B of 744B parameters compute per step) and DeepSeek Sparse Attention (DSA) layered on Multi-head Latent Attention (MLA), which lets each token attend only to itself and a selected subset of previous tokens. Together they cut compute and memory dramatically versus a dense model of the same capacity."
+  - question: "How long is GLM-5.2's context window?"
+    answer: "GLM-5.2 supports a context length of up to 1 million tokens, enabled by Multi-head Latent Attention combined with DeepSeek Sparse Attention to keep the KV cache and attention compute tractable at that scale."
+  - question: "What is DeepSeek Sparse Attention (DSA)?"
+    answer: "DSA is a sparse attention mechanism where the current token attends only to itself and a selected subset of previous tokens, rather than every prior token. In GLM-5.2 it is combined with Multi-head Latent Attention (MLA) and an IndexShare component to make 1M-token context economically feasible."
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+The open-weight frontier keeps pushing scale and efficiency at the same time. **GLM-5.2** lands as a **744B-parameter Mixture-of-Experts (MoE)** model that, despite its enormous total size, activates only about **40B parameters per inference step**. It pairs an aggressive sparse MoE feed-forward design with **DeepSeek Sparse Attention (DSA)** and a **1M-token context window** — a combination aimed squarely at making very large models practical to serve.
+
+This is an architecture walkthrough of what makes GLM-5.2 tick, and how it compares to the other MoE models I have covered.
+
+## The Big Numbers
+
+- **744B total parameters** — only **~40B active** per token
+- **256 experts** in each MoE layer — **8 routed + 1 shared** active per token
+- **78 transformer blocks** (the first 3 use a dense FFN, the rest are MoE)
+- **Embedding dimension of 6,144**
+- **Vocabulary size of 155K**
+- **1M-token context length**
+- **Multi-head Latent Attention (MLA)** + **DeepSeek Sparse Attention (DSA)** with **IndexShare**
+
+The headline is the activation ratio: serving 744B parameters worth of capacity while computing only ~40B per step. That is roughly **5%** of the model active at any moment — the defining trick of modern sparse MoE design.
+
+## Sparse Attention: Reaching 1M Tokens
+
+The attention stack is where GLM-5.2 earns its long context. Each block combines two ideas:
+
+**Multi-head Latent Attention (MLA)** — instead of caching full key/value tensors for every head, MLA compresses them into a shared low-rank latent space. This shrinks the KV cache, which is the real bottleneck for long-context inference. DeepSeek popularized MLA, and it is now a staple of efficient large models.
+
+**DeepSeek Sparse Attention (DSA) with IndexShare** — layered on top of MLA, DSA makes attention *sparse*: the current token attends only to **itself and a selected subset of previous tokens**, not the entire history. With a naive dense attention pattern, a 1M-token context would be computationally hopeless. DSA prunes the attention graph so that each token only looks at the positions that matter, and IndexShare reuses selection indices across heads to keep the bookkeeping cheap.
+
+RoPE (Rotary Position Embeddings) handles positional encoding, as in most modern transformers.
+
+The payoff: a **1M-token supported context length** that stays tractable on real hardware — something a dense full-attention model at this scale simply could not offer.
+
+## The MoE Layer: 256 Experts, 9 Active
+
+GLM-5.2's feed-forward path is where the 744B/40B split comes from. Of the 78 blocks:
+
+- The **first 3 blocks** use a **dense FFN** with hidden size **12,288** (no routing — early layers benefit from dense processing)
+- The remaining **75 blocks** use the **MoE layer**
+
+Each MoE layer contains:
+
+- **256 experts**, each a SwiGLU feed-forward module
+- **Input expert size of 6,144**, **intermediate projection size of 2,048**
+- A **router** that selects **8 experts per token**, plus **1 shared expert** that is always active
+
+The shared expert is a now-common pattern (DeepSeek, Qwen): it captures general-purpose computation that every token needs, while the 8 routed experts specialize. That gives you 9 active experts per token but only the routed 8 are dynamically selected.
+
+The **FeedForward (SwiGLU) module** uses the standard gated structure — two parallel linear projections, a SiLU activation on the gate, and a final down-projection — which has become the default FFN in high-end LLMs.
+
+## Why the Activation Ratio Matters
+
+With **~40B of 744B parameters active per step**, GLM-5.2 inherits the central economics of sparse MoE:
+
+- **Compute scales with active parameters**, not total — each forward pass costs roughly what a 40B dense model would
+- **Memory scales with total parameters** — you still have to hold 744B weights (or a quantized version) resident
+- The bottleneck shifts from FLOPs to **memory bandwidth and expert routing**, exactly the regime that [Wide Expert Parallelism on NVL72](/blog/nvidia-wide-ep-nvl72-moe-2026/) is built to exploit
+
+This is the same trade-off I broke down for [Mistral Small 4 119B](/blog/mistral-small-4-119b-moe-2026/) — but GLM-5.2 takes it to a far larger scale, with 256 experts versus Mistral's 128 and a much higher total parameter count.
+
+## How It Compares
+
+GLM-5.2 sits among the largest open-weight MoE models:
+
+| Model | Total Params | Active Params | Experts (active) | Context |
+|---|---|---|---|---|
+| **GLM-5.2** | 744B | ~40B | 256 (8 + 1 shared) | 1M |
+| DeepSeek-R1 | 671B | 37B | 256 (8) | 128K |
+| Mistral Small 4 | 119B | 6.5B | 128 (4) | 256K |
+| Qwen3 | 235B | 22B | 128 (8) | 256K |
+
+On independent benchmark estimates (Artificial Analysis style intelligence index), GLM-5.2's top configuration lands in the **low-50s** — competitive with strong frontier and open models, trailing the very top proprietary systems but firmly in the conversation for a self-hostable, open-weight model. Independent evaluation is still forthcoming, so treat early numbers as estimates.
+
+## Where It Fits
+
+GLM-5.2 is built for organizations that want **frontier-class capability they can self-host**, with the long context needed for whole-codebase reasoning, document analysis, and agentic workflows:
+
+- **vs DeepSeek-R1**: similar expert count and active-parameter budget, but a much larger total capacity and 8x the context window
+- **vs Mistral Small 4**: GLM-5.2 is a heavyweight — far more capacity and context, at a correspondingly larger serving footprint
+- **vs proprietary frontier models**: open weights and a 1M-token window are the differentiators, even if raw scores trail the very top closed models
+
+For deployment, the same playbook applies as with other large MoE models: tensor and expert parallelism across multiple GPUs, quantization (FP8/NVFP4) to fit the weights, and KV-cache-aware serving. See my [vLLM Recipes](/blog/vllm-recipes-deploy-model-gpu-2026/) for community serving configs and [LLM-D distributed inference](/blog/llm-d-kubernetes-native-distributed-inference/) for scaling MoE serving on Kubernetes.
+
+## Key Takeaways
+
+1. **744B total, ~40B active** — GLM-5.2 computes like a mid-size model while holding frontier-scale capacity.
+2. **DeepSeek Sparse Attention + MLA** make a **1M-token context** economically feasible.
+3. **256 experts, 8 routed + 1 shared** per token — a high-granularity MoE with a shared-expert backbone.
+4. **First 3 blocks stay dense**; the other 75 are MoE — a common "dense early, sparse late" pattern.
+5. **Memory, not FLOPs, is the constraint** — serving GLM-5.2 is an expert-parallelism and quantization problem.
+
+## Related Articles
+
+- [Mistral Small 4 119B: One Model, Three Personalities](/blog/mistral-small-4-119b-moe-2026/)
+- [Wide Expert Parallelism on NVL72: Scaling MoE Inference](/blog/nvidia-wide-ep-nvl72-moe-2026/)
+- [vLLM Recipes: Deploy Any Model on Any GPU](/blog/vllm-recipes-deploy-model-gpu-2026/)
+- [LLM-D: Kubernetes-Native Distributed Inference](/blog/llm-d-kubernetes-native-distributed-inference/)
+- [LLM Quality vs Cost vs Safety vs Throughput](/blog/llm-quality-vs-cost-frontier-models-2026/)
+
+<BlogPromoCard />

@@ -1,0 +1,516 @@
+---
+draft: false
+title: "OpenClaw Backup and Reinstall: Preserve Config, Memory, and Credentials"
+seoTitle: "OpenClaw Backup and Reinstall Guide"
+snippet: "How to back up OpenClaw before a clean reinstall, preserve ~/.openclaw state, restore config and memory, and avoid copying caches or exposed secrets."
+description: "How to back up OpenClaw before a clean reinstall, preserve ~/.openclaw state, restore config and memory, and avoid copying caches or exposed secrets."
+publishDate: "2026-06-29"
+lastModified: "2026-06-29"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "openclaw"
+  - "backup"
+  - "reinstall"
+  - "restore"
+  - "configuration"
+  - "docker"
+  - "azure"
+  - "security"
+image:
+  src: "/blog/openclaw/setting-up-azure-vm.jpg"
+  alt: "OpenClaw backup and reinstall procedure on an Azure Linux VM"
+faq:
+  - question: "Is backing up openclaw.json enough before reinstalling OpenClaw?"
+    answer: "No. openclaw.json is important, but OpenClaw also stores credentials, auth profiles, sessions, cron jobs, memory notes, workspace files, and runtime state under ~/.openclaw. Docker deployments may also use ~/.config/openclaw."
+  - question: "Should I restore OpenClaw session history?"
+    answer: "Restore sessions only if you need conversation continuity. Session JSONL files can contain private conversation content, so they increase backup size and sensitivity."
+  - question: "What should I not copy into a fresh OpenClaw install?"
+    answer: "Do not copy node_modules, .git, build output, caches, Docker image layers, temporary files, update-check.json, or large model caches. Re-clone the source repository and restore only state."
+---
+
+If you want to reinstall OpenClaw cleanly, do not copy the entire `~/openclaw` directory into the new installation.
+
+The application source can be cloned again. The valuable state is the configuration and runtime data under `~/.openclaw`, plus deployment-specific files such as `~/openclaw/.env`.
+
+For a Docker-based OpenClaw install on an Azure VM, preserve the state first, then reinstall the source code.
+
+## What Must Be Preserved
+
+Back up the entire OpenClaw state directory before deleting or moving anything:
+
+```text
+~/.openclaw
+```
+
+This can include:
+
+| Path | Purpose | Restore? |
+|------|---------|----------|
+| `openclaw.json` | Primary configuration | Yes |
+| `agents/main/agent/auth-profiles.json` | Provider, API, and OAuth profiles | Yes, secret |
+| `agents/main/agent/auth.json` | Authentication state | Yes, secret |
+| `agents/main/agent/models.json` | Agent model configuration | Yes |
+| `agents/main/sessions/sessions.json` | Session index and metadata | Optional |
+| `agents/main/sessions/*.jsonl` | Conversation transcripts | Optional, private |
+| `credentials/` | Discord, channel, and provider credentials | Yes, secret |
+| `cron/jobs.json` | Scheduled jobs | Yes |
+| `workspace/` | Agent identity, instructions, tools, and durable context | Yes |
+| `memory/notes/` | File-backed durable memory | Yes |
+| `memory/main.sqlite` | Search/index database | Optional, usually rebuildable |
+| `canvas/index.html` | Custom canvas page | Only if customized |
+| `openclaw.json.bak*` | Emergency config rollback copies | Optional |
+
+For some Docker deployments, also preserve:
+
+```text
+~/.config/openclaw
+```
+
+That directory may contain auth-profile encryption material. Treat it as secret.
+
+## What Not to Restore
+
+Do not migrate large or rebuildable application files into the fresh install:
+
+- `~/openclaw/node_modules`
+- `~/openclaw/.git`
+- `~/.cache`
+- Docker image layers
+- downloaded model caches
+- build output
+- `~/.openclaw/update-check.json`
+- `~/.openclaw/completions/`
+- `~/.openclaw/cron/*.tmp`
+- session `.bak-*` files unless you are debugging an old session
+
+If a file count looks huge, such as hundreds of thousands of files, you are probably counting the source checkout, dependency folders, cache directories, model files, or the whole home directory. OpenClaw configuration alone should be much smaller.
+
+Check where the size is concentrated:
+
+```bash
+du -h --max-depth=2 ~/.openclaw 2>/dev/null | sort -h | tail -30
+
+find ~/.openclaw -type d | wc -l
+find ~/.openclaw -type f | wc -l
+du -sh ~/.openclaw
+
+du -h --max-depth=2 ~/openclaw 2>/dev/null | sort -h | tail -30
+```
+
+## Step 1: Stop OpenClaw Before Copying State
+
+Stop the gateway so files are not changing while you archive them:
+
+```bash
+cd ~/openclaw
+docker compose stop openclaw-gateway
+```
+
+If you want to be more conservative, stop the whole stack:
+
+```bash
+docker compose down
+```
+
+## Step 2: Create a Full State Backup
+
+This is the safest compatible backup for older Docker installs:
+
+```bash
+umask 077
+mkdir -p ~/openclaw-backups
+
+tar -C "$HOME" \
+  --exclude='.openclaw/agents/main/sessions/*.bak-*' \
+  --exclude='.openclaw/agents/main/sessions/*.lock' \
+  --exclude='.openclaw/cron/*.tmp' \
+  -czf "$HOME/openclaw-backups/openclaw-state-$(date +%Y%m%d-%H%M%S).tar.gz" \
+  .openclaw
+```
+
+If your deployment uses `~/.config/openclaw`, back it up too:
+
+```bash
+if test -d "$HOME/.config/openclaw"; then
+  tar -C "$HOME" \
+    -czf "$HOME/openclaw-backups/openclaw-config-dir-$(date +%Y%m%d-%H%M%S).tar.gz" \
+    .config/openclaw
+fi
+```
+
+Preserve local deployment files from the source checkout:
+
+```bash
+cd ~/openclaw
+
+tar -czf "$HOME/openclaw-backups/openclaw-deployment-$(date +%Y%m%d-%H%M%S).tar.gz" \
+  .env \
+  docker-compose.yml \
+  docker-compose.yaml \
+  compose.yml \
+  compose.yaml \
+  2>/dev/null || true
+```
+
+If the repository has local changes you care about, save a patch:
+
+```bash
+git rev-parse HEAD > "$HOME/openclaw-backups/openclaw-git-revision.txt"
+git status --short > "$HOME/openclaw-backups/openclaw-git-status.txt"
+git diff > "$HOME/openclaw-backups/openclaw-uncommitted.patch"
+```
+
+## Step 3: Verify the Backup
+
+Create and verify checksums:
+
+```bash
+sha256sum ~/openclaw-backups/openclaw-*.tar.gz \
+  > ~/openclaw-backups/openclaw-backups.sha256
+
+sha256sum -c ~/openclaw-backups/openclaw-backups.sha256
+```
+
+Inspect the archive without extracting it:
+
+```bash
+ARCHIVE="$(ls -t ~/openclaw-backups/openclaw-state-*.tar.gz | head -1)"
+
+tar -tzf "$ARCHIVE" | head -50
+ls -lh "$ARCHIVE"
+chmod 600 "$ARCHIVE" ~/openclaw-backups/openclaw-backups.sha256
+```
+
+These archives can contain API keys, OAuth tokens, Discord credentials, GitHub credentials, gateway secrets, conversation transcripts, and personal data. Keep them private and encrypted.
+
+## Smaller Config-Only Backup
+
+If you do not want to preserve session history or the rebuildable SQLite search index, create a smaller archive:
+
+```bash
+umask 077
+mkdir -p ~/openclaw-backups
+
+tar -C "$HOME/.openclaw" \
+  -czf "$HOME/openclaw-backups/openclaw-config-only-$(date +%Y%m%d-%H%M%S).tar.gz" \
+  openclaw.json \
+  agents/main/agent \
+  credentials \
+  cron/jobs.json \
+  workspace \
+  memory/notes
+```
+
+If you want conversation continuity too:
+
+```bash
+tar -C "$HOME/.openclaw" \
+  -czf "$HOME/openclaw-backups/openclaw-migration-full-$(date +%Y%m%d-%H%M%S).tar.gz" \
+  openclaw.json \
+  agents/main/agent \
+  agents/main/sessions \
+  credentials \
+  cron/jobs.json \
+  workspace \
+  memory \
+  canvas/index.html
+```
+
+The full state archive is safer when you are unsure. The config-only archive is cleaner when you deliberately want a smaller restore.
+
+## Step 4: Confirm Important Files Exist
+
+Check for important state without printing secrets:
+
+```bash
+for file in \
+  ~/.openclaw/openclaw.json \
+  ~/.openclaw/agents/main/agent/auth-profiles.json \
+  ~/.openclaw/agents/main/agent/auth.json \
+  ~/.openclaw/agents/main/agent/models.json \
+  ~/.openclaw/credentials/discord-pairing.json \
+  ~/.openclaw/cron/jobs.json \
+  ~/openclaw/.env
+do
+  if test -f "$file"; then
+    echo "FOUND: $file"
+  else
+    echo "MISSING: $file"
+  fi
+done
+```
+
+List top-level OpenClaw state directories:
+
+```bash
+find ~/.openclaw -mindepth 1 -maxdepth 1 -printf '%f\n' | sort
+```
+
+Look especially for:
+
+```text
+openclaw.json
+workspace
+memory
+identity
+plugins
+skills
+channels
+agents
+credentials
+cron
+```
+
+## Step 5: Reinstall OpenClaw Cleanly
+
+Move the old source checkout aside:
+
+```bash
+cd ~/openclaw
+docker compose down
+
+cd ~
+mv openclaw "openclaw.old.$(date +%Y%m%d-%H%M%S)"
+```
+
+Clone a fresh copy:
+
+```bash
+git clone https://github.com/openclaw/openclaw.git ~/openclaw
+cd ~/openclaw
+./docker-setup.sh
+docker compose down
+```
+
+The new install may create fresh empty state. Preserve it before restoring the old state:
+
+```bash
+mv ~/.openclaw ~/.openclaw.fresh 2>/dev/null || true
+mkdir -p ~/.openclaw
+chmod 700 ~/.openclaw
+```
+
+## Step 6: Restore OpenClaw State
+
+Restore the full state archive:
+
+```bash
+tar -xzf ~/openclaw-backups/openclaw-state-YYYYMMDD-HHMMSS.tar.gz \
+  -C "$HOME"
+```
+
+Or restore the smaller config-only archive:
+
+```bash
+tar -xzf ~/openclaw-backups/openclaw-config-only-YYYYMMDD-HHMMSS.tar.gz \
+  -C "$HOME/.openclaw"
+```
+
+If you backed up `~/.config/openclaw`, restore it too:
+
+```bash
+tar -xzf ~/openclaw-backups/openclaw-config-dir-YYYYMMDD-HHMMSS.tar.gz \
+  -C "$HOME"
+```
+
+Fix ownership for the Docker user:
+
+```bash
+sudo chown -R 1000:1000 ~/.openclaw
+
+if test -d "$HOME/.config/openclaw"; then
+  sudo chown -R 1000:1000 ~/.config/openclaw
+fi
+
+chmod 700 ~/.openclaw
+```
+
+The Docker container commonly runs as UID `1000`, so ownership must match the bind-mounted state path.
+
+## Step 7: Restore Deployment Settings Carefully
+
+Do not blindly overwrite every new Compose file with an old one. Start by restoring `.env` only:
+
+```bash
+cd ~/openclaw
+cp ~/openclaw.old.*/.env .env
+chmod 600 .env
+```
+
+If the old install had custom Compose overrides, compare them before copying:
+
+```bash
+ls -la ~/openclaw.old.*/
+```
+
+Only copy overrides you still need, such as explicit volume mounts, ports, or environment variables.
+
+## Step 8: Rotate Exposed Credentials
+
+If terminal history, logs, screenshots, or uploaded files exposed tokens, do not restore those exact values as if nothing happened.
+
+Rotate:
+
+- GitHub tokens and GitHub Copilot credentials
+- Discord bot tokens and pairing credentials
+- model provider API keys
+- OAuth refresh tokens where possible
+- gateway or Control UI secrets from `.env`
+
+Prefer re-authentication for credentials such as:
+
+```text
+~/.openclaw/credentials/github-copilot.token.json
+```
+
+Restore it only when you understand the risk and the token was not exposed.
+
+## Step 9: Start and Validate
+
+Start the new install:
+
+```bash
+cd ~/openclaw
+docker compose up -d
+```
+
+Check containers and logs:
+
+```bash
+docker compose ps
+docker compose logs --no-color --tail=200 openclaw-gateway
+```
+
+Run OpenClaw validation:
+
+```bash
+docker compose run --rm openclaw-cli doctor
+docker compose run --rm openclaw-cli status
+docker compose run --rm openclaw-cli cron list
+```
+
+If your OpenClaw version supports it, use the repair mode:
+
+```bash
+docker compose run --rm openclaw-cli doctor --fix
+```
+
+`doctor --fix` can migrate legacy primary configuration and cron-job formats after an upgrade.
+
+## Step 10: Reapply Safe Configuration
+
+If you extracted settings from an old install, reapply only the safe ones. Examples:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  channels.discord.enabled true
+
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.compaction.memoryFlush.enabled true
+
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.provider local
+
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.model all-MiniLM-L6-v2
+
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.enabled true
+
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.vectorWeight 0.7
+
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.query.hybrid.textWeight 0.3
+
+docker compose run --rm openclaw-cli config set \
+  agents.defaults.memorySearch.cache.enabled true
+```
+
+Do not re-enable:
+
+```text
+gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback
+```
+
+Configure explicit allowed origins for the new hostname instead:
+
+```bash
+docker compose run --rm openclaw-cli config set \
+  gateway.controlUi.allowedOrigins \
+  '["https://openclaw.example.com"]'
+```
+
+For local SSH tunnel access, prefer loopback binding and avoid public Control UI exposure.
+
+## Troubleshooting After Restore
+
+### Permission Denied on OpenClaw State
+
+Fix ownership and restrictive permissions:
+
+```bash
+sudo chown -R 1000:1000 ~/.openclaw
+chmod 700 ~/.openclaw
+chmod 600 ~/.openclaw/openclaw.json
+```
+
+### Missing Memory Search Results
+
+If you restored only `memory/notes`, the SQLite index may need to be rebuilt. Start the gateway and run:
+
+```bash
+docker compose run --rm openclaw-cli doctor --fix
+```
+
+Then verify:
+
+```bash
+ls -la ~/.openclaw/memory/notes
+ls -lh ~/.openclaw/memory/
+```
+
+### Discord Does Not Reconnect
+
+Check whether the channel is enabled and the token was rotated:
+
+```bash
+docker compose run --rm openclaw-cli config get channels.discord.enabled
+docker compose logs --no-color --tail=200 openclaw-gateway | grep -i discord
+```
+
+If a Discord token was exposed, create a new bot token in the Discord Developer Portal and update OpenClaw with the new value.
+
+### The Backup Is Massive
+
+You probably included dependency folders or caches. Use the state-only archive:
+
+```bash
+tar -C "$HOME" \
+  --exclude='.openclaw/agents/main/sessions/*.bak-*' \
+  --exclude='.openclaw/cron/*.tmp' \
+  -czf "$HOME/openclaw-backups/openclaw-state-$(date +%Y%m%d-%H%M%S).tar.gz" \
+  .openclaw
+```
+
+Or use the smaller config-only archive:
+
+```bash
+tar -C "$HOME/.openclaw" \
+  -czf "$HOME/openclaw-backups/openclaw-config-only-$(date +%Y%m%d-%H%M%S).tar.gz" \
+  openclaw.json \
+  agents/main/agent \
+  credentials \
+  cron/jobs.json \
+  workspace \
+  memory/notes
+```
+
+## Key Takeaways
+
+Back up `~/.openclaw` before reinstalling OpenClaw. It contains the durable state: configuration, credentials, auth profiles, sessions, memory, jobs, and workspace data.
+
+Re-clone the application source instead of copying `~/openclaw` wholesale. Do not migrate `node_modules`, `.git`, caches, model downloads, or build output.
+
+Treat every backup as secret material. If credentials were exposed in terminal history, screenshots, pasted logs, or uploaded files, rotate them before starting the restored installation.

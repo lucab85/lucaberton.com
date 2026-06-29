@@ -1,0 +1,476 @@
+---
+draft: false
+title: "How to Clean Up an Azure Account: Delete Resources, Cancel Subscriptions, and Remove a Tenant"
+seoTitle: "How to Delete Azure Resources and Cancel a Subscription"
+snippet: "A safe Azure cleanup runbook for deleting all resources, handling locks and DevTest Labs, canceling subscriptions, and understanding tenant deletion."
+description: "A safe Azure cleanup runbook for deleting all resources, handling locks and DevTest Labs, canceling subscriptions, and understanding tenant deletion."
+publishDate: "2026-06-29"
+lastModified: "2026-06-29"
+category: "Cloud"
+author: "Luca Berton"
+tags:
+  - "azure"
+  - "azure-cli"
+  - "cloud-cost"
+  - "cleanup"
+  - "resource-groups"
+  - "subscriptions"
+  - "entra-id"
+  - "devops"
+image:
+  src: "/blog/openclaw/setting-up-azure-vm.jpg"
+  alt: "Azure subscription cleanup and resource deletion runbook"
+faq:
+  - question: "Is deleting Azure resource groups the same as deleting an Azure account?"
+    answer: "No. Deleting resource groups removes deployed resources inside a subscription. Canceling a subscription stops subscription billing. Deleting a Microsoft Entra tenant is a separate identity cleanup step that should only happen after subscriptions and dependencies are removed."
+  - question: "Does canceling an Azure subscription delete all data immediately?"
+    answer: "No. Microsoft says billing stops after cancellation, but the subscription and retained data are not deleted immediately. Manual subscription deletion becomes available later when required conditions are met."
+  - question: "Why can an Azure resource group deletion fail with ScopeLocked?"
+    answer: "A delete lock on the resource group or on a contained resource can block deletion. Remove deliberate locks first. For service-managed groups, delete the parent service, such as a DevTest Lab, before deleting the resource group."
+---
+
+There are three different things people often mean when they say they want to "nuke" an Azure account:
+
+1. **Stop billing quickly** by canceling the subscription.
+2. **Delete all deployed resources** inside a subscription.
+3. **Remove the Microsoft Entra tenant** after subscriptions and dependencies are gone.
+
+Do not treat these as the same operation. Azure separates billing, resources, subscriptions, Marketplace products, support plans, and Entra tenants.
+
+This runbook is written for environments you own or administer. It is intentionally defensive: verify the target subscription, back up data first, use confirmation prompts, remove locks deliberately, and handle partial failures without losing track of what remains.
+
+## Before You Delete Anything
+
+Make sure you have a real backup of anything you might need later:
+
+- databases
+- storage accounts
+- virtual machine disks or images
+- Key Vault secrets and certificates
+- DNS zone records
+- application configuration
+- CI/CD secrets
+- SaaS or Marketplace configuration
+- identity tenant settings
+
+If you are cleaning up after an OpenClaw install, verify the backup archive before touching Azure resources:
+
+```bash
+ls -lh ~/openclaw-backups/*.tar.gz
+tar -tzf ~/openclaw-backups/openclaw-state-YYYYMMDD-HHMMSS.tar.gz | head -50
+sha256sum -c ~/openclaw-backups/openclaw-backups.sha256
+```
+
+A tiny archive may not contain production data. Confirm before deletion.
+
+## Option 1: Stop Billing as Fast as Possible
+
+If your main goal is stopping cost, cancel the subscription from the Azure portal:
+
+```text
+Azure portal
+  -> Cost Management + Billing
+  -> Subscriptions
+  -> Select subscription
+  -> Cancel
+```
+
+Microsoft documents that after cancellation, billing stops immediately, although the final invoice can still include usage already incurred in the current billing cycle. The subscription and retained data are not deleted immediately.
+
+Also check separately for:
+
+- Marketplace SaaS products
+- Azure support plans
+- Microsoft 365 or other commercial subscriptions
+- third-party services billed outside Azure
+
+Microsoft notes that SaaS subscriptions may need manual cancellation; only pay-as-you-go SaaS subscriptions are automatically canceled by the Azure subscription cancellation process.
+
+Use this option when cost control matters more than immediately purging every resource.
+
+## Option 2: Delete All Resources in a Subscription
+
+If you want the subscription empty before canceling or deleting it, delete all resource groups.
+
+Start by identifying the exact subscription:
+
+```bash
+az login
+
+az account show \
+  --query '{subscription:name,id:id,tenant:tenantId,user:user.name}' \
+  --output yaml
+
+az account list \
+  --query '[].{name:name,id:id,tenant:tenantId,isDefault:isDefault}' \
+  --output table
+```
+
+Set placeholders for the subscription you intend to delete:
+
+```bash
+SUB_ID="00000000-0000-0000-0000-000000000000"
+EXPECTED_NAME="Your Subscription Name"
+EXPECTED_TENANT="11111111-1111-1111-1111-111111111111"
+```
+
+Preview resources:
+
+```bash
+az account set --subscription "$SUB_ID"
+
+az resource list \
+  --subscription "$SUB_ID" \
+  --query '[].{name:name,type:type,resourceGroup:resourceGroup}' \
+  --output table
+
+az group list \
+  --subscription "$SUB_ID" \
+  --query '[].name' \
+  --output table
+```
+
+## Safer Deletion Script
+
+Create `azure-nuke.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+SUB_ID="00000000-0000-0000-0000-000000000000"
+EXPECTED_NAME="Your Subscription Name"
+EXPECTED_TENANT="11111111-1111-1111-1111-111111111111"
+
+az account set --subscription "$SUB_ID"
+
+ACTUAL_ID="$(az account show --query id --output tsv)"
+ACTUAL_NAME="$(az account show --query name --output tsv)"
+ACTUAL_TENANT="$(az account show --query tenantId --output tsv)"
+
+echo
+echo "Deletion target"
+echo "  Subscription: $ACTUAL_NAME"
+echo "  ID:           $ACTUAL_ID"
+echo "  Tenant:       $ACTUAL_TENANT"
+echo
+
+if [[ "$ACTUAL_ID" != "$SUB_ID" ||
+      "$ACTUAL_NAME" != "$EXPECTED_NAME" ||
+      "$ACTUAL_TENANT" != "$EXPECTED_TENANT" ]]; then
+    echo "ERROR: Azure context does not match the expected subscription."
+    exit 1
+fi
+
+echo "RESOURCE GROUPS THAT WILL BE DELETED:"
+az group list \
+  --subscription "$SUB_ID" \
+  --query "[].name" \
+  --output table
+
+echo
+read -r -p "Type exactly 'NUKE $SUB_ID' to continue: " CONFIRM
+
+if [[ "$CONFIRM" != "NUKE $SUB_ID" ]]; then
+    echo "Aborted."
+    exit 1
+fi
+
+echo
+echo "Removing Azure management locks..."
+
+az lock list \
+  --subscription "$SUB_ID" \
+  --query "[].id" \
+  --output tsv |
+while IFS= read -r LOCK_ID; do
+    [[ -z "$LOCK_ID" ]] && continue
+    echo "Deleting lock: $LOCK_ID"
+    az lock delete --ids "$LOCK_ID"
+done
+
+echo
+echo "Submitting resource-group deletions..."
+
+az group list \
+  --subscription "$SUB_ID" \
+  --query "[].name" \
+  --output tsv |
+while IFS= read -r RESOURCE_GROUP; do
+    [[ -z "$RESOURCE_GROUP" ]] && continue
+
+    echo "Deleting resource group: $RESOURCE_GROUP"
+
+    az group delete \
+      --subscription "$SUB_ID" \
+      --name "$RESOURCE_GROUP" \
+      --yes \
+      --no-wait
+done
+
+echo
+echo "All resource-group deletion requests were submitted."
+echo "Run the following to inspect what remains:"
+echo "az group list --subscription '$SUB_ID' --output table"
+echo "az resource list --subscription '$SUB_ID' --output table"
+```
+
+Run it:
+
+```bash
+chmod +x azure-nuke.sh
+./azure-nuke.sh
+```
+
+Resource group deletion is irreversible. Microsoft also notes that you must remove underlying resource locks and backup data before deleting a resource group.
+
+## Check What Remains
+
+After submitting deletion requests:
+
+```bash
+az group list \
+  --subscription "$SUB_ID" \
+  --query "[].{name:name,state:properties.provisioningState}" \
+  --output table
+
+az resource list \
+  --subscription "$SUB_ID" \
+  --query "[].{name:name,type:type,resourceGroup:resourceGroup}" \
+  --output table
+
+az lock list \
+  --subscription "$SUB_ID" \
+  --output table
+```
+
+In the Azure portal, also check hidden resources:
+
+```text
+Subscriptions
+  -> Select subscription
+  -> Resources
+  -> Manage view
+  -> Show hidden types
+```
+
+Microsoft documents that active hidden resources can block subscription deletion.
+
+## Handling ScopeLocked Errors
+
+You may see an error like:
+
+```text
+(ScopeLocked) The scope '/subscriptions/.../resourceGroups/lab-rg'
+cannot perform delete operation because following scope(s) are locked:
+'/subscriptions/.../resourceGroups/lab-rg/providers/...'
+```
+
+That means a delete lock still exists on the resource group or on a contained resource. A resource-level delete lock can block deleting the whole resource group.
+
+List locks:
+
+```bash
+az lock list \
+  --subscription "$SUB_ID" \
+  --output table
+```
+
+Delete a known lock deliberately:
+
+```bash
+az lock delete \
+  --ids "/subscriptions/.../providers/Microsoft.Authorization/locks/LOCK_NAME"
+```
+
+Do not remove locks blindly in shared or production environments. Locks often exist to prevent accidental deletion.
+
+## DevTest Labs Can Recreate Locks
+
+Azure DevTest Labs can create protected-resource locks. If you remove the locks first and then immediately delete the resource group, the lab may recreate locks before the group deletion succeeds.
+
+Delete the DevTest Lab service first:
+
+```bash
+az lab delete \
+  --subscription "$SUB_ID" \
+  --resource-group "lab-rg" \
+  --name "lab" \
+  --yes
+```
+
+Then remove leftover locks:
+
+```bash
+while IFS= read -r LOCK_ID; do
+  [[ -z "$LOCK_ID" ]] && continue
+  echo "Deleting lock: $LOCK_ID"
+  az lock delete --ids "$LOCK_ID"
+done < <(
+  az lock list \
+    --subscription "$SUB_ID" \
+    --resource-group "lab-rg" \
+    --query "[].id" \
+    --output tsv
+)
+```
+
+Then delete the group:
+
+```bash
+az group delete \
+  --subscription "$SUB_ID" \
+  --name "lab-rg" \
+  --yes
+```
+
+## Resume Cleanup Without Stopping at the First Failure
+
+If the first deletion script stops because of `set -e`, some earlier groups may already have deletion requests submitted while later groups were never processed.
+
+Resume with a loop that logs failures and continues:
+
+```bash
+while IFS= read -r RG; do
+  [[ -z "$RG" ]] && continue
+
+  echo "Submitting deletion: $RG"
+
+  if ! az group delete \
+      --subscription "$SUB_ID" \
+      --name "$RG" \
+      --yes \
+      --no-wait; then
+    echo "WARNING: deletion failed for $RG; continuing"
+  fi
+done < <(
+  az group list \
+    --subscription "$SUB_ID" \
+    --query "[].name" \
+    --output tsv
+)
+```
+
+This is useful during cleanup because one locked or service-managed resource group should not prevent deletion requests for unrelated groups.
+
+## Cancel the Subscription After Cleanup
+
+Do not cancel the subscription until resource deletion requests are submitted and you have checked what remains.
+
+Portal path:
+
+```text
+Azure portal
+  -> Cost Management + Billing
+  -> Subscriptions
+  -> Select subscription
+  -> Cancel
+```
+
+The Azure CLI also has a cancellation command, but check its current status in your CLI version before relying on it:
+
+```bash
+az account subscription cancel \
+  --subscription-id "$SUB_ID"
+```
+
+After cancellation:
+
+- billing stops immediately, according to Microsoft documentation
+- a final invoice may still arrive for usage already incurred
+- services are disabled
+- subscription data is retained temporarily
+- manual deletion in the portal becomes available only after the required waiting period and deletion conditions are met
+
+Microsoft documents that the **Delete subscription** option is available after 3 days for customer-led subscriptions or 7 days for field and partner channel subscriptions, depending on subscription type. Canceled subscriptions are automatically deleted after 90 days.
+
+## Delete the Subscription
+
+After the waiting period:
+
+```text
+Azure portal
+  -> Subscriptions
+  -> Select canceled subscription
+  -> Delete
+```
+
+If deletion is blocked:
+
+- verify all resources are gone
+- show hidden resource types in the portal
+- check for locks
+- wait for deletion state to update
+- check Marketplace products and support plans
+- verify you have the Subscription Owner role
+
+## Delete the Entra Tenant Last
+
+Do not delete the Microsoft Entra tenant before cleaning up subscriptions. Active or canceled subscriptions, Marketplace dependencies, enterprise apps, users, service principals, or directory integrations can block tenant deletion.
+
+Safer order:
+
+1. Back up data.
+2. Delete resources.
+3. Cancel Marketplace SaaS and support plans.
+4. Cancel every Azure subscription.
+5. Delete subscriptions after Azure allows it.
+6. Remove tenant dependencies.
+7. Delete the Microsoft Entra tenant from the Entra admin center.
+
+Portal path:
+
+```text
+Microsoft Entra admin center
+  -> Microsoft Entra ID
+  -> Manage tenants
+  -> Select tenant
+  -> Delete
+```
+
+If this is an organizational tenant, coordinate with the tenant administrator. Removing the identity layer too early can make cleanup harder because you may lose access to the resources and billing objects you still need to remove.
+
+## Full Cleanup Checklist
+
+Before running deletion:
+
+- Confirm subscription ID, name, and tenant ID.
+- Confirm backups are valid.
+- Export DNS records if needed.
+- Export databases and storage data.
+- Save Key Vault material you are legally allowed and technically able to export.
+- Check Marketplace and support subscriptions.
+- Check hidden resources.
+- Confirm no other teams depend on the subscription.
+
+During deletion:
+
+- Remove intentional locks only after confirming ownership.
+- Delete service-managed parents before their managed resource groups.
+- Use `--no-wait` for bulk resource-group deletion.
+- Use continuation loops so one failed group does not stop the rest.
+
+After deletion:
+
+- Verify resource groups.
+- Verify resources.
+- Verify locks.
+- Cancel the subscription.
+- Wait for manual subscription deletion eligibility.
+- Delete the subscription.
+- Delete the Entra tenant only after subscriptions and dependencies are gone.
+
+## Related Microsoft Documentation
+
+- [Cancel and delete your Azure subscription](https://learn.microsoft.com/en-us/azure/cost-management-billing/manage/cancel-azure-subscription)
+- [Azure Resource Manager resource group and resource deletion](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/delete-resource-group)
+- [Lock your Azure resources to protect your infrastructure](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/lock-resources)
+- [az lab delete](https://learn.microsoft.com/en-us/cli/azure/lab?view=azure-cli-latest#az-lab-delete)
+
+## Key Takeaways
+
+Deleting Azure resources, canceling a subscription, deleting a subscription, and deleting an Entra tenant are different operations.
+
+If you want to stop cost quickly, cancel the subscription. If you want a clean subscription before cancellation, delete resource groups first and handle locks, hidden resources, and service-managed groups.
+
+Delete the Entra tenant last. Identity cleanup before resource and billing cleanup can make the remaining work harder.

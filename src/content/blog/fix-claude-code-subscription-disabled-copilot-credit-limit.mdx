@@ -1,0 +1,265 @@
+---
+draft: false
+title: "Fix Claude Code Subscription Disabled and Copilot Credit Limit"
+seoTitle: "Fix Claude Code and Copilot Credit Limit"
+snippet: "What to do when Claude Code says subscription access is disabled and Copilot says you reached your credit limit."
+description: "Troubleshooting guide for Claude Code subscription access disabled errors and GitHub Copilot AI credit limit errors, including API key fallback and admin budget fixes."
+publishDate: "2026-06-30"
+lastModified: "2026-06-30"
+image:
+  src: "/blog/thumbnails/claude-code-enterprise-admin-2026.jpg"
+  alt: "Claude Code and GitHub Copilot access troubleshooting"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - claude-code
+  - github-copilot
+  - ai-credits
+  - authentication
+  - troubleshooting
+faq:
+  - question: "Why does Claude Code say my organization disabled subscription access?"
+    answer: "It means Claude Code cannot use your Claude subscription as the active credential path. Use an Anthropic API key, ask your admin to enable Claude Code subscription access, or use your organization's configured provider such as Bedrock, Vertex AI, or Microsoft Foundry."
+  - question: "Why does Copilot say I reached my credit limit?"
+    answer: "GitHub Copilot usage consumes AI credits. If your included credits or user-level budget are exhausted, Copilot can block further usage until credits reset or an admin raises the budget or enables additional usage."
+  - question: "Can I keep working after hitting a Copilot credit limit?"
+    answer: "Yes, but only if your organization allows more usage. Otherwise you must wait until the reset time shown in the error message."
+---
+
+Two access errors are becoming common as AI coding tools move from simple subscriptions to governed, metered usage:
+
+```text
+Your organization has disabled Claude subscription access for Claude Code.
+Use an Anthropic API key instead, or ask your admin to enable access.
+```
+
+```text
+You've reached your credit limit. To continue working, please contact your organization's Copilot admin or wait until your credits reset on 1 July 2026 at 2:00.
+```
+
+They look similar because both stop your coding agent, but they are different problems.
+
+The Claude Code message is an **authentication and organization policy** problem.
+
+The GitHub Copilot message is a **usage, budget, or credit limit** problem.
+
+## Quick Diagnosis
+
+| Error | Product | Root cause | Immediate fix |
+|---|---|---|---|
+| Organization disabled Claude subscription access | Claude Code | Your org does not allow Claude subscription OAuth for Claude Code | Use `ANTHROPIC_API_KEY` or ask admin to enable access |
+| Reached your credit limit | GitHub Copilot | Your included AI credits or user-level budget are exhausted | Wait for reset or ask Copilot admin to raise budget |
+
+If you are blocked right now, the shortest path is:
+
+1. For Claude Code: switch to an Anthropic API key.
+2. For Copilot: check the reset time and ask your admin for a higher user-level budget or additional usage.
+
+## Fix Claude Code: Subscription Access Disabled
+
+Claude Code supports multiple authentication methods:
+
+- Claude Pro or Max subscription
+- Claude for Teams or Enterprise
+- Claude Console API key
+- Amazon Bedrock
+- Google Vertex AI
+- Microsoft Foundry
+- Claude apps gateway
+- `ANTHROPIC_API_KEY`
+- `apiKeyHelper`
+- `CLAUDE_CODE_OAUTH_TOKEN`
+
+The error means your organization has blocked the subscription route for Claude Code. In practice, the CLI cannot use your Claude.ai subscription login as the active credential.
+
+### Option 1: Use an Anthropic API Key
+
+Create an API key in the Claude Console and export it before launching Claude Code:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+claude
+```
+
+In interactive mode, Claude Code may ask whether to use the custom API key. Approve it.
+
+Then check the active credential path:
+
+```text
+/status
+```
+
+If the API key belongs to the wrong organization, a disabled organization, or an expired billing account, you can still fail. In that case, generate a key from the correct Console organization.
+
+### Option 2: Ask the Admin to Enable Claude Code Access
+
+Send your admin a direct request:
+
+```text
+Please enable Claude Code access for my account or organization.
+The CLI is returning:
+"Your organization has disabled Claude subscription access for Claude Code."
+
+If subscription access is not allowed, please invite me to the Claude Console with the Claude Code or Developer role so I can use an Anthropic API key.
+```
+
+For enterprise teams, this is often the right path. It keeps billing, access, and audit controls centralized.
+
+### Option 3: Remove a Bad API Key
+
+Sometimes the inverse happens: you have a valid Claude subscription, but an old `ANTHROPIC_API_KEY` is set in your shell and Claude Code tries that first.
+
+Check your environment:
+
+```bash
+env | grep ANTHROPIC
+```
+
+If you want to fall back to subscription login:
+
+```bash
+unset ANTHROPIC_API_KEY
+unset ANTHROPIC_AUTH_TOKEN
+claude
+```
+
+Then inside Claude Code:
+
+```text
+/logout
+```
+
+Restart and log in again.
+
+This will not fix the organization-disabled error if your organization truly blocks subscription access, but it does fix stale-key confusion.
+
+## Claude Code Authentication Precedence
+
+Claude Code does not simply use the credential you most recently typed. It follows precedence rules.
+
+The practical order is:
+
+1. Cloud provider credentials, such as Bedrock, Vertex AI, or Microsoft Foundry
+2. `ANTHROPIC_AUTH_TOKEN`
+3. `ANTHROPIC_API_KEY`
+4. `apiKeyHelper`
+5. `CLAUDE_CODE_OAUTH_TOKEN`
+6. Subscription OAuth from `/login`
+
+That order matters. If `ANTHROPIC_API_KEY` is present, it can take precedence over a subscription login after approval. If the API key is bad, your subscription might be fine but Claude Code still fails.
+
+## Fix GitHub Copilot: You've Reached Your Credit Limit
+
+The Copilot error is different:
+
+```text
+You've reached your credit limit.
+To continue working, please contact your organization's Copilot admin
+or wait until your credits reset on 1 July 2026 at 2:00.
+```
+
+This means your current Copilot allowance is exhausted or blocked by a budget control.
+
+On **30 June 2026**, a reset on **1 July 2026 at 2:00** is the next reset window shown by the product. If you do nothing, access should resume after that time, assuming the reset is in the billing or account timezone used by GitHub.
+
+### What To Check First
+
+In VS Code:
+
+1. Click the Copilot icon in the status bar.
+2. Open usage or quota details.
+3. Check your credits used, plan allowance, and reset date.
+
+On GitHub.com:
+
+1. Open billing settings.
+2. Go to AI usage.
+3. Review included credits, additional usage, model breakdown, and cost.
+
+If you are on an organization-managed plan, you may not be able to fix this yourself.
+
+## What To Ask the Copilot Admin
+
+Send this:
+
+```text
+I reached my GitHub Copilot AI credit limit.
+The error says credits reset on 1 July 2026 at 2:00.
+
+Can you please check:
+1. My user-level budget
+2. Whether additional AI credit usage is enabled
+3. Whether my cost center or organization budget is exhausted
+4. Whether I can get a temporary budget increase for coding-agent work
+```
+
+The important phrase is **user-level budget**. GitHub's budget model can block a single user even if the organization still has other budget available.
+
+## Why This Happens More With Coding Agents
+
+AI coding agents burn credits faster than chat assistants because they repeatedly send and receive large context:
+
+- repository files
+- diffs
+- terminal output
+- test logs
+- dependency files
+- stack traces
+- conversation history
+- tool results
+
+One debugging session can consume far more tokens than a normal prompt. Premium models also cost more per token than lightweight models.
+
+If you use Claude, Opus, GPT-5.x, or long-context models for every step, budget exhaustion is expected.
+
+## Reduce the Chance of Hitting the Limit Again
+
+Use this operating pattern:
+
+| Task | Suggested model behavior |
+|---|---|
+| Simple edits | Use a cheaper or default model |
+| Large architecture decisions | Use a premium model briefly |
+| Test fixing | Keep context narrow |
+| Long logs | Summarize before sending |
+| Repeated instructions | Use project instructions instead of re-pasting |
+| Bulk refactors | Split into smaller sessions |
+| Code review | Limit scope to changed files |
+
+Also avoid keeping one long agent session alive forever. Long sessions can accumulate context and make each turn more expensive.
+
+## Admin Checklist
+
+For Claude Code admins:
+
+1. Decide whether developers should use subscription login, Console API keys, or a cloud provider.
+2. Assign the correct Claude Console role: Claude Code or Developer.
+3. Document the approved credential path.
+4. Use managed settings if the organization needs centralized policy.
+5. Make sure developers know whether `ANTHROPIC_API_KEY` is allowed.
+
+For Copilot admins:
+
+1. Review the user's AI credit usage.
+2. Check user-level budgets first.
+3. Check cost center, organization, and enterprise budgets.
+4. Enable additional usage only where appropriate.
+5. Set alerts before users hit a hard stop.
+6. Publish model-selection guidance for expensive coding workflows.
+
+## Key Takeaways
+
+The Claude Code error is not a model outage. It is your organization's access policy blocking subscription-based Claude Code authentication. Use an Anthropic API key or ask the admin to enable the right access path.
+
+The Copilot error is not an authentication failure. It means the current AI credit allowance or budget is exhausted. You either wait until **1 July 2026 at 2:00** or ask the Copilot admin to raise the relevant budget.
+
+Both errors point to the same operational reality: AI coding tools now need the same governance as cloud infrastructure. Authentication, budget controls, model selection, and usage monitoring are part of the development workflow.
+
+## References
+
+- [Claude Code authentication](https://docs.anthropic.com/en/docs/claude-code/iam)
+- [Claude Code advanced setup](https://docs.anthropic.com/en/docs/claude-code/setup)
+- [GitHub Copilot usage limits](https://docs.github.com/en/copilot/concepts/usage-limits)
+- [GitHub Copilot budgets for usage-based billing](https://docs.github.com/en/copilot/concepts/billing/budgets-for-usage-based-billing)
+- [Monitoring GitHub AI Credits usage](https://docs.github.com/en/copilot/how-tos/manage-and-track-spending/monitor-ai-usage)
+- [Models and pricing for GitHub Copilot](https://docs.github.com/en/copilot/reference/copilot-billing/models-and-pricing)

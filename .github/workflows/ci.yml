@@ -1,4 +1,4 @@
-# Single CI/CD pipeline for the Astro site.
+# Single CI/CD pipeline for the Astro site (GitHub Actions only).
 #
 # Sequential, no duplicated work, build runs ONCE:
 #   check-links -> build (+ SEO validation) -> e2e -> deploy -> indexnow -> lighthouse
@@ -12,6 +12,8 @@
 #   length, and (built-only) that the sitemap excludes meta-refresh redirect stubs.
 # - E2E and Lighthouse reuse the single build artifact (no rebuilds).
 # - Caching: pnpm store (setup action), Astro asset cache, Playwright browsers.
+# - IndexNow: submits changed URLs on each deploy; submits all sitemap URLs when
+#   layouts/components change or when no changed files are detected.
 name: CI/CD
 
 on:
@@ -176,17 +178,21 @@ jobs:
           # Get changed files in this commit
           CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
 
-          if [ -z "$CHANGED" ]; then
-            echo "No changed files detected, submitting sitemap fallback."
-            URLS=$(curl -sL "${SITE}/sitemap-index.xml" \
+          # Helper: fetch all URLs from every sitemap shard
+          fetch_all_sitemap_urls() {
+            curl -sL "${SITE}/sitemap-index.xml" \
               | grep -oP '(?<=<loc>)[^<]+' \
               | while read sub; do curl -sL "$sub" | grep -oP '(?<=<loc>)[^<]+'; done \
-              | sort | tail -100)
+              | sort -u
+          }
+
+          if [ -z "$CHANGED" ]; then
+            echo "No changed files detected, submitting all sitemap URLs."
+            URLS=$(fetch_all_sitemap_urls)
           else
             # Map changed files to URLs
-            URLS=""
             # Always include homepage
-            URLS="${SITE}/"
+            echo "${SITE}/" >> /tmp/changed_urls.txt
 
             # Blog posts
             echo "$CHANGED" | grep '^src/content/blog/.*\.mdx$' | while read f; do
@@ -200,15 +206,12 @@ jobs:
               [ -n "$route" ] && echo "${SITE}/${route}/"
             done >> /tmp/changed_urls.txt
 
-            # Components changed = resubmit recent posts
-            if echo "$CHANGED" | grep -q '^src/components/'; then
-              curl -sL "${SITE}/sitemap-index.xml" \
-                | grep -oP '(?<=<loc>)[^<]+' \
-                | while read sub; do curl -sL "$sub" | grep -oP '(?<=<loc>)[^<]+'; done \
-                | sort | tail -50 >> /tmp/changed_urls.txt
+            # Layout/component changes affect all pages — submit everything
+            if echo "$CHANGED" | grep -qE '^src/(components|layouts)/'; then
+              echo "Layout/component change detected, submitting all sitemap URLs."
+              fetch_all_sitemap_urls >> /tmp/changed_urls.txt
             fi
 
-            echo "${SITE}/" >> /tmp/changed_urls.txt
             URLS=$(sort -u /tmp/changed_urls.txt 2>/dev/null)
           fi
 

@@ -1,7 +1,7 @@
 ---
 draft: true
 title: "Nexus 5X and Nexus 6P bootloop fix"
-snippet: "Fix the infamous Nexus 5X and 6P bootloop issue (BLOD) by disabling faulty A57 cores and running only on A53 cores using a custom recovery and workaround injector."
+snippet: "Fix the infamous Nexus 5X and 6P bootloop issue (BLOD) by disabling faulty A57 cores and running only on A53 cores using a custom recovery and workaround."
 publishDate: "2018-07-02"
 lastModified: "2025-03-25"
 category: "howto"

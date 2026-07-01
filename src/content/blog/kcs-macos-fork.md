@@ -1,9 +1,9 @@
 ---
 draft: true
 title: "Fix Ansible and Python fork on macOS High Sierra+"
-snippet: "Running into Python or Ansible crashes on macOS High Sierra+? This guide explains why fork-related errors happen—and how to fix them for good with a."
+snippet: "Explains why Python and Ansible crash on macOS High Sierra+ due to fork safety, and the one-line fix using OBJC_DISABLE_INITIALIZE_FORK_SAFETY."
 publishDate: "2021-08-19"
-lastModified: "2025-03-25"
+lastModified: "2026-07-01"
 category: "kcs"
 author: "Luca Berton"
 image:

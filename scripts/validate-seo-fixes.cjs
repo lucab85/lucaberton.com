@@ -19,8 +19,32 @@
  *  13. Orphan pages each receive >= 1 incoming internal link     (source)
  *  14. Key 301 redirects exist in static/_redirects              (source)
  *
+ * Checks 15+ automate the Ahrefs Site Audit (29 Jun 2026) and GSC coverage
+ * (5 Jul 2026) report findings so they are caught at pre-commit time:
+ *
+ *  15. <img>/<Image>/<Picture> carry an alt attribute; markdown
+ *      body images have non-empty alt text                       (source)  [Ahrefs: Missing alt text]
+ *  16. rel=nofollow on INTERNAL links only toward /blog/search   (source)  [Ahrefs: nofollow outgoing internal links]
+ *  17. Internal link hygiene: no http:// or www. self-links, no
+ *      missing trailing slash, no uppercase in page paths        (source)  [GSC: Page with redirect / 404]
+ *  18. Internal /blog/<slug>/ links resolve to a published post,
+ *      a redirect stub, or a 301 (drafts/missing = FAIL)         (source)  [GSC: Not found 404]
+ *  19. Generated category pages never collide with a 301 in
+ *      static/_redirects; category links resolve; thin
+ *      categories (< 3 posts) warned                             (source)  [Ahrefs: 5XX page in sitemap]
+ *  20. Published post slugs never collide with a 301             (source)  [Ahrefs: redirect/sitemap conflicts]
+ *  21. AI-crawler readiness: llms.txt + llms-full.txt exist,
+ *      robots.txt allows GPTBot/ClaudeBot/anthropic-ai/
+ *      Google-Extended, sitemaps declared, JSON-LD in layout     (source)  [AI/GEO optimization]
+ *  22. Incoming dofollow internal-link graph: published posts
+ *      with < 2 incoming links are warned                        (built HTML) [Ahrefs: only one dofollow incoming link]
+ *
  * Source-only checks always run. HTML checks run when ./public exists
  * (run `pnpm build` first). Exits 1 if any FAIL-level check fails.
+ *
+ * NOT automatable here (documented for completeness): transient 5XX at the
+ * edge, "Page and SERP titles do not match", referring-domain drops, and
+ * IndexNow submission (see scripts/indexnow-submit.sh).
  */
 const fs = require("fs");
 const path = require("path");
@@ -536,6 +560,357 @@ function checkNoLeakedTemplateUrls() {
 }
 
 // ---------------------------------------------------------------------------
+// Report-driven checks (Ahrefs Site Audit 29 Jun 2026 / GSC coverage 5 Jul 2026)
+// ---------------------------------------------------------------------------
+
+// slugify must match src/utils/getUniqueCategories.ts ({ lower: true, strict: true }).
+let slugifyFn;
+try {
+  slugifyFn = require("slugify");
+  if (slugifyFn && slugifyFn.default) slugifyFn = slugifyFn.default;
+} catch {
+  slugifyFn = null;
+}
+const categorySlug = (name) =>
+  slugifyFn
+    ? slugifyFn(name, { lower: true, strict: true })
+    : name.toLowerCase().replace(/[^a-z0-9\s-]/g, "").trim().replace(/[\s-]+/g, "-");
+
+// Frontmatter-only parse (never the body — posts embed YAML in code blocks).
+function frontmatterOf(src) {
+  const m = src.match(/^---\n([\s\S]*?)\n---/);
+  return m ? m[1] : null;
+}
+
+// Strip fenced code blocks, inline code, and HTML comments so code samples
+// (e.g. an XSS <img> demo) and commented-out markup are never flagged as
+// real content. Replaced with spaces to keep the text scannable.
+function stripNonContent(src) {
+  return src
+    .replace(/```[\s\S]*?```/g, (m) => " ".repeat(m.length))
+    .replace(/`[^`\n]*`/g, (m) => " ".repeat(m.length))
+    .replace(/<!--[\s\S]*?-->/g, (m) => " ".repeat(m.length));
+}
+
+// All published posts: { file, slug, fm }.
+function publishedPosts() {
+  return walk(BLOG_DIR, (p) => p.endsWith(".mdx"))
+    .map((fp) => ({ file: fp, slug: path.basename(fp, ".mdx"), fm: frontmatterOf(read(fp)) }))
+    .filter((p) => p.fm != null && !/^draft:\s*true\b/m.test(p.fm));
+}
+
+function draftSlugs() {
+  return new Set(
+    walk(BLOG_DIR, (p) => p.endsWith(".mdx"))
+      .filter((fp) => {
+        const fm = frontmatterOf(read(fp));
+        return fm != null && /^draft:\s*true\b/m.test(fm);
+      })
+      .map((fp) => path.basename(fp, ".mdx"))
+  );
+}
+
+// Categories of a post: `category: "X"` plus a frontmatter `categories:` list
+// (inline [a, b] or block form) — mirrors getUniqueCategories.ts.
+function postCategories(fm) {
+  const out = [];
+  const single = fm.match(/^category:\s*["']?([^"'\n]+?)["']?\s*$/m);
+  const block = fm.match(/^categories:\s*(\[[^\]]*\])?\s*\n?((?:\s+-\s+.+\n?)*)/m);
+  if (block) {
+    if (block[1]) {
+      for (const item of block[1].slice(1, -1).split(","))
+        if (item.trim()) out.push(item.trim().replace(/^["']|["']$/g, ""));
+    } else if (block[2]) {
+      for (const line of block[2].split("\n")) {
+        const m = line.match(/^\s+-\s+["']?(.+?)["']?\s*$/);
+        if (m) out.push(m[1]);
+      }
+    }
+  }
+  if (!out.length && single) out.push(single[1].trim());
+  return out;
+}
+
+// _redirects 301 source paths (first token of each 301 line).
+function redirectSources() {
+  const out = new Set();
+  const redirects = read(path.join(ROOT, "static", "_redirects"));
+  for (const line of redirects.split("\n")) {
+    const t = line.trim();
+    if (!t || t.startsWith("#") || !/\b301\b/.test(t)) continue;
+    out.add(t.split(/\s+/)[0]);
+  }
+  return out;
+}
+
+// 15. Every <img>/<Image>/<Picture> must carry an alt attribute, and markdown
+// body images must have non-empty alt text. [Ahrefs: Missing alt text]
+function checkImageAlt() {
+  let bad = 0;
+  for (const fp of sourceScanFiles()) {
+    const src = stripNonContent(read(fp));
+    const rel = path.relative(ROOT, fp);
+    const tags = src.match(/<(?:img|Image|Picture)\b[^>]*>/g) || [];
+    for (const tag of tags) {
+      if (!/\balt\s*=/.test(tag)) {
+        bad++;
+        record("FAIL", "img missing alt", `${rel}: ${tag.replace(/\s+/g, " ").slice(0, 80)}…`);
+      }
+    }
+    if (fp.endsWith(".mdx")) {
+      const fm = frontmatterOf(src);
+      if (fm && /^draft:\s*true\b/m.test(fm)) continue;
+      const bodyRe = /!\[(\s*)\]\(([^)\s]+)\)/g;
+      let m;
+      while ((m = bodyRe.exec(src))) {
+        bad++;
+        record("FAIL", "markdown image empty alt", `${rel} -> ${m[2]}`);
+      }
+    }
+  }
+  record(bad ? "FAIL" : "PASS", "image alt text", `${bad} image(s) missing alt`);
+}
+
+// 16. rel=nofollow is allowed ONLY on internal links to /blog/search (search
+// facets). Any other internal nofollow bleeds link equity.
+// [Ahrefs: Page has nofollow outgoing internal links]
+function checkInternalNofollowAllowlist() {
+  let bad = 0;
+  for (const fp of sourceScanFiles()) {
+    const src = stripNonContent(read(fp));
+    const rel = path.relative(ROOT, fp);
+    const anchors = src.match(/<a\b[^>]*>/g) || [];
+    for (const a of anchors) {
+      if (!/rel=["'`][^"'`]*nofollow/i.test(a)) continue;
+      const href = getAttr(a, "href") || "";
+      const internal = href.startsWith("/") || href.includes("lucaberton.com");
+      if (internal && !href.includes("/blog/search")) {
+        bad++;
+        record("FAIL", "internal nofollow", `${rel}: nofollow on ${href || "(dynamic href)"}`);
+      }
+    }
+  }
+  record(bad ? "FAIL" : "PASS", "internal nofollow allowlist", `${bad} internal nofollow link(s) outside /blog/search`);
+}
+
+// 17. Internal link hygiene: self-links must be relative https (never http://
+// or www., which 301), page paths must end with a trailing slash (non-slash
+// versions 301), and page paths must be lowercase (case mismatch 404s).
+// [GSC: Page with redirect / Not found (404)]
+function checkInternalUrlHygiene() {
+  let bad = 0;
+  const targetRe = /(?:\]\(|href=["'`])([^"'`)\s>]+)/g;
+  for (const fp of sourceScanFiles()) {
+    const src = stripNonContent(read(fp));
+    const rel = path.relative(ROOT, fp);
+    let m;
+    while ((m = targetRe.exec(src))) {
+      let url = m[1];
+      if (/^(mailto:|tel:|#|data:|\{)/.test(url)) continue;
+      if (/^https?:\/\//.test(url)) {
+        if (/^http:\/\/(www\.)?lucaberton\.com/.test(url) || /^https?:\/\/www\.lucaberton\.com/.test(url)) {
+          bad++;
+          record("FAIL", "self-link via redirect host", `${rel} -> ${url}`);
+          continue;
+        }
+        if (!/^https:\/\/lucaberton\.com/.test(url)) continue; // external
+        url = url.replace(/^https:\/\/lucaberton\.com/, "") || "/";
+      }
+      if (!url.startsWith("/")) continue;
+      const pathPart = url.split(/[?#]/)[0];
+      if (pathPart === "/" || pathPart === "") continue;
+      const last = pathPart.split("/").pop();
+      if (last.includes(".")) continue; // asset / file
+      if (!pathPart.endsWith("/")) {
+        bad++;
+        record("FAIL", "missing trailing slash", `${rel} -> ${url}`);
+      }
+      if (/[A-Z]/.test(pathPart)) {
+        bad++;
+        record("FAIL", "uppercase page path", `${rel} -> ${url}`);
+      }
+    }
+  }
+  record(bad ? "FAIL" : "PASS", "internal URL hygiene", `${bad} redirect/404-causing internal link(s)`);
+}
+
+// 18. Every internal /blog/<slug>/ link must resolve to a published post, a
+// redirect stub page, or a 301 in static/_redirects. Links to drafts or
+// missing posts become 404s in the build. [GSC: Not found (404)]
+function checkBlogLinkTargets() {
+  const published = new Set(publishedPosts().map((p) => p.slug.toLowerCase()));
+  const drafts = new Set([...draftSlugs()].map((s) => s.toLowerCase()));
+  const redirects = redirectSources();
+  const stubs = new Set();
+  const blogPagesDir = path.join(ROOT, "src", "pages", "blog");
+  if (exists(blogPagesDir)) {
+    for (const entry of fs.readdirSync(blogPagesDir, { withFileTypes: true })) {
+      if (entry.isDirectory() && exists(path.join(blogPagesDir, entry.name, "index.astro"))) stubs.add(entry.name.toLowerCase());
+    }
+  }
+  // Non-post sub-routes and asset dirs under /blog/.
+  const skip = new Set(["categories", "tags", "search", "events", "proteinlens", "openclaw", "thumbnails", "books", "courses", "conferences"]);
+  const linkRe = /(?:\]\(|href=["'`])\/blog\/([A-Za-z0-9._-]+)\//g;
+  let bad = 0;
+  for (const fp of sourceScanFiles()) {
+    const src = stripNonContent(read(fp));
+    const rel = path.relative(ROOT, fp);
+    const seen = new Set();
+    let m;
+    while ((m = linkRe.exec(src))) {
+      const seg = m[1].toLowerCase();
+      if (skip.has(seg) || /^\d+$/.test(seg) || seen.has(seg)) continue;
+      seen.add(seg);
+      if (published.has(seg) || stubs.has(seg)) continue;
+      if (redirects.has(`/blog/${seg}`) || redirects.has(`/blog/${seg}/`)) continue;
+      bad++;
+      record("FAIL", drafts.has(seg) ? "link to draft post" : "link to missing post", `${rel} -> /blog/${m[1]}/`);
+    }
+  }
+  record(bad ? "FAIL" : "PASS", "blog link targets resolve", `${bad} link(s) to draft/missing posts without redirect`);
+}
+
+// 19. Category pages are generated from published-post frontmatter; none may
+// also have a 301 in static/_redirects (page + redirect conflict = the
+// "5XX page in sitemap" Ahrefs error for /blog/categories/data/). Category
+// links in source must resolve, and near-empty categories are warned.
+// [Ahrefs: 5XX page / 5XX page in sitemap]
+function checkCategoryIntegrity() {
+  const MIN_CATEGORY_POSTS = 3;
+  const counts = new Map(); // slug -> post count
+  for (const p of publishedPosts()) {
+    for (const cat of postCategories(p.fm)) {
+      const slug = categorySlug(cat);
+      counts.set(slug, (counts.get(slug) || 0) + 1);
+    }
+  }
+  const redirects = redirectSources();
+  let conflicts = 0;
+  for (const slug of counts.keys()) {
+    if (redirects.has(`/blog/categories/${slug}`) || redirects.has(`/blog/categories/${slug}/`)) {
+      conflicts++;
+      record("FAIL", "category/redirect conflict", `/blog/categories/${slug}/ is generated (${counts.get(slug)} post(s)) AND 301-redirected — retire the category or drop the redirect`);
+    }
+  }
+  // Category links in source must point at a generated or redirected slug.
+  let brokenLinks = 0;
+  const linkRe = /(?:\]\(|href=["'`])\/blog\/categories\/([A-Za-z0-9-]+)\//g;
+  for (const fp of sourceScanFiles()) {
+    const src = stripNonContent(read(fp));
+    const rel = path.relative(ROOT, fp);
+    const seen = new Set();
+    let m;
+    while ((m = linkRe.exec(src))) {
+      const slug = m[1];
+      if (seen.has(slug)) continue;
+      seen.add(slug);
+      if (counts.has(slug) || redirects.has(`/blog/categories/${slug}`) || redirects.has(`/blog/categories/${slug}/`)) continue;
+      brokenLinks++;
+      record("FAIL", "link to missing category", `${rel} -> /blog/categories/${slug}/`);
+    }
+  }
+  const thin = [...counts.entries()].filter(([, n]) => n < MIN_CATEGORY_POSTS).map(([s, n]) => `${s}(${n})`);
+  if (thin.length) record("WARN", "thin categories", `${thin.length} category page(s) with < ${MIN_CATEGORY_POSTS} posts: ${thin.join(", ")}`);
+  record(conflicts || brokenLinks ? "FAIL" : "PASS", "category integrity", `${conflicts} redirect conflict(s), ${brokenLinks} broken category link(s), ${counts.size} categories`);
+}
+
+// 20. A published post slug must never also be a 301 source in _redirects —
+// the sitemap would then advertise a URL the edge redirects (or errors) on.
+function checkPostSlugRedirectConflict() {
+  const redirects = redirectSources();
+  let bad = 0;
+  for (const p of publishedPosts()) {
+    if (redirects.has(`/blog/${p.slug}`) || redirects.has(`/blog/${p.slug}/`)) {
+      bad++;
+      record("FAIL", "post/redirect conflict", `/blog/${p.slug}/ is published AND 301-redirected`);
+    }
+  }
+  record(bad ? "FAIL" : "PASS", "post slugs vs redirects", `${bad} published post(s) shadowed by a 301`);
+}
+
+// 21. AI-crawler / GEO readiness: llms.txt + llms-full.txt exist, robots.txt
+// explicitly allows the major AI crawlers, both sitemaps are declared, and
+// the base layout ships JSON-LD structured data.
+function checkAiReadiness() {
+  for (const f of ["llms.txt", "llms-full.txt"]) {
+    const fp = path.join(ROOT, "static", f);
+    const ok = exists(fp) && read(fp).trim().length > 0;
+    record(ok ? "PASS" : "FAIL", `AI: ${f}`, ok ? "present and non-empty" : `static/${f} missing or empty`);
+  }
+  const robots = read(path.join(ROOT, "static", "robots.txt"));
+  // Split robots.txt into User-agent blocks.
+  const blocks = new Map(); // agent -> block text
+  let current = [];
+  for (const line of robots.split("\n")) {
+    const ua = line.match(/^User-agent:\s*(.+?)\s*$/i);
+    if (ua) current = [ua[1]];
+    else if (current.length) for (const agent of current) blocks.set(agent, (blocks.get(agent) || "") + line + "\n");
+  }
+  for (const bot of ["GPTBot", "ClaudeBot", "anthropic-ai", "Google-Extended"]) {
+    const block = blocks.get(bot);
+    const ok = block != null && /^Allow:\s*\/\s*$/m.test(block) && !/^Disallow:\s*\/\s*$/m.test(block);
+    record(ok ? "PASS" : "FAIL", `AI: robots.txt ${bot}`, ok ? "explicitly allowed" : `no 'Allow: /' block for ${bot}`);
+  }
+  const star = blocks.get("*") || "";
+  record(/^Disallow:\s*\/\s*$/m.test(star) ? "FAIL" : "PASS", "AI: robots.txt global", /^Disallow:\s*\/\s*$/m.test(star) ? "'User-agent: *' blocks the whole site" : "no global Disallow: /");
+  for (const sm of ["sitemap-index.xml", "video-sitemap.xml"]) {
+    const ok = new RegExp(`^Sitemap:\\s*https://lucaberton\\.com/${sm.replace(".", "\\.")}\\s*$`, "m").test(robots);
+    record(ok ? "PASS" : "FAIL", `AI: robots.txt sitemap ${sm}`, ok ? "declared" : `Sitemap line for ${sm} missing`);
+  }
+  const layout = path.join(ROOT, "src", "layouts", "Layout.astro");
+  const hasLd = exists(layout) && /application\/ld\+json/.test(read(layout));
+  record(hasLd ? "PASS" : "FAIL", "AI: JSON-LD in layout", hasLd ? "structured data present" : "no application/ld+json in Layout.astro");
+}
+
+// 22. (built HTML) Incoming dofollow internal-link graph. Published posts with
+// fewer than 2 incoming dofollow links from other pages match the Ahrefs
+// "Page has only one dofollow incoming internal link" notice. WARN-level:
+// fix by adding related-post/contextual links, not by blocking commits.
+function checkIncomingDofollowLinks() {
+  const pages = walk(PUBLIC_DIR, (p) => path.basename(p) === "index.html");
+  if (!pages.length) {
+    record("WARN", "incoming link graph", "public/ has no pages — run `pnpm build`");
+    return;
+  }
+  const incoming = new Map(); // "/blog/<slug>/" -> Set of source pages
+  const anchorRe = /<a\b[^>]*>/g;
+  for (const fp of pages) {
+    const from = "/" + path.relative(PUBLIC_DIR, path.dirname(fp)).replace(/\\/g, "/") + "/";
+    const html = read(fp);
+    let m;
+    while ((m = anchorRe.exec(html))) {
+      const tag = m[0];
+      if (/rel=["'][^"']*nofollow/i.test(tag)) continue;
+      let href = getAttr(tag, "href");
+      if (!href) continue;
+      href = href.replace(/^https:\/\/lucaberton\.com/, "");
+      if (!href.startsWith("/")) continue;
+      const target = href.split(/[?#]/)[0];
+      if (!/^\/blog\/[a-z0-9._-]+\/$/.test(target)) continue;
+      if (target === from) continue;
+      if (!incoming.has(target)) incoming.set(target, new Set());
+      incoming.get(target).add(from);
+    }
+  }
+  const skip = new Set(["categories", "tags", "search", "events", "proteinlens", "openclaw", "thumbnails", "books", "courses", "conferences"]);
+  const weak = [];
+  const blogDir = path.join(PUBLIC_DIR, "blog");
+  if (exists(blogDir)) {
+    for (const entry of fs.readdirSync(blogDir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || skip.has(entry.name) || /^\d+$/.test(entry.name)) continue;
+      const idx = path.join(blogDir, entry.name, "index.html");
+      if (!exists(idx) || !parsePage(read(idx)).indexable) continue;
+      const n = (incoming.get(`/blog/${entry.name}/`) || new Set()).size;
+      if (n < 2) weak.push(`/blog/${entry.name}/ (${n})`);
+    }
+  }
+  if (weak.length) {
+    record("WARN", "posts with < 2 incoming dofollow links", `${weak.length} post(s): ${weak.slice(0, 10).join(", ")}${weak.length > 10 ? ", …" : ""}`);
+  }
+  record("PASS", "incoming link graph", `${incoming.size} linked post URLs analyzed, ${weak.length} below threshold`);
+}
+
+// ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 console.log("\nSEO fix validation — lucaberton.com" + (SOURCE_ONLY ? " (source-only)" : "") + "\n" + "=".repeat(38));
@@ -551,12 +926,20 @@ checkBlogImagesExist();
 checkRedirects();
 checkDraftFilters();
 checkSourceFrontmatterLength();
+checkImageAlt();
+checkInternalNofollowAllowlist();
+checkInternalUrlHygiene();
+checkBlogLinkTargets();
+checkCategoryIntegrity();
+checkPostSlugRedirectConflict();
+checkAiReadiness();
 if (!SOURCE_ONLY) {
   checkBuiltHtml();
   checkCategoryWordCount();
   checkListingLinksResolve();
   checkSitemapNoStubs();
   checkNoLeakedTemplateUrls();
+  checkIncomingDofollowLinks();
 } else {
   record("PASS", "built-HTML checks", "skipped (--source-only); run `pnpm validate:seo` after build");
 }

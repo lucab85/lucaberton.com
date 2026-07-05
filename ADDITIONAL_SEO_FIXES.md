@@ -132,3 +132,36 @@ This phase addresses the remaining 140 pages with indexing issues identified in 
 ✅ **SEO Performance**: Improved search visibility and rankings  
 
 This comprehensive fix addresses **all remaining 140 indexing issues** and establishes a robust foundation for optimal search engine visibility.
+---
+
+# Phase 3 — Automated Report Checks at Pre-Commit (5 Jul 2026)
+
+## Overview
+Every actionable finding from the Ahrefs Site Audit (29 Jun 2026) and the GSC
+coverage drilldowns (5 Jul 2026) is now an automated check in
+`scripts/validate-seo-fixes.cjs` (checks 15–22). The source-level checks run on
+every commit via `.githooks/pre-commit`; built-HTML checks run with
+`pnpm validate:seo` after `pnpm build`.
+
+## Report finding → automated check
+| Report finding | Check | Runs at |
+|---|---|---|
+| Missing alt text (hero images) | 15: all `<img>/<Image>/<Picture>` + markdown images require alt | pre-commit |
+| Nofollow outgoing internal links | 16: internal `rel=nofollow` allowed only toward `/blog/search` | pre-commit |
+| Page with redirect (GSC): http/www/no-trailing-slash self-links | 17: internal URL hygiene incl. lowercase page paths | pre-commit |
+| Not found 404 (GSC): links to deleted/draft posts | 18: every `/blog/<slug>/` link resolves (post, stub, or 301) | pre-commit |
+| 5XX page in sitemap (`/blog/categories/data/`) | 19: generated category pages must not collide with a 301 in `_redirects` | pre-commit |
+| Sitemap advertises redirected URL | 20: published post slugs must not collide with a 301 | pre-commit |
+| AI/GEO readiness | 21: `llms.txt` + `llms-full.txt`, robots.txt AI-crawler allows, sitemaps declared, JSON-LD | pre-commit |
+| Page has only one dofollow incoming internal link | 22: built-HTML incoming-link graph, WARN under 2 links | `pnpm validate:seo` (post-build) |
+
+## Content fixes applied alongside
+- Recategorized 3 posts from retired `data` category → `Platform Engineering`
+  (removes the generated-page/301 conflict behind the 5XX-in-sitemap error).
+- Drafted `scaling-ai-inference-with-vllm-on-rhel-ai-multi-node-deployments`
+  (it was published while `_redirects` 301s it to
+  `vllm-inference-optimization-on-rhel-ai`).
+
+## Not automatable at commit time
+Transient edge 5XX, "Page and SERP titles do not match", referring-domain and
+Top-10 ranking drops, and IndexNow submission (`scripts/indexnow-submit.sh`).

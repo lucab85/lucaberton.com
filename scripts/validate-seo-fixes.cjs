@@ -38,6 +38,8 @@
  *      Google-Extended, sitemaps declared, JSON-LD in layout     (source)  [AI/GEO optimization]
  *  22. Incoming dofollow internal-link graph: published posts
  *      with < 2 incoming links are warned                        (built HTML) [Ahrefs: only one dofollow incoming link]
+ *  23. Every published article renders >= 3 related articles
+ *      (BlogRelatedPosts simulation + manual section links)      (source)
  *
  * Source-only checks always run. HTML checks run when ./public exists
  * (run `pnpm build` first). Exits 1 if any FAIL-level check fails.
@@ -615,7 +617,9 @@ function draftSlugs() {
 function postCategories(fm) {
   const out = [];
   const single = fm.match(/^category:\s*["']?([^"'\n]+?)["']?\s*$/m);
-  const block = fm.match(/^categories:\s*(\[[^\]]*\])?\s*\n?((?:\s+-\s+.+\n?)*)/m);
+  // [ \t]* (not \s*) so the greedy whitespace cannot swallow the newline plus
+  // the first list item's indentation, which would let the * group match empty.
+  const block = fm.match(/^categories:[ \t]*(\[[^\]]*\])?[ \t]*\n?((?:[ \t]+-[ \t]+.+\n?)*)/m);
   if (block) {
     if (block[1]) {
       for (const item of block[1].slice(1, -1).split(","))
@@ -862,6 +866,76 @@ function checkAiReadiness() {
   record(hasLd ? "PASS" : "FAIL", "AI: JSON-LD in layout", hasLd ? "structured data present" : "no application/ld+json in Layout.astro");
 }
 
+// 23. Every published article must render at least 3 related articles.
+// Mirrors BlogRelatedPosts.astro exactly: candidates are other published
+// posts scored by same category (+3) and shared tags (+1 each), score > 0,
+// top 6 by score then publishDate — unioned with any manual
+// "## Related Articles" section links in the post body.
+function checkRelatedArticles() {
+  const MIN_RELATED = 3;
+  const parseTags = (fm) => {
+    const out = [];
+    // [ \t]* (not \s*): see postCategories.
+    const block = fm.match(/^tags:[ \t]*(\[[^\]]*\])?[ \t]*\n?((?:[ \t]+-[ \t]+.+\n?)*)/m);
+    if (block) {
+      if (block[1]) {
+        for (const item of block[1].slice(1, -1).split(","))
+          if (item.trim()) out.push(item.trim().replace(/^["']|["']$/g, ""));
+      } else if (block[2]) {
+        for (const line of block[2].split("\n")) {
+          const m = line.match(/^\s+-\s+["']?(.+?)["']?\s*$/);
+          if (m) out.push(m[1]);
+        }
+      }
+    }
+    return out.map((t) => t.toLowerCase());
+  };
+  const fmDate = (fm) => {
+    const m = fm.match(/^publishDate:\s*["']?([^"'\n]+)/m);
+    return m ? new Date(m[1]).getTime() || 0 : 0;
+  };
+  const posts = publishedPosts().map((p) => {
+    const cats = postCategories(p.fm);
+    return {
+      slug: p.slug,
+      category: (cats[0] || "").toLowerCase(),
+      tags: new Set(parseTags(p.fm)),
+      date: fmDate(p.fm),
+      body: read(p.file),
+    };
+  });
+  const publishedSet = new Set(posts.map((p) => p.slug.toLowerCase()));
+  let weak = 0;
+  for (const post of posts) {
+    // Component simulation: score > 0 candidates, top 6.
+    const scored = [];
+    for (const other of posts) {
+      if (other.slug === post.slug) continue;
+      let score = 0;
+      if (other.category && other.category === post.category) score += 3;
+      for (const tag of post.tags) if (other.tags.has(tag)) score += 1;
+      if (score > 0) scored.push({ slug: other.slug, score, date: other.date });
+    }
+    scored.sort((a, b) => b.score - a.score || b.date - a.date);
+    const related = new Set(scored.slice(0, 6).map((s) => s.slug.toLowerCase()));
+    // Manual "## Related Articles" section links to published posts.
+    const section = post.body.match(/^##\s+Related Articles\s*\n([\s\S]*?)(?=\n##\s|\n---\s*\n|$)/m);
+    if (section) {
+      const linkRe = /\]\(\/blog\/([A-Za-z0-9._-]+)\/\)/g;
+      let m;
+      while ((m = linkRe.exec(section[1]))) {
+        const slug = m[1].toLowerCase();
+        if (slug !== post.slug.toLowerCase() && publishedSet.has(slug)) related.add(slug);
+      }
+    }
+    if (related.size < MIN_RELATED) {
+      weak++;
+      record("FAIL", "related articles < 3", `blog/${post.slug} renders ${related.size} related article(s) — add shared tags, a matching category, or a manual Related Articles section`);
+    }
+  }
+  record(weak ? "FAIL" : "PASS", "related articles >= 3", `${weak} of ${posts.length} published post(s) below ${MIN_RELATED}`);
+}
+
 // 22. (built HTML) Incoming dofollow internal-link graph. Published posts with
 // fewer than 2 incoming dofollow links from other pages match the Ahrefs
 // "Page has only one dofollow incoming internal link" notice. WARN-level:
@@ -933,6 +1007,7 @@ checkBlogLinkTargets();
 checkCategoryIntegrity();
 checkPostSlugRedirectConflict();
 checkAiReadiness();
+checkRelatedArticles();
 if (!SOURCE_ONLY) {
   checkBuiltHtml();
   checkCategoryWordCount();

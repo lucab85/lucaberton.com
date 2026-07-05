@@ -154,6 +154,7 @@ every commit via `.githooks/pre-commit`; built-HTML checks run with
 | Sitemap advertises redirected URL | 20: published post slugs must not collide with a 301 | pre-commit |
 | AI/GEO readiness | 21: `llms.txt` + `llms-full.txt`, robots.txt AI-crawler allows, sitemaps declared, JSON-LD | pre-commit |
 | Page has only one dofollow incoming internal link | 22: built-HTML incoming-link graph, WARN under 2 links | `pnpm validate:seo` (post-build) |
+| Internal linking depth | 23: every published article must render >= 3 related articles (BlogRelatedPosts simulation + manual section links) | pre-commit |
 
 ## Content fixes applied alongside
 - Recategorized 3 posts from retired `data` category → `Platform Engineering`

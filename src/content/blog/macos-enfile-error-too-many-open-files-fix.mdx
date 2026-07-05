@@ -1,0 +1,122 @@
+---
+draft: false
+title: "macOS ENFILE Error: Too Many Open Files — Fix Guide"
+snippet: "Fix the macOS ENFILE file table overflow error when builds fail. Diagnose kern.maxfiles exhaustion with sysctl and lsof, and find the leaking process."
+description: "Fix the macOS ENFILE file table overflow error when builds fail. Diagnose kern.maxfiles exhaustion with sysctl and lsof, and find the leaking process."
+image:
+  src: "/blog/thumbnails/macos-enfile-error-too-many-open-files-fix.jpg"
+  alt: "macOS ENFILE Error: Too Many Open Files — Fix Guide"
+publishDate: "2026-07-05"
+lastModified: "2026-07-05"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["macOS", "Troubleshooting", "Error Fix", "DevOps", "Developer Experience", "Node.js"]
+---
+
+My Astro site build died mid-run on a MacBook Pro M1 with an error I do not see often:
+
+```
+Error: ENFILE: file table overflow
+```
+
+My first instinct was the same one many developers have: *is this machine finally too old?* It is not. `ENFILE` is an operating system resource exhaustion problem, not a hardware performance problem — and here is how to diagnose and fix it properly.
+
+## ENFILE vs EMFILE: Read the Error Carefully
+
+These two errors look similar but point at different limits:
+
+- **`EMFILE` — too many open files.** One individual process hit its *per-process* file descriptor limit (`ulimit -n`). This is the common one, and raising the process limit usually fixes it.
+- **`ENFILE` — file table overflow.** The *system-wide* open-file table is exhausted. Every process on the machine combined has opened as many files as the kernel allows. No process can open another file until descriptors are released.
+
+That distinction changes the fix. With `EMFILE` you tune the offending process. With `ENFILE` something on the machine is hoarding descriptors, and your build just happened to be the process that hit the wall.
+
+## Quick Diagnosis
+
+Check the current system-wide totals first:
+
+```bash
+sysctl kern.num_files kern.maxfiles
+```
+
+On my machine the output made the problem obvious:
+
+```
+kern.num_files: 118234
+kern.maxfiles: 122880
+```
+
+Roughly 118,000 descriptors open out of a 122,880 ceiling. A build tool that walks thousands of content files — Astro processing an entire blog, in my case — needs a burst of descriptors and simply could not get them.
+
+## Find the Culprit
+
+A healthy development Mac idles at a small fraction of that ceiling. Six figures of open descriptors almost always means a leaking or unusually busy application: Docker, a long-running dev server, file watchers, an IDE, browser processes, or something that was repeatedly restarted without cleaning up.
+
+List the processes holding the most open files:
+
+```bash
+sudo lsof -nP |
+  awk 'NR > 1 {print $1, $2}' |
+  sort |
+  uniq -c |
+  sort -nr |
+  head -30
+```
+
+The first column is the descriptor count, followed by the process name and PID. Expect this to take a while with the table nearly full — `lsof` is enumerating every open file on the system.
+
+Once you have the offending PID, confirm what it actually is:
+
+```bash
+ps -p <PID> -o pid,ppid,command
+```
+
+Then quit or restart that application. A reboot also clears every descriptor and gets you working again immediately, but if you skip identifying the leaker, you will be back here in a few days.
+
+After the cleanup, re-run the failed command and verify the totals dropped:
+
+```bash
+sysctl kern.num_files
+pnpm build
+```
+
+## Why I Would Not Raise kern.maxfiles First
+
+You *can* raise the ceiling:
+
+```bash
+sudo sysctl -w kern.maxfiles=245760
+sudo sysctl -w kern.maxfilesperproc=122880
+```
+
+But with 118,000 descriptors already open, that treats the symptom. A process leaking file descriptors will consume whatever ceiling you give it — you are just scheduling the same failure for later, and in the meantime every other subsystem on the machine competes with the leak. Find the process first. Raise the limit only if your legitimate workload (large monorepos, many containers, heavy file watching) genuinely needs more headroom. This is the same discipline that applies to [container ulimit errors](/blog/docker-error-ulimit-too-low/): understand the consumer before you move the limit.
+
+## Does This Justify Replacing the Mac?
+
+No. This was the question I actually had to talk myself out of, so let me be direct about it: an M4 or M5 Mac hits exactly the same `ENFILE` wall, because the open-file table is a kernel resource limit, not a function of CPU speed or unified memory.
+
+The honest hardware assessment for an M1 Pro in 2026:
+
+- **16 GB RAM:** workable for a quantized 4-bit 7B local LLM, but tight while also running an IDE, browser, and containers.
+- **32 GB RAM:** comfortable for a 7B model alongside normal development.
+- A newer Apple Silicon chip improves inference speed and build times, but it does not fix descriptor leaks, and it would not have fixed this Astro build.
+
+If your build fails with `ENFILE`, keep the machine and find the descriptor-heavy process. Buy new hardware for throughput reasons, not for error messages.
+
+## Prevention
+
+- **Watch the baseline.** An occasional `sysctl kern.num_files` after a long uptime tells you whether something is creeping.
+- **Restart leak-prone apps periodically.** Docker Desktop, Electron-based IDEs, and dev servers with file watchers are the usual suspects on a developer Mac.
+- **Clean up watchers in your own code.** Every `fs.watch`, opened stream, and spawned child process in a Node.js tool holds descriptors until closed.
+- **Apply [root cause analysis](/blog/root-cause-analysis/)** instead of rebooting on a loop — recurring resource exhaustion always has a single dominant cause.
+
+## Related Guides
+
+- [Docker Error: ulimit Too Low — Fix Guide](/blog/docker-error-ulimit-too-low/)
+- [Docker Error: Port Is Already Allocated — Fix Guide](/blog/docker-error-port-already-in-use/)
+- [Fix Claude Code Install on macOS: Homebrew & Node 26](/blog/fix-claude-code-homebrew-macos-node-26-install/)
+- [Root Cause Analysis with Pareto Charts](/blog/root-cause-analysis/)
+- [Docker Cheat Sheet](/blog/docker-cheat-sheet-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I help teams debug and optimize their development and container infrastructure. [Book a consultation](https://calendly.com/lucaberton/) to fix your toughest environment issues.

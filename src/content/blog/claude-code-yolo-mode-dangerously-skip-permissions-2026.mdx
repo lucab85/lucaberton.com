@@ -1,9 +1,10 @@
 ---
 title: "Claude Code YOLO Mode: Skip Permissions Safely"
-snippet: "YOLO mode skips all Claude Code permission prompts — the agent edits files and runs commands without asking. Here is when to use it and how to stay safe."
-description: "How to use Claude Code's --dangerously-skip-permissions flag: enable it in terminal and VS Code, when it makes sense, and the safety guardrails required."
+seoTitle: "Claude Code YOLO Mode: bypassPermissions Guide"
+snippet: "Claude Code YOLO mode can globally bypass permission prompts with permissions.defaultMode=bypassPermissions. Here is how to enable it and stay safe."
+description: "How to enable Claude Code YOLO mode globally with permissions.defaultMode set to bypassPermissions in ~/.claude/settings.json, plus safety guardrails and rollback steps."
 publishDate: "2026-06-30"
-lastModified: "2026-06-30"
+lastModified: "2026-07-10"
 image:
   src: "/blog/thumbnails/claude-code-complete-guide-hooks-mcp-sdk-2026.jpg"
   alt: "Claude Code YOLO Mode dangerously skip permissions"
@@ -11,11 +12,22 @@ author: "Luca Berton"
 category: "AI"
 tags: ["Claude Code", "Anthropic", "AI", "Developer Tools", "Automation", "Productivity"]
 draft: false
+faq:
+  - question: "What does Claude Code YOLO mode do?"
+    answer: "YOLO mode bypasses Claude Code permission prompts so file edits, shell commands, and other tool calls can run without manual approval."
+  - question: "How do I enable YOLO mode globally?"
+    answer: "Set permissions.defaultMode to bypassPermissions in ~/.claude/settings.json, validate the JSON, and restart any running Claude Code sessions."
+  - question: "Is bypassPermissions safe?"
+    answer: "It is only safe in controlled environments such as clean Git repositories, containers, disposable VMs, or automation workflows with strong guardrails. It can approve destructive actions without prompting."
 ---
 
-YOLO mode is the community nickname for running Claude Code with the `--dangerously-skip-permissions` flag. It bypasses every confirmation prompt — no more "approve this file edit?", no more "allow this shell command?". The agent just works.
+YOLO mode is the community nickname for running Claude Code without interactive permission prompts. Traditionally that meant launching Claude Code with `--dangerously-skip-permissions`. The more permanent version is setting `permissions.defaultMode` to `bypassPermissions` in `~/.claude/settings.json`.
+
+That global setting makes new Claude Code sessions auto-accept tool calls without prompting. File edits, shell commands, deletes, force pushes, dependency installs, and other actions can proceed without the normal approval loop.
 
 That sounds risky, and it can be. But in the right environment it is one of the fastest ways to move from idea to working code.
+
+If you want the full workflow around Claude Code, prompts, permissions, MCP, hooks, and production habits, I cover it in my [Claude Code Masterclass on Udemy](https://www.udemy.com/course/claude-code-masterclass-ai-coding/).
 
 ## What YOLO Mode Actually Does
 
@@ -27,7 +39,37 @@ The tradeoff is simple: **speed versus control**. A task that requires fifty con
 
 ## How to Enable It
 
-### Terminal
+### Global Settings
+
+To enable YOLO mode globally for new Claude Code sessions, edit `~/.claude/settings.json` and set `permissions.defaultMode` to `bypassPermissions`:
+
+```json
+{
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  }
+}
+```
+
+If your settings file already contains other keys, add the `permissions` object without deleting the rest of your configuration. Validate the JSON before restarting Claude Code:
+
+```bash
+python -m json.tool ~/.claude/settings.json >/dev/null
+```
+
+Restart any running Claude Code sessions after changing the file. The setting applies globally to new sessions. You may also see a one-time confirmation dialog the first time bypass mode activates.
+
+To revert, remove the line or change the value back to the normal permission mode you were using before:
+
+```json
+{
+  "permissions": {
+    "defaultMode": "default"
+  }
+}
+```
+
+### One-Off Terminal Session
 
 Add the flag when launching Claude Code:
 
@@ -40,6 +82,8 @@ For non-interactive use or piped workflows:
 ```bash
 claude --print "refactor the auth module to use async/await" --dangerously-skip-permissions
 ```
+
+Use this when you want bypass mode for one session but do not want to change your global settings.
 
 ### VS Code
 
@@ -60,7 +104,7 @@ Claude Code ships with three operating modes. Understanding where YOLO fits help
 |------|--------------|----------|
 | **Normal** | All actions | Production work, unfamiliar codebases, exploratory tasks |
 | **Plan** | None (read-only) | Reviewing a strategy before committing to changes |
-| **YOLO** | None (read + write) | High-trust environments, repetitive tasks, CI pipelines |
+| **YOLO / bypassPermissions** | None (read + write + commands) | High-trust environments, repetitive tasks, CI pipelines |
 
 [Plan mode](/blog/claude-code-mods-production-ready-workflow-2026/) is underused. If you want speed without the risk, Plan mode lets Claude map out every change it intends to make — you review the plan, then approve execution. You get the audit without the interruptions.
 
@@ -68,7 +112,7 @@ YOLO mode is for when you have already built that trust and want to skip even th
 
 ## Safety Before You Enable It
 
-The flag name says it: this is dangerous if you are not prepared. Two things make it safe to use.
+The flag name says it: this is dangerous if you are not prepared. The global setting is even more serious because you can forget it is enabled. Three things make it safer to use.
 
 ### 1. A Clean Git Repository
 
@@ -86,7 +130,17 @@ git reset --hard HEAD
 
 This is the minimum. Without it, you have no rollback and mistakes are permanent.
 
-### 2. A Container or Sandbox
+### 2. A Branch With a Narrow Scope
+
+Do not run global bypass mode directly on `main` unless you are in a disposable repo.
+
+```bash
+git switch -c claude/yolo-refactor
+```
+
+Keep the task narrow: one refactor, one migration, one cleanup, one test pass. A broad prompt plus global permissions is where surprises become expensive.
+
+### 3. A Container or Sandbox
 
 For anything beyond your personal dev machine, run Claude Code inside a Docker container. Mistakes stay inside the container. Your host system is untouched.
 
@@ -97,6 +151,18 @@ docker run --rm -it -v $(pwd):/workspace my-dev-image \
 
 This is the pattern I use for [automated agentic workflows](/blog/agentic-devops-claude-code-skills-subagents/) where Claude runs in CI without human oversight.
 
+## What Can Go Wrong
+
+Global `bypassPermissions` means Claude Code can approve actions you would normally inspect first. The obvious risks are deleted files and bad edits. The less obvious risks are often worse:
+
+- A command updates lockfiles or dependencies across the repo
+- A script rewrites generated files you did not intend to touch
+- A cleanup removes local-only configuration
+- A Git command stages unrelated changes
+- A deployment or push command runs before you are ready
+
+That does not mean you should never use YOLO mode. It means the environment needs to be designed so a bad action is recoverable.
+
 ## When It Makes Sense
 
 **Use YOLO mode when:**
@@ -104,12 +170,14 @@ This is the pattern I use for [automated agentic workflows](/blog/agentic-devops
 - Your repo is clean and you can roll back in seconds
 - The task is repetitive and well-understood (refactoring, formatting, bulk renaming)
 - You are running Claude in a CI pipeline or automation script
+- You have tests or linters that can catch bad edits quickly
 
 **Keep normal mode when:**
 - You are working on a production codebase with uncommitted changes
 - The task is exploratory and you are not sure what Claude will do
 - You are working with secrets, credentials, or sensitive configuration
 - You are new to Claude Code and still building mental models of its behavior
+- You are connected to production infrastructure or deployment credentials
 
 ## Hooks as a Middle Ground
 
@@ -122,3 +190,5 @@ This is closer to how production [agentic AI systems](/blog/ai-agent-guardrails-
 YOLO mode is not a shortcut for lazy engineers. It is a tool for engineers who have already done the work to make their environment safe. Version control, sandboxing, and a clear task scope — get those right and removing confirmation prompts just removes friction from a process you have already validated.
 
 The real skill is knowing when to hand the wheel over. Start with normal mode, build confidence in how Claude behaves on your codebase, then selectively unlock autonomy where it earns it.
+
+For a complete Claude Code workflow, including prompting, `CLAUDE.md`, Git discipline, MCP, hooks, and production readiness, take my [Claude Code Masterclass: AI-Powered Development](https://www.udemy.com/course/claude-code-masterclass-ai-coding/).

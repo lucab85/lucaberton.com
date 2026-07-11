@@ -1,0 +1,281 @@
+---
+import Layout from "@layouts/Layout.astro";
+import Container from "@components/container.astro";
+import Breadcrumb from "@components/Breadcrumb.astro";
+import Collapsible from "@components/Collapsible.astro";
+import ServiceRelatedPosts from "@components/ServiceRelatedPosts.astro";
+
+export const prerender = true;
+export const lastModified = '2026-07-11';
+
+const faqs = [
+  {
+    q: "What is the biggest driver of GPU cost?",
+    a: "For most teams it's idle inference capacity, not training. Training runs are bursty and end, but inference GPUs are usually left running 24/7 to guarantee low latency, even when real traffic only uses a fraction of that capacity. Utilization — not the hourly GPU price — is typically the single biggest lever, which is why right-sizing and autoscaling tend to deliver more savings than chasing a cheaper GPU SKU."
+  },
+  {
+    q: "Does quantization hurt model quality?",
+    a: "It can, but the impact is usually small and workload-dependent. Moving from FP16/FP32 to INT8 or FP8 reduces memory footprint and can raise throughput per GPU, but it introduces some numerical approximation that may show up as a small accuracy or quality regression on sensitive tasks. The right approach is to quantize, then evaluate on your own held-out test set before rolling it into production — don't assume the tradeoff is free, and don't assume it's prohibitive either."
+  },
+  {
+    q: "Are spot instances safe for production inference?",
+    a: "They can be, but only with a design that tolerates preemption — think stateless replicas behind a load balancer with fast health checks and automatic replacement, or a spot/on-demand mix where a baseline of reserved or on-demand capacity absorbs traffic if spot is reclaimed. Spot is a much easier fit for training, where checkpointing lets a job resume after interruption. Running production inference entirely on spot with no fallback capacity is a reliability risk, not just a cost decision."
+  },
+  {
+    q: "What's the difference between MIG and autoscaling for cost savings?",
+    a: "MIG partitions a single physical GPU into multiple isolated instances so several low-utilization workloads can share hardware instead of each getting a dedicated full GPU. Autoscaling changes how many GPU replicas are running over time, matching capacity to traffic instead of holding peak capacity around the clock. They solve different inefficiencies — MIG addresses workloads too small to fill a whole GPU, autoscaling addresses demand that varies by time of day — and most inference platforms benefit from combining both."
+  },
+  {
+    q: "How do I estimate my monthly GPU bill before committing to a cluster size?",
+    a: "Model it explicitly rather than guessing: separate training GPU-hours (price × GPU count × utilization × hours per run × runs per month) from inference GPU-hours (always-on GPU count × utilization × hours per month), then add storage and egress. The free GPU Cost Calculator at /gpu-cost-calculator/ does exactly this and lets you compare scenarios — more training GPUs, lower utilization, spot pricing, reserved instances — before you commit to a cluster size or a vendor contract."
+  }
+];
+const faqSchema = {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": faqs.map(f => ({
+    "@type": "Question",
+    "name": f.q,
+    "acceptedAnswer": { "@type": "Answer", "text": f.a }
+  }))
+};
+---
+
+<Layout title="GPU Cost Optimization" description="Where GPU infrastructure spend actually goes, the main cost levers — MIG, spot, autoscaling, quantization — and how to model cost per request. By Luca Berton.">
+  <script type="application/ld+json" set:html={JSON.stringify(faqSchema)} />
+  <Breadcrumb items={[{ name: "GPU Cost Optimization" }]} />
+
+  <!-- Hero -->
+  <section class="bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 py-16">
+    <Container>
+      <div class="max-w-3xl">
+        <p class="text-blue-400 text-sm font-semibold uppercase tracking-widest mb-3">GPU Cost Optimization</p>
+        <h1 class="text-3xl md:text-4xl font-bold text-white leading-tight">
+          GPU Cost Optimization
+        </h1>
+        <p class="text-slate-400 mt-4 text-lg">
+          GPU bills spiral because utilization is invisible until the invoice arrives — a cluster can look "busy" on a dashboard and still be burning most of its budget on idle capacity. This page is the methodology behind that math; the free calculator is where you apply it to your own numbers.
+        </p>
+        <div class="flex flex-wrap gap-4 mt-8">
+          <a href="/gpu-cost-calculator/" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-lg transition-all hover:scale-105 active:scale-95 cursor-pointer">Try the Free GPU Cost Calculator</a>
+          <a href="/contact/" class="border border-slate-600 hover:border-slate-400 text-slate-300 hover:text-white font-semibold py-3 px-8 rounded-lg transition-all cursor-pointer">Book a Cost Review</a>
+        </div>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Direct answer box -->
+  <section class="py-10 bg-white">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <div class="bg-slate-50 border-l-4 border-blue-600 rounded-r-lg p-5 md:p-6">
+          <p class="text-gray-800 leading-relaxed">
+            You reduce GPU infrastructure costs by attacking utilization first, then pricing: right-size the number and type of GPUs to actual measured load, use MIG partitioning to fit multiple low-usage workloads onto one physical GPU instead of dedicating a full GPU to each, buy spot or preemptible capacity for interruptible training jobs and reserved or committed-use pricing for steady-state inference, autoscale inference replicas to traffic instead of running peak capacity around the clock, and raise throughput per GPU on the serving side with quantization (INT8/FP8) and continuous request batching. Luca Berton, an AI & Cloud Advisor with 18+ years of enterprise infrastructure experience, has helped clients achieve a 30% average cloud cost reduction using this combination of levers.
+          </p>
+        </div>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Where GPU spend actually goes -->
+  <section class="py-16 bg-white">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">Where GPU spend actually goes</h2>
+        <p class="text-gray-600 mb-6">
+          Most GPU bills break down into four categories, and the same four categories drive the model behind the <a href="/gpu-cost-calculator/" class="text-blue-600 hover:underline">GPU Cost Calculator</a>: training, inference, storage, and egress. Training cost is <code class="text-sm bg-slate-100 px-1.5 py-0.5 rounded">GPU-hours × utilization × price</code>, and it's bursty by nature — a run starts, consumes a cluster for hours or days, and stops. Inference is different: it's <code class="text-sm bg-slate-100 px-1.5 py-0.5 rounded">always-on GPU count × utilization × hours in the month</code>, and because those GPUs are usually kept running to guarantee latency, inference is the silent, ongoing line item that keeps billing even when traffic is light. Storage and egress are smaller in most workloads, but they compound — checkpoints and datasets accumulate, and data movement between regions or out to the public internet adds up.
+        </p>
+        <p class="text-gray-600 mb-6">
+          In practice, inference is usually the larger recurring cost over a full year, even when a single training run looks more expensive on paper — because training ends and inference doesn't.
+        </p>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-200 text-left">
+                <th class="py-2 text-gray-600 font-medium">Category</th>
+                <th class="py-2 text-gray-600 font-medium">Billing pattern</th>
+                <th class="py-2 text-gray-600 font-medium">Main driver</th>
+                <th class="py-2 text-gray-600 font-medium">Typical optimization lever</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="border-b border-gray-100">
+                <td class="py-2.5 text-gray-800 font-medium">Training</td>
+                <td class="py-2.5 text-gray-600">Bursty — GPU-hours per run × runs/month</td>
+                <td class="py-2.5 text-gray-600">Number of runs, hours per run, GPU count</td>
+                <td class="py-2.5 text-gray-600">Spot/preemptible pricing, checkpointing</td>
+              </tr>
+              <tr class="border-b border-gray-100">
+                <td class="py-2.5 text-gray-800 font-medium">Inference</td>
+                <td class="py-2.5 text-gray-600">Continuous — always-on GPUs × hours/month</td>
+                <td class="py-2.5 text-gray-600">Idle capacity held for peak traffic</td>
+                <td class="py-2.5 text-gray-600">Autoscaling, MIG, batching, quantization</td>
+              </tr>
+              <tr class="border-b border-gray-100">
+                <td class="py-2.5 text-gray-800 font-medium">Storage</td>
+                <td class="py-2.5 text-gray-600">$/TB-month, accumulates over time</td>
+                <td class="py-2.5 text-gray-600">Dataset and checkpoint retention</td>
+                <td class="py-2.5 text-gray-600">Lifecycle policies, checkpoint pruning</td>
+              </tr>
+              <tr class="border-b border-gray-100">
+                <td class="py-2.5 text-gray-800 font-medium">Egress</td>
+                <td class="py-2.5 text-gray-600">$/GB transferred out</td>
+                <td class="py-2.5 text-gray-600">Cross-region traffic, external API responses</td>
+                <td class="py-2.5 text-gray-600">Co-locate compute and data, cache responses</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </Container>
+  </section>
+
+  <!-- The cost levers -->
+  <section class="py-16 bg-slate-50">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-2">The cost levers</h2>
+        <p class="text-gray-500 mb-8">Each lever attacks a different inefficiency. None of them is free — here's the honest tradeoff for each.</p>
+        <div class="grid md:grid-cols-2 gap-6">
+          <div class="bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">🔀</div>
+            <h3 class="font-bold text-gray-900 mb-2">MIG partitioning</h3>
+            <p class="text-sm text-gray-600">NVIDIA Multi-Instance GPU splits a single physical GPU into several isolated instances, so multiple low-utilization services — a small classifier, an embedding model, a lightweight API — can share one card instead of each reserving a full GPU. It meaningfully lowers cost for fleets of small models, but it caps the memory and compute available to any one instance, so it isn't the right fit for a workload that needs the whole GPU's memory.</p>
+          </div>
+          <div class="bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">🎯</div>
+            <h3 class="font-bold text-gray-900 mb-2">Spot / preemptible instances</h3>
+            <p class="text-sm text-gray-600">Spot capacity is priced at a large discount to on-demand because the provider can reclaim it with little notice. It's often the single biggest lever for training jobs that checkpoint regularly and can resume from the last saved state. The tradeoff is real: a job can be interrupted mid-run, so it only works with checkpointing and retry logic already in place.</p>
+          </div>
+          <div class="bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">📅</div>
+            <h3 class="font-bold text-gray-900 mb-2">Reserved / committed-use pricing</h3>
+            <p class="text-sm text-gray-600">Cloud providers discount hourly rates in exchange for a capacity commitment over a term — typically one or three years. This can cut steady-state inference cost meaningfully, since inference workloads run continuously and rarely need the flexibility spot or on-demand pricing is built for. The tradeoff is commitment risk: you're paying for capacity whether or not demand materializes as forecast.</p>
+          </div>
+          <div class="bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">📈</div>
+            <h3 class="font-bold text-gray-900 mb-2">Autoscaling</h3>
+            <p class="text-sm text-gray-600">Instead of holding peak capacity 24/7, autoscaling adds and removes inference replicas as traffic rises and falls. Since most inference traffic has a daily or weekly pattern, this can cut idle-hour spend substantially. The tradeoff is cold-start latency — scaling up takes time, so autoscaling needs headroom margin and warm-up strategy to avoid hurting the traffic spikes it's meant to serve.</p>
+          </div>
+          <div class="bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">🔢</div>
+            <h3 class="font-bold text-gray-900 mb-2">Quantization</h3>
+            <p class="text-sm text-gray-600">Running inference in INT8 or FP8 instead of FP16/FP32 cuts the memory footprint of a model and can raise throughput per GPU, since more requests fit in memory and more compute is available per token. The tradeoff is a small, workload-dependent accuracy cost — it should be validated against your own evaluation set, not assumed to be lossless.</p>
+          </div>
+          <div class="bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">📦</div>
+            <h3 class="font-bold text-gray-900 mb-2">Continuous batching</h3>
+            <p class="text-sm text-gray-600">Serving frameworks like vLLM and TGI batch concurrent requests together dynamically, rather than processing one request per GPU pass, which raises effective throughput per GPU for LLM serving. It's frequently the highest-leverage change for LLM inference cost, though the achievable gain depends on request-size variance and latency targets — very latency-sensitive workloads can't batch as aggressively.</p>
+          </div>
+        </div>
+        <p class="text-sm text-gray-500 mt-8">
+          None of these numbers are universal — the actual savings from any lever depend on your GPU type, utilization, and traffic pattern. Use the <a href="/gpu-cost-calculator/" class="text-blue-600 hover:underline">free GPU Cost Calculator</a> to model spot pricing, reserved discounts, and utilization changes against your own inputs.
+        </p>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Modeling cost per request -->
+  <section class="py-16 bg-white">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">Modeling cost per request</h2>
+        <p class="text-gray-600 mb-4">
+          Once inference is the dominant recurring cost, the metric that actually matters is cost per request, not cost per GPU-hour. The mechanism is simple:
+        </p>
+        <p class="text-gray-800 font-medium bg-slate-50 rounded-lg p-4 mb-6">
+          cost per request = (GPU price per hour) ÷ (requests served per hour at your target latency and batch size)
+        </p>
+        <p class="text-gray-600 mb-4">
+          Everything else in this page — MIG, batching, quantization, autoscaling — is really a way of moving one of those two numbers: lowering the effective GPU price, or raising the number of requests a GPU can serve per hour without breaking your latency target.
+        </p>
+        <div class="bg-slate-50 border-l-4 border-blue-600 rounded-r-lg p-5">
+          <p class="text-xs font-semibold uppercase tracking-wider text-blue-700 mb-2">Illustrative example — not a benchmark</p>
+          <p class="text-sm text-gray-700">
+            Say a GPU costs $2/hour and, at your target latency, serves 500 requests per hour — that's $2 ÷ 500 = $0.004 per request before overhead. Doubling throughput per GPU through continuous batching or a smaller quantized model halves that to $0.002 per request, with no change to the hourly GPU price. The same arithmetic works in reverse: if utilization drops and a GPU only serves 250 requests/hour, cost per request doubles even though nothing about the hardware or pricing changed.
+          </p>
+        </div>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Capacity planning -->
+  <section class="py-16 bg-slate-50">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">Capacity planning</h2>
+        <p class="text-gray-600 mb-4">
+          Training and inference need different planning models because their demand shapes are different. Training capacity should be planned around how many runs you expect per month and how many hours each run takes — it's a scheduling problem, and spare capacity between runs is straightforward to release or use for other work. Inference capacity should be planned around peak concurrent traffic plus a headroom margin for spikes and failover, with autoscaling handling the gap between peak and average so you aren't paying peak-capacity prices around the clock.
+        </p>
+        <p class="text-gray-600">
+          The free <a href="/gpu-cost-calculator/" class="text-blue-600 hover:underline">GPU Cost Calculator</a> models exactly this split — separate GPU type, count, utilization, and run parameters for training and inference — so you can see how a change in run frequency or peak headroom moves your monthly bill before you commit to a cluster size.
+        </p>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Cloud vs on-premises -->
+  <section class="py-16 bg-white">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">Cloud vs on-premises</h2>
+        <p class="text-gray-600 mb-4">
+          Cloud GPUs win when demand is bursty or uncertain: you pay for what you use, provision in minutes, and avoid a capital commitment before you know your real utilization pattern. On-premises or colocated GPUs can win when a workload runs at high, steady utilization over a multi-year horizon, since owned hardware amortizes below cloud on-demand and even reserved rates at high enough utilization — but it requires upfront capital, longer lead times to procure and deploy, and the operational burden of running the hardware yourself.
+        </p>
+        <p class="text-gray-600">
+          There is no fixed crossover point that applies to every organization — the right answer depends on your utilization and time horizon, which is exactly what scenario comparison in the <a href="/gpu-cost-calculator/" class="text-blue-600 hover:underline">GPU Cost Calculator</a> is built to help you reason about before signing a multi-year contract either way.
+        </p>
+      </div>
+    </Container>
+  </section>
+
+  <!-- FAQ -->
+  <section class="py-16 bg-white">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">Frequently asked questions</h2>
+        {faqs.map(f => (
+          <Collapsible title={f.q}>{f.a}</Collapsible>
+        ))}
+      </div>
+    </Container>
+  </section>
+
+  <!-- Related pillar pages -->
+  <section class="py-16 bg-slate-50">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">Related reading</h2>
+        <div class="grid md:grid-cols-2 gap-4">
+          <a href="/openshift-ai-multi-tenant-gpu-architecture/" class="bg-white rounded-xl p-5 border border-slate-100 hover:shadow-md transition-all hover:-translate-y-0.5 cursor-pointer">
+            <h3 class="font-bold text-gray-900 text-sm">OpenShift AI Multi-Tenant GPU Architecture</h3>
+            <p class="text-xs text-gray-500 mt-1">The isolation and scheduling layer that makes right-sizing possible.</p>
+          </a>
+          <a href="/ai-infrastructure-consultant-regulated-enterprises/" class="bg-white rounded-xl p-5 border border-slate-100 hover:shadow-md transition-all hover:-translate-y-0.5 cursor-pointer">
+            <h3 class="font-bold text-gray-900 text-sm">AI Infrastructure for Regulated Enterprises</h3>
+            <p class="text-xs text-gray-500 mt-1">Cost control as part of a governed, production-ready AI platform.</p>
+          </a>
+        </div>
+      </div>
+    </Container>
+  </section>
+
+  <Container>
+    <ServiceRelatedPosts keywords={['gpu', 'cost-optimization', 'finops', 'mlops', 'inference', 'kubernetes']} />
+  </Container>
+
+  <!-- Closing CTA -->
+  <section class="bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 py-16">
+    <Container>
+      <div class="text-center max-w-2xl mx-auto">
+        <h2 class="text-3xl font-bold text-white">Want to know exactly what you'd save?</h2>
+        <p class="text-slate-400 mt-3">Run your own numbers through the free calculator, or bring your architecture to a cost review call and we'll model MIG, spot, reserved, and batching strategies against your actual workloads.</p>
+        <p class="text-slate-500 text-sm mt-4">Written by Luca Berton — AI & Cloud Advisor, Docker Captain, former Red Hat engineer, 18+ years in enterprise infrastructure. <a href="/about/" class="text-blue-400 hover:underline">More about Luca →</a></p>
+        <div class="flex flex-wrap gap-4 justify-center mt-6">
+          <a href="/gpu-cost-calculator/" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-lg transition-all hover:scale-105 active:scale-95 cursor-pointer">Try the Calculator</a>
+          <a href="/contact/" class="border border-slate-600 hover:border-slate-400 text-slate-300 hover:text-white font-semibold py-3 px-8 rounded-lg transition-all cursor-pointer">Book a Cost Review</a>
+        </div>
+      </div>
+    </Container>
+  </section>
+</Layout>

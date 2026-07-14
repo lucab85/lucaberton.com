@@ -126,3 +126,8 @@ With two commands, you get a robust workflow:
 * `tar -czf ... -C hf_repo .` to package it into a single portable artifact.
 
 This is a practical way to archive models, move them across environments, and ensure you can recreate an exact setup later—without depending on a cache layout or a live network connection.
+
+## Related Articles
+
+- [InstructLab Fine-Tuning Guide: Customize AI](/blog/instructlab-fine-tuning-guide-rhel-ai-2026/)
+- [RHEL AI Deployment Guide: Enterprise Production Setup (2026)](/blog/rhel-ai-deployment-guide-enterprise-production-2026/)

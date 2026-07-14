@@ -386,3 +386,9 @@ Ensure proper character rendering:
 - [W3C CSS Properties](https://www.w3.org/community/webed/wiki/CSS/Properties)  
 - [MDN: Viewport Meta Tag](https://developer.mozilla.org/en-US/docs/Mozilla/Mobile/Viewport_meta_tag)  
 - [Google: Responsive Web Design Patterns](https://developers.google.com/web/fundamentals/design-and-ux/responsive/patterns)
+
+## Related Articles
+
+- [Git Cheat Sheet 2026](/blog/git-cheat-sheet-2026/)
+- [Grep, Sed & Awk Cheat Sheet](/blog/grep-sed-awk-cheat-sheet/)
+- [Vim Cheat Sheet 2026](/blog/vim-cheat-sheet-2026/)

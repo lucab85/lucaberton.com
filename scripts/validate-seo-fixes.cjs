@@ -114,6 +114,9 @@ const record = (level, check, detail = "") => results.push({ level, check, detai
 // ---------------------------------------------------------------------------
 const read = (p) => fs.readFileSync(p, "utf8");
 const exists = (p) => fs.existsSync(p);
+// A handful of legacy posts are `.md` rather than `.mdx`; strip whichever
+// extension is actually present so their slug matches the rendered URL.
+const slugOf = (fp) => path.basename(fp).replace(/\.mdx?$/, "");
 
 function walk(dir, predicate, out = []) {
   if (!exists(dir)) return out;
@@ -189,7 +192,7 @@ function parsePage(html) {
 // ---------------------------------------------------------------------------
 function sourceScanFiles() {
   return [
-    ...walk(BLOG_DIR, (p) => p.endsWith(".mdx")),
+    ...walk(BLOG_DIR, (p) => p.endsWith(".mdx") || p.endsWith(".md")),
     ...walk(path.join(ROOT, "src", "pages"), (p) => p.endsWith(".astro")),
     ...walk(path.join(ROOT, "src", "components"), (p) => p.endsWith(".astro")),
     ...walk(path.join(ROOT, "src", "layouts"), (p) => p.endsWith(".astro")),
@@ -259,7 +262,7 @@ function checkMasterclassRename() {
 }
 
 function checkNoAstroEmbed() {
-  const offenders = walk(BLOG_DIR, (p) => p.endsWith(".mdx")).filter((p) =>
+  const offenders = walk(BLOG_DIR, (p) => p.endsWith(".mdx") || p.endsWith(".md")).filter((p) =>
     /from\s+["']astro-embed["']/.test(read(p))
   );
   if (offenders.length) {
@@ -301,7 +304,7 @@ function checkOrphanIncomingLinks() {
 // (404) before a crawl does. External (http/https), data:, and Astro-import
 // (relative ../) references are skipped.
 function checkBlogImagesExist() {
-  const files = walk(BLOG_DIR, (p) => p.endsWith(".mdx"));
+  const files = walk(BLOG_DIR, (p) => p.endsWith(".mdx") || p.endsWith(".md"));
   const STATIC_DIR = path.join(ROOT, "static");
   let missing = 0;
   const localImg = (src) =>
@@ -313,7 +316,7 @@ function checkBlogImagesExist() {
   for (const fp of files) {
     const src = read(fp);
     if (/^draft:\s*true\b/m.test(src)) continue; // drafts are noindex
-    const rel = "blog/" + path.basename(fp, ".mdx");
+    const rel = "blog/" + slugOf(fp);
 
     // Frontmatter image.src
     const fmImg = src.match(/^\s*src:\s*["']([^"']+)["']/m);
@@ -375,7 +378,7 @@ function checkDraftFilters() {
 // is `seoTitle || title` (the " | Luca Berton" suffix is only appended when the
 // total still fits in 60, so only a base title > 60 actually fails).
 function checkSourceFrontmatterLength() {
-  const files = walk(BLOG_DIR, (p) => p.endsWith(".mdx"));
+  const files = walk(BLOG_DIR, (p) => p.endsWith(".mdx") || p.endsWith(".md"));
   let descLong = 0, titleLong = 0;
   const fmValue = (fm, key) => {
     const m = fm.match(new RegExp(`^${key}:\\s*(.+?)\\s*$`, "m"));
@@ -388,7 +391,7 @@ function checkSourceFrontmatterLength() {
     if (!fmMatch) continue;
     const fm = fmMatch[1];
     if (/^draft:\s*true\b/m.test(fm)) continue; // drafts are noindex
-    const rel = "blog/" + path.basename(fp, ".mdx");
+    const rel = "blog/" + slugOf(fp);
 
     const snippet = fmValue(fm, "snippet");
     if (snippet != null && snippet.length > MAX_DESC) {
@@ -596,19 +599,19 @@ function stripNonContent(src) {
 
 // All published posts: { file, slug, fm }.
 function publishedPosts() {
-  return walk(BLOG_DIR, (p) => p.endsWith(".mdx"))
-    .map((fp) => ({ file: fp, slug: path.basename(fp, ".mdx"), fm: frontmatterOf(read(fp)) }))
+  return walk(BLOG_DIR, (p) => p.endsWith(".mdx") || p.endsWith(".md"))
+    .map((fp) => ({ file: fp, slug: slugOf(fp), fm: frontmatterOf(read(fp)) }))
     .filter((p) => p.fm != null && !/^draft:\s*true\b/m.test(p.fm));
 }
 
 function draftSlugs() {
   return new Set(
-    walk(BLOG_DIR, (p) => p.endsWith(".mdx"))
+    walk(BLOG_DIR, (p) => p.endsWith(".mdx") || p.endsWith(".md"))
       .filter((fp) => {
         const fm = frontmatterOf(read(fp));
         return fm != null && /^draft:\s*true\b/m.test(fm);
       })
-      .map((fp) => path.basename(fp, ".mdx"))
+      .map((fp) => slugOf(fp))
   );
 }
 
@@ -661,7 +664,7 @@ function checkImageAlt() {
         record("FAIL", "img missing alt", `${rel}: ${tag.replace(/\s+/g, " ").slice(0, 80)}…`);
       }
     }
-    if (fp.endsWith(".mdx")) {
+    if (fp.endsWith(".mdx") || fp.endsWith(".md")) {
       const fm = frontmatterOf(src);
       if (fm && /^draft:\s*true\b/m.test(fm)) continue;
       const bodyRe = /!\[(\s*)\]\(([^)\s]+)\)/g;
@@ -919,7 +922,13 @@ function checkRelatedArticles() {
     scored.sort((a, b) => b.score - a.score || b.date - a.date);
     const related = new Set(scored.slice(0, 6).map((s) => s.slug.toLowerCase()));
     // Manual "## Related Articles" section links to published posts.
-    const section = post.body.match(/^##\s+Related Articles\s*\n([\s\S]*?)(?=\n##\s|\n---\s*\n|$)/m);
+    // The lookahead's end-of-section alternatives must include a TRUE
+    // end-of-string check, not a bare `$` — with the /m flag, `$` matches
+    // before every line's newline too, so a bare `$` here would stop the
+    // non-greedy capture after the section's very first line whenever the
+    // section is the last thing in the file (no trailing heading/divider).
+    // `(?![\s\S])` only succeeds at the actual end of input.
+    const section = post.body.match(/^##\s+Related Articles\s*\n([\s\S]*?)(?=\n##\s|\n---\s*\n|(?![\s\S]))/m);
     if (section) {
       const linkRe = /\]\(\/blog\/([A-Za-z0-9._-]+)\/\)/g;
       let m;
@@ -967,11 +976,28 @@ function checkIncomingDofollowLinks() {
     }
   }
   const skip = new Set(["categories", "tags", "search", "events", "proteinlens", "openclaw", "thumbnails", "books", "courses", "conferences"]);
+  // Redirect-stub pages (meta-refresh only, no real content) render an
+  // indexable index.html with no <meta name="robots"> tag, so the
+  // `parsePage(...).indexable` check below can't tell them apart from real
+  // posts. Exclude them explicitly using the same stub-detection this file
+  // already applies in checkBlogLinkTargets/checkSitemapNoStubs — otherwise
+  // every stale/renamed slug left behind by a redirect gets misreported as an
+  // orphaned real post with 0-1 incoming links.
+  const stubs = new Set();
+  const blogPagesDir = path.join(ROOT, "src", "pages", "blog");
+  if (exists(blogPagesDir)) {
+    for (const entry of fs.readdirSync(blogPagesDir, { withFileTypes: true })) {
+      if (entry.isDirectory() && exists(path.join(blogPagesDir, entry.name, "index.astro"))) {
+        stubs.add(entry.name.toLowerCase());
+      }
+    }
+  }
   const weak = [];
   const blogDir = path.join(PUBLIC_DIR, "blog");
   if (exists(blogDir)) {
     for (const entry of fs.readdirSync(blogDir, { withFileTypes: true })) {
       if (!entry.isDirectory() || skip.has(entry.name) || /^\d+$/.test(entry.name)) continue;
+      if (stubs.has(entry.name.toLowerCase())) continue;
       const idx = path.join(blogDir, entry.name, "index.html");
       if (!exists(idx) || !parsePage(read(idx)).indexable) continue;
       const n = (incoming.get(`/blog/${entry.name}/`) || new Set()).size;

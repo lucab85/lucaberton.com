@@ -15,8 +15,9 @@ const LAYOUTS_DIR = path.join(ROOT, 'src', 'layouts');
 
 // Collect all valid blog slugs (lowercase for case-insensitive matching;
 // macOS preserves case in readdir while Linux CI is case-sensitive)
-const blogFiles = fs.readdirSync(BLOG_DIR).filter(f => f.endsWith('.mdx'));
-const validSlugs = new Set(blogFiles.map(f => f.replace('.mdx', '').toLowerCase()));
+// The content collection accepts both .md and .mdx posts, so both must count.
+const blogFiles = fs.readdirSync(BLOG_DIR).filter(f => f.endsWith('.mdx') || f.endsWith('.md'));
+const validSlugs = new Set(blogFiles.map(f => f.replace(/\.mdx?$/, '').toLowerCase()));
 
 // Collect all valid page routes
 const validPages = new Set(['books', 'courses', 'about', 'contact', 'services', 'blog', 'conference-speaking-journey', 'kubecon', 'book-signing', 'talk', 'network']);
@@ -96,7 +97,7 @@ if (totalBroken > 0) {
   console.error(`\n❌ Found ${totalBroken} broken internal blog links:\n`);
   for (const [file, links] of Object.entries(broken)) {
     for (const { line, slug } of links) {
-      console.error(`  ${file}:${line} → /blog/${slug}/ (no matching .mdx)`);
+      console.error(`  ${file}:${line} → /blog/${slug}/ (no matching .md/.mdx)`);
     }
   }
   console.error(`\nFix these before deploying.\n`);

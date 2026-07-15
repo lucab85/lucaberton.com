@@ -20,28 +20,30 @@ Here is how to install Helm on RHEL 9. Tested and verified.
 - RHEL 9 installed and updated
 - Root or sudo access
 - Internet connection
+- `curl` installed (preinstalled by default; if missing, run `sudo dnf install -y curl`)
 
 ## Step 1: Update System
 
 ```bash
-sudo dnf update
+sudo dnf update -y
 ```
 
-## Step 2: Add Official Repository
+## Step 2: Download the Install Script
 
-Helm should be installed from the official repository to get the latest stable version and security updates.
+Helm does not maintain an official DNF/YUM repository for RHEL-family distributions — only Fedora's own package repositories carry a first-party `helm` package. On RHEL 9, the officially recommended path is the installer script published by the Helm project:
 
 ```bash
-# Add the official Helm repository
-# Check Helm documentation for the latest repo URL
-sudo dnf install -y curl gnupg2
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+chmod 700 get_helm.sh
 ```
 
 ## Step 3: Install Helm
 
 ```bash
-sudo dnf install -y helm
+./get_helm.sh
 ```
+
+The script detects your OS and architecture, downloads the matching Helm release, verifies its checksum, and copies the `helm` binary to `/usr/local/bin`.
 
 ## Step 4: Verify Installation
 
@@ -49,42 +51,57 @@ sudo dnf install -y helm
 helm version
 ```
 
-Expected output should show the installed version.
+Expected output shows the installed version, e.g. `version.BuildInfo{Version:"v4.x.x", ...}`.
 
-## Step 5: Post-Install Configuration
+## Step 5: Set Up Shell Completion
+
+Helm is a CLI binary, not a background service — there is no daemon to enable or start. The genuinely useful post-install step is turning on shell completion:
 
 ```bash
-# Enable and start the service (if applicable)
-sudo systemctl enable --now helm
-
-# Verify status
-sudo systemctl status helm
+sudo dnf install -y bash-completion   # if not already installed
+helm completion bash | sudo tee /etc/bash_completion.d/helm > /dev/null
+source /etc/bash_completion.d/helm
 ```
 
 ## Troubleshooting
 
-### Package Not Found
+### helm: command not found
 
-Make sure the repository was added correctly:
-
-```bash
-# List configured repositories
-dnf repolist
-```
-
-### Permission Denied
-
-Ensure your user has the correct group membership:
+The install script places the binary in `/usr/local/bin`. Confirm it's there and on your `PATH`:
 
 ```bash
-sudo usermod -aG helm $USER
-newgrp helm
+which helm
+echo $PATH
+ls -l /usr/local/bin/helm
 ```
+
+Open a new shell session if `/usr/local/bin` was only just added to your `PATH`.
+
+### Script Fails to Download (TLS/curl Errors)
+
+If `curl` fails with a certificate or TLS error, update your CA certificates and retry:
+
+```bash
+sudo dnf install -y ca-certificates
+curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4
+```
+
+Corporate proxies and an incorrect system clock are the most common causes of TLS failures when fetching the script from GitHub.
+
+### Checksum Verification Failed
+
+If you downloaded a release archive manually instead of using the script and its `sha256sum` doesn't match the checksum published on the [GitHub releases page](https://github.com/helm/helm/releases), the download was corrupted or tampered with in transit — delete it and download it again.
 
 ## Uninstall
 
 ```bash
-sudo dnf remove -y helm
+sudo rm -f /usr/local/bin/helm
+```
+
+To also remove Helm's cache, config, and data directories:
+
+```bash
+rm -rf ~/.cache/helm ~/.config/helm ~/.local/share/helm
 ```
 
 ## Related Guides

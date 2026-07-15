@@ -13,13 +13,16 @@ category: "DevOps"
 tags: ["ArgoCD", "Ubuntu 24.04 LTS", "Installation", "Linux", "DevOps"]
 ---
 
-Here is how to install ArgoCD on Ubuntu 24.04 LTS. Tested and verified.
+Here is how to install the ArgoCD CLI on Ubuntu 24.04 LTS. Tested and verified.
+
+> **Scope:** This guide installs the `argocd` command-line client only — a single static binary with no daemon, no systemd service, and no dedicated system group. The ArgoCD *server* runs as pods inside a Kubernetes cluster. If you don't already have one running, see [Install ArgoCD on Kubernetes](/blog/install-argocd-kubernetes/) or [Install ArgoCD on K3s](/blog/install-argocd-k3s/) first.
 
 ## Prerequisites
 
 - Ubuntu 24.04 LTS installed and updated
 - Root or sudo access
 - Internet connection
+- An existing ArgoCD server to log into (optional to install the CLI itself, required to actually use it)
 
 ## Step 1: Update System
 
@@ -27,72 +30,100 @@ Here is how to install ArgoCD on Ubuntu 24.04 LTS. Tested and verified.
 sudo apt update && sudo apt upgrade -y
 ```
 
-## Step 2: Add Official Repository
+## Step 2: Detect Your Architecture and Download the CLI Binary
 
-ArgoCD should be installed from the official repository to get the latest stable version and security updates.
+The ArgoCD CLI has no `apt` package and no official APT repository — the project does not publish one. The supported installation method is downloading the prebuilt static binary for your CPU architecture directly from the [ArgoCD GitHub releases page](https://github.com/argoproj/argo-cd/releases). This step is identical across every Linux distribution; there is nothing Ubuntu-specific about it.
 
 ```bash
-# Add the official ArgoCD repository
-# Check ArgoCD documentation for the latest repo URL
-sudo apt install -y curl gnupg2
+# Ensure curl is available
+sudo apt install -y curl
+
+# Detect CPU architecture (x86_64 -> amd64, aarch64 -> arm64)
+case "$(uname -m)" in
+  x86_64)  ARGOCD_ARCH="amd64" ;;
+  aarch64) ARGOCD_ARCH="arm64" ;;
+  *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+# Download the matching binary
+curl -sSL -o argocd-linux-$ARGOCD_ARCH "https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-$ARGOCD_ARCH"
 ```
 
-## Step 3: Install ArgoCD
+## Step 3: Install the Binary
 
 ```bash
-sudo apt install -y argocd
+sudo install -m 555 argocd-linux-$ARGOCD_ARCH /usr/local/bin/argocd
+rm argocd-linux-$ARGOCD_ARCH
 ```
 
 ## Step 4: Verify Installation
 
 ```bash
-argocd version
+argocd version --client
 ```
 
-Expected output should show the installed version.
+Expected output shows only the client version — there is no local server for it to compare against.
 
-## Step 5: Post-Install Configuration
+## Step 5: Shell Completion and Connecting to a Server
+
+Optional: enable bash completion for the `argocd` command.
 
 ```bash
-# Enable and start the service (if applicable)
-sudo systemctl enable --now argocd
-
-# Verify status
-sudo systemctl status argocd
+argocd completion bash | sudo tee /etc/bash_completion.d/argocd > /dev/null
 ```
+
+The binary alone doesn't do anything until it's pointed at a running ArgoCD server:
+
+```bash
+argocd login <your-argocd-server>:443
+```
+
+If you don't have a server yet, deploy one first: [Install ArgoCD on Kubernetes](/blog/install-argocd-kubernetes/) or [Install ArgoCD on K3s](/blog/install-argocd-k3s/).
 
 ## Troubleshooting
 
-### Package Not Found
+### command not found: argocd
 
-Make sure the repository was added correctly:
-
-```bash
-# List configured repositories
-apt repolist
-```
-
-### Permission Denied
-
-Ensure your user has the correct group membership:
+`/usr/local/bin` isn't on every shell's `PATH` by default. Confirm it's included, or open a new shell session:
 
 ```bash
-sudo usermod -aG argocd $USER
-newgrp argocd
+echo $PATH | tr ':' '\n' | grep /usr/local/bin
+which argocd
 ```
+
+### Binary Won't Run / Permission Denied
+
+If you copied the binary manually instead of using `install -m 555`, it may not be marked executable:
+
+```bash
+sudo chmod +x /usr/local/bin/argocd
+```
+
+### x509: certificate signed by unknown authority
+
+This happens when `argocd login` connects to a server presenting a self-signed certificate. For a lab or test server, skip verification:
+
+```bash
+argocd login <your-argocd-server>:443 --insecure
+```
+
+For production, import the server's CA certificate into your trust store instead of using `--insecure`.
 
 ## Uninstall
 
+The CLI is a single file, not something installed through a package manager — remove it directly:
+
 ```bash
-sudo apt remove -y argocd
+sudo rm /usr/local/bin/argocd
 ```
 
 ## Related Guides
 
+- [Install ArgoCD on Kubernetes](/blog/install-argocd-kubernetes/)
+- [Install ArgoCD on K3s](/blog/install-argocd-k3s/)
 - [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
 - [ArgoCD Tutorial](/blog/fix-argocd-app-of-apps-sync-issues/)
 - [Docker vs Kubernetes](/blog/docker-vs-kubernetes-when-you-need-which/)
-- [Ansible Tutorial](/blog/ansible-tutorial-beginners-guide-2026/)
 
 ## About the Author
 

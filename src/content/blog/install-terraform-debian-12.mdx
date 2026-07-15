@@ -29,12 +29,19 @@ sudo apt update && sudo apt upgrade -y
 
 ## Step 2: Add Official Repository
 
-Terraform should be installed from the official repository to get the latest stable version and security updates.
+Terraform is distributed through HashiCorp's official apt repository. Import the signing key and register the repository before installing:
 
 ```bash
-# Add the official Terraform repository
-# Check Terraform documentation for the latest repo URL
-sudo apt install -y curl gnupg2
+# Install prerequisites for adding a signed apt repository
+sudo apt install -y wget gnupg
+
+# Import the HashiCorp GPG signing key
+wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+
+# Add the official HashiCorp repository (resolves to "bookworm" on Debian 12)
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(grep -oP '(?<=UBUNTU_CODENAME=).*' /etc/os-release || lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/hashicorp.list
+
+sudo apt update
 ```
 
 ## Step 3: Install Terraform
@@ -49,37 +56,41 @@ sudo apt install -y terraform
 terraform version
 ```
 
-Expected output should show the installed version.
+Expected output should show the installed version, for example `Terraform v1.x.x`.
 
-## Step 5: Post-Install Configuration
+## Step 5: Enable Shell Autocomplete
+
+Terraform is a CLI binary with no background service, so there is nothing to enable or start with systemd. Instead, enable tab-completion for your shell:
 
 ```bash
-# Enable and start the service (if applicable)
-sudo systemctl enable --now terraform
-
-# Verify status
-sudo systemctl status terraform
+terraform -install-autocomplete
 ```
+
+This appends the completion hook to your shell profile (`~/.bashrc` for Bash). Restart your shell or run `source ~/.bashrc` for it to take effect.
 
 ## Troubleshooting
 
+### GPG Key Import Failure
+
+If `apt update` reports `NO_PUBKEY` or a signature verification error, the keyring file may be missing or empty. Re-run the key import and confirm the file exists:
+
+```bash
+ls -l /usr/share/keyrings/hashicorp-archive-keyring.gpg
+wget -O - https://apt.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+sudo apt update
+```
+
 ### Package Not Found
 
-Make sure the repository was added correctly:
+Confirm the repository was registered and refresh the apt cache:
 
 ```bash
-# List configured repositories
-apt repolist
+cat /etc/apt/sources.list.d/hashicorp.list
+sudo apt update
+apt-cache policy terraform
 ```
 
-### Permission Denied
-
-Ensure your user has the correct group membership:
-
-```bash
-sudo usermod -aG terraform $USER
-newgrp terraform
-```
+If `apt-cache policy terraform` shows no install candidate, double-check that the codename in `hashicorp.list` matches Debian 12's codename (`bookworm`).
 
 ## Uninstall
 

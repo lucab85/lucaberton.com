@@ -18,24 +18,34 @@ Here is how to install kubectl on RHEL 9. Tested and verified.
 ## Prerequisites
 
 - RHEL 9 installed and updated
+- System registered with Red Hat Subscription Manager (`subscription-manager register`) so the BaseOS/AppStream repositories are enabled
 - Root or sudo access
 - Internet connection
 
 ## Step 1: Update System
 
 ```bash
-sudo dnf update
+sudo dnf update -y
 ```
 
 ## Step 2: Add Official Repository
 
-kubectl should be installed from the official repository to get the latest stable version and security updates.
+kubectl should be installed from the official Kubernetes package repository so you get the latest stable version and security updates.
 
 ```bash
-# Add the official kubectl repository
-# Check kubectl documentation for the latest repo URL
-sudo dnf install -y curl gnupg2
+# Create the Kubernetes repository definition
+# This overwrites any existing configuration in /etc/yum.repos.d/kubernetes.repo
+cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.36/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.36/rpm/repodata/repomd.xml.key
+EOF
 ```
+
+> `v1.36` selects the Kubernetes 1.36 package repository, the current stable minor version at the time of writing. To track a different minor version, replace `v1.36` in both the `baseurl` and `gpgkey` lines, then re-run `dnf update`.
 
 ## Step 3: Install kubectl
 
@@ -43,43 +53,55 @@ sudo dnf install -y curl gnupg2
 sudo dnf install -y kubectl
 ```
 
+dnf reads the `gpgkey` URL from the repo file and imports/trusts the signing key automatically during install.
+
 ## Step 4: Verify Installation
 
 ```bash
-kubectl version
+kubectl version --client
 ```
 
-Expected output should show the installed version.
+Expected output should show the installed client version.
 
-## Step 5: Post-Install Configuration
+## Step 5: Enable Shell Completion
+
+kubectl is a standalone CLI binary — it has no daemon and nothing to enable or start with systemd. Instead, set up Bash completion so you get tab-completion for commands, flags, and resource names.
 
 ```bash
-# Enable and start the service (if applicable)
-sudo systemctl enable --now kubectl
+# Install bash-completion if it isn't already present
+sudo dnf install -y bash-completion
 
-# Verify status
-sudo systemctl status kubectl
+# Enable kubectl completion for the current user
+echo 'source <(kubectl completion bash)' >> ~/.bashrc
+echo 'alias k=kubectl' >> ~/.bashrc
+echo 'complete -o default -F __start_kubectl k' >> ~/.bashrc
+source ~/.bashrc
 ```
 
 ## Troubleshooting
 
+### GPG Key Import Failed
+
+If `dnf install` reports a GPG key retrieval or signature error, confirm the repo file has the correct key URL and re-import the key manually:
+
+```bash
+cat /etc/yum.repos.d/kubernetes.repo
+sudo rpm --import https://pkgs.k8s.io/core:/stable:/v1.36/rpm/repodata/repomd.xml.key
+sudo dnf install -y kubectl
+```
+
 ### Package Not Found
 
-Make sure the repository was added correctly:
+If dnf reports `Failed to synchronize cache for repo 'kubernetes'` or `No match for argument: kubectl`, clear the cache, refresh metadata, and confirm the package is visible:
 
 ```bash
-# List configured repositories
+sudo dnf clean all
+sudo dnf makecache
 dnf repolist
+dnf list kubectl --showduplicates
 ```
 
-### Permission Denied
-
-Ensure your user has the correct group membership:
-
-```bash
-sudo usermod -aG kubectl $USER
-newgrp kubectl
-```
+If `kubernetes.repo` is missing, redo Step 2. If instead `dnf update` in Step 1 fails with a message about the system not being registered, run `sudo subscription-manager register` and attach a valid subscription before continuing.
 
 ## Uninstall
 

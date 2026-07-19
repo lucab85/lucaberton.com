@@ -7,7 +7,7 @@
  * (in that case, do not set staticDistDir).
  */
 const BASE = process.env.LHCI_BASE_URL;
-const PATHS = ['/', '/about/', '/blog/', '/contact/', '/gpu-cost-calculator/'];
+const PATHS = ['/', '/about/', '/blog/', '/contact/', '/gpu-cost-calculator/', '/ai-platform-engineer-bootcamp/', '/ai-platform-engineer-readiness-scorecard/'];
 
 const staticUrls = PATHS.map((p) => `http://localhost${p === '/' ? '/index.html' : p + 'index.html'}`);
 const liveUrls = BASE ? PATHS.map((p) => new URL(p, BASE).toString()) : null;

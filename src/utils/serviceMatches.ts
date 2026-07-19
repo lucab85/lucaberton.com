@@ -116,3 +116,17 @@ export function matchServices(category: string, tags: string[], limit = 2): Scor
     .sort((a, b) => b.score - a.score)
     .slice(0, limit);
 }
+
+// DevOps/Kubernetes/AI-infra posts also get a lightweight CTA into the
+// Individual-path funnel (AI Platform Engineer Readiness Scorecard/Bootcamp),
+// alongside — not instead of — the Enterprise-path BlogConsultationCta above.
+const BOOTCAMP_KEYWORDS = [
+  'ai', 'ml', 'gpu', 'llm', 'rag', 'mlops', 'inference', 'openshift-ai',
+  'kubernetes', 'k8s', 'docker', 'container', 'cloud-native', 'helm',
+  'devops', 'sre', 'platform-engineering', 'automation',
+];
+
+export function isBootcampRelevant(category: string, tags: string[]): boolean {
+  const allTags = [category.toLowerCase(), ...tags.map((t) => t.toLowerCase())];
+  return BOOTCAMP_KEYWORDS.some((k) => allTags.some((t) => tokensMatch(t, k)));
+}

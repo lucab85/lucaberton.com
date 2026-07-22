@@ -126,7 +126,8 @@ hermes gateway restart
 | `DISCORD_ALLOWED_ROLES` | No | Role-based access, OR'd with the user allowlist |
 | `DISCORD_ALLOW_ALL_USERS` | No | Set `true` to skip the allowlist entirely (open access) |
 | `DISCORD_REQUIRE_MENTION` | No | Require an @mention in server channels (default: true) |
-| `DISCORD_FREE_RESPONSE_CHANNELS` | No | Channel IDs where a mention isn't required |
+| `DISCORD_ALLOWED_CHANNELS` | No | Comma-separated channel IDs — if set, the bot **only** responds in these |
+| `DISCORD_FREE_RESPONSE_CHANNELS` | No | Comma-separated channel IDs where a mention isn't required |
 | `DISCORD_HOME_CHANNEL` | No | Channel ID the agent uses for proactive/scheduled messages |
 
 ### Optional: Fine-Grained Behavior in `config.yaml`
@@ -147,11 +148,78 @@ discord:
     replied_user: true
 ```
 
+## Managing Channel Access
+
+### Adding Hermes to a Private Channel
+
+Being in the server isn't enough — private channels override server-wide role permissions, so the bot needs explicit access to each one:
+
+1. Right-click the private channel → **Edit Channel** → **Permissions**.
+2. Click **Add members or roles** and add the Hermes bot (or its role).
+3. Explicitly allow View Channel, Send Messages, Read Message History, Send Messages in Threads, Embed Links, Attach Files, Add Reactions, Create Public Threads, Create Private Threads, and Manage Threads.
+
+Then copy the channel's numeric ID (Developer Mode on → right-click the channel → **Copy Channel ID** — not the full URL, per [the invalid-literal-for-int() gotcha](/blog/hermes-agent-discord-invalid-literal-int-error/)) and add it to the existing comma-separated list:
+
+```bash
+nano ~/.hermes/.env
+```
+
+```text
+DISCORD_ALLOWED_CHANNELS=222222222222222222,NEW_PRIVATE_CHANNEL_ID
+```
+
+Add the same ID to `DISCORD_FREE_RESPONSE_CHANNELS` too if you want Hermes to reply there without requiring an @mention. Restart afterward: `hermes gateway restart`.
+
+### Giving Hermes Access to Every Channel
+
+To let Hermes work anywhere it can see rather than a fixed list, two things need to change — the Discord-side permissions, and the Hermes-side restriction.
+
+On Discord: **Server Settings → Roles → (Hermes's role) → Permissions**, enable the same permission set as above at the role level (not per-channel), and explicitly **do not enable Administrator** — it's a far larger blast radius than anything the bot actually needs. Private channels or categories still need the role added explicitly, since role-level permissions don't automatically apply there.
+
+On the VPS, back up first, then remove the channel restriction entirely:
+
+```bash
+cp ~/.hermes/.env ~/.hermes/.env.backup.$(date +%Y%m%d-%H%M%S)
+sed -i '/^DISCORD_ALLOWED_CHANNELS=/d' ~/.hermes/.env
+```
+
+With no `DISCORD_ALLOWED_CHANNELS` set, Hermes responds in any channel it has Discord permissions for — the allowlist restriction only applies when that variable exists at all. Check `config.yaml` too, in case the same restriction was set there:
+
+```bash
+grep -nE 'allowed_channels|ignored_channels' ~/.hermes/.env ~/.hermes/config.yaml
+```
+
+### Choosing How It Responds Once It's Everywhere
+
+With the channel restriction gone, decide whether Hermes needs an @mention to respond. Both directions use the same safe idempotent pattern — update the line if it exists, append it if it doesn't:
+
+```bash
+# Require @mention everywhere (recommended — avoids the agent replying to every message it can see)
+grep -q '^DISCORD_REQUIRE_MENTION=' ~/.hermes/.env \
+  && sed -i 's/^DISCORD_REQUIRE_MENTION=.*/DISCORD_REQUIRE_MENTION=true/' ~/.hermes/.env \
+  || echo 'DISCORD_REQUIRE_MENTION=true' >> ~/.hermes/.env
+```
+
+```bash
+# Respond to every message, no mention needed — noisy, and can burn through model usage fast in busy channels
+grep -q '^DISCORD_REQUIRE_MENTION=' ~/.hermes/.env \
+  && sed -i 's/^DISCORD_REQUIRE_MENTION=.*/DISCORD_REQUIRE_MENTION=false/' ~/.hermes/.env \
+  || echo 'DISCORD_REQUIRE_MENTION=false' >> ~/.hermes/.env
+```
+
+Restart and confirm in the logs before testing:
+
+```bash
+hermes gateway restart
+journalctl --user -u hermes-gateway --since "2 minutes ago" --no-pager \
+  | grep -Ei 'discord|connected|ready|error|forbidden'
+```
+
 ## Troubleshooting
 
 **Bot is online but never responds.** This is almost always the Message Content Intent being disabled — go back to Developer Portal → Bot → Privileged Gateway Intents and confirm all three are toggled on, then restart the gateway.
 
-**"No Discord access policy configured; inbound Discord messages will be denied by default."** You haven't set an allowlist. Configure at least one of `DISCORD_ALLOWED_USERS`, `DISCORD_ALLOWED_ROLES`, or `DISCORD_ALLOW_ALL_USERS=true`.
+**"No env user allowlists configured."** The exact warning is: *"No env user allowlists configured. Messaging platforms default to pairing/allowlist policies and will deny unknown senders unless you configure platform allowlists (e.g., TELEGRAM_ALLOWED_USERS=your_id) or explicitly opt in with GATEWAY_ALLOW_ALL_USERS=true plus dm_policy/group_policy: open on the platform."* For Discord specifically, configure at least one of `DISCORD_ALLOWED_USERS`, `DISCORD_ALLOWED_ROLES`, or `DISCORD_ALLOW_ALL_USERS=true`.
 
 **Disallowed intents error on connect.** Same root cause as the "not responding" case — one or more Privileged Gateway Intents aren't enabled in the Developer Portal. Enable all three and restart.
 

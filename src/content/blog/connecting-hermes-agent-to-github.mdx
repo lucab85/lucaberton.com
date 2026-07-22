@@ -1,0 +1,128 @@
+---
+draft: false
+title: "Connecting Hermes Agent to GitHub: Auth Setup and Gotchas"
+seoTitle: "Hermes Agent + GitHub: Token Setup, gh CLI, Gotchas"
+snippet: "Set up GitHub access for Hermes Agent's bundled github-auth skill — gh CLI or a token, the exact scopes it recommends, and two documented gotchas."
+description: "How to authenticate Hermes Agent against GitHub using the bundled github-auth skill: the gh CLI vs. token detection order, recommended token scopes, and two documented issues — a doctor false-positive and a Docker terminal-backend gotcha."
+publishDate: "2026-07-22"
+lastModified: "2026-07-22"
+image:
+  src: "/blog/thumbnails/connecting-hermes-agent-to-github.svg"
+  alt: "Hermes Agent GitHub authentication flow: gh CLI, GITHUB_TOKEN, .hermes/.env, and git credential store"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "Hermes Agent"
+  - "GitHub"
+  - "Nous Research"
+  - "Authentication"
+  - "Tutorial"
+faq:
+  - question: "How does Hermes Agent authenticate to GitHub?"
+    answer: "Its bundled github-auth skill checks four places in order: the gh CLI (if `gh auth status` succeeds, it's used for everything), the GITHUB_TOKEN environment variable, GITHUB_TOKEN inside ~/.hermes/.env, and finally the git credential store (~/.git-credentials) as a last resort. If none are found, GitHub features simply aren't available."
+  - question: "What GitHub token scopes does Hermes Agent need?"
+    answer: "For a classic personal access token, the github-auth skill itself recommends repo (full repository access — read, write, push, PRs), workflow (trigger and manage GitHub Actions), and read:org if you're working with organization repos, with a 90-day expiration as a reasonable default. A fine-grained token scoped to specific repositories with Contents/Pull requests/Issues read-write works just as well if you'd rather scope it tighter."
+  - question: "Why does hermes doctor warn about a missing GITHUB_TOKEN even though I'm logged in with gh CLI?"
+    answer: "This is a known, documented false positive (GitHub issue #16115) — the doctor check only looks for the GITHUB_TOKEN/GH_TOKEN environment variable, but the actual runtime correctly falls back to `gh auth token` when neither is set. The warning is cosmetic; GitHub features work fine through gh CLI regardless. Setting GITHUB_TOKEN anyway will suppress the warning, at the cost of not actually needing it."
+  - question: "Why can't Hermes see my GITHUB_TOKEN when I'm using the Docker terminal backend?"
+    answer: "This is a known, documented issue (GitHub issue #1436): GITHUB_TOKEN set via ~/.hermes/.env or `hermes config set` isn't automatically propagated into the terminal Docker provides for the agent's shell commands, since environment variables set on the host aren't passed into the container by default. No official fix was in place as of this writing — if you hit this, it's a known limitation of the Docker terminal backend specifically, not something wrong with your token."
+---
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+Among [Hermes Agent](/blog/what-is-hermes-agent-nous-research/)'s ~78 bundled skills are several for GitHub — PR workflows, code review, issue triage, repo management — all gated behind one thing first: the agent actually being able to authenticate to GitHub. That's handled by a dedicated **github-auth** skill.
+
+## How Detection Works
+
+The skill checks four places, in this exact order, and stops at the first one that works:
+
+1. **`gh` CLI** — if `gh auth status` succeeds, Hermes uses it for everything. This is the path of least setup: no token to generate or store at all.
+2. **`GITHUB_TOKEN` environment variable** — used directly for API calls via `curl` if set.
+3. **`~/.hermes/.env`** — a `GITHUB_TOKEN=` line in Hermes's own config directory.
+4. **Git credential store** — `~/.git-credentials`, extracted as a last resort if nothing else is configured.
+
+If none of these resolve, GitHub-dependent skills simply aren't available — nothing crashes, they just can't do anything that needs GitHub access.
+
+## Option A: Use the `gh` CLI (Simplest)
+
+If you already have the [GitHub CLI](https://cli.github.com/) installed and logged in (`gh auth login`) on the box running Hermes, there's nothing further to configure — the skill picks it up automatically as the first-choice method.
+
+## Option B: Set a Token Directly
+
+If `gh` isn't installed or authenticated, generate a personal access token. The skill's own documentation recommends, for a **classic** PAT:
+
+- **`repo`** — full repository access: read, write, push, PRs
+- **`workflow`** — trigger and manage GitHub Actions
+- **`read:org`** — only if you're working with organization repos
+- **Expiration: 90 days** as a reasonable default, rather than a token that never expires
+
+If you'd rather scope it tighter, GitHub's newer **fine-grained tokens** work just as well — limit repository access to only what Hermes needs, with Contents (read/write), Pull requests (read/write), and Issues (read/write) as the equivalent permissions.
+
+Store it without it ever touching your shell history:
+
+```bash
+read -s -p "GitHub token: " GITHUB_TOKEN
+echo
+hermes config set GITHUB_TOKEN "$GITHUB_TOKEN"
+unset GITHUB_TOKEN
+```
+
+This writes it to `~/.hermes/.env`. Restart the gateway for it to take effect:
+
+```bash
+hermes gateway restart
+```
+
+## Verifying It Worked, Without Printing the Token
+
+Confirm the line exists without echoing the value:
+
+```bash
+grep -q '^GITHUB_TOKEN=.' ~/.hermes/.env \
+  && echo "GitHub token configured" \
+  || echo "GitHub token missing"
+```
+
+Then confirm it actually authenticates:
+
+```bash
+set -a
+source ~/.hermes/.env
+set +a
+
+curl -fsS \
+  -H "Authorization: Bearer $GITHUB_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  https://api.github.com/user |
+  python3 -c 'import json,sys; print("Authenticated as:", json.load(sys.stdin)["login"])'
+
+unset GITHUB_TOKEN
+```
+
+In practice, once this is wired up you don't need to run these checks manually every time — you can just ask the agent directly (through whichever [messaging channel](/blog/connecting-hermes-agent-to-discord/) you've connected) to run a read-only auth check. It'll verify a token is present, call GitHub's `GET /user` endpoint, and report back only the username and whether authentication succeeded — never the token itself.
+
+## Two Known Gotchas
+
+### `hermes doctor` Warns About a Missing Token Even With `gh` CLI Logged In
+
+This is a documented false positive ([issue #16115](https://github.com/NousResearch/hermes-agent/issues/16115)): the `doctor` check only looks for the `GITHUB_TOKEN`/`GH_TOKEN` environment variable, but the actual runtime correctly falls back to `gh auth token` when neither is set — the check just hasn't caught up to that fallback logic. If you're authenticated via `gh` and GitHub skills work fine in practice, the warning is cosmetic and safe to ignore. Setting `GITHUB_TOKEN` anyway will make the warning go away, at the cost of maintaining a token you didn't strictly need.
+
+### `GITHUB_TOKEN` Not Visible Under the Docker Terminal Backend
+
+If you've configured Hermes to use [Docker as its terminal backend](/blog/hermes-agent-oracle-cloud-free-tier-deployment/) rather than local execution, a `GITHUB_TOKEN` set via `.env` or `hermes config set` may not be visible to commands the agent runs — because host environment variables aren't automatically passed into the container. This is a known, open issue ([#1436](https://github.com/NousResearch/hermes-agent/issues/1436)) with no official fix documented as of this writing. If GitHub commands fail specifically under the Docker backend despite a confirmed-working token, this mismatch is the likely cause, not a bad token.
+
+## Security Notes
+
+- Prefer exporting the token as an environment variable or letting `gh` manage it over embedding it directly in commands — keeps it out of shell history and process listings.
+- If you use `git config credential.helper store`, be aware it saves credentials to `~/.git-credentials` in **plaintext** — a deliberate simplicity/security tradeoff the skill's own docs acknowledge.
+- Set an expiration on any token you create; don't generate one that never expires.
+- GitHub no longer accepts password authentication for git operations — a personal access token is the password now, wherever a git prompt asks for one.
+
+## Related Articles
+
+- [What is Hermes Agent? Nous Research's Self-Improving AI Agent](/blog/what-is-hermes-agent-nous-research/)
+- [How to Deploy Hermes Agent on Oracle Cloud's Free Tier](/blog/hermes-agent-oracle-cloud-free-tier-deployment/)
+- [Connecting Hermes Agent to Discord: Complete Setup Guide](/blog/connecting-hermes-agent-to-discord/)
+- [What is Hermes Cloud? Running Hermes Agent Without a Server](/blog/what-is-hermes-cloud-nous-portal/)
+- [Hermes Agent on a 1GB VPS: Fixing the Common Gotchas](/blog/hermes-agent-low-memory-vps-troubleshooting/)
+
+<BlogPromoCard />

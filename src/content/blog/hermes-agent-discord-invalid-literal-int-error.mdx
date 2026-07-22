@@ -1,0 +1,129 @@
+---
+draft: false
+title: "Fix: Hermes Agent Discord 'invalid literal for int()' Error"
+seoTitle: "Fix Hermes Discord: invalid literal for int() Error"
+snippet: "Gateway crashes with 'invalid literal for int()' after Discord setup? You likely pasted a channel URL instead of its numeric ID — here's the fix."
+description: "Fixing two common Hermes Agent Discord config mistakes: pasting a full channel URL where a bare numeric ID is expected (invalid literal for int() with base 10), and forgetting to set DISCORD_ALLOWED_USERS."
+publishDate: "2026-07-22"
+lastModified: "2026-07-22"
+image:
+  src: "/blog/thumbnails/hermes-agent-discord-invalid-literal-int-error.svg"
+  alt: "Fixing Hermes Agent Discord config: channel URL pasted instead of numeric ID, and missing user allowlist"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "Hermes Agent"
+  - "Discord"
+  - "Troubleshooting"
+  - "Nous Research"
+faq:
+  - question: "Why does Hermes Agent's Discord gateway crash with 'invalid literal for int() with base 10'?"
+    answer: "This is a Python error, not a Discord one: it means a channel-related setting (DISCORD_ALLOWED_CHANNELS, DISCORD_FREE_RESPONSE_CHANNELS, or DISCORD_HOME_CHANNEL) got parsed as an integer but contains something else — almost always because a full channel URL was pasted in instead of just the numeric ID at the end of it."
+  - question: "What's the difference between a Discord channel URL and a channel ID?"
+    answer: "A channel URL looks like https://discord.com/channels/<SERVER_ID>/<CHANNEL_ID> — two different numeric IDs separated by a slash. Hermes's channel settings want only the second number, the bare CHANNEL_ID, with no URL, slashes, or server ID attached."
+  - question: "Why does Hermes say no user allowlist is configured even though the bot is online?"
+    answer: "Because DISCORD_ALLOWED_USERS (and/or DISCORD_ALLOWED_ROLES) hasn't been set. A connected bot and an authorized user are two separate checks — the bot can be fully online and still treat every message as unauthorized until at least one allowlist variable is set."
+  - question: "How do I find my numeric Discord User ID from the web app?"
+    answer: "Click the gear icon (User Settings) in the bottom-left, go to Advanced, toggle on Developer Mode, then go back to any channel or DM, right-click your own name or avatar, and select Copy User ID. The result is a long number (17-19 digits) — not your username or the #1234-style tag shown in your profile."
+  - question: "Why does Hermes hit 'Too many requests. Retry in N seconds' while I'm debugging Discord?"
+    answer: "This is Discord's own API rate limit, not a Hermes bug — each crash-and-restart cycle while fixing a config error is another login attempt, and enough of them in a short window trips the limit. Wait out the specified seconds, restart once, and avoid repeatedly restarting to test in the meantime, since that resets the wait."
+---
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+You've gotten past inviting the bot and enabling [Privileged Gateway Intents](/blog/connecting-hermes-agent-to-discord/) — the gateway connects, the bot shows online — but it still doesn't respond, or the gateway won't even start cleanly. Two specific config mistakes cause most of what's left, and both show up as very literal error messages once you know what to look for.
+
+## Issue 1: "invalid literal for int() with base 10"
+
+**Symptom:** The gateway process crashes or logs a Python traceback ending in something like:
+
+```text
+ValueError: invalid literal for int() with base 10: 'https://discord.com/channels/111111111111111111/222222222222222222'
+```
+
+**Cause:** Discord's right-click menu on a channel offers **Copy Link**, which gives you the full URL — `https://discord.com/channels/<SERVER_ID>/<CHANNEL_ID>`. Hermes's channel-related settings (`DISCORD_ALLOWED_CHANNELS`, `DISCORD_FREE_RESPONSE_CHANNELS`, `DISCORD_HOME_CHANNEL`) expect only the bare numeric channel ID — they get parsed directly as integers, so anything else (a URL, slashes, the server ID) fails immediately.
+
+**Fix:** Find where the full URL got saved:
+
+```bash
+grep -RniF 'discord.com/channels/' ~/.hermes
+```
+
+That'll point you at `~/.hermes/.env` and/or `~/.hermes/config.yaml`. Open whichever file it flags and replace the full URL with just the trailing number — the second ID in the URL, not the first:
+
+```text
+# Wrong:
+DISCORD_ALLOWED_CHANNELS=https://discord.com/channels/111111111111111111/222222222222222222
+
+# Right:
+DISCORD_ALLOWED_CHANNELS=222222222222222222
+```
+
+Do the same for `DISCORD_FREE_RESPONSE_CHANNELS` and `DISCORD_HOME_CHANNEL` if either has the same problem.
+
+## Issue 2: No User Allowlist Configured
+
+**Symptom:** The gateway logs indicate no user-level allowlist is set — the bot connects fine, but every message is treated as unauthorized regardless of who sends it.
+
+**Cause:** `DISCORD_ALLOWED_USERS` (or `DISCORD_ALLOWED_ROLES`) was never set. A connected bot and an authorized user are two independent checks — being online doesn't imply anyone is allowed to talk to it.
+
+**Fix:** Get your numeric Discord User ID, then add it:
+
+```bash
+nano ~/.hermes/.env
+```
+
+```text
+DISCORD_ALLOWED_USERS=YOUR_NUMERIC_USER_ID
+```
+
+Save and restart the gateway, then verify the values landed correctly without echoing the token itself:
+
+```bash
+grep -E '^DISCORD_(ALLOWED_USERS|ALLOWED_CHANNELS|FREE_RESPONSE_CHANNELS|HOME_CHANNEL)=' ~/.hermes/.env
+```
+
+## Finding Your Numeric User ID (Not Your Username)
+
+The single most common mixup here: your Discord username or tag (something like `yourname_0142`) is **not** the ID Hermes needs. You need the numeric snowflake ID, which looks like `333333333333333333`.
+
+**On Discord for the web** (this is the one that trips people up, since the menu layout differs slightly from desktop):
+
+1. Click the **gear icon** (User Settings) in the bottom-left corner.
+2. Go to **Advanced**.
+3. Toggle on **Developer Mode**.
+4. Go back to any channel or DM where you've sent a message.
+5. Right-click your own name or avatar.
+6. Select **Copy User ID**.
+
+You'll get a long number, not your display name. Paste that number — and only that number — into `DISCORD_ALLOWED_USERS`.
+
+## Issue 3: Rate-Limited After Repeated Restarts
+
+**Symptom:** After fixing the two issues above, the gateway connects but a new error shows up:
+
+```text
+Too many requests. Retry in 276 seconds
+```
+
+**Cause:** This isn't a config problem — it's Discord itself. Every crash-and-restart cycle while debugging the earlier issues is another login attempt against Discord's API, and enough of them in a short window trips Discord's own rate limiting, independent of anything Hermes does wrong.
+
+**Fix:** Do nothing for the number of seconds Discord specifies (it counts down from when the limit was hit), then restart once and leave it alone rather than restarting repeatedly to "test" — each additional attempt while still rate-limited just resets the wait. Once it clears, a single `hello` in the channel is enough to confirm the bot is actually responding.
+
+## Verifying the Fix
+
+Restart however you're running the gateway (foreground process, or whatever supervisor — systemd or otherwise — you've set up to keep it alive), then check the logs for the specific problems being gone rather than just generic activity:
+
+```bash
+grep -Ei 'invalid literal for int|no.*allowlist' <your gateway log source>
+```
+
+No more `invalid literal for int()`, and no more warnings about a missing allowlist. Then test it directly: send a plain message in the channel, or mention the bot by its handle, and confirm you get a reply.
+
+## Related Articles
+
+- [Connecting Hermes Agent to Discord: Complete Setup Guide](/blog/connecting-hermes-agent-to-discord/)
+- [Hermes Agent Discord Bot Not Showing Up or Not Responding](/blog/hermes-agent-discord-bot-not-responding-troubleshooting/)
+- [Hermes Agent on a 1GB VPS: Fixing the Common Gotchas](/blog/hermes-agent-low-memory-vps-troubleshooting/)
+- [What is Hermes Agent? Nous Research's Self-Improving AI Agent](/blog/what-is-hermes-agent-nous-research/)
+
+<BlogPromoCard />

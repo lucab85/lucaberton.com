@@ -1,0 +1,89 @@
+---
+draft: false
+title: "Claude Code ECONNRESET: Fix the API Connection Reset Error"
+seoTitle: "Fix ECONNRESET in Claude Code: Connection Reset Guide"
+snippet: "ECONNRESET means the link between Claude Code and the API dropped. Here are six fixes, from restart to VPN and firewall checks, that get you back online fast."
+description: "ECONNRESET means the link between Claude Code and the API dropped. Here are six fixes, from restart to VPN and firewall checks, that get you back online fast."
+image:
+  src: "/blog/thumbnails/agentic-devops-claude-code.jpg"
+  alt: "Fixing the ECONNRESET connection reset error in Claude Code"
+publishDate: "2026-07-23"
+lastModified: "2026-07-23"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "Claude Code"
+  - "Troubleshooting"
+  - "API"
+  - "DevOps"
+  - "Networking"
+---
+
+If you are mid-session in **Claude Code** and suddenly hit `ECONNRESET`, it means the TCP connection between your client and `api.anthropic.com` was closed by the other side before the request finished. The error is a *network* signal, not a code bug in your project. That distinction matters, because it tells you where to look first: the transport layer, not your source code.
+
+First, the reassuring part. As of this writing, the [Claude status page](https://status.anthropic.com/) shows **Claude API and Claude Code as operational**. Several incidents did occur and were resolved on July 22–23, 2026, so a brief retry after an incident window usually clears itself. If the status page is green and you are still seeing resets, the cause is almost always on your side of the network.
+
+## What ECONNRESET actually means
+
+`ECONNRESET` is a POSIX socket error: *connection reset by peer*. In plain terms, the remote host (or something sitting between you and it — a proxy, VPN, or firewall) tore down the TCP connection without a clean close. Claude Code was mid-stream, expecting more bytes, and got a reset packet instead. Anthropic specifically calls out VPNs, firewalls, and network restrictions as common culprits, and notes that some networks silently terminate idle, non-streaming connections.
+
+## Fix it in this order
+
+Try the steps top to bottom. Most resets resolve at step 1 or 2.
+
+### 1. Restart Claude Code
+
+Close Claude Code completely, reopen it, and retry. A transient service blip or a stale local socket is the cheapest thing to rule out first.
+
+### 2. Drop the VPN / proxy, or change networks
+
+Turn off any VPN or proxy, or switch to a different network or hotspot. This is the single most common fix for `ECONNRESET` with Claude Code. If you are on a corporate VPN, try a phone hotspot to confirm the tunnel is the issue.
+
+### 3. Run the built-in doctor
+
+```bash
+claude doctor
+```
+
+Or run `/doctor` from inside Claude Code. It checks your local environment, auth, and connectivity and reports what is misconfigured.
+
+### 4. Test raw connectivity with curl
+
+```bash
+curl -v https://api.anthropic.com
+```
+
+A response like `404`, `405`, or an authentication error is **good** — it proves the server is reachable and TLS is working. A TLS failure, timeout, or another connection reset points squarely at your network, proxy, antivirus, or firewall. The `-v` flag shows the exact TLS handshake step where things break, which is the fastest way to localize the fault.
+
+### 5. Update Claude Code, then restart the terminal
+
+Update to the newest available version, then fully restart the terminal. Stale CLI builds occasionally hold broken connection state or ship fixes for transport handling.
+
+### 6. Stream long requests
+
+For long API requests, use streaming or reduce the request duration. Anthropic notes that some networks terminate idle, non-streaming connections, so a long generation with no bytes on the wire can get killed by an intermediate proxy. Streaming keeps the connection alive with steady traffic.
+
+## Corporate networks
+
+On a locked-down corporate network, ask IT to allow outbound HTTPS traffic to `api.anthropic.com` on port `443`. No exceptions, no MITM proxy inspection on that host — a TLS-inspecting proxy that re-signs certificates is a frequent source of resets.
+
+## FAQ
+
+**Is ECONNRESET a bug in my code?**
+No. It is a transport-layer error indicating the connection was reset before the API call completed. Your application code is not the cause.
+
+**The status page says operational but I still get resets. Why?**
+The reset is almost always local — a VPN, proxy, firewall, or unstable network on your side. The steps above target exactly those causes.
+
+**What does a "good" curl response look like?**
+`404`, `405`, or an auth error all mean you reached the server successfully. Only a TLS failure or connection reset signals a network/proxy problem.
+
+**Why does streaming help?**
+Some networks drop idle, non-streaming connections. Streaming sends bytes continuously, keeping the connection from looking idle to intermediate proxies.
+
+## Key takeaways
+
+- `ECONNRESET` is a network fault, not a code bug — check the transport layer first.
+- Restart Claude Code, then drop the VPN/proxy before anything else.
+- `curl -v https://api.anthropic.com` is your fastest diagnostic: any HTTP status = reachable, TLS reset = network fault.
+- On corporate networks, allow outbound `443` to `api.anthropic.com` and avoid TLS-inspecting proxies.

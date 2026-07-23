@@ -1,0 +1,83 @@
+---
+draft: false
+title: "Fix ArgoCD SyncError Application Out of Sync"
+seoTitle: "Fix ArgoCD SyncError Application Out of Sync"
+snippet: "ArgoCD app stuck out of sync? Diagnose sync failures, hook errors, and resource health check issues. Step-by-step fix with kubectl commands and YAML examples."
+description: "ArgoCD app stuck out of sync? Diagnose sync failures, hook errors, and resource health check issues. Step-by-step fix with kubectl commands and YAML examples."
+publishDate: "2026-04-03"
+lastModified: "2026-04-03"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "argocd"
+  - "gitops"
+  - "kubernetes"
+  - "troubleshooting"
+  - "devops"
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Fix ArgoCD SyncError Application Out of Sync"
+---
+## The Problem
+
+Your ArgoCD application shows `OutOfSync` status even after syncing. The application never reaches `Synced` state.
+
+## Root Cause
+
+OutOfSync means the live cluster state differs from the desired state in Git. Persistent OutOfSync usually means:
+
+1. **Mutating webhooks or controllers** modify resources after ArgoCD deploys them
+2. **Default values** added by Kubernetes that are not in your manifests
+3. **Ignore differences not configured** for fields that legitimately differ
+
+## Fix
+
+### Identify What Is Different
+
+```bash
+# Show the diff
+argocd app diff my-app
+
+# Detailed diff
+argocd app diff my-app --local ./manifests
+```
+
+### Ignore Expected Differences
+
+```yaml
+# In your ArgoCD Application spec
+spec:
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas    # HPA manages replicas
+    - group: ""
+      kind: Service
+      jqPathExpressions:
+        - .metadata.annotations."cloud.google.com/neg-status"
+```
+
+### Common Fields to Ignore
+
+| Field | Reason |
+|-------|--------|
+| `/spec/replicas` | HPA or KEDA manages scaling |
+| `/metadata/annotations` | Controllers add annotations |
+| `/metadata/labels` | Admission webhooks add labels |
+| `/status` | Kubernetes updates status |
+
+### Force Sync
+
+```bash
+# Sync with prune
+argocd app sync my-app --prune
+
+# Sync specific resources only
+argocd app sync my-app --resource apps:Deployment:my-deploy
+```
+
+## Related Resources
+
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+- [Fix ArgoCD Showing False Diffs](/blog/fix-argocd-showing-false-diffs/)

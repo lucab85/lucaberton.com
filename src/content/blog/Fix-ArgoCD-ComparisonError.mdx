@@ -1,0 +1,95 @@
+---
+draft: false
+title: "Fix ArgoCD ComparisonError"
+seoTitle: "Fix ArgoCD ComparisonError"
+snippet: "ArgoCD showing ComparisonError for application? Debug manifest comparison failures, resource exclusions, and diff customization."
+description: "ArgoCD showing ComparisonError for application? Debug manifest comparison failures, resource exclusions, and diff customization."
+publishDate: "2026-04-03"
+lastModified: "2026-04-03"
+category: "DevOps"
+author: "Luca Berton"
+tags:
+  - "argocd"
+  - "gitops"
+  - "kubernetes"
+  - "troubleshooting"
+  - "devops"
+image:
+  src: "/blog/books/Practical RHEL AI Dyone Dekker.jpg"
+  alt: "Fix ArgoCD ComparisonError"
+---
+## The Problem
+
+ArgoCD shows `ComparisonError` status on your application. The UI displays a yellow warning and the application health cannot be determined.
+
+## Root Cause
+
+ComparisonError occurs when ArgoCD cannot compare the desired state (Git) with the live state (cluster). Common causes:
+
+1. **CRD not installed**: The application references a Custom Resource whose CRD is not yet installed
+2. **Invalid manifests**: YAML/JSON syntax errors or invalid Kubernetes API fields
+3. **Resource too large**: Kubernetes resources exceeding the annotation size limit
+4. **API server unreachable**: ArgoCD repo-server or application-controller cannot reach the target cluster
+
+## Fix
+
+### CRD Not Installed
+
+```bash
+# Check if the CRD exists
+kubectl get crd | grep your-resource-kind
+
+# Install CRDs before deploying the application
+# Option 1: Sync waves (install CRDs first)
+# Add to CRD manifest:
+# metadata:
+#   annotations:
+#     argocd.argoproj.io/sync-wave: "-1"
+```
+
+### Invalid Manifests
+
+```bash
+# Validate manifests locally
+kubectl apply --dry-run=client -f manifests/
+
+# Check ArgoCD repo-server logs
+kubectl logs -n argocd deployment/argocd-repo-server --tail=50
+```
+
+### Resource Exclusions
+
+If ArgoCD chokes on specific resources, exclude them:
+
+```yaml
+# argocd-cm ConfigMap
+data:
+  resource.exclusions: |
+    - apiGroups:
+        - cilium.io
+      kinds:
+        - CiliumIdentity
+      clusters:
+        - "*"
+```
+
+### Application-Level Fix
+
+```bash
+# Force a refresh
+argocd app get my-app --refresh
+
+# Hard refresh (clear cache)
+argocd app get my-app --hard-refresh
+```
+
+## Prevention
+
+- Always install CRDs in a separate sync wave (`-1` or earlier)
+- Use `argocd app diff` to validate before syncing
+- Set resource exclusions for cluster-managed resources
+
+## Related Resources
+
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+- [ArgoCD vs Flux](/blog/argocd-vs-flux-2026/)

@@ -1,0 +1,141 @@
+---
+draft: false
+title: "KEDA vs HPA 2026: Scale-to-Zero and Event Autoscaling"
+seoTitle: "KEDA vs HPA 2026: Scale-to-Zero and Event Autoscaling"
+snippet: "KEDA vs HPA compared for 2026. Event-driven vs metric-based autoscaling, scale-to-zero, external metrics, and which Kubernetes autoscaler to use."
+description: "KEDA vs HPA Kubernetes autoscaling comparison 2026. Event-driven, scale-to-zero, external metrics, and decision guide."
+image:
+  src: "/blog/thumbnails/keda-vs-hpa-2026.jpg"
+  alt: "KEDA vs HPA: Kubernetes Autoscaling"
+publishDate: "2026-04-04"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags:
+  - "keda"
+  - "hpa"
+  - "kubernetes"
+  - "autoscaling"
+  - "event-driven"
+---
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+Kubernetes ships with **Horizontal Pod Autoscaler (HPA)** for metric-based scaling. **KEDA** (Kubernetes Event-Driven Autoscaler) extends HPA with event sources and scale-to-zero. Choosing the right autoscaler depends on your workload pattern — request-driven services behave differently from queue consumers and batch processors.
+
+## Architecture
+
+**HPA** is a built-in Kubernetes controller that polls the metrics API at a configurable interval (default 15s). It calculates the desired replica count based on current vs target metric values and issues scale commands to the deployment.
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: api-server
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: api-server
+  minReplicas: 2
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+```
+
+**KEDA** deploys as an operator with two components: a metrics adapter that exposes external metrics to HPA, and a controller that manages `ScaledObject` CRDs. KEDA does not replace HPA — it creates and manages HPA resources behind the scenes while adding scale-to-zero logic.
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: order-processor
+spec:
+  scaleTargetRef:
+    name: order-processor
+  minReplicaCount: 0    # Scale to zero!
+  maxReplicaCount: 100
+  triggers:
+    - type: rabbitmq
+      metadata:
+        host: amqp://rabbitmq.default:5672
+        queueName: orders
+        queueLength: "5"  # 1 pod per 5 messages
+    - type: cron
+      metadata:
+        timezone: Europe/Amsterdam
+        start: "0 8 * * *"
+        end: "0 20 * * *"
+        desiredReplicas: "3"
+```
+
+## Feature Comparison
+
+| Capability | HPA | KEDA |
+|---|---|---|
+| **Scale-to-zero** | No (minimum 1 replica) | Yes |
+| **Metric sources** | CPU, memory, custom metrics API | 65+ scalers (Kafka, RabbitMQ, AWS SQS, Prometheus, Cron, PostgreSQL, Redis) |
+| **Setup complexity** | Built-in, zero install | Operator install via Helm |
+| **Custom metrics** | Requires metrics adapter | Built-in adapters for external systems |
+| **Cooldown control** | `--horizontal-pod-autoscaler-downscale-stabilization` | Per-ScaledObject `cooldownPeriod` and `pollingInterval` |
+| **Multiple triggers** | Multiple metrics with `max` policy | Multiple triggers with composite logic |
+| **GitOps friendly** | Standard K8s resource | CRD-based, fully declarative |
+| **CNCF status** | Part of Kubernetes | CNCF Graduated project |
+
+## Scale-to-Zero: The Key Differentiator
+
+HPA enforces `minReplicas: 1` — you always pay for at least one pod per deployment. In clusters with hundreds of microservices, many of which handle sporadic traffic, this adds up.
+
+KEDA sets `minReplicaCount: 0` and monitors external triggers. When the queue is empty or no events arrive, KEDA scales the deployment to zero. When a message appears, KEDA creates the first pod within seconds.
+
+```bash
+# Typical savings calculation:
+# 200 microservices × 1 idle pod × 256Mi memory = 50 Gi wasted
+# KEDA scale-to-zero on 150 low-traffic services saves ~37.5 Gi
+```
+
+This is critical for development and staging environments where most services sit idle 90% of the time.
+
+## When to Use Each
+
+**Use HPA when:**
+- You need CPU/memory-based autoscaling for web APIs
+- Your workloads always need at least one replica running
+- You want zero additional dependencies
+- Simple request-per-second scaling is sufficient
+
+**Use KEDA when:**
+- You process messages from queues (Kafka, RabbitMQ, SQS, Redis)
+- You want scale-to-zero for cost savings
+- You need to scale based on external metrics (database row count, Prometheus queries)
+- You run batch or scheduled workloads
+- You have mixed triggers (queue depth + cron schedule)
+
+**Use both together:**
+KEDA manages HPA internally. You can use HPA for your always-on API services and KEDA ScaledObjects for your event-driven processors in the same cluster — they coexist without conflict.
+
+## Production Tips
+
+1. **Set `pollingInterval`** appropriately — 30s is fine for queues, 5s for latency-sensitive scaling
+2. **Configure `cooldownPeriod`** to prevent flapping (default 300s is often too aggressive for cold-start workloads)
+3. **Use `ScaledJob`** instead of `ScaledObject` for batch workloads where each message should spawn a new Job
+4. **Monitor KEDA operator health** — it is a single point of failure for all scale-to-zero workloads
+5. **Test cold start latency** — scale-to-zero means the first request after idle waits for pod startup
+
+## Related Reading
+
+- [Kubernetes vs Docker Swarm](/blog/kubernetes-vs-docker-swarm-2026/)
+- [EKS vs AKS vs GKE](/blog/eks-vs-aks-vs-gke-2026/)
+- [Helm vs Kustomize](/blog/helm-vs-kustomize-2026/)
+
+<BlogPromoCard />

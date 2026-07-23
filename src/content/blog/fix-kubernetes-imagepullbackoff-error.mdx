@@ -1,0 +1,104 @@
+---
+draft: false
+title: "Fix Kubernetes ImagePullBackOff: Image Pull Errors Solved"
+snippet: "How to fix the ImagePullBackOff error in Kubernetes. Causes, diagnosis steps, and proven solutions with kubectl commands."
+description: "Fix the ImagePullBackOff Kubernetes error. Step-by-step troubleshooting guide with causes, diagnosis commands, and solutions."
+image:
+  src: "/blog/thumbnails/fix-kubernetes-imagepullbackoff-error.jpg"
+  alt: "Fix Kubernetes ImagePullBackOff: Image Pull Errors Solved"
+publishDate: "2026-04-04"
+lastModified: "2026-04-04"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ["Kubernetes", "Troubleshooting", "Error Fix", "kubectl", "DevOps"]
+---
+
+If you are seeing `ImagePullBackOff` in your Kubernetes cluster, here is how to fix it.
+
+## What This Error Means
+
+ImagePullBackOff means Kubernetes cannot pull the container image. It tried and failed, and is now backing off before retrying.
+
+Common causes:
+- Image name or tag is wrong
+- Image does not exist in the registry
+- Authentication credentials are missing or expired
+- Registry is down or unreachable
+- Network policy blocking registry access
+
+## How to Diagnose
+
+```bash
+# Check pod status
+kubectl get pods -o wide
+
+# Describe the affected pod
+kubectl describe pod <pod-name>
+
+# Check events
+kubectl get events --sort-by='.lastTimestamp' -A
+```
+
+## Identify the Exact Error
+
+```bash
+kubectl describe pod <pod-name> | grep -A10 'Events'
+# Look for: 'Failed to pull image' with the specific reason
+```
+
+## Common Fixes
+
+### 1. Wrong Image Name
+
+```bash
+# Check what image the pod is trying to pull
+kubectl get pod <pod-name> -o jsonpath='{.spec.containers[0].image}'
+
+# Verify image exists
+docker pull <image-name>  # or: crane manifest <image-name>
+```
+
+### 2. Missing Registry Credentials
+
+```bash
+# Create registry secret
+kubectl create secret docker-registry regcred \
+  --docker-server=registry.example.com \
+  --docker-username=user \
+  --docker-password=pass
+
+# Patch service account
+kubectl patch serviceaccount default -p '{"imagePullSecrets": [{"name": "regcred"}]}'
+```
+
+### 3. Private Registry with Expired Token
+
+```bash
+# Check secret expiry
+kubectl get secret regcred -o jsonpath='{.data.\.dockerconfigjson}' | base64 -d
+
+# Delete and recreate with fresh credentials
+kubectl delete secret regcred
+kubectl create secret docker-registry regcred --docker-server=... --docker-username=... --docker-password=...
+```
+
+## Verify the Fix
+
+```bash
+# Force a new pull attempt
+kubectl delete pod <pod-name>
+# Deployment will create a new pod that pulls the image
+```
+
+## Prevention
+
+- Set proper resource requests and limits
+- Use pod disruption budgets for critical workloads
+- Monitor cluster health with Prometheus and Grafana
+- Implement proper health checks (readiness and liveness probes)
+
+## Related Resources
+
+- [Kubernetes Cheat Sheet](/blog/kubernetes-cheat-sheet-kubectl-commands-2026/)
+- [DevOps Roadmap 2026](/blog/devops-roadmap-2026-skills-tools-career/)
+- [Book a Kubernetes Workshop](/services/kubernetes-workshops/)

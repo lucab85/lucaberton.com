@@ -1,0 +1,173 @@
+---
+title: "Argo CD: GitOps Continuous Deployment for Kubernetes"
+seoTitle: "Argo CD: GitOps Continuous Deployment for Kubernetes"
+snippet: "Production-ready Argo CD setup — ApplicationSets, multi-cluster sync, RBAC, notifications, and progressive delivery patterns."
+description: "Production-ready Argo CD setup — ApplicationSets, multi-cluster sync, RBAC, notifications, and progressive delivery patterns."
+publishDate: "2026-06-05"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['DevOps', 'GitOps', 'Kubernetes']
+image:
+  src: "/blog/thumbnails/argo-cd-gitops-kubernetes-deployment-2026.jpg"
+  alt: "Argo CD: GitOps Continuous Deployment for Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What Is Argo CD?
+
+[Argo CD](https://github.com/argoproj/argo-cd) is the most popular GitOps continuous delivery tool for Kubernetes. It watches Git repos and syncs desired state to clusters. 18K+ GitHub stars, CNCF Graduated.
+
+### GitOps Principle
+
+```
+Git (desired state) ──sync──▶ Kubernetes (actual state)
+     │                              │
+     └─── Argo CD reconciles ───────┘
+           every 3 minutes
+```
+
+## Installation
+
+```bash
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+# Get initial admin password
+argocd admin initial-password -n argocd
+```
+
+## Application Definition
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: payment-service
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/myorg/payment-service
+    targetRevision: main
+    path: k8s/production
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: payments
+  syncPolicy:
+    automated:
+      prune: true        # Delete resources removed from Git
+      selfHeal: true     # Fix manual changes in cluster
+    syncOptions:
+      - CreateNamespace=true
+      - PrunePropagationPolicy=foreground
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        maxDuration: 3m
+```
+
+## ApplicationSets (Multi-Cluster/Multi-Env)
+
+Deploy to multiple environments from a single definition:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: payment-service
+spec:
+  generators:
+    - list:
+        elements:
+          - cluster: production
+            url: https://prod-cluster.example.com
+            namespace: payments
+            values:
+              replicas: "3"
+          - cluster: staging
+            url: https://staging-cluster.example.com
+            namespace: payments
+            values:
+              replicas: "1"
+  template:
+    metadata:
+      name: "payment-{{cluster}}"
+    spec:
+      source:
+        repoURL: https://github.com/myorg/payment-service
+        path: "k8s/{{cluster}}"
+      destination:
+        server: "{{url}}"
+        namespace: "{{namespace}}"
+      syncPolicy:
+        automated:
+          selfHeal: true
+```
+
+## Progressive Delivery
+
+### Canary with Argo Rollouts
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: payment-service
+spec:
+  replicas: 5
+  strategy:
+    canary:
+      steps:
+        - setWeight: 10      # 10% traffic to new version
+        - pause: {duration: 5m}
+        - analysis:           # Run metrics check
+            templates:
+              - templateName: success-rate
+        - setWeight: 50      # 50% if analysis passes
+        - pause: {duration: 10m}
+        - analysis:
+            templates:
+              - templateName: success-rate
+        # Full rollout if all analyses pass
+```
+
+## Notifications
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-notifications-cm
+data:
+  trigger.on-sync-failed: |
+    - when: app.status.sync.status == 'OutOfSync'
+      send: [slack-alert]
+  template.slack-alert: |
+    message: |
+      Application {{.app.metadata.name}} sync failed!
+      {{.app.status.sync.status}}
+  service.slack: |
+    token: $slack-token
+    channel: deployments
+```
+
+## Best Practices
+
+1. **Separate app repos from config repos** — don't mix code and K8s manifests
+2. **Use Helm or Kustomize** — not raw YAML (too many files)
+3. **Enable auto-sync + self-heal** — manual sync defeats GitOps
+4. **ApplicationSets for scale** — don't create Applications manually
+5. **RBAC per team** — projects restrict what teams can deploy where
+6. **Notifications** — alert on sync failures immediately
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Flux CD vs Argo CD: GitOps Compared](/blog/fluxcd-vs-argocd-gitops-comparison-2026/)
+- [Crossplane: Infrastructure from K8s](/blog/crossplane-kubernetes-infrastructure-control-plane-2026/)
+- [Backstage: Internal Developer Portal](/blog/backstage-internal-developer-portal-setup-2026/)

@@ -1,0 +1,171 @@
+---
+/**
+ * Global interaction tracking for GA4 / dataLayer.
+ *
+ * Tracks user actions without collecting form values or free-text content:
+ * - link clicks, button clicks, CTA clicks
+ * - form submissions
+ * - input/select/textarea changes by field name/type only
+ * - copy events, details toggles, and keyboard activation on buttons
+ */
+---
+
+<script is:inline>
+  (function () {
+    if (window.__lucaInteractionTrackerLoaded) return;
+    window.__lucaInteractionTrackerLoaded = true;
+
+    var EVENT_NAME = 'site_interaction';
+    var MAX_TEXT = 80;
+
+    function cleanText(value) {
+      return String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, MAX_TEXT);
+    }
+
+    function pathOf(element) {
+      if (!element || !element.tagName) return '';
+      var parts = [];
+      var node = element;
+      while (node && node.nodeType === 1 && parts.length < 4) {
+        var part = node.tagName.toLowerCase();
+        if (node.id) {
+          part += '#' + node.id;
+          parts.unshift(part);
+          break;
+        }
+        if (node.className && typeof node.className === 'string') {
+          var cls = node.className
+            .split(/\s+/)
+            .filter(Boolean)
+            .slice(0, 2)
+            .join('.');
+          if (cls) part += '.' + cls;
+        }
+        parts.unshift(part);
+        node = node.parentElement;
+      }
+      return parts.join(' > ');
+    }
+
+    function elementLabel(element) {
+      if (!element) return '';
+      return cleanText(
+        element.getAttribute('data-track-label') ||
+        element.getAttribute('aria-label') ||
+        element.getAttribute('title') ||
+        element.innerText ||
+        element.textContent ||
+        element.getAttribute('href') ||
+        element.getAttribute('name') ||
+        element.id ||
+        element.tagName
+      );
+    }
+
+    function isOutbound(url) {
+      try {
+        var parsed = new URL(url, window.location.href);
+        return parsed.hostname !== window.location.hostname;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function isDownload(url) {
+      return /\.(pdf|epub|zip|tar|gz|tgz|dmg|pkg|exe|csv|ics)(\?|#|$)/i.test(url || '');
+    }
+
+    function isCta(element) {
+      if (!element) return false;
+      var text = elementLabel(element).toLowerCase();
+      var href = (element.getAttribute('href') || '').toLowerCase();
+      var className = String(element.className || '').toLowerCase();
+      return (
+        element.hasAttribute('data-track-cta') ||
+        /cta|button|btn|subscribe|consult|assessment|enroll|buy|download/.test(className) ||
+        /calendly|udemy|leanpub|amazon|convertkit|kit\.com|mailerlite/.test(href) ||
+        /subscribe|schedule|assessment|enroll|buy|get|download|contact|start learning|view services/.test(text)
+      );
+    }
+
+    function send(action, element, extra) {
+      var payload = Object.assign({
+        event_category: 'interaction',
+        interaction_action: action,
+        interaction_label: elementLabel(element),
+        element_tag: element && element.tagName ? element.tagName.toLowerCase() : '',
+        element_path: pathOf(element),
+        page_path: window.location.pathname,
+        page_title: document.title
+      }, extra || {});
+
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push(Object.assign({ event: EVENT_NAME }, payload));
+
+      if (typeof window.gtag === 'function') {
+        window.gtag('event', EVENT_NAME, payload);
+      }
+    }
+
+    document.addEventListener('click', function (event) {
+      var target = event.target && event.target.closest
+        ? event.target.closest('a, button, [role="button"], input[type="button"], input[type="submit"], summary, [data-track]')
+        : null;
+      if (!target) return;
+
+      var href = target.getAttribute('href') || '';
+      var action = 'click';
+      if (target.matches('button, [role="button"], input[type="button"], input[type="submit"]')) action = 'button_click';
+      if (target.matches('a')) action = 'link_click';
+      if (isCta(target)) action = 'cta_click';
+      if (isOutbound(href)) action = 'outbound_click';
+      if (isDownload(href)) action = 'download_click';
+
+      send(action, target, {
+        link_url: href ? new URL(href, window.location.href).href : '',
+        outbound: href ? isOutbound(href) : false,
+        download: href ? isDownload(href) : false
+      });
+    }, true);
+
+    document.addEventListener('submit', function (event) {
+      send('form_submit', event.target, {
+        form_id: event.target.id || '',
+        form_name: event.target.getAttribute('name') || '',
+        form_action: event.target.getAttribute('action') || ''
+      });
+    }, true);
+
+    document.addEventListener('change', function (event) {
+      var target = event.target;
+      if (!target || !target.matches || !target.matches('input, select, textarea')) return;
+      send('field_change', target, {
+        field_type: target.getAttribute('type') || target.tagName.toLowerCase(),
+        field_name: target.getAttribute('name') || target.id || ''
+      });
+    }, true);
+
+    document.addEventListener('copy', function (event) {
+      var target = event.target && event.target.closest ? event.target.closest('pre, code, article, main') : null;
+      send('copy', target || document.body, {});
+    }, true);
+
+    document.addEventListener('toggle', function (event) {
+      var target = event.target;
+      if (!target || !target.matches || !target.matches('details')) return;
+      send(target.open ? 'details_open' : 'details_close', target, {});
+    }, true);
+
+    document.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      var target = event.target && event.target.closest
+        ? event.target.closest('button, [role="button"], input[type="button"], input[type="submit"]')
+        : null;
+      if (!target) return;
+      send('button_keypress', target, { key: event.key });
+    }, true);
+  })();
+</script>

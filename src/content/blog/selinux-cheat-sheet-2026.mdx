@@ -1,0 +1,158 @@
+---
+draft: false
+title: "SELinux Cheat Sheet 2026: Modes, Contexts,"
+snippet: "SELinux cheat sheet. Modes, file contexts, booleans, audit2allow, and common troubleshooting commands. Copy-paste ready commands for daily operations."
+description: "SELinux cheat sheet. Modes, file contexts, booleans, audit2allow, and common troubleshooting commands. Copy-paste ready commands for daily operations."
+image:
+  src: "/blog/thumbnails/selinux-cheat-sheet-2026.jpg"
+  alt: "SELinux Cheat Sheet 2026: Modes, Contexts, and Troubleshooting"
+publishDate: "2026-04-04"
+lastModified: "2026-04-04"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["Cheat Sheet", "Reference", "DevOps", "2026"]
+---
+A quick reference for SELinux — mandatory access control for Linux. Bookmark this page.
+
+## Status and Modes
+
+```bash
+# Check current status
+getenforce                   # Enforcing, Permissive, or Disabled
+sestatus                     # Detailed status
+
+# Change mode temporarily (until reboot)
+sudo setenforce 1            # Enforcing
+sudo setenforce 0            # Permissive
+
+# Change mode permanently
+sudo vi /etc/selinux/config
+# Set: SELINUX=enforcing
+```
+
+## File Contexts
+
+```bash
+# View file context
+ls -Z /var/www/html/
+ls -Zd /var/www/html/
+
+# Restore default context
+sudo restorecon -v /var/www/html/index.html
+sudo restorecon -Rv /var/www/html/       # Recursive
+
+# Change file context temporarily
+sudo chcon -t httpd_sys_content_t /var/www/html/index.html
+
+# Set default context permanently
+sudo semanage fcontext -a -t httpd_sys_content_t "/srv/web(/.*)?"
+sudo restorecon -Rv /srv/web/
+
+# List all file context rules
+sudo semanage fcontext -l | grep httpd
+```
+
+## Booleans
+
+```bash
+# List all booleans
+getsebool -a
+getsebool -a | grep httpd
+
+# Check specific boolean
+getsebool httpd_can_network_connect
+
+# Set boolean temporarily
+sudo setsebool httpd_can_network_connect on
+
+# Set boolean permanently
+sudo setsebool -P httpd_can_network_connect on
+sudo setsebool -P httpd_can_network_connect_db on
+```
+
+## Port Contexts
+
+```bash
+# List port contexts
+sudo semanage port -l
+sudo semanage port -l | grep http
+
+# Add custom port for a service
+sudo semanage port -a -t http_port_t -p tcp 8443
+sudo semanage port -a -t ssh_port_t -p tcp 2222
+
+# Delete custom port mapping
+sudo semanage port -d -t http_port_t -p tcp 8443
+```
+
+## Troubleshooting
+
+```bash
+# View denied actions in audit log
+sudo ausearch -m AVC -ts recent
+sudo ausearch -m AVC -ts today
+
+# Human-readable denials
+sudo sealert -a /var/log/audit/audit.log
+
+# Generate policy module from denials
+sudo ausearch -m AVC -ts recent | audit2allow -M mypolicy
+sudo semodule -i mypolicy.pp
+
+# Watch denials in real-time
+sudo tail -f /var/log/audit/audit.log | grep AVC
+```
+
+## Process Contexts
+
+```bash
+# View process context
+ps -eZ | grep httpd
+ps -eZ | grep nginx
+
+# View user context
+id -Z
+```
+
+## Policy Modules
+
+```bash
+# List installed modules
+sudo semodule -l
+
+# Install custom module
+sudo semodule -i mypolicy.pp
+
+# Remove module
+sudo semodule -r mypolicy
+
+# Generate module from denials (quick fix)
+sudo grep nginx /var/log/audit/audit.log | audit2allow -M nginx_custom
+sudo semodule -i nginx_custom.pp
+```
+
+## Common SELinux Types
+
+| Type | Used For |
+|------|----------|
+| `httpd_sys_content_t` | Web server static content |
+| `httpd_sys_rw_content_t` | Web server writable content |
+| `container_file_t` | Container volumes (Podman/Docker) |
+| `ssh_port_t` | SSH ports |
+| `http_port_t` | HTTP/HTTPS ports |
+| `user_home_t` | User home directories |
+| `var_log_t` | Log files |
+
+## Tips and Tricks
+
+- Never `setenforce 0` in production — use `audit2allow` to fix denials properly
+- Use `restorecon -Rv` after copying files to web directories
+- Use `:Z` or `:z` volume flags with Podman/Docker for SELinux labels
+- Check booleans first — most "SELinux blocking" issues are a missing boolean
+- Use `matchpathcon` to check expected context: `matchpathcon /var/www/html`
+
+## Related Resources
+
+- [Linux Cheat Sheet](/blog/linux-cheat-sheet-2026/)
+- [RHEL 9 Administration Guide](/blog/red-hat-enterprise-linux-9-for-sysadmins/)
+- [iptables Cheat Sheet](/blog/iptables-cheat-sheet-2026/)

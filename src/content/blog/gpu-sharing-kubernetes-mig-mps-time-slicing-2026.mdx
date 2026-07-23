@@ -1,0 +1,263 @@
+---
+title: "GPU Sharing on Kubernetes: MIG vs MPS vs Time-Slicing"
+seoTitle: "GPU Sharing on K8s: MIG vs MPS vs Time-Slicing"
+snippet: "Compare NVIDIA GPU sharing strategies for Kubernetes: Multi-Instance GPU, Multi-Process Service, and time-slicing with benchmarks and use cases."
+description: "Compare NVIDIA GPU sharing strategies for Kubernetes workloads. Multi-Instance GPU, Multi-Process Service, and time-slicing with performance benchmarks and use cases."
+publishDate: "2026-06-05"
+lastModified: "2026-07-01"
+image:
+  src: "/blog/thumbnails/gpu-sharing-kubernetes-mig-mps-time-slicing-2026.jpg"
+  alt: "GPU Sharing on Kubernetes: MIG vs MPS vs Time-Slicing"
+tags:
+  - "kubernetes"
+  - "gpu"
+  - "nvidia"
+  - "ai"
+  - "resource-management"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import YouTube from "../../components/YouTube.astro";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+## Why Share GPUs?
+
+A single A100 80GB costs $3.25/hour. Many AI workloads don't need a full GPU:
+
+- **Development/testing** — needs 10-20% of an A100
+- **Small model inference** — 7B models use 16GB of 80GB
+- **Batch preprocessing** — CPU-bound with occasional GPU burst
+- **Multiple small models** — each needs 10-20GB
+
+Without sharing, you waste 60-80% of GPU capacity. Three technologies solve this:
+
+## Comparison Matrix
+
+| Feature | MIG | MPS | Time-Slicing |
+|---------|-----|-----|-------------|
+| Isolation | ✅ Hardware | ⚠️ Process-level | ❌ None |
+| Memory isolation | ✅ Guaranteed | ❌ Shared | ❌ Shared |
+| Fault isolation | ✅ Full | ❌ Shared failure domain | ❌ Shared |
+| Supported GPUs | A100, H100, H200 | All NVIDIA | All NVIDIA |
+| Max partitions | 7 (A100) | 48 processes | Unlimited |
+| Overhead | ~0% | ~5% | ~10-15% |
+| Use case | Production multi-tenant | Cooperative workloads | Dev/test |
+
+## Multi-Instance GPU (MIG)
+
+MIG **hardware-partitions** a GPU into up to 7 isolated instances. Each instance has dedicated compute, memory, and cache — like separate physical GPUs.
+
+### Supported GPU Profiles (A100 80GB)
+
+| Profile | GPU Memory | Compute (SMs) | Instances |
+|---------|-----------|---------------|-----------|
+| 1g.10gb | 10GB | 1/7 | Up to 7 |
+| 2g.20gb | 20GB | 2/7 | Up to 3 |
+| 3g.40gb | 40GB | 3/7 | Up to 2 |
+| 4g.40gb | 40GB | 4/7 | 1 |
+| 7g.80gb | 80GB | 7/7 (full) | 1 |
+
+### Enable MIG on Kubernetes
+
+```yaml
+# GPU Operator configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-operator-mig-config
+  namespace: gpu-operator
+data:
+  config.yaml: |
+    version: v1
+    mig-configs:
+      all-1g.10gb:
+        - device-filter: ["0x20B210DE"]  # A100
+          devices: all
+          mig-enabled: true
+          mig-devices:
+            "1g.10gb": 7
+      mixed:
+        - device-filter: ["0x20B210DE"]
+          devices: all
+          mig-enabled: true
+          mig-devices:
+            "3g.40gb": 1
+            "2g.20gb": 1
+            "1g.10gb": 2
+```
+
+### Request MIG Slices in Pods
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inference-small
+spec:
+  containers:
+    - name: model
+      image: vllm/vllm-openai:latest
+      resources:
+        limits:
+          nvidia.com/mig-1g.10gb: 1  # Request 1 MIG slice (10GB)
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: inference-large
+spec:
+  containers:
+    - name: model
+      resources:
+        limits:
+          nvidia.com/mig-3g.40gb: 1  # Request larger slice (40GB)
+```
+
+### MIG Best Practices
+
+- Use **1g.10gb** for 7B models (Llama 8B fits in quantized form)
+- Use **3g.40gb** for 13-34B models
+- Use **7g.80gb** (full GPU) for 70B+ models
+- **Cannot mix MIG profiles on same GPU** — plan ahead
+- Reconfiguring MIG requires GPU reset (brief downtime)
+
+## Multi-Process Service (MPS)
+
+MPS allows multiple CUDA processes to **share a GPU simultaneously** via a shared CUDA context. No hardware partitioning — processes cooperatively share compute.
+
+### How MPS Works
+
+```
+Without MPS:              With MPS:
+┌─────────────┐           ┌─────────────┐
+│   Process A │ ──time──▶ │ Process A+B │ ──parallel──▶
+│   Process B │   slice   │  (shared)   │   execution
+└─────────────┘           └─────────────┘
+     GPU idle               GPU busy
+   between procs           continuously
+```
+
+### Enable MPS on Kubernetes
+
+```yaml
+# NVIDIA device plugin config
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin
+data:
+  config.yaml: |
+    version: v1
+    sharing:
+      mps:
+        renameByDefault: false
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 10  # Allow 10 pods to share each GPU
+```
+
+### Request Shared GPU
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: preprocessing
+spec:
+  containers:
+    - name: worker
+      resources:
+        limits:
+          nvidia.com/gpu: 1  # Gets shared access via MPS
+        requests:
+          nvidia.com/gpu: 1
+```
+
+### MPS Limitations
+
+- **No memory isolation** — one process can OOM and crash all
+- **No fault isolation** — CUDA error affects all processes
+- **Best for cooperative workloads** you control (same team, same app)
+- **Not recommended for multi-tenant** production environments
+
+## Time-Slicing
+
+The simplest approach: multiple pods take turns using the GPU. The NVIDIA device plugin advertises more GPUs than physically exist.
+
+### Configure Time-Slicing
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin
+data:
+  config.yaml: |
+    version: v1
+    sharing:
+      timeSlicing:
+        renameByDefault: false
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 4  # Each GPU appears as 4 virtual GPUs
+```
+
+### How It Works
+
+- GPU rapidly switches between processes (context switching)
+- Each pod "sees" a full GPU but shares time
+- **No memory isolation** — total memory is shared
+- ~10-15% overhead from context switching
+
+### Best For
+
+- **Development clusters** — many developers sharing few GPUs
+- **CI/CD pipelines** — short GPU jobs that don't need full capacity
+- **Non-critical workloads** — where occasional latency spikes are acceptable
+
+## Decision Framework
+
+### Choose MIG when:
+- ✅ Production multi-tenant GPU sharing
+- ✅ Need guaranteed memory and compute isolation
+- ✅ Running different customers/teams on same hardware
+- ✅ Using A100/H100/H200 GPUs
+- ✅ Security requirements demand isolation
+
+### Choose MPS when:
+- ✅ Multiple cooperative processes from same application
+- ✅ Batch inference with many small models
+- ✅ Need higher GPU utilization without hardware partitioning
+- ✅ Processes are trusted (same team/namespace)
+- ✅ Using older GPUs without MIG support (V100, T4)
+
+### Choose Time-Slicing when:
+- ✅ Development and testing environments
+- ✅ CI/CD GPU access for unit tests
+- ✅ Budget constraints (any GPU works)
+- ✅ Workloads are bursty (idle most of the time)
+- ✅ Simplicity over performance
+
+## Cost Savings Example
+
+**Scenario:** 4 teams each running a 7B model inference service
+
+| Strategy | GPUs Needed | Monthly Cost (A100) |
+|----------|-------------|-------------------|
+| No sharing | 4x A100 | $9,490 |
+| Time-slicing (4x) | 1x A100 | $2,373 |
+| MPS (4 procs) | 1x A100 | $2,373 |
+| MIG (4x 1g.10gb) | 1x A100 | $2,373 |
+
+All three save 75% — but MIG gives **production-grade isolation** at the same cost.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Autoscale AI Inference with KEDA + GPUs](/blog/kubernetes-ai-inference-autoscaling-keda-gpu-2026/)
+- [LLM Inference Cost Optimization on Kubernetes](/blog/llm-inference-cost-optimization-kubernetes-2026/)
+- [NVIDIA GPU Operator on Kubernetes](/blog/nvidia-gpu-operator-kubernetes-setup/)
+- [AI Model Serving: vLLM vs Triton vs NIM](/blog/ai-model-serving-kubernetes-vllm-triton-nim-2026/)

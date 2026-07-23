@@ -1,0 +1,282 @@
+---
+title: "KEDA vs HPA: Kubernetes Autoscaling Compared (2026 Guide)"
+seoTitle: "KEDA vs HPA: Config Examples & Benchmarks (2026)"
+snippet: "KEDA vs Horizontal Pod Autoscaler — when to use event-driven vs metric-based scaling. Configuration examples, performance benchmarks, and production patterns."
+description: "KEDA vs Horizontal Pod Autoscaler — when to use event-driven vs metric-based scaling. Configuration examples, performance benchmarks, and production patterns."
+publishDate: "2026-06-05"
+lastModified: "2026-07-01"
+image:
+  src: "/blog/thumbnails/keda-vs-hpa-kubernetes-autoscaling-2026.jpg"
+  alt: "KEDA vs HPA: Kubernetes Autoscaling Compared (2026 Guide)"
+tags:
+  - "kubernetes"
+  - "keda"
+  - "autoscaling"
+  - "devops"
+category: "Platform Engineering"
+author: "Luca Berton"
+draft: false
+---
+
+import YouTube from "../../components/YouTube.astro";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+## Quick Decision
+
+| Scenario | Use HPA | Use KEDA |
+|----------|---------|----------|
+| CPU/memory scaling | ✅ | Overkill |
+| Scale from/to zero | ❌ | ✅ |
+| Queue-based scaling | ❌ | ✅ |
+| Cron-based scaling | ❌ | ✅ |
+| Custom Prometheus metrics | Complex | ✅ Easy |
+| No extra dependencies | ✅ | Requires KEDA operator |
+
+## Horizontal Pod Autoscaler (HPA)
+
+HPA is Kubernetes' **built-in** autoscaling mechanism. It watches resource metrics (CPU, memory) or custom metrics and adjusts replica count.
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-app
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web-app
+  minReplicas: 2
+  maxReplicas: 50
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 10
+          periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+```
+
+### How HPA Works
+
+1. Metrics Server collects CPU/memory from kubelets (every 15s default)
+2. HPA controller checks metrics (every 15s default)
+3. Calculates desired replicas: `ceil(currentReplicas × (currentMetric / targetMetric))`
+4. Scales deployment up or down within min/max bounds
+
+### HPA Limitations
+
+- **Cannot scale to zero** — minimum is 1 replica
+- **Limited metric sources** — CPU, memory, or custom metrics via adapters
+- **Custom metrics are complex** — requires Prometheus Adapter or Datadog Cluster Agent
+- **No event-driven scaling** — purely metric-based with polling interval
+
+## KEDA (Kubernetes Event-Driven Autoscaling)
+
+KEDA extends Kubernetes with **60+ scalers** for event-driven autoscaling. It creates and manages HPA objects behind the scenes.
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: order-processor
+spec:
+  scaleTargetRef:
+    name: order-processor
+  pollingInterval: 10
+  cooldownPeriod: 300
+  minReplicaCount: 0    # Scale to zero!
+  maxReplicaCount: 100
+  triggers:
+    - type: rabbitmq
+      metadata:
+        queueName: orders
+        host: amqp://rabbitmq.default.svc:5672
+        queueLength: "5"    # 1 pod per 5 messages
+    - type: cron
+      metadata:
+        timezone: Europe/Amsterdam
+        start: "0 8 * * 1-5"
+        end: "0 20 * * 1-5"
+        desiredReplicas: "3"
+```
+
+### KEDA Architecture
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│   Scaler    │────▶│ KEDA Operator│────▶│     HPA     │
+│ (RabbitMQ)  │     │              │     │ (auto-created)│
+└─────────────┘     └──────────────┘     └─────────────┘
+                           │
+                           ▼
+                    ┌──────────────┐
+                    │  Deployment  │
+                    │  0→N replicas│
+                    └──────────────┘
+```
+
+### Popular KEDA Scalers
+
+| Scaler | Use Case |
+|--------|----------|
+| `kafka` | Scale on consumer lag |
+| `rabbitmq` | Scale on queue depth |
+| `aws-sqs` | Scale on SQS message count |
+| `prometheus` | Any Prometheus metric |
+| `cron` | Time-based pre-scaling |
+| `postgresql` | Scale on query result |
+| `redis-streams` | Scale on stream length |
+| `azure-servicebus` | Scale on subscription count |
+
+### Scale to Zero
+
+KEDA's killer feature — when no events exist, scale deployment to **zero replicas**:
+
+```yaml
+spec:
+  minReplicaCount: 0
+  triggers:
+    - type: aws-sqs
+      metadata:
+        queueURL: https://sqs.eu-west-1.amazonaws.com/123/orders
+        queueLength: "1"
+        awsRegion: eu-west-1
+```
+
+Cold start latency: first pod takes 5-30s to become ready (depends on image size and init).
+
+## Performance Comparison
+
+### Scaling Speed
+
+| Metric | HPA | KEDA |
+|--------|-----|------|
+| Polling interval | 15s (default) | 10-30s (configurable) |
+| Scale-up reaction | 15-45s | 10-40s |
+| Scale-down cooldown | 5min (default) | Configurable |
+| Zero→1 cold start | N/A | 5-30s |
+
+### Resource Overhead
+
+| Component | CPU | Memory |
+|-----------|-----|--------|
+| HPA (built-in) | ~0 | ~0 |
+| Metrics Server | 100m | 200Mi |
+| KEDA Operator | 100m | 128Mi |
+| KEDA Metrics Server | 100m | 128Mi |
+
+## Production Patterns
+
+### Pattern 1: HPA for Web + KEDA for Workers
+
+```yaml
+# Web tier: CPU-based HPA
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-api
+spec:
+  minReplicas: 3
+  maxReplicas: 30
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          averageUtilization: 60
+---
+# Worker tier: KEDA for queue processing
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: worker
+spec:
+  minReplicaCount: 0
+  maxReplicaCount: 50
+  triggers:
+    - type: kafka
+      metadata:
+        topic: events
+        consumerGroup: workers
+        lagThreshold: "10"
+```
+
+### Pattern 2: KEDA with Prometheus for Custom Metrics
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: api-gateway
+spec:
+  minReplicaCount: 2
+  maxReplicaCount: 20
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus:9090
+        query: |
+          sum(rate(http_requests_total{service="api"}[2m]))
+        threshold: "100"    # Scale when >100 req/s per pod
+```
+
+## Installation
+
+### KEDA via Helm
+
+```bash
+helm repo add kedacore https://kedacore.github.io/charts
+helm install keda kedacore/keda --namespace keda --create-namespace
+```
+
+### Verify
+
+```bash
+kubectl get pods -n keda
+# NAME                                      READY
+# keda-operator-5f8b4b6d4-xxxxx            1/1
+# keda-operator-metrics-apiserver-xxx       1/1
+```
+
+## When to Choose
+
+### Stick with HPA when:
+- CPU/memory metrics are sufficient
+- You don't need scale-to-zero
+- You want zero additional dependencies
+- Simple web applications with predictable load
+
+### Choose KEDA when:
+- You need scale-to-zero for cost savings
+- Event-driven workloads (queues, streams, schedules)
+- You want simpler custom metric configuration
+- Batch processing or async job workers
+- Multi-trigger scaling logic
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Kustomize vs Helm 2026](/blog/kustomize-vs-helm-kubernetes-templating-2026/)
+- [Kubernetes KEDA Event-Driven Autoscaling](/blog/kubernetes-keda-event-driven-autoscaling/)
+- [EKS vs GKE vs AKS 2026](/blog/eks-vs-gke-vs-aks-2026/)

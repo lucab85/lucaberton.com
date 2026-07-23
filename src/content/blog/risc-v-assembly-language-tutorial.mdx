@@ -1,0 +1,135 @@
+---
+title: "RISC-V Assembly Tutorial: Your First Program"
+seoTitle: "RISC-V Assembly Tutorial: Your First Program"
+snippet: "Learn RISC-V assembly from scratch — registers, instruction formats, and a working hello-world you can run in QEMU. A beginner-friendly intro to the open ISA."
+description: "Learn RISC-V assembly from scratch — registers, instruction formats, and a working hello-world you can run in QEMU. A beginner-friendly intro to the open ISA."
+publishDate: "2026-06-11"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "RISC-V"
+tags: ["RISC-V", "assembly", "tutorial", "programming", "low-level"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-74.jpg"
+  alt: "Developers exploring RISC-V technology at RISC-V Summit Europe 2026"
+faq:
+  - question: "Is RISC-V assembly easy to learn?"
+    answer: "RISC-V is widely considered one of the easiest assembly languages to learn. Its clean RISC design has a small set of regular instructions, a simple register model with 32 general-purpose registers, and no legacy baggage — which is exactly why universities increasingly teach computer architecture with it."
+  - question: "How many registers does RISC-V have?"
+    answer: "RV32I and RV64I have 32 general-purpose integer registers (x0 to x31). x0 is hardwired to zero. The rest have ABI roles and names: ra (return address), sp (stack pointer), a0 to a7 (arguments and return values), t0 to t6 (temporaries), and s0 to s11 (saved registers)."
+  - question: "How do I run RISC-V assembly without a RISC-V computer?"
+    answer: "Assemble and link with a RISC-V toolchain (riscv64-linux-gnu-as / -gcc), then run the binary under QEMU user-mode emulation (qemu-riscv64) on your x86 or Arm machine. No physical RISC-V hardware is required to learn and experiment."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+If you want to *truly* understand a processor, write assembly for it — and RISC-V is the best ISA in decades to learn on. It is clean, regular, and free of legacy cruft, which is exactly why universities are adopting it to teach computer architecture. This tutorial gets you from zero to a running RISC-V program, with no RISC-V hardware required.
+
+![Developers exploring RISC-V technology at the Summit](/blog/events/riscv-summit-2026/riscv-summit-74.jpg)
+
+## Why Learn on RISC-V?
+
+Compared to x86's decades of accumulated complexity, [RISC-V](/blog/what-is-risc-v-open-isa-explained/) is a breath of fresh air: a small, orthogonal instruction set, fixed-length encodings, and a tidy register model. You can hold the whole base ISA in your head. That is why it shines for [education](/blog/one-student-one-chip-risc-v-bosc-open-education-2026/) — and why it is a joy to learn.
+
+## The Registers
+
+RV32I/RV64I have **32 general-purpose registers**, `x0`–`x31`. Each also has an **ABI name** describing its conventional role:
+
+| Register | ABI name | Role |
+| --- | --- | --- |
+| `x0` | `zero` | Hardwired to 0 |
+| `x1` | `ra` | Return address |
+| `x2` | `sp` | Stack pointer |
+| `x5`–`x7` | `t0`–`t2` | Temporaries |
+| `x8`–`x9` | `s0`–`s1` | Saved registers |
+| `x10`–`x17` | `a0`–`a7` | Arguments / return values |
+| `x18`–`x27` | `s2`–`s11` | Saved registers |
+| `x28`–`x31` | `t3`–`t6` | Temporaries |
+
+The trick worth remembering: **`x0` is always zero**. Writes to it are discarded, reads always return 0. This single design choice eliminates the need for many special instructions — a `mov` is just `addi rd, rs, 0`, and a `nop` is `addi x0, x0, 0`.
+
+## Instruction Formats
+
+Every base instruction is **32 bits** wide and falls into one of a few regular formats — R, I, S, B, U, J. You do not need to memorize the bit layouts to start, but the key idea is **regularity**: the source and destination register fields sit in the same place across formats, which makes the hardware decoder simple (and the [microarchitecture](/blog/risc-v-open-source-cores-cva6-xiangshan/) cheaper). The optional [compressed (C) extension](/blog/risc-v-extensions-explained-isa-alphabet/) adds 16-bit forms for code density.
+
+## The Core Instructions
+
+A handful of instructions covers most of what you will write:
+
+```asm
+addi  a0, a0, 5     # a0 = a0 + 5   (add immediate)
+add   a0, a1, a2    # a0 = a1 + a2
+sub   a0, a1, a2    # a0 = a1 - a2
+li    a0, 42        # load immediate (pseudo-instruction)
+mv    a1, a0        # copy a0 -> a1 (pseudo: addi a1, a0, 0)
+ld    a0, 0(sp)     # load 64-bit word from address in sp
+sd    a0, 0(sp)     # store 64-bit word to address in sp
+beq   a0, a1, label # branch if equal
+jal   ra, func      # jump and link (call), saving return addr in ra
+ret                 # return (pseudo: jalr x0, 0(ra))
+ecall               # environment call (syscall / SBI request)
+```
+
+Note how many are **pseudo-instructions** — `li`, `mv`, `ret`, `nop` — that the assembler expands into real ones. They make assembly readable without bloating the ISA.
+
+## Your First Program: Hello, RISC-V
+
+Here is a complete Linux `hello world` using the `write` and `exit` syscalls via `ecall`:
+
+```asm
+.section .data
+msg:    .ascii "Hello, RISC-V!\n"
+.equ    len, 15
+
+.section .text
+.global _start
+_start:
+    li   a7, 64          # syscall number: write
+    li   a0, 1           # fd = stdout
+    la   a1, msg         # buffer address
+    li   a2, len         # length
+    ecall                # invoke kernel
+
+    li   a7, 93          # syscall number: exit
+    li   a0, 0           # exit code 0
+    ecall
+```
+
+The Linux RISC-V syscall convention: the **syscall number goes in `a7`**, arguments in `a0`–`a5`, and `ecall` traps into the kernel (in [supervisor mode](/blog/risc-v-security-privilege-pmp-confidential-computing/)). The return value comes back in `a0`.
+
+## Assemble, Link, Run
+
+You need a [RISC-V toolchain](/blog/build-risc-v-toolchain-gcc-llvm/) and QEMU — no RISC-V hardware:
+
+```bash
+# Assemble and link
+riscv64-linux-gnu-as -o hello.o hello.s
+riscv64-linux-gnu-ld -o hello hello.o
+
+# Run under QEMU user-mode emulation on your x86/Arm machine
+qemu-riscv64 ./hello
+# -> Hello, RISC-V!
+```
+
+That is the entire loop. Edit, assemble, run — watch your instructions execute. For deeper inspection, run it under [GDB](/blog/risc-v-debugging-openocd-gdb-jtag/) and single-step to see registers change.
+
+## Reading Compiler Output
+
+A powerful way to learn: write tiny C functions and inspect what the compiler emits.
+
+```bash
+riscv64-linux-gnu-gcc -O2 -S add.c -o add.s   # see the assembly
+riscv64-linux-gnu-objdump -d a.out            # disassemble a binary
+```
+
+Comparing your hand-written assembly to the compiler's output teaches the ABI, calling conventions, and clever optimizations quickly.
+
+<BlogPromoCard variant="course" />
+
+## The Bottom Line
+
+RISC-V assembly is approachable precisely because the ISA was designed to be clean: 32 regular registers (with `x0` hardwired to zero), fixed-width instructions, and a small core set rounded out by readable pseudo-instructions. Write the hello-world above, run it in QEMU, then disassemble some C — you will understand the machine far better than any diagram could teach. It is the single best way to *feel* why RISC-V is special.
+
+---
+
+*Part of my RISC-V series. Next: [Debugging RISC-V with GDB & OpenOCD](/blog/risc-v-debugging-openocd-gdb-jtag/) and the [memory model & atomics](/blog/risc-v-memory-model-atomics-rvwmo/).*

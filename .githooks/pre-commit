@@ -1,0 +1,48 @@
+#!/bin/sh
+# Auto-run SEO source validation before every commit.
+#
+# Runs the deterministic, source-level checks from scripts/validate-seo-fixes.cjs
+# (titles/meta in source, robots, nofollow, redirects, orphan links, no astro-embed
+# facade, no links to deleted URLs), plus the report-driven checks automated from
+# the Ahrefs Site Audit (29 Jun 2026) and GSC coverage (5 Jul 2026) reports:
+# image alt text, internal-nofollow allowlist, URL hygiene (http/www/trailing
+# slash/case), blog-link resolution, category & post-slug vs _redirects
+# conflicts, AI-crawler readiness (llms.txt, robots.txt AI allows, JSON-LD),
+# and a >= 3 related-articles minimum per published post.
+# These do NOT require a build, so the hook stays fast. Full built-HTML
+# validation (incl. the incoming dofollow link graph) runs via `pnpm validate:seo`
+# after a `pnpm build` (recommended in CI).
+#
+# This hook is wired up via `core.hooksPath=.githooks` (set by the `prepare`
+# npm script on install, or manually: `git config core.hooksPath .githooks`).
+#
+# To bypass in an emergency: `git commit --no-verify`.
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "pre-commit: node not found; skipping SEO validation." >&2
+  exit 0
+fi
+
+node scripts/validate-seo-fixes.cjs --source-only
+status=$?
+
+if [ "$status" -ne 0 ]; then
+  echo "" >&2
+  echo "pre-commit: SEO validation failed (see [FAIL] above)." >&2
+  echo "Fix the issues, or bypass with 'git commit --no-verify' if intentional." >&2
+  exit "$status"
+fi
+
+# Guard against oversized images being committed (only checks staged images, so
+# it stays fast and never blocks commits that don't touch images).
+node scripts/check-image-sizes.cjs --staged
+img_status=$?
+
+if [ "$img_status" -ne 0 ]; then
+  echo "" >&2
+  echo "pre-commit: image size guard failed (see above)." >&2
+  echo "Resize the oversized image(s), or bypass with 'git commit --no-verify' if intentional." >&2
+  exit "$img_status"
+fi
+
+exit 0

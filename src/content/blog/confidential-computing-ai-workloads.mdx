@@ -1,0 +1,126 @@
+---
+draft: false
+title: "Confidential Computing for AI"
+seoTitle: "Confidential Computing for AI Workloads"
+snippet: "Process sensitive data in encrypted enclaves. Confidential computing with Intel TDX, AMD SEV, and Arm CCA enables AI on regulated data."
+description: "Process sensitive data in encrypted enclaves. Confidential computing with Intel TDX, AMD SEV, and Arm CCA enables AI on regulated data."
+publishDate: "2026-02-26"
+lastModified: "2026-02-26"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "confidential-computing"
+  - "security"
+  - "privacy"
+  - "tee"
+  - "ai"
+image:
+  src: "/blog/thumbnails/confidential-computing-ai-workloads.jpg"
+  alt: "Confidential Computing for AI Workloads"
+---
+AI workloads process some of the most sensitive data in an organization — training data, model weights, inference inputs, and predictions. Confidential computing protects this data while it is being processed, not just at rest and in transit.
+
+## The Three States of Data Protection
+
+| State | Traditional Protection | Confidential Computing |
+|-------|----------------------|----------------------|
+| At rest | Encryption (AES-256) | ✅ Already covered |
+| In transit | TLS 1.3 | ✅ Already covered |
+| **In use** | **None** | **Hardware-based TEEs** |
+
+The "in use" gap means that anyone with access to the host machine — cloud provider employees, compromised hypervisors, malicious co-tenants — can potentially read your data while it is being processed.
+
+## Trusted Execution Environments (TEEs)
+
+TEEs create hardware-isolated enclaves where code and data are protected from everything outside — including the operating system, hypervisor, and cloud provider.
+
+### Available TEE Technologies
+
+| Technology | Vendor | Isolation Level | GPU Support |
+|-----------|--------|-----------------|-------------|
+| Intel TDX | Intel | VM-level | Via GPU TEE |
+| AMD SEV-SNP | AMD | VM-level | Planned |
+| ARM CCA | ARM | Realm-level | Via GPU TEE |
+| NVIDIA H100 TEE | NVIDIA | GPU memory | Native |
+
+## Confidential AI Architecture
+
+```
+┌──────────────── Confidential VM (TEE) ────────────────┐
+│                                                        │
+│  ┌─────────────┐  ┌─────────────┐  ┌──────────────┐  │
+│  │ Encrypted   │  │ AI Model    │  │ Encrypted    │  │
+│  │ Training    │→ │ (in secure  │→ │ Predictions  │  │
+│  │ Data        │  │  memory)    │  │              │  │
+│  └─────────────┘  └─────────────┘  └──────────────┘  │
+│                                                        │
+│  Memory encrypted with hardware keys                   │
+│  Attestation proves code integrity                     │
+└────────────────────────────────────────────────────────┘
+│
+│ Cloud provider / hypervisor CANNOT see inside
+```
+
+## Kubernetes Integration
+
+Running confidential AI workloads on Kubernetes:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: confidential-inference
+spec:
+  runtimeClassName: kata-cc  # Confidential Containers
+  containers:
+    - name: inference
+      image: registry.example.com/ai-model:v1
+      resources:
+        limits:
+          nvidia.com/gpu: 1
+      env:
+        - name: NVIDIA_CC_MODE
+          value: "on"  # Enable GPU confidential computing
+      volumeMounts:
+        - name: encrypted-model
+          mountPath: /models
+          readOnly: true
+  volumes:
+    - name: encrypted-model
+      csi:
+        driver: secrets-store.csi.k8s.io
+        readOnly: true
+```
+
+### Confidential Containers (CoCo)
+
+The CNCF Confidential Containers project brings TEE support to Kubernetes:
+
+1. **Kata Containers**: Provides VM-level isolation per pod
+2. **Attestation**: Cryptographic proof that the workload runs in a genuine TEE
+3. **Encrypted images**: Container images decrypted only inside the TEE
+4. **Sealed secrets**: Secrets released only to attested workloads
+
+## Use Cases for Confidential AI
+
+1. **Multi-party ML**: Train models on combined datasets without any party seeing the other's data
+2. **Regulated inference**: Healthcare/financial AI where data must never be exposed to cloud provider
+3. **Model protection**: Prevent model theft — weights are never accessible outside the TEE
+4. **Edge AI**: Protect models running on untrusted hardware at the edge
+
+## Performance Considerations
+
+Confidential computing adds overhead:
+
+- **CPU TEE**: 5-15% performance overhead for memory encryption
+- **GPU TEE (H100)**: 2-5% overhead for GPU memory encryption
+- **Attestation**: One-time cost at workload startup (seconds)
+- **Memory limit**: TEE size limits maximum model/data size
+
+For inference workloads, the overhead is often acceptable. For large-scale training, plan for 10-15% longer training times.
+
+## Related Reading
+
+- [Confidential Computing: Encrypted VMs and Enclaves](/blog/confidential-computing-encrypted-vms-enclaves/)
+- [Enterprise AI Security Hardening on RHEL AI](/blog/enterprise-ai-security-hardening-rhel-ai-with-selinux-and-container-isolation/)
+- [GPU Cluster Architecture](/blog/gpu-cluster-architecture-training-inference/)

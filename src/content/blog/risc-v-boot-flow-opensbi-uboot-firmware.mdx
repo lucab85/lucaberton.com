@@ -1,0 +1,105 @@
+---
+title: "RISC-V Boot Flow: OpenSBI, U-Boot & the SBI"
+seoTitle: "RISC-V Boot Flow: OpenSBI, U-Boot & the SBI"
+snippet: "How a RISC-V system boots — the SBI, OpenSBI, U-Boot, UEFI, and the journey from reset vector to a running Linux kernel, explained step by step."
+description: "How a RISC-V system boots — the SBI, OpenSBI, U-Boot, UEFI, and the journey from reset vector to a running Linux kernel, explained step by step."
+publishDate: "2026-06-11"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "RISC-V"
+tags: ["RISC-V", "OpenSBI", "U-Boot", "firmware", "Linux"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-71.jpg"
+  alt: "RISC-V hardware and development systems at RISC-V Summit Europe 2026"
+faq:
+  - question: "What is the SBI in RISC-V?"
+    answer: "The Supervisor Binary Interface (SBI) is the standardized contract between the operating system running in supervisor mode and the firmware running in machine mode. It lets the kernel request privileged services — like setting timers, sending inter-processor interrupts, or rebooting — without knowing platform-specific details. OpenSBI is its reference implementation."
+  - question: "What is OpenSBI?"
+    answer: "OpenSBI is the reference open-source implementation of the RISC-V Supervisor Binary Interface. It runs in machine mode (M-mode) as the most privileged firmware, provides SBI services to the supervisor-mode OS, and typically loads the next-stage bootloader such as U-Boot. It is analogous to the role PSCI/firmware plays on Arm."
+  - question: "Do RISC-V systems use UEFI?"
+    answer: "Yes, increasingly. The RISC-V boot chain supports UEFI through U-Boot's EFI implementation or dedicated firmware, which lets standard distributions (Ubuntu, Fedora, Debian) boot with GRUB and the EFI stub just as they do on x86 and Arm. This standardization is key to a unified 'just works' install experience."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+When you press power on a [RISC-V board](/blog/risc-v-development-boards-2026-guide/), a precise sequence of handoffs takes the chip from a single instruction at the reset vector all the way to a multi-user Linux login. Understanding that boot flow demystifies a lot of RISC-V — and explains why terms like **SBI**, **OpenSBI**, and **U-Boot** come up constantly. Here is the journey, stage by stage.
+
+![RISC-V hardware and development systems at the Summit](/blog/events/riscv-summit-2026/riscv-summit-71.jpg)
+
+## The Big Picture: A Chain of Handoffs
+
+RISC-V boot is a relay race across [privilege modes](/blog/risc-v-security-privilege-pmp-confidential-computing/), each stage more capable and less privileged than the last:
+
+```
+Reset vector → ZSBL (ROM) → FSBL → OpenSBI (M-mode) → U-Boot (S-mode) → Linux kernel (S-mode)
+```
+
+Each stage initializes a bit more of the system and hands control to the next. The genius of the design is **standardized interfaces** between stages, so the kernel does not need to know the gory platform details.
+
+## Stage 0: The Reset Vector and ROM
+
+At power-on, every hart (hardware thread) starts executing in **Machine mode** at a fixed **reset vector** address. A tiny **Zero-Stage Boot Loader (ZSBL)** baked into on-chip ROM runs first. Its only job is to bring up just enough — often loading a **First-Stage Boot Loader (FSBL)** from flash into SRAM, since DRAM is not initialized yet.
+
+## Stage 1: First-Stage Boot Loader
+
+The **FSBL** initializes critical hardware: the DRAM controller, clocks, and basic I/O. Once main memory works, it can load the larger firmware stages into RAM. On some SoCs this stage is vendor-specific; on others it is folded into the next stage.
+
+## Stage 2: OpenSBI — The M-mode Firmware
+
+This is the heart of RISC-V firmware. **OpenSBI** is the reference implementation of the **Supervisor Binary Interface (SBI)** — the standardized contract between machine mode and the supervisor-mode OS.
+
+OpenSBI runs in the most privileged **M-mode** and provides services the kernel calls via the `ecall` instruction:
+
+- **Timer** management (setting the next timer interrupt)
+- **IPI** (inter-processor interrupts) to wake other harts
+- **Console** output during early boot
+- **System reset** and shutdown
+- **Hart state management** (bringing CPUs online/offline)
+
+Think of OpenSBI as RISC-V's equivalent of PSCI plus low-level firmware on Arm. Because the SBI is standardized, the *same* Linux kernel can run on wildly different RISC-V hardware — the platform differences hide behind OpenSBI. It then loads the next stage, usually U-Boot.
+
+## Stage 3: U-Boot — The Bootloader
+
+**Das U-Boot** is the familiar, full-featured bootloader from the embedded world, and it runs in **Supervisor mode** on RISC-V. It can:
+
+- Read filesystems and load a kernel + device tree + initramfs
+- Provide an interactive console for development
+- Implement **UEFI** services via its EFI stub
+- Drive network boot, USB, and storage
+
+U-Boot's UEFI support is the bridge that lets standard distributions boot with **GRUB** and an EFI stub — the same way they do on a PC.
+
+## Stage 4: The Device Tree
+
+A recurring character throughout: the **Device Tree Blob (DTB)**. RISC-V (like Arm) uses a device tree to describe the hardware — CPUs, memory, peripherals, interrupt controllers — to the OS, since there is no x86-style enumerable bus for everything. Firmware passes the DTB to the kernel so Linux knows what hardware exists without hardcoding it. (UEFI + ACPI is an emerging alternative on application-class platforms.)
+
+## Stage 5: The Linux Kernel
+
+Finally, the **Linux kernel** boots in Supervisor mode, parses the device tree, and calls into OpenSBI (still resident in M-mode) for privileged operations throughout its lifetime. From here it mounts the root filesystem and starts userspace — and you reach a login prompt on your [RISC-V Linux distribution](/blog/risc-v-linux-distributions-guide/).
+
+## Why This Standardization Matters
+
+The whole point is **portability**. Because SBI, device tree, and UEFI are standardized, a single distribution image can boot across many vendors' boards — exactly the "install once, run anywhere" experience the [profiles effort (RVA23)](/blog/risc-v-profiles-rva23-explained/) is designed to guarantee. It is what turns a pile of incompatible dev boards into a real platform.
+
+## See It Yourself in QEMU
+
+You can watch the entire chain in [QEMU](/blog/getting-started-risc-v-qemu-emulation-linux/), which ships with OpenSBI built in:
+
+```bash
+qemu-system-riscv64 -machine virt -nographic \
+  -bios default \
+  -kernel u-boot.bin
+```
+
+QEMU prints the OpenSBI banner (showing the SBI version and platform), then hands off to whatever you loaded — a great way to study each stage without hardware.
+
+<BlogPromoCard variant="course" />
+
+## The Bottom Line
+
+RISC-V boots as a relay of privilege levels — ROM to FSBL to **OpenSBI** (M-mode firmware and SBI provider) to **U-Boot** (the bootloader, often via UEFI) to the **Linux kernel** — with the **device tree** describing hardware along the way. The standardized SBI and UEFI interfaces are what make one OS image run across diverse RISC-V silicon. Once this flow clicks, the rest of the platform makes a lot more sense.
+
+---
+
+*Part of my RISC-V series. Next: [Running Linux distributions on RISC-V](/blog/risc-v-linux-distributions-guide/) and [RISC-V interrupts explained](/blog/risc-v-interrupts-plic-clint-aia/).*

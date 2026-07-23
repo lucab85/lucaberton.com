@@ -1,0 +1,179 @@
+---
+draft: false
+title: "Buildah vs Kaniko 2026: Container Image Building"
+snippet: "Buildah vs Kaniko compared for 2026. Rootless builds, CI/CD pipelines, Kubernetes-native building, Dockerfile support, and which builder to use."
+description: "Buildah vs Kaniko container image build comparison 2026. Rootless, CI/CD, Kubernetes-native, Dockerfile, and decision guide."
+image:
+  src: "/blog/thumbnails/buildah-vs-kaniko-2026.jpg"
+  alt: "Buildah vs Kaniko: Container Image Building"
+publishDate: "2026-04-04"
+lastModified: "2026-05-02"
+author: "Luca Berton"
+category: "DevOps"
+tags:
+  - "buildah"
+  - "kaniko"
+  - "containers"
+  - "ci-cd"
+  - "comparison"
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+Buildah builds container images without a daemon. Kaniko builds images inside Kubernetes without Docker. Both solve the "how do I build images in CI/CD without Docker-in-Docker" problem — differently.
+
+## Architecture
+
+| Aspect | Buildah | Kaniko |
+|---|---|---|
+| **Daemon** | No | No |
+| **Runs on** | Linux workstation, CI runners | Kubernetes pods, CI containers |
+| **Dockerfile support** | Yes | Yes |
+| **Non-Dockerfile builds** | Yes (scripted builds) | No (Dockerfile only) |
+| **Rootless** | Yes (native) | No (runs as root inside container) |
+| **Language** | Go | Go |
+| **OCI compliance** | Full | Full |
+| **Push to registry** | `buildah push` | Automatic (part of build) |
+
+## Usage
+
+### Buildah
+
+```bash
+# Build from Dockerfile (like docker build)
+buildah bud -t myapp:latest .
+
+# Scripted build (no Dockerfile needed)
+container=$(buildah from alpine)
+buildah run $container -- apk add --no-cache python3
+buildah copy $container app.py /app/
+buildah config --entrypoint '["python3", "/app/app.py"]' $container
+buildah commit $container myapp:latest
+
+# Push
+buildah push myapp:latest docker://registry.example.com/myapp:latest
+
+# Rootless build
+buildah bud --isolation chroot -t myapp .
+```
+
+Buildah's scripted builds are unique — you can build images programmatically without a Dockerfile. Useful for complex build logic that does not fit in Dockerfile syntax.
+
+### Kaniko
+
+```bash
+# In a Kubernetes pod
+docker run \
+  -v $(pwd):/workspace \
+  gcr.io/kaniko-project/executor:latest \
+  --dockerfile=/workspace/Dockerfile \
+  --context=/workspace \
+  --destination=registry.example.com/myapp:latest
+```
+
+```yaml
+# Kubernetes Job for building images
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: build-myapp
+spec:
+  template:
+    spec:
+      containers:
+        - name: kaniko
+          image: gcr.io/kaniko-project/executor:latest
+          args:
+            - --dockerfile=Dockerfile
+            - --context=git://github.com/myorg/myapp.git
+            - --destination=registry.example.com/myapp:latest
+            - --cache=true
+            - --cache-repo=registry.example.com/cache
+          volumeMounts:
+            - name: docker-config
+              mountPath: /kaniko/.docker
+      volumes:
+        - name: docker-config
+          secret:
+            secretName: registry-credentials
+      restartPolicy: Never
+```
+
+## CI/CD integration
+
+### GitHub Actions
+
+```yaml
+# Buildah
+- name: Build with Buildah
+  run: |
+    buildah bud -t myapp:${{ github.sha }} .
+    buildah push myapp:${{ github.sha }} docker://ghcr.io/${{ github.repository }}:${{ github.sha }}
+
+# Kaniko
+- name: Build with Kaniko
+  uses: aevea/action-kaniko@master
+  with:
+    image: myapp
+    tag: ${{ github.sha }}
+    registry: ghcr.io/${{ github.repository_owner }}
+```
+
+### Tekton (Kubernetes-native CI)
+
+```yaml
+# Kaniko is the default builder in Tekton
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-push
+spec:
+  steps:
+    - name: build
+      image: gcr.io/kaniko-project/executor:latest
+      args:
+        - --dockerfile=Dockerfile
+        - --destination=$(params.image)
+        - --cache=true
+```
+
+## Layer caching
+
+| Feature | Buildah | Kaniko |
+|---|---|---|
+| **Local cache** | Yes (host storage) | No (stateless pod) |
+| **Registry cache** | No | Yes (`--cache-repo`) |
+| **Cache efficiency** | Good (local layers) | Good (registry layers) |
+| **Warm build** | Very fast (local) | Moderate (pulls cache from registry) |
+
+Kaniko's registry-based caching works across ephemeral CI pods — each build pulls cached layers from the registry. Buildah's local cache is faster but requires persistent storage.
+
+## Decision guide
+
+### Choose Buildah when:
+- **Developer workstation** — build images locally without Docker daemon
+- **Rootless builds** — security requirement (no root access)
+- **Scripted builds** — complex build logic beyond Dockerfile capabilities
+- **[Podman](/blog/podman-vs-docker-2026/) ecosystem** — Buildah is the build engine behind `podman build`
+- **Red Hat / OpenShift** — Buildah is the native builder
+
+### Choose Kaniko when:
+- **Kubernetes-native CI/CD** — build images inside pods without Docker socket
+- **[Tekton](/blog/tekton-vs-github-actions-2026/)**, Argo Workflows, or other Kubernetes CI systems
+- **No Docker daemon** available in the CI environment
+- **Registry-based caching** for reproducible builds across ephemeral runners
+- **GitOps pipelines** — build triggered by Git events, runs in-cluster
+
+### Also consider
+- **BuildKit** — Docker's next-gen builder, supports rootless, concurrent builds
+- **ko** — build Go container images without Dockerfile
+- **Jib** — build Java container images without Dockerfile
+
+<BlogPromoCard />
+
+## Related
+
+- [Podman vs Docker 2026](/blog/podman-vs-docker-2026/)
+- [Podman vs containerd 2026](/blog/podman-vs-containerd-2026/)
+- [Tekton vs GitHub Actions 2026](/blog/tekton-vs-github-actions-2026/)
+- [containerd vs CRI-O 2026](/blog/containerd-vs-cri-o-2026/)

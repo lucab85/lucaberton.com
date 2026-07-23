@@ -1,0 +1,238 @@
+---
+draft: false
+title: "Kubernetes Finalizers: Why Resources Get Stuck"
+snippet: "Understand how Kubernetes finalizers work, why resources get stuck in Terminating state, and how to safely remove them to unblock deletions."
+description: "Understand how Kubernetes finalizers work, why resources get stuck in Terminating state, and how to safely remove finalizers to unblock deletions in production clusters."
+image: { src: "/blog/thumbnails/kubernetes-finalizers-stuck-resources-2026.jpg", alt: "Kubernetes finalizers explained stuck resources" }
+publishDate: "2026-06-02"
+lastModified: "2026-06-02"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "troubleshooting", "finalizers", "operations"]
+---
+
+## What Are Finalizers?
+
+Finalizers are keys in a resource's `metadata.finalizers` array that tell Kubernetes: "Do not delete this object until I have cleaned up." They act as pre-delete hooks that guarantee external dependencies are resolved before garbage collection.
+
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-data
+  finalizers:
+    - kubernetes.io/pvc-protection
+```
+
+When you run `kubectl delete`, Kubernetes sets `metadata.deletionTimestamp` but does NOT remove the object. The controller responsible for the finalizer must:
+1. Perform its cleanup logic
+2. Remove its finalizer from the array
+3. Only then does Kubernetes actually delete the object
+
+## Common Finalizers You Will Encounter
+
+| Finalizer | Purpose | Controller |
+|-----------|---------|------------|
+| `kubernetes.io/pvc-protection` | Prevents PVC deletion while mounted | PVC Protection Controller |
+| `kubernetes.io/pv-protection` | Prevents PV deletion while bound | PV Protection Controller |
+| `foregroundDeletion` | Waits for dependents to delete first | Garbage Collector |
+| `orphan` | Leaves dependents running | Garbage Collector |
+| `external-dns` | Removes DNS records before ingress deletion | ExternalDNS |
+| `helm.sh/hook-delete-policy` | Helm release cleanup | Helm/Tiller |
+| Custom finalizers | Operator-specific cleanup | Custom operators |
+
+## Why Resources Get Stuck in Terminating
+
+A resource stays in `Terminating` state when:
+
+1. **Controller is down** — the controller that should process the finalizer is not running
+2. **Controller is broken** — the cleanup logic is failing (e.g., cannot reach external API)
+3. **Namespace deletion** — namespace is terminating but contains resources with unprocessable finalizers
+4. **Orphaned finalizer** — a CRD was deleted before its controller could clean up
+
+Check a stuck resource:
+
+```bash
+kubectl get pod stuck-pod -o jsonpath='{.metadata.finalizers}'
+# ["my-operator.io/cleanup"]
+
+kubectl get pod stuck-pod -o jsonpath='{.metadata.deletionTimestamp}'
+# 2026-06-01T10:30:00Z
+```
+
+## How to Unstick Resources Safely
+
+### Step 1: Identify What Is Stuck
+
+```bash
+# Find all resources stuck in Terminating
+kubectl get all --all-namespaces | grep Terminating
+
+# For namespaces specifically
+kubectl get namespaces | grep Terminating
+
+# Check finalizers on a specific resource
+kubectl get namespace stuck-ns -o json | jq '.spec.finalizers'
+kubectl get namespace stuck-ns -o json | jq '.metadata.finalizers'
+```
+
+### Step 2: Understand Why
+
+Before removing finalizers, understand what cleanup they represent:
+
+```bash
+# Check events for the resource
+kubectl describe namespace stuck-ns
+
+# Check if the responsible controller is running
+kubectl get pods -n kube-system | grep controller
+
+# Check operator logs
+kubectl logs -n operator-system deploy/my-operator
+```
+
+### Step 3: Remove Finalizers (When Safe)
+
+**For regular resources:**
+
+```bash
+kubectl patch pod stuck-pod -p '{"metadata":{"finalizers":null}}' --type=merge
+```
+
+**For namespaces (requires API call):**
+
+```bash
+# Export namespace spec
+kubectl get namespace stuck-ns -o json > ns.json
+
+# Remove finalizers from spec
+jq '.spec.finalizers = []' ns.json > ns-clean.json
+
+# Replace via API
+kubectl replace --raw "/api/v1/namespaces/stuck-ns/finalize" -f ns-clean.json
+```
+
+**For CRDs:**
+
+```bash
+kubectl patch crd my-crd.example.com \
+  -p '{"metadata":{"finalizers":[]}}' --type=merge
+```
+
+### Step 4: Bulk Cleanup
+
+When multiple resources are stuck (common during CRD/operator uninstall):
+
+```bash
+# Remove finalizers from all resources of a type in a namespace
+kubectl get configmaps -n stuck-ns -o name | while read cm; do
+  kubectl patch "$cm" -n stuck-ns \
+    -p '{"metadata":{"finalizers":null}}' --type=merge
+done
+
+# Nuclear option: all resources in a namespace
+for resource in $(kubectl api-resources --namespaced -o name); do
+  kubectl get "$resource" -n stuck-ns -o name 2>/dev/null | while read obj; do
+    kubectl patch "$obj" -n stuck-ns \
+      -p '{"metadata":{"finalizers":null}}' --type=merge 2>/dev/null
+  done
+done
+```
+
+## Writing Your Own Finalizer
+
+If you are building an operator, here is the pattern:
+
+```go
+const myFinalizer = "mycompany.io/cleanup"
+
+func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+    obj := &v1alpha1.MyResource{}
+    if err := r.Get(ctx, req.NamespacedName, obj); err != nil {
+        return ctrl.Result{}, client.IgnoreNotFound(err)
+    }
+
+    // Resource is being deleted
+    if !obj.DeletionTimestamp.IsZero() {
+        if containsString(obj.Finalizers, myFinalizer) {
+            // Perform cleanup
+            if err := r.cleanupExternalResources(obj); err != nil {
+                return ctrl.Result{}, err
+            }
+            // Remove finalizer
+            obj.Finalizers = removeString(obj.Finalizers, myFinalizer)
+            if err := r.Update(ctx, obj); err != nil {
+                return ctrl.Result{}, err
+            }
+        }
+        return ctrl.Result{}, nil
+    }
+
+    // Add finalizer if not present
+    if !containsString(obj.Finalizers, myFinalizer) {
+        obj.Finalizers = append(obj.Finalizers, myFinalizer)
+        if err := r.Update(ctx, obj); err != nil {
+            return ctrl.Result{}, err
+        }
+    }
+
+    // Normal reconciliation logic
+    return ctrl.Result{}, nil
+}
+```
+
+## Prevention: Best Practices
+
+1. **Always test operator uninstall** — simulate removing your operator and verify cleanup completes
+2. **Add timeouts to cleanup logic** — do not let finalizers hang forever
+3. **Log finalizer actions** — make it obvious what cleanup is happening
+4. **Document your finalizers** — other team members need to know what they do
+5. **Use owner references** — prefer garbage collection over finalizers when possible
+
+```yaml
+# Owner references auto-delete dependents (no finalizer needed)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: my-config
+  ownerReferences:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: my-app
+      uid: d9607e19-f88f-11e6-a518-42010a800195
+```
+
+## Debugging Checklist
+
+```bash
+# 1. What finalizers are present?
+kubectl get <resource> <name> -o jsonpath='{.metadata.finalizers}'
+
+# 2. When was deletion requested?
+kubectl get <resource> <name> -o jsonpath='{.metadata.deletionTimestamp}'
+
+# 3. Is the controller running?
+kubectl get pods -A | grep -i <operator-name>
+
+# 4. What do the controller logs say?
+kubectl logs -n <operator-ns> deploy/<operator> --tail=50
+
+# 5. Are there events?
+kubectl describe <resource> <name> | tail -20
+```
+
+
+## Deepen Your Kubernetes Skills
+
+If you found this article useful, check out my books for hands-on Kubernetes mastery:
+
+- **[Kubernetes Recipes](https://amzn.to/3DzC8QA)** — A practical guide for container orchestration and deployment with real-world patterns
+- **[Ansible for Kubernetes by Example](https://amzn.to/3NLCAMB)** — Automate Kubernetes cluster operations with Ansible playbooks
+
+Both books follow the same practical, example-driven approach you see in my articles.
+
+## Related Content
+
+- [Kubernetes Labels and Annotations Best Practices](/blog/kubernetes-namespace-best-practices-2026/)
+- [Kubernetes Namespace Best Practices for Multi-Tenancy](/blog/kubernetes-namespace-best-practices-2026/)
+- [Kubernetes Graceful Shutdown and PreStop Hooks](/blog/kubernetes-finalizers-explained-stuck-resources/)

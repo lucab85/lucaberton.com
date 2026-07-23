@@ -1,0 +1,61 @@
+---
+/**
+ * Shows related blog posts based on matching tags and category.
+ * Drives internal linking and keeps visitors on site longer (reduces bounce rate).
+ */
+import { getCollection } from 'astro:content';
+import slugify from 'slugify';
+
+export interface Props {
+  currentSlug: string;
+  category: string;
+  tags: string[];
+  limit?: number;
+}
+
+const { currentSlug, category, tags, limit = 6 } = Astro.props;
+
+const allPosts = (await getCollection('blog'))
+  .filter(post => !post.data.draft && post.slug !== currentSlug);
+
+// Score posts by: same category (+3), shared tags (+1 each)
+const scored = allPosts
+  .map(post => {
+    let score = 0;
+    if (post.data.category.toLowerCase() === category.toLowerCase()) score += 3;
+    const postTags = post.data.tags.map(t => t.toLowerCase());
+    for (const tag of tags) {
+      if (postTags.includes(tag.toLowerCase())) score += 1;
+    }
+    return { post, score };
+  })
+  .filter(s => s.score > 0)
+  .sort((a, b) => b.score - a.score || new Date(b.post.data.publishDate).getTime() - new Date(a.post.data.publishDate).getTime())
+  .slice(0, limit);
+---
+
+{scored.length > 0 && (
+  <section class="mt-12 mb-8">
+    <h2 class="text-2xl font-bold text-gray-900 mb-6">Related Articles</h2>
+    <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+      {scored.map(({ post }) => (
+        <a href={`/blog/${post.slug}/`} class="group block bg-white border border-gray-200 rounded-xl overflow-hidden hover:shadow-lg transition-shadow">
+          {post.data.image?.src && (
+            <img
+              src={post.data.image.src}
+              alt={post.data.image.alt || post.data.title}
+              width="400"
+              height="210"
+              loading="lazy"
+              class="w-full h-40 object-cover"
+            />
+          )}
+          <div class="p-4">
+            <span class="text-xs text-blue-600 font-medium uppercase tracking-wide">{post.data.category}</span>
+            <h3 class="text-sm font-semibold text-gray-900 mt-1 group-hover:text-blue-700 transition-colors line-clamp-2">{post.data.title}</h3>
+          </div>
+        </a>
+      ))}
+    </div>
+  </section>
+)}

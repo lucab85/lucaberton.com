@@ -1,0 +1,355 @@
+---
+draft: false
+title: "How to Nuke an AWS Test Account — Complete Cleanup Script"
+snippet: "A production-ready Bash script to permanently delete all resources in a disposable AWS test account — CloudWatch, Config, GuardDuty, RDS, S3, EC2, and more."
+description: "A production-ready bash script to permanently delete all resources in a disposable AWS test account, covering CloudWatch, CloudTrail, Config, GuardDuty, KMS, Kinesis, RDS, S3, WAF, Lambda, SNS, SQS, EC2, EBS, NAT Gateways, and Elastic IPs."
+image: { src: "/blog/thumbnails/aws-test-account-cleanup-nuke-script-2026.jpg", alt: "AWS test account cleanup nuke script for cost optimization" }
+publishDate: "2026-05-28"
+lastModified: "2026-05-28"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["aws", "cloud", "cost-optimization", "bash", "cleanup", "devops", "security"]
+---
+
+export const prerender = true;
+
+You spun up an AWS test account months ago. Now the Free Tier alerts are rolling in — **CloudWatch Logs at 4.27 GB of 5 GB**, GuardDuty charges creeping up, orphaned EBS volumes accumulating cost. Time to burn it all down.
+
+This guide provides a **complete, destructive cleanup script** for disposable AWS accounts. It covers every service that commonly generates unexpected charges after experimentation.
+
+## When to Use This
+
+- Disposable test/sandbox accounts you are about to **close permanently**
+- Lab environments after a training session or certification prep
+- PoC accounts where the project was cancelled
+- Any account where you want **zero monthly charges** before closure
+
+## Prerequisites
+
+- **AWS CLI v2** configured with admin permissions
+- **jq** installed (`apt install jq` or `brew install jq`)
+- The account must be expendable — **this deletes everything permanently**
+
+## The Script
+
+Save as `nuke-aws-test-account.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -u
+
+# ============================================================
+# AWS TEST ACCOUNT CLEANUP / "NUKE" SCRIPT
+# ============================================================
+# WARNING:
+# - This deletes resources permanently.
+# - It is intended for a disposable/test AWS account.
+# - Review before running.
+# - Some resources may fail due to dependencies; rerun after a few minutes.
+# - After cleanup, close the AWS account from the root user console.
+# ============================================================
+
+DRY_RUN="${DRY_RUN:-0}"
+
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)"
+
+echo "============================================================"
+echo " AWS cleanup script"
+echo " Account: ${ACCOUNT_ID}"
+echo " DRY_RUN=${DRY_RUN}"
+echo "============================================================"
+
+if [[ -z "${ACCOUNT_ID}" || "${ACCOUNT_ID}" == "None" ]]; then
+  echo "ERROR: AWS CLI is not authenticated."
+  exit 1
+fi
+
+if [[ "${DRY_RUN}" != "1" ]]; then
+  echo
+  echo "This will DELETE resources in AWS account ${ACCOUNT_ID}."
+  echo "Type DELETE-${ACCOUNT_ID} to continue:"
+  read -r CONFIRM
+  if [[ "${CONFIRM}" != "DELETE-${ACCOUNT_ID}" ]]; then
+    echo "Aborted."
+    exit 1
+  fi
+fi
+
+run() {
+  echo "+ $*"
+  if [[ "${DRY_RUN}" != "1" ]]; then
+    "$@" || true
+  fi
+}
+
+regions() {
+  aws ec2 describe-regions --all-regions \
+    --query 'Regions[].RegionName' \
+    --output text 2>/dev/null | tr '\t' '\n'
+}
+
+echo
+echo "Finding all regions..."
+REGIONS="$(regions)"
+```
+
+### Global Resources: S3 Buckets
+
+S3 buckets are global. The script handles versioned objects, delete markers, and multipart uploads before deleting the bucket itself:
+
+```bash
+echo "============================================================"
+echo " S3 buckets"
+echo "============================================================"
+for bucket in $(aws s3api list-buckets --query 'Buckets[].Name' --output text 2>/dev/null); do
+  echo "Cleaning bucket: $bucket"
+
+  # Remove versioned objects and delete markers
+  versions_json="$(aws s3api list-object-versions --bucket "$bucket" 2>/dev/null || echo '{}')"
+
+  echo "$versions_json" | jq -r '.Versions[]? | [.Key, .VersionId] | @tsv' | while IFS=$'\t' read -r key version; do
+    run aws s3api delete-object --bucket "$bucket" --key "$key" --version-id "$version"
+  done
+
+  echo "$versions_json" | jq -r '.DeleteMarkers[]? | [.Key, .VersionId] | @tsv' | while IFS=$'\t' read -r key version; do
+    run aws s3api delete-object --bucket "$bucket" --key "$key" --version-id "$version"
+  done
+
+  # Remove non-versioned objects
+  run aws s3 rm "s3://${bucket}" --recursive
+
+  # Abort multipart uploads
+  aws s3api list-multipart-uploads --bucket "$bucket" \
+    --query 'Uploads[].[Key,UploadId]' --output text 2>/dev/null |
+  while read -r key upload_id; do
+    [[ -n "${key:-}" && -n "${upload_id:-}" ]] && \
+      run aws s3api abort-multipart-upload --bucket "$bucket" --key "$key" --upload-id "$upload_id"
+  done
+
+  run aws s3api delete-bucket --bucket "$bucket"
+done
+```
+
+### Regional Cleanup: CloudWatch Logs
+
+This is usually the **biggest Free Tier offender**. Log groups accumulate silently:
+
+```bash
+echo "CloudWatch Logs"
+aws logs describe-log-groups --region "$region" \
+  --query 'logGroups[].logGroupName' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r lg; do
+  [[ -n "$lg" ]] && run aws logs delete-log-group --region "$region" --log-group-name "$lg"
+done
+```
+
+AWS documentation confirms that `delete-log-group` [permanently deletes the log group and its archived log events](https://docs.aws.amazon.com/cli/latest/reference/logs/delete-log-group.html).
+
+### Regional Cleanup: CloudTrail
+
+```bash
+echo "CloudTrail"
+aws cloudtrail list-trails --region "$region" \
+  --query 'Trails[].TrailARN' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r trail; do
+  [[ -z "$trail" ]] && continue
+  run aws cloudtrail stop-logging --region "$region" --name "$trail"
+  run aws cloudtrail delete-trail --region "$region" --name "$trail"
+done
+```
+
+### Regional Cleanup: AWS Config
+
+```bash
+echo "AWS Config"
+aws configservice describe-configuration-recorders --region "$region" \
+  --query 'ConfigurationRecorders[].name' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r recorder; do
+  [[ -z "$recorder" ]] && continue
+  run aws configservice stop-configuration-recorder --region "$region" \
+    --configuration-recorder-name "$recorder"
+  run aws configservice delete-configuration-recorder --region "$region" \
+    --configuration-recorder-name "$recorder"
+done
+```
+
+### Regional Cleanup: GuardDuty
+
+GuardDuty charges per GB of analyzed events. Delete the detector to stop charges immediately:
+
+```bash
+echo "GuardDuty"
+aws guardduty list-detectors --region "$region" \
+  --query 'DetectorIds[]' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r detector; do
+  [[ -n "$detector" ]] && run aws guardduty delete-detector --region "$region" --detector-id "$detector"
+done
+```
+
+### Regional Cleanup: Lambda Functions
+
+```bash
+echo "Lambda"
+aws lambda list-functions --region "$region" \
+  --query 'Functions[].FunctionName' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r fn; do
+  [[ -n "$fn" ]] && run aws lambda delete-function --region "$region" --function-name "$fn"
+done
+```
+
+### Regional Cleanup: Kinesis
+
+```bash
+echo "Kinesis Data Streams"
+aws kinesis list-streams --region "$region" \
+  --query 'StreamNames[]' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r stream; do
+  [[ -n "$stream" ]] && run aws kinesis delete-stream --region "$region" \
+    --stream-name "$stream" --enforce-consumer-deletion
+done
+
+echo "Kinesis Firehose"
+aws firehose list-delivery-streams --region "$region" \
+  --query 'DeliveryStreamNames[]' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r ds; do
+  [[ -n "$ds" ]] && run aws firehose delete-delivery-stream --region "$region" \
+    --delivery-stream-name "$ds" --allow-force-delete
+done
+```
+
+### Regional Cleanup: RDS
+
+```bash
+echo "RDS instances"
+aws rds describe-db-instances --region "$region" \
+  --query 'DBInstances[].DBInstanceIdentifier' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r db; do
+  [[ -z "$db" ]] && continue
+  run aws rds delete-db-instance \
+    --region "$region" \
+    --db-instance-identifier "$db" \
+    --skip-final-snapshot \
+    --delete-automated-backups
+done
+```
+
+### Regional Cleanup: EC2, EBS, NAT Gateways, Elastic IPs
+
+```bash
+# Terminate all instances
+echo "EC2 instances"
+instance_ids="$(aws ec2 describe-instances --region "$region" \
+  --filters "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+  --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || true)"
+if [[ -n "$instance_ids" ]]; then
+  run aws ec2 terminate-instances --region "$region" --instance-ids $instance_ids
+fi
+
+# Delete NAT Gateways ($$$ per hour)
+echo "NAT Gateways"
+aws ec2 describe-nat-gateways --region "$region" \
+  --filter "Name=state,Values=available,pending,failed" \
+  --query 'NatGateways[].NatGatewayId' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r nat; do
+  [[ -n "$nat" ]] && run aws ec2 delete-nat-gateway --region "$region" --nat-gateway-id "$nat"
+done
+
+# Delete unattached EBS volumes
+echo "Unattached EBS volumes"
+aws ec2 describe-volumes --region "$region" \
+  --filters "Name=status,Values=available" \
+  --query 'Volumes[].VolumeId' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r vol; do
+  [[ -n "$vol" ]] && run aws ec2 delete-volume --region "$region" --volume-id "$vol"
+done
+
+# Release Elastic IPs
+echo "Elastic IPs"
+aws ec2 describe-addresses --region "$region" \
+  --query 'Addresses[].AllocationId' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r alloc; do
+  [[ -n "$alloc" ]] && run aws ec2 release-address --region "$region" --allocation-id "$alloc"
+done
+```
+
+### Regional Cleanup: KMS Keys
+
+Customer-managed KMS keys have a minimum 7-day waiting period before deletion:
+
+```bash
+echo "KMS customer-managed keys"
+aws kms list-keys --region "$region" \
+  --query 'Keys[].KeyId' --output text 2>/dev/null |
+tr '\t' '\n' |
+while read -r key; do
+  [[ -z "$key" ]] && continue
+  manager="$(aws kms describe-key --region "$region" --key-id "$key" \
+    --query 'KeyMetadata.KeyManager' --output text 2>/dev/null || true)"
+  state="$(aws kms describe-key --region "$region" --key-id "$key" \
+    --query 'KeyMetadata.KeyState' --output text 2>/dev/null || true)"
+  if [[ "$manager" == "CUSTOMER" && "$state" != "PendingDeletion" ]]; then
+    run aws kms schedule-key-deletion --region "$region" --key-id "$key" --pending-window-in-days 7
+  fi
+done
+```
+
+### Additional Services: SNS, SQS, WAFv2, Secrets Manager
+
+The full script also covers SNS topics, SQS queues, WAFv2 Web ACLs, Secrets Manager secrets, VPC Flow Logs, VPC Endpoints, ELB/ALB load balancers, and EBS snapshots.
+
+## How to Run
+
+**Dry run first** (prints commands without executing):
+
+```bash
+DRY_RUN=1 ./nuke-aws-test-account.sh
+```
+
+**Real deletion** (requires typing a confirmation string):
+
+```bash
+DRY_RUN=0 ./nuke-aws-test-account.sh
+```
+
+The safety confirmation requires you to type `DELETE-<your-account-id>` before any destructive action runs.
+
+## After the Script: Manual Checklist
+
+1. **AWS Marketplace** → Manage subscriptions → cancel active subscriptions
+2. **Billing** → Savings Plans / Reservations → check active commitments
+3. **Billing** → Free Tier → confirm no services are near/over limits
+4. **Sign in as ROOT user** → Account → [Close account](https://docs.aws.amazon.com/accounts/latest/reference/manage-acct-closing.html)
+
+AWS may still send a final bill for usage before closure, and Savings Plans or Reserved Instances can keep invoicing until they expire.
+
+## Common Free Tier Traps
+
+| Service | Free Tier Limit | Common Trap |
+|---|---|---|
+| CloudWatch Logs | 5 GB/month | Lambda/ECS logs accumulate silently |
+| NAT Gateway | Not free | Forgotten in default VPC setups |
+| Elastic IP | Free if attached | Charged when unattached |
+| EBS Volumes | 30 GB | Orphaned after instance termination |
+| RDS | 750 hours/month | db.t3.micro left running |
+| GuardDuty | 30-day trial | Charges per analyzed GB after trial |
+
+## Why Not Use aws-nuke?
+
+Tools like [aws-nuke](https://github.com/rebuy-de/aws-nuke) and [cloud-nuke](https://github.com/gruntwork-io/cloud-nuke) are excellent for complex multi-account environments. This script is simpler — no external dependencies beyond `aws` and `jq`, no config files, and you can read every line to understand exactly what it does.
+
+For enterprise environments with AWS Organizations, I recommend aws-nuke with proper account filtering. For a single test account you want gone today, this script gets the job done.
+
+---
+
+*Need help with AWS cost optimization or cloud architecture? I help enterprises build production-grade platforms at scale. Book a free consultation on [Calendly](https://calendly.com/lucaberton/).*

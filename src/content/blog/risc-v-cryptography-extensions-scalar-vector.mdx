@@ -1,0 +1,93 @@
+---
+title: "RISC-V Cryptography: Scalar and Vector Crypto"
+snippet: "How RISC-V accelerates cryptography — the scalar crypto (Zk) and vector crypto extensions, AES/SHA instructions, constant-time guarantees, and entropy sources."
+description: "How RISC-V accelerates cryptography — the scalar crypto (Zk) and vector crypto extensions, AES/SHA instructions, constant-time guarantees, and entropy sources."
+publishDate: "2026-06-11"
+lastModified: "2026-06-11"
+author: "Luca Berton"
+category: "RISC-V"
+tags: ["RISC-V", "cryptography", "security", "AES", "extensions"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-55.jpg"
+  alt: "RISC-V security and cryptography hardware at RISC-V Summit Europe 2026"
+faq:
+  - question: "Does RISC-V have hardware cryptography instructions?"
+    answer: "Yes. The scalar cryptography extensions (grouped under Zk) add instructions to accelerate AES, SHA-2, SHA-3, and related algorithms, plus a standardized entropy source. There is also a vector cryptography extension that uses the Vector unit for high-throughput bulk encryption. They make crypto faster and more side-channel resistant than pure software."
+  - question: "What is the Zk extension in RISC-V?"
+    answer: "Zk is the umbrella name for the RISC-V scalar cryptography extensions. It bundles sub-extensions such as Zkne/Zknd (AES encrypt/decrypt), Zknh (SHA-2/SHA-3 hashing), Zkr (entropy source for random numbers), and Zbkb/Zbkc/Zbkx (bit-manipulation helpers used by crypto), giving a complete scalar crypto acceleration package."
+  - question: "Why are dedicated crypto instructions more secure than software?"
+    answer: "Hand-written software crypto can leak secrets through timing side channels if execution time depends on key bits. RISC-V crypto instructions are specified to be data-independent in timing (constant-time), which closes that class of side-channel and, as a bonus, runs much faster than table-based software implementations."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Cryptography is everywhere — TLS, disk encryption, secure boot, signatures — and doing it in pure software is both slow and dangerously prone to side-channel leaks. RISC-V addresses this with dedicated **cryptography extensions**: scalar crypto (the **Zk** family) and a **vector crypto** extension. This guide explains what they add and why they matter for security.
+
+![RISC-V security and cryptography hardware at the Summit](/blog/events/riscv-summit-2026/riscv-summit-55.jpg)
+
+## Why Crypto Needs Hardware Help
+
+Two problems with software-only cryptography:
+
+- **Speed** — algorithms like AES and SHA are computationally heavy; software implementations are far slower than dedicated instructions.
+- **Side channels** — naive software can leak key bits through *timing*: if the runtime depends on secret data (e.g. table lookups whose cache behavior varies), an attacker can infer the key. Writing constant-time crypto by hand is notoriously hard.
+
+Hardware crypto instructions solve both: they are fast *and* specified to run in **constant time**, closing timing side channels by design. This complements the broader RISC-V [security and isolation](/blog/risc-v-security-privilege-pmp-confidential-computing/) story.
+
+## Scalar Cryptography: The Zk Family
+
+The **scalar crypto extensions** add instructions usable on the normal integer registers. They are grouped under the **Zk** umbrella, with focused sub-extensions:
+
+- **Zkne / Zknd** — AES encryption and decryption rounds
+- **Zknh** — SHA-2 and SHA-3 hash acceleration
+- **Zkr** — a standardized **entropy source** for generating true random numbers (seeds for keys)
+- **Zbkb / Zbkc / Zbkx** — bit-manipulation and carry-less multiply helpers that crypto code leans on
+- **Zk / Zkn / Zks** — convenience bundles that pull the above together
+
+So a chip advertising **Zk** gives you a complete scalar crypto toolkit. As [extensions](/blog/risc-v-extensions-explained-isa-alphabet/), these are modular: a tiny [embedded](/blog/risc-v-embedded-iot-microcontroller-guide/) part can add just AES, while a larger SoC takes the full set.
+
+## The Entropy Source (Zkr)
+
+Good cryptography needs good randomness, and software cannot manufacture true entropy. **Zkr** standardizes access to a hardware entropy source via a CSR, so operating systems and libraries have a portable, vendor-neutral way to seed their random-number generators. A standardized interface here is a big deal — it means the same kernel code gets quality entropy across different RISC-V hardware.
+
+## Vector Cryptography
+
+For *bulk* cryptographic work — encrypting large volumes of data, as a [server](/blog/risc-v-datacenter-servers-sovereign-ai-2026/) or storage system does — RISC-V adds a **vector crypto extension** built on the [Vector extension (RVV)](/blog/risc-v-vector-extension-rvv-programming/). It processes many blocks in parallel using the vector unit, delivering far higher throughput than scalar instructions. This is what you want for line-rate disk encryption, VPN gateways, and TLS termination at scale.
+
+## A Conceptual Example
+
+Without crypto instructions, an AES round is dozens of table lookups and XORs in software. With the scalar extension it collapses to a handful of dedicated instructions:
+
+```asm
+# Conceptual: one AES encryption round step using the scalar crypto extension
+aes64es   a0, a0, a1     # AES final-round encrypt step (illustrative)
+aes64esm  a0, a0, a1     # AES middle-round encrypt with MixColumns
+# ... far fewer instructions, constant-time, no secret-dependent table lookups
+```
+
+The result is faster *and* free of the cache-timing side channels that plague table-driven software AES.
+
+## Where This Matters
+
+Hardware crypto touches nearly every serious use of RISC-V:
+
+- **Secure boot and roots of trust** — verifying firmware signatures (think OpenTitan-style designs from [lowRISC](/blog/risc-v-open-source-cores-cva6-xiangshan/)).
+- **Confidential computing** — fast memory/VM encryption for [protected workloads](/blog/risc-v-security-privilege-pmp-confidential-computing/).
+- **TLS and networking** — encrypting traffic at scale on servers and gateways.
+- **IoT** — even tiny [embedded](/blog/risc-v-embedded-iot-microcontroller-guide/) devices can do real crypto without a huge performance hit.
+- **Post-quantum readiness** — bit-manipulation and vector primitives help accelerate emerging PQC algorithms.
+
+## A Word on Profiles
+
+As with all RISC-V capabilities, the question "is it present?" is answered by [profiles](/blog/risc-v-profiles-rva23-explained/) and platform specs. Security-conscious platforms increasingly require the crypto extensions, so software can rely on them rather than carrying slow fallbacks. Always check your target's extension list before assuming hardware AES is available.
+
+<BlogPromoCard variant="course" />
+
+## The Bottom Line
+
+RISC-V brings cryptography into the hardware with two complementary tools: the **scalar Zk family** (AES, SHA-2/3, a standardized entropy source, and bit-manipulation helpers) and a **vector crypto** extension for high-throughput bulk encryption. Beyond raw speed, these instructions are **constant-time by design**, eliminating a whole class of timing side channels that bedevil software crypto. From secure boot on a microcontroller to line-rate encryption on a server, RISC-V crypto extensions make strong, fast, side-channel-resistant cryptography a first-class hardware feature.
+
+---
+
+*Part of my RISC-V series. See also [RISC-V security & confidential computing](/blog/risc-v-security-privilege-pmp-confidential-computing/) and [extensions explained](/blog/risc-v-extensions-explained-isa-alphabet/).*

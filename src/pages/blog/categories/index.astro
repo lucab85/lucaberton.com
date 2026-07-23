@@ -1,0 +1,128 @@
+---
+import { getCollection } from "astro:content";
+import Layout from "@layouts/Layout.astro";
+import Container from "@components/container.astro";
+import Breadcrumb from "@components/Breadcrumb.astro";
+import slugify from "slugify";
+
+export const prerender = true;
+
+const allPosts = await getCollection("blog", ({ data }) => {
+  return !data.draft && data.publishDate < new Date();
+});
+
+// Build category data with counts and latest post
+const categoryMap = new Map<string, { count: number; latestDate: Date; latestTitle: string; latestSlug: string }>();
+allPosts.forEach(post => {
+  const cat = post.data.category;
+  const existing = categoryMap.get(cat);
+  if (!existing || post.data.publishDate > existing.latestDate) {
+    categoryMap.set(cat, {
+      count: (existing?.count || 0) + 1,
+      latestDate: post.data.publishDate,
+      latestTitle: post.data.title,
+      latestSlug: post.slug,
+    });
+  } else {
+    existing.count++;
+  }
+});
+
+const categories = [...categoryMap.entries()]
+  .sort((a, b) => b[1].count - a[1].count);
+
+// Color mapping for categories
+const categoryColors: Record<string, string> = {
+  "AI": "from-violet-500 to-purple-600",
+  "Platform Engineering": "from-blue-500 to-cyan-600",
+  "DevOps": "from-orange-500 to-red-500",
+  "Automation": "from-green-500 to-emerald-600",
+  "Open Source": "from-teal-500 to-green-600",
+};
+
+const defaultColor = "from-slate-500 to-slate-600";
+
+// CollectionPage schema for /blog/categories/ index
+const categoriesSchema = {
+  "@context": "https://schema.org",
+  "@type": "CollectionPage",
+  "@id": "https://lucaberton.com/blog/categories/",
+  "url": "https://lucaberton.com/blog/categories/",
+  "name": "Blog Categories — AI, Cloud & DevOps Topics",
+  "description": "Browse all blog categories covering AI, Kubernetes, Ansible, platform engineering, DevOps, cloud security, and more by Luca Berton.",
+  "isPartOf": { "@type": "WebSite", "@id": "https://lucaberton.com/#website", "url": "https://lucaberton.com/" },
+  "mainEntity": {
+    "@type": "ItemList",
+    "numberOfItems": categories.length,
+    "itemListElement": categories.map(([cat], index) => ({
+      "@type": "ListItem",
+      "position": index + 1,
+      "url": `https://lucaberton.com/blog/categories/${slugify(cat, { lower: true, strict: true })}/`,
+      "name": cat
+    }))
+  }
+};
+---
+
+<Layout title="Blog Categories — AI, Cloud & DevOps Topics" description="Browse all blog categories covering AI, Kubernetes, Ansible, platform engineering, DevOps, cloud security, and more by Luca Berton.">
+  <script type="application/ld+json" set:html={JSON.stringify(categoriesSchema)} />
+  <Breadcrumb items={[{ name: "Blog", url: "/blog/" }, { name: "Categories" }]} />
+  <Container>
+    <div class="mt-16 text-center">
+      <h1 class="text-4xl lg:text-5xl font-bold lg:tracking-tight">Categories</h1>
+      <p class="text-lg mt-4 text-slate-500 mx-auto max-w-xl">
+        {allPosts.length} articles across {categories.length} categories
+      </p>
+    </div>
+
+    <main class="mt-12 max-w-5xl mx-auto">
+      <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+        {categories.map(([cat, data]) => {
+          const colorClass = categoryColors[cat] || defaultColor;
+          const slug = slugify(cat, { lower: true, strict: true });
+          return (
+            <a
+              href={`/blog/categories/${slug}/`}
+              class="group block rounded-xl overflow-hidden border border-gray-100 hover:border-blue-200 hover:shadow-lg transition-all"
+            >
+              <div class={`h-2 bg-gradient-to-r ${colorClass}`}></div>
+              <div class="p-6">
+                <div class="flex items-center justify-between mb-3">
+                  <h2 class="text-xl font-bold group-hover:text-blue-600 transition-colors">{cat}</h2>
+                  <span class="text-2xl font-bold text-gray-200">{data.count}</span>
+                </div>
+                <p class="text-sm text-gray-500">
+                  {data.count} article{data.count !== 1 ? 's' : ''}
+                </p>
+                <div class="mt-4 pt-4 border-t border-gray-50">
+                  <p class="text-xs text-gray-400 mb-1">Latest:</p>
+                  <p class="text-sm text-gray-600 font-medium line-clamp-2 group-hover:text-blue-600 transition-colors">
+                    {data.latestTitle}
+                  </p>
+                </div>
+                <span class="inline-flex items-center gap-1 mt-4 text-blue-600 font-medium text-sm opacity-0 group-hover:opacity-100 transition-opacity">
+                  Browse articles →
+                </span>
+              </div>
+            </a>
+          );
+        })}
+      </div>
+    </main>
+
+    <div class="mt-12 mb-8 text-center">
+      <a href="/blog/" class="text-blue-600 hover:text-blue-800 font-medium">
+        ← Back to all articles
+      </a>
+    </div>
+  </Container>
+</Layout>
+
+<style>
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+</style>

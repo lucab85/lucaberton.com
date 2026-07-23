@@ -1,0 +1,177 @@
+---
+draft: false
+title: "How to Clean-Install the Latest Fedora on a Lenovo Laptop (No CD Drive Needed)"
+seoTitle: "Reinstall Fedora on a Lenovo Laptop via USB (No CD)"
+snippet: "No optical drive, no problem. Wipe a Lenovo laptop and clean-install the latest Fedora Workstation from a USB stick, created on macOS, Linux, or Windows."
+description: "Step-by-step guide to erasing a Lenovo laptop and clean-installing the latest Fedora Workstation from a bootable USB stick. Covers Fedora Media Writer, the macOS 'app is damaged' Gatekeeper fix, a dd fallback, Lenovo's F12 boot menu, and post-install updates."
+publishDate: "2026-07-22"
+lastModified: "2026-07-22"
+image:
+  src: "/blog/thumbnails/reinstall-fedora-lenovo-laptop-usb.svg"
+  alt: "Four-step diagram for reinstalling Fedora on a Lenovo laptop: create USB, boot via F12, erase disk, install and update"
+author: "Luca Berton"
+category: "Linux"
+tags:
+  - "Fedora"
+  - "Lenovo"
+  - "Linux"
+  - "USB Installer"
+  - "Clean Install"
+faq:
+  - question: "Can I reinstall Fedora on a Lenovo laptop without a CD or DVD drive?"
+    answer: "Yes. Almost no modern laptop has an optical drive, and Fedora's official installer does not need one. Write the Fedora Workstation ISO to a USB stick with Fedora Media Writer (or dd) and boot the Lenovo from it using the F12 (or Fn+F12) boot-menu key."
+  - question: "What is the latest version of Fedora?"
+    answer: "As of July 2026, the latest stable release is Fedora Workstation 44, built on kernel 6.14 and GNOME 48."
+  - question: "Fedora Media Writer says the app is damaged on macOS. How do I fix it?"
+    answer: "This is a Gatekeeper/quarantine issue, not real corruption, and it happens even with files downloaded from Fedora's official site. Move FedoraMediaWriter.app to Applications, then run `sudo xattr -dr com.apple.quarantine \"/Applications/FedoraMediaWriter.app\"` in Terminal and try opening it again."
+  - question: "Which key opens the boot menu on a Lenovo laptop?"
+    answer: "Press F12 repeatedly right after powering on (Fn+F12 on some models with function-key lock enabled). If that does not work, look for a small Novo button or pinhole on the side of the laptop — pressing it while powered off opens a boot/recovery menu directly."
+  - question: "Will erasing the disk during Fedora installation permanently destroy my data?"
+    answer: "The installer's 'erase disk' / 'use entire disk' option removes existing partitions for normal reuse, which is sufficient for reinstalling your own machine, but it is not a forensic-grade secure wipe. Back up anything you need first — the process is not reversible."
+---
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+You do not need an optical drive to reinstall Fedora. A USB stick and Fedora's official installer are all a modern Lenovo laptop needs — and as of July 2026, the latest stable release is Fedora Workstation 44, built on kernel 6.14 and GNOME 48.
+
+This guide walks through wiping a Lenovo laptop completely and doing a clean install: back up first, build the installation USB (including the macOS-specific issues you are likely to hit), boot the Lenovo from it, erase the disk, and update the fresh system.
+
+## Before You Start: Back Up Everything
+
+The steps below **delete**:
+
+- The current Fedora (or Windows) installation
+- Every personal file, photo, download, and setting on the internal drive
+- Any recovery partitions on the selected disk
+
+Copy anything important to an external drive, a different USB stick, or cloud storage — including browser passwords, SSH keys, and dotfiles in your home directory. Keep the laptop plugged into its charger for the whole process; a mid-install power loss can leave the disk in an unbootable state.
+
+## Step 1: Create the Fedora Installation USB
+
+You'll need a USB stick of at least 4 GB. Everything currently on it will be erased.
+
+### Option A: Fedora Media Writer (Linux, Windows, or macOS)
+
+Fedora Media Writer is Fedora's official tool for building bootable installation media, and it can download the correct image for you automatically.
+
+On an existing Fedora machine:
+
+```bash
+sudo dnf install mediawriter
+```
+
+On Windows or macOS, download Fedora Media Writer from Fedora's official Workstation download page instead. Then:
+
+1. Open Fedora Media Writer.
+2. Select **Fedora Workstation** and confirm it picked **Fedora Workstation 44, x86_64** — Lenovo laptops with Intel or AMD processors need the `x86_64` image, even if you're writing the USB from an Apple Silicon Mac.
+3. Select your USB stick carefully — double-check the size against your actual drive.
+4. Click **Write** (or **Create Live USB**) and wait for writing and verification to finish.
+
+### Fixing "FedoraMediaWriter is damaged and can't be opened" on macOS
+
+This is a known Gatekeeper/quarantine issue with the macOS build, not real file corruption — it happens even with a file downloaded straight from Fedora's official site. The usual **System Settings → Privacy & Security → Open Anyway** override often does not appear for this particular error, because that button is meant for the "unidentified developer" warning, not the "damaged" one.
+
+Instead, clear the quarantine attribute directly:
+
+```bash
+sudo xattr -dr com.apple.quarantine "/Applications/FedoraMediaWriter.app"
+```
+
+Enter your Mac password when prompted (Terminal won't show characters as you type). Then try opening Fedora Media Writer again. This only removes quarantine from that one app — it does not disable Gatekeeper system-wide.
+
+If the command reports the file doesn't exist, run it with a trailing space and drag the app icon into Terminal instead of typing the path:
+
+```bash
+sudo xattr -dr com.apple.quarantine 
+```
+
+Also confirm you downloaded the matching build for your Mac's architecture:
+
+```bash
+uname -m   # arm64 -> Apple Silicon build; x86_64 -> Intel build
+```
+
+### Option B: `dd` from Terminal (macOS fallback, no extra app)
+
+If Fedora Media Writer still won't cooperate, write the ISO directly.
+
+1. Download the **Fedora Workstation 44 Live ISO** for **x86_64** — this is the image the Lenovo will boot, so pick x86_64 regardless of what kind of Mac you're using to create the USB.
+2. Identify the USB drive:
+
+   ```bash
+   diskutil list
+   ```
+
+   Confirm the disk number (e.g. `/dev/disk4`) by matching its size to your actual USB stick — using the wrong disk number here can erase your Mac.
+
+3. Unmount it:
+
+   ```bash
+   diskutil unmountDisk /dev/disk4
+   ```
+
+4. Write the image (replace `disk4` with your actual disk number, and drag the ISO from Finder into Terminal to auto-fill its path):
+
+   ```bash
+   sudo dd if=/Users/yourname/Downloads/Fedora-Workstation-Live-x86_64-44-1.1.iso of=/dev/rdisk4 bs=4m
+   ```
+
+   The terminal will look frozen while it writes — press `Ctrl+T` to check progress. Don't close the window or unplug the USB.
+
+5. When it finishes, flush and eject:
+
+   ```bash
+   sync
+   diskutil eject /dev/disk4
+   ```
+
+## Step 2: Boot the Lenovo from USB
+
+1. Plug in the USB stick and shut the laptop down completely.
+2. Power it on while repeatedly pressing **F12** (or **Fn+F12** if function-key lock is enabled).
+3. From the one-time boot menu, select the entry that looks like **UEFI: USB**, **USB HDD**, or your USB drive's manufacturer name.
+
+If F12 doesn't bring up a boot menu, some Lenovo models have a small **Novo button** or pinhole on the side — press it while the laptop is off to open a boot/recovery menu directly. Leave Secure Boot at its default setting; the official Fedora USB boots fine under standard UEFI without changes.
+
+## Step 3: Erase the Disk and Install Fedora
+
+1. From the boot menu, choose **Start Fedora Workstation Live** and wait for the desktop.
+2. Optionally test Wi-Fi, the keyboard, touchpad, and display before committing.
+3. Open **Install Fedora**, then select your language and keyboard layout.
+4. Select the laptop's **internal SSD/NVMe** drive — identify it by size and model, and make sure you are *not* selecting the USB installer itself.
+5. Choose the option to use the entire disk (worded roughly as **Use entire disk**, **Erase disk and install Fedora**, or **Reclaim all space**, depending on installer version).
+6. Confirm that existing partitions and any other operating systems will be removed.
+7. Optionally enable disk encryption — if you do, store the passphrase somewhere safe; there is no recovery without it.
+8. Start the installation.
+
+If the laptop has more than one internal drive, disconnect any external drives first and double-check which disk is selected before confirming — this step is not reversible.
+
+## Step 4: First Boot and Update
+
+1. Select **Restart** and remove the USB stick as soon as the screen goes blank.
+2. Complete Fedora's initial account setup and connect to the internet.
+3. Open a terminal and fully update the fresh install:
+
+   ```bash
+   sudo dnf upgrade --refresh
+   sudo reboot
+   ```
+
+4. After the reboot, confirm the version:
+
+   ```bash
+   cat /etc/fedora-release
+   # Fedora Linux 44
+   ```
+
+## A Note on "Erase Disk"
+
+The installer's erase/reclaim option removes partitions for normal reuse — plenty for reinstalling a machine you own — but it is not a forensic secure wipe. If the laptop is being sold, donated, or handed off, that distinction matters; for a personal clean install, it doesn't.
+
+## Related Articles
+
+- [Fedora 44: Cutting-Edge Linux for Developers](/blog/fedora-44-cutting-edge-linux/)
+- [Fix Claude Code Install on macOS: Homebrew & Node 26](/blog/fix-claude-code-homebrew-macos-node-26-install/)
+- [Rocky Linux vs Alma Linux](/blog/rocky-linux-vs-alma-linux/)
+- [Linux Cheat Sheet 2026](/blog/linux-cheat-sheet-2026/)
+
+<BlogPromoCard />

@@ -1,0 +1,199 @@
+---
+title: "Plausible: Privacy-First Google Analytics Alternative"
+seoTitle: "Plausible: Privacy-First Google Analytics Alternative"
+snippet: "Deploy Plausible Analytics on Kubernetes — GDPR-compliant, no cookies, under 1KB script, and full data ownership for privacy-first web stats."
+description: "Deploy Plausible Analytics on Kubernetes — GDPR-compliant, no cookies, under 1KB script, and full data ownership."
+publishDate: "2026-06-05"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "Open Source"
+tags: ['Open Source', 'Privacy', 'DevOps']
+image:
+  src: "/blog/thumbnails/plausible-analytics-privacy-first-self-hosted-2026.jpg"
+  alt: "Plausible Analytics: Privacy-First, Lightweight Google Analytics Alternative"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## Why Replace Google Analytics?
+
+Google Analytics 4 is:
+- **Heavy** — 45KB script, slows page load
+- **Privacy-invasive** — cookies, fingerprinting, cross-site tracking
+- **Complex** — event-based model confuses most teams
+- **Blocked** — 40%+ of visitors use ad blockers that block GA
+
+[Plausible](https://github.com/plausible/analytics) fixes all four problems.
+
+## Plausible vs Google Analytics
+
+| Feature | Plausible | GA4 |
+|---------|-----------|-----|
+| Script size | under 1KB | 45KB |
+| Cookies | ❌ None | ✅ Multiple |
+| GDPR consent banner | Not needed | Required |
+| Setup time | 5 minutes | Hours |
+| Data ownership | ✅ Full | ❌ Google owns it |
+| Real-time | ✅ | ✅ |
+| Funnels | ✅ | ✅ |
+| Revenue tracking | ✅ | ✅ |
+| Self-hosted | ✅ | ❌ |
+| Ad blocker bypass | ✅ (proxy) | ❌ |
+| Price | $9/mo or free (self-hosted) | Free (you are the product) |
+
+## Self-Host on Kubernetes
+
+### Architecture
+
+```
+┌────────────────────────────────────┐
+│       Plausible Stack              │
+│                                    │
+│  ┌────────────┐  ┌─────────────┐  │
+│  │  Plausible │  │  ClickHouse │  │
+│  │  (Elixir)  │  │  (Analytics │  │
+│  │            │  │   Engine)   │  │
+│  └─────┬──────┘  └──────┬──────┘  │
+│        │                 │         │
+│        └────────┬────────┘         │
+│                 │                  │
+│         ┌───────▼───────┐          │
+│         │  PostgreSQL   │          │
+│         │  (metadata)   │          │
+│         └───────────────┘          │
+└────────────────────────────────────┘
+```
+
+### Kubernetes Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plausible
+  namespace: analytics
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: plausible
+          image: ghcr.io/plausible/community-edition:v2.1
+          ports:
+            - containerPort: 8000
+          env:
+            - name: BASE_URL
+              value: "https://analytics.yourdomain.com"
+            - name: DATABASE_URL
+              value: "postgres://plausible:pass@postgres:5432/plausible"
+            - name: CLICKHOUSE_DATABASE_URL
+              value: "http://clickhouse:8123/plausible"
+            - name: SECRET_KEY_BASE
+              valueFrom:
+                secretKeyRef:
+                  name: plausible-secrets
+                  key: secret-key
+            - name: TOTP_VAULT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: plausible-secrets
+                  key: totp-key
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: analytics
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24.3-alpine
+          ports:
+            - containerPort: 8123
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 50Gi
+```
+
+### Bypass Ad Blockers (Reverse Proxy)
+
+```nginx
+# Nginx config - proxy the tracking script through your domain
+location /js/visits.js {
+    proxy_pass https://analytics.yourdomain.com/js/script.js;
+    proxy_set_header Host analytics.yourdomain.com;
+}
+
+location /api/event {
+    proxy_pass https://analytics.yourdomain.com/api/event;
+    proxy_set_header Host analytics.yourdomain.com;
+    proxy_set_header X-Forwarded-For $remote_addr;
+}
+```
+
+Script tag on your site:
+```html
+<script defer data-domain="yourdomain.com" src="/js/visits.js"></script>
+```
+
+This bypasses ad blockers because the script loads from your own domain.
+
+## Custom Events
+
+Track conversions without cookies:
+
+```javascript
+// Track signup
+plausible('Signup', {props: {plan: 'pro', source: 'blog'}})
+
+// Track download
+plausible('Download', {props: {file: 'whitepaper.pdf'}})
+
+// Track outbound link
+plausible('Outbound Link', {props: {url: 'https://calendly.com/lucaberton'}})
+```
+
+## Migration from GA4
+
+Plausible imports historical GA4 data:
+
+1. Export from GA4 (Google Takeout or API)
+2. Plausible Settings → Import Data → Google Analytics
+3. Historical data appears in same dashboard
+
+## Resource Requirements
+
+| Scale | Visitors/mo | RAM | CPU | Storage |
+|-------|-------------|-----|-----|---------|
+| Small | under 100K | 512MB | 0.5 | 10GB |
+| Medium | 100K-1M | 2GB | 1 | 50GB |
+| Large | 1M-10M | 4GB | 2 | 200GB |
+| Enterprise | 10M+ | 8GB+ | 4+ | 500GB+ |
+
+Plausible is incredibly efficient — a single small VPS handles 100K visitors easily.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Listmonk: Open-Source Newsletter Manager](/blog/listmonk-open-source-email-newsletter-2026/)
+- [Coolify: Self-Hosted Heroku Alternative](/blog/coolify-open-source-heroku-self-hosted-paas-2026/)
+- [Ghost CMS on Kubernetes](/blog/ghost-cms-headless-self-hosted-kubernetes-2026/)

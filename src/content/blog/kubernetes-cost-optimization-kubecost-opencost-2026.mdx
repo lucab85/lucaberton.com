@@ -1,0 +1,130 @@
+---
+title: "Kubernetes Cost Optimization with Kubecost and OpenCost"
+snippet: "Track and reduce Kubernetes spending — per-namespace cost allocation, right-sizing recommendations, idle resource detection, and showback reports."
+description: "Track and reduce Kubernetes spending — per-namespace cost allocation, right-sizing recommendations, idle resource detection, and showback reports."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Kubernetes', 'FinOps', 'DevOps']
+image:
+  src: "/blog/thumbnails/kubernetes-cost-optimization-kubecost-opencost-2026.jpg"
+  alt: "Kubernetes Cost Optimization with Kubecost and OpenCost"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## The Problem: Invisible Spending
+
+Most organizations don't know what each team or service costs in Kubernetes. The cloud bill shows "EKS: $50,000/month" — but which team? Which workload? What's idle?
+
+## Kubecost vs OpenCost
+
+| Feature | OpenCost | Kubecost |
+|---------|----------|----------|
+| License | Apache 2.0 (CNCF) | Free tier + Enterprise |
+| Cost allocation | ✅ | ✅ |
+| Recommendations | ❌ | ✅ |
+| Alerts | ❌ | ✅ |
+| Multi-cluster | ❌ | ✅ (Enterprise) |
+| Savings plans | ❌ | ✅ |
+| UI | Basic | Full dashboard |
+| API | ✅ | ✅ |
+
+## Installation (Kubecost)
+
+```bash
+helm install kubecost cost-analyzer/cost-analyzer \
+  --namespace kubecost --create-namespace \
+  --set kubecostToken="your-token" \
+  --set prometheus.server.enabled=true
+```
+
+## Cost Allocation Model
+
+```
+Total Cluster Cost = Node Cost + Storage Cost + Network Cost
+
+Per-Pod Cost = (CPU Request / Node CPU) × Node Cost/hr
+             + (Memory Request / Node Memory) × Node Cost/hr
+             + PV Cost × (PV Size / Total PV)
+
+Per-Namespace Cost = Σ Pod Costs in Namespace
+Per-Team Cost = Σ Namespace Costs (label: team=X)
+```
+
+## Right-Sizing Recommendations
+
+```bash
+# Kubecost API — get savings opportunities
+curl http://kubecost:9090/model/savings/requestSizing?window=7d
+
+# Response:
+{
+  "containerName": "api-server",
+  "currentCPURequest": "2000m",
+  "recommendedCPURequest": "350m",
+  "currentMemoryRequest": "4Gi",
+  "recommendedMemoryRequest": "1.2Gi",
+  "monthlySavings": "$180"
+}
+```
+
+## Common Waste Patterns
+
+| Pattern | Typical Waste | Fix |
+|---------|--------------|-----|
+| Over-provisioned requests | 40-60% | VPA or right-size manually |
+| Idle namespaces | 10-20% | Auto-delete dev envs nightly |
+| Orphan PVCs | 5-10% | PVC cleanup CronJob |
+| No autoscaling | 20-30% | HPA/KEDA for variable workloads |
+| Wrong instance type | 15-25% | Node auto-provisioner (Karpenter) |
+| No spot/preemptible | 30-60% | Spot for stateless workloads |
+
+## Showback Dashboard (Grafana)
+
+```yaml
+# Prometheus recording rules for cost
+groups:
+  - name: cost-allocation
+    rules:
+      - record: namespace:cost:hourly
+        expr: |
+          sum by (namespace) (
+            container_cpu_allocation * on(node) group_left()
+            node_cost_per_cpu_hour
+          ) +
+          sum by (namespace) (
+            container_memory_allocation_bytes / 1024 / 1024 / 1024
+            * on(node) group_left()
+            node_cost_per_gb_hour
+          )
+```
+
+## Quick Wins (First 30 Days)
+
+1. **Delete idle workloads** — dev/staging environments running 24/7
+2. **Right-size top 10 over-provisioned pods** — usually saves 30%+
+3. **Enable HPA** — for services with variable traffic
+4. **Spot instances** — for stateless, fault-tolerant workloads
+5. **Reserved capacity** — for stable baseline (commit 1-3 years)
+
+## Cost per Request (Business Metrics)
+
+The ultimate goal — cost per business transaction:
+
+```
+Cost per API request = Namespace cost / Total requests
+Cost per order = (Payment ns + Cart ns + Shipping ns) / Orders processed
+```
+
+When you can show "$0.003 per order processed" vs "$50,000 cloud bill," finance understands.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Resource Limits Best Practices](/blog/kubernetes-resource-limits-requests-best-practices-2026/)
+- [KEDA: Event-Driven Autoscaling](/blog/kubernetes-keda-event-driven-autoscaling/)
+- [LLM Inference Cost Optimization](/blog/llm-inference-cost-optimization-kubernetes-2026/)

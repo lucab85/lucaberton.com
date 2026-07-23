@@ -1,0 +1,131 @@
+---
+title: "Debugging RISC-V: GDB, OpenOCD and JTAG"
+seoTitle: "Debugging RISC-V: GDB, OpenOCD and JTAG"
+snippet: "A practical guide to debugging RISC-V — GDB, OpenOCD, JTAG, the Debug Spec, and single-stepping real hardware or QEMU. From printf to breakpoints."
+description: "A practical guide to debugging RISC-V — GDB, OpenOCD, JTAG, the Debug Spec, and single-stepping real hardware or QEMU. From printf to breakpoints."
+publishDate: "2026-06-11"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "RISC-V"
+tags: ["RISC-V", "debugging", "GDB", "OpenOCD", "JTAG"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-63.jpg"
+  alt: "RISC-V development hardware at RISC-V Summit Europe 2026"
+faq:
+  - question: "How do I debug a RISC-V program?"
+    answer: "For software running on Linux, use riscv64-linux-gnu-gdb (or gdb-multiarch) with QEMU's gdbstub or directly on hardware. For bare-metal and firmware, use GDB connected to OpenOCD, which drives a JTAG/debug probe attached to the target. QEMU's '-s -S' flags also expose a GDB server for emulated debugging."
+  - question: "What is OpenOCD used for with RISC-V?"
+    answer: "OpenOCD (Open On-Chip Debugger) is the bridge between GDB and physical RISC-V hardware. It speaks to a JTAG or debug probe, implements the RISC-V Debug Specification to halt the core, read/write registers and memory, set hardware breakpoints, and flash firmware — then exposes a GDB server that your debugger connects to."
+  - question: "Can I debug RISC-V without hardware?"
+    answer: "Yes. Run your program in QEMU with the '-s -S' options to start a GDB server on port 1234 and halt at startup, then connect with 'target remote :1234'. This gives full single-step, breakpoint, and register inspection without any physical RISC-V board."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Sooner or later every RISC-V project hits a bug that `printf` cannot catch — a crash in early [boot](/blog/risc-v-boot-flow-opensbi-uboot-firmware/), a wrong register, a misbehaving [interrupt](/blog/risc-v-interrupts-plic-clint-aia/) handler. That is when you reach for a real debugger. The good news: RISC-V has a standardized, well-supported debug stack built on **GDB, OpenOCD, and JTAG**. Here is how it all fits together.
+
+![RISC-V development hardware at the Summit](/blog/events/riscv-summit-2026/riscv-summit-63.jpg)
+
+## The Debug Stack at a Glance
+
+```
+GDB  <-- remote protocol -->  OpenOCD  <-- JTAG/probe -->  RISC-V target
+```
+
+Three layers:
+
+- **GDB** — the debugger you interact with (breakpoints, stepping, inspecting variables).
+- **OpenOCD** — the translator that speaks GDB's remote protocol on one side and the hardware debug transport on the other.
+- **The RISC-V Debug Spec** — the standardized on-chip debug module OpenOCD drives, so one toolchain works across vendors.
+
+## The RISC-V Debug Specification
+
+A big reason RISC-V debugging "just works" across hardware is the official **RISC-V Debug Specification**, which standardizes the on-chip **Debug Module (DM)** and its transport. It defines how an external debugger can:
+
+- **Halt** and **resume** harts
+- Read and write **registers** and **memory** while halted
+- Set **hardware breakpoints** and **watchpoints** (via trigger registers)
+- Access the core over **JTAG** (the most common debug transport)
+
+Because this is standardized, OpenOCD can support many different RISC-V chips with a config file rather than bespoke drivers — the same portability dividend the [ISA itself](/blog/what-is-risc-v-open-isa-explained/) delivers.
+
+## Debugging Without Hardware: QEMU + GDB
+
+The fastest way to start needs no probe at all. [QEMU](/blog/getting-started-risc-v-qemu-emulation-linux/) has a built-in GDB server:
+
+```bash
+# Start QEMU halted, exposing a GDB server on :1234
+qemu-system-riscv64 -machine virt -nographic \
+  -kernel my_program.elf -s -S
+```
+
+`-s` opens the gdbstub on port 1234; `-S` freezes the CPU at reset so you can set breakpoints before anything runs. In another terminal:
+
+```bash
+riscv64-linux-gnu-gdb my_program.elf
+(gdb) target remote :1234
+(gdb) break main
+(gdb) continue
+(gdb) info registers
+(gdb) stepi          # single-step one instruction
+```
+
+This is ideal for learning [assembly](/blog/risc-v-assembly-language-tutorial/) — watch `a0`–`a7`, `sp`, and `pc` change instruction by instruction.
+
+## Debugging Real Hardware: OpenOCD + JTAG
+
+For bare-metal firmware on a [dev board](/blog/risc-v-development-boards-2026-guide/), you connect a **debug probe** (built-in USB-JTAG on many boards, or an external one) and run OpenOCD:
+
+```bash
+# Start OpenOCD with the board's config; it exposes a GDB server on :3333
+openocd -f interface/your-probe.cfg -f target/your-riscv-soc.cfg
+```
+
+Then attach GDB and, if needed, flash:
+
+```bash
+riscv64-unknown-elf-gdb firmware.elf
+(gdb) target extended-remote :3333
+(gdb) load                 # flash the firmware to the target
+(gdb) monitor reset halt   # OpenOCD command: reset and halt
+(gdb) break main
+(gdb) continue
+```
+
+`monitor` passes commands straight to OpenOCD, which is how you reset, halt, and control the chip at the hardware level.
+
+## Hardware vs Software Breakpoints
+
+Worth understanding for embedded work:
+
+- **Software breakpoints** replace an instruction with the `ebreak` instruction in RAM. Unlimited in number, but only work in writable memory.
+- **Hardware breakpoints** use the core's trigger registers — they work even in **flash/ROM** (where you cannot modify code), but the chip has a *limited* number (often 2–8).
+
+When debugging code running from flash, you depend on hardware breakpoints, so use them sparingly.
+
+## Tools Beyond GDB
+
+The ecosystem is rich:
+
+- **VS Code** with the Cortex-Debug or native debug extensions wraps GDB+OpenOCD in a GUI.
+- **`ebreak`** in your code forces a trap to the debugger — handy as a programmatic breakpoint.
+- **objdump / addr2line** from the [toolchain](/blog/build-risc-v-toolchain-gcc-llvm/) turn a crash address into a source line.
+- **Tracing** (where supported by the SoC) records execution history for post-mortem analysis.
+
+## A Practical Workflow
+
+1. Reproduce in **QEMU** first when possible — fastest iteration, no hardware.
+2. Move to **hardware + OpenOCD** for timing-sensitive or peripheral bugs QEMU cannot model.
+3. Use `monitor reset halt`, set a breakpoint before the fault, and single-step into it.
+4. Inspect `mcause`/`scause` and `mepc`/`sepc` on a trap to find *why* and *where* it faulted.
+
+<BlogPromoCard variant="course" />
+
+## The Bottom Line
+
+RISC-V debugging stands on a standardized foundation: the **RISC-V Debug Spec** defines the on-chip debug module, **OpenOCD** drives it over **JTAG**, and **GDB** gives you the familiar interface. Start in **QEMU** with `-s -S` for zero-cost single-stepping, then graduate to **OpenOCD + a probe** for real hardware. Master `info registers`, `stepi`, and reading the trap CSRs, and almost no RISC-V bug can hide from you.
+
+---
+
+*Part of my RISC-V series. See also the [assembly tutorial](/blog/risc-v-assembly-language-tutorial/) and [interrupts on RISC-V](/blog/risc-v-interrupts-plic-clint-aia/).*

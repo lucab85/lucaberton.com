@@ -1,0 +1,151 @@
+---
+title: "Falco: Runtime Threat Detection for Kubernetes"
+snippet: "Detect anomalous behavior in containers with Falco — syscall monitoring, custom rules, alerting to Slack/PagerDuty, and MITRE ATT&CK mapping."
+description: "Detect anomalous behavior in containers with Falco — syscall monitoring, custom rules, alerting to Slack/PagerDuty, and MITRE ATT&CK mapping."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Security', 'Kubernetes', 'Open Source']
+image:
+  src: "/blog/thumbnails/falco-runtime-security-kubernetes-threat-detection-2026.jpg"
+  alt: "Falco: Runtime Threat Detection for Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What Is Falco?
+
+[Falco](https://github.com/falcosecurity/falco) detects unexpected behavior in running containers by monitoring Linux syscalls. Think of it as an intrusion detection system (IDS) for Kubernetes. CNCF Graduated, 7K+ stars.
+
+## What Falco Detects
+
+- Shell spawned inside container
+- Sensitive file read (`/etc/shadow`, `/etc/passwd`)
+- Unexpected network connections
+- Binary executed from `/tmp`
+- Privilege escalation attempts
+- Container escape techniques
+- Cryptominer signatures
+
+## Installation
+
+```bash
+helm repo add falcosecurity https://falcosecurity.github.io/charts
+helm install falco falcosecurity/falco \
+  --namespace falco --create-namespace \
+  --set driver.kind=modern_ebpf \
+  --set falcosidekick.enabled=true \
+  --set falcosidekick.config.slack.webhookurl="https://hooks.slack.com/..."
+```
+
+## Default Rules (Out of the Box)
+
+Falco ships with 100+ rules covering common threats:
+
+```yaml
+# Shell in container
+- rule: Terminal shell in container
+  desc: A shell was spawned in a container
+  condition: >
+    spawned_process and container and shell_procs
+    and not known_shell_spawn_containers
+  output: >
+    Shell spawned in container
+    (container=%container.name shell=%proc.name parent=%proc.pname
+     user=%user.name evt_type=%evt.type)
+  priority: WARNING
+  tags: [container, shell, mitre_execution]
+```
+
+## Custom Rules
+
+```yaml
+# Detect crypto mining
+- rule: Detect crypto miners
+  desc: Detected a process with crypto mining indicators
+  condition: >
+    spawned_process and container and
+    (proc.name in (xmrig, minerd, cpuminer) or
+     proc.cmdline contains "stratum+tcp" or
+     proc.cmdline contains "pool.minergate")
+  output: >
+    Crypto miner detected (container=%container.name cmd=%proc.cmdline)
+  priority: CRITICAL
+  tags: [cryptomining, mitre_resource_hijacking]
+
+# Detect kubectl exec
+- rule: Kubectl exec to pod
+  desc: Someone ran kubectl exec into a production pod
+  condition: >
+    spawned_process and container and
+    k8s.ns.name = "production" and
+    proc.pname = "runc"
+  output: >
+    Exec into production pod (pod=%k8s.pod.name ns=%k8s.ns.name user=%ka.user.name)
+  priority: WARNING
+  tags: [k8s, exec, mitre_execution]
+```
+
+## MITRE ATT&CK Mapping
+
+| Technique | Falco Rule |
+|-----------|-----------|
+| T1059 (Command Scripting) | Terminal shell in container |
+| T1003 (Credential Dumping) | Read /etc/shadow |
+| T1048 (Exfiltration) | Unexpected outbound connection |
+| T1611 (Container Escape) | nsenter or mount namespace |
+| T1496 (Resource Hijacking) | Crypto miner detection |
+| T1071 (Application Layer Protocol) | DNS tunneling |
+
+## Alert Pipeline
+
+```
+Syscall → Falco Engine → Rule Match → Falcosidekick → Destinations
+                                                        ├── Slack
+                                                        ├── PagerDuty
+                                                        ├── Elasticsearch
+                                                        ├── AWS SecurityHub
+                                                        ├── Prometheus
+                                                        └── OPA (auto-kill pod)
+```
+
+## Response Automation
+
+```yaml
+# Falcosidekick + Kubernetes Response Engine
+# Auto-kill pod on critical alert
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falcosidekick-config
+data:
+  config.yaml: |
+    kubernetesPolicyReport:
+      enabled: true
+    # Kill pod on critical
+    outputs:
+      - type: kubernetesPod
+        config:
+          action: delete
+          minimumPriority: critical
+```
+
+## Performance Impact
+
+| Driver | CPU Overhead | Kernel Version |
+|--------|-------------|----------------|
+| modern_ebpf | under 1% | 5.8+ |
+| kmod (legacy) | 2-5% | Any |
+| Plugin (cloud) | 0% (no syscalls) | N/A |
+
+Modern eBPF driver adds negligible overhead — production-safe.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Cilium: eBPF Security](/blog/cilium-ebpf-kubernetes-networking-security-2026/)
+- [Keycloak: IAM](/blog/keycloak-identity-access-management-kubernetes-2026/)
+- [OWASP Top 10 for LLM Applications](/blog/owasp-top-10-llm-applications-2025-security-guide/)

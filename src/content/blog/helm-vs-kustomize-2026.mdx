@@ -1,0 +1,195 @@
+---
+draft: false
+title: "Helm vs Kustomize 2026: Kubernetes Package Management"
+seoTitle: "Helm vs Kustomize 2026: Kubernetes (2026)"
+snippet: "Helm vs Kustomize compared for 2026. Templating vs overlays, chart repositories, GitOps compatibility, and which Kubernetes packaging tool to use."
+description: "Helm vs Kustomize Kubernetes packaging comparison 2026. Templating vs patches, GitOps, chart repos, and decision guide."
+image:
+  src: "/blog/thumbnails/helm-vs-kustomize-2026.jpg"
+  alt: "Helm vs Kustomize: Kubernetes Packaging"
+publishDate: "2026-04-04"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags:
+  - "helm"
+  - "kustomize"
+  - "kubernetes"
+  - "gitops"
+  - "comparison"
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+Helm uses templates and values to generate Kubernetes manifests. Kustomize uses base manifests and overlay patches. Helm is a package manager. Kustomize is a configuration customization tool. They solve related but different problems.
+
+## Core approach
+
+### Helm (templates + values)
+
+```yaml
+# templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicas }}
+  template:
+    spec:
+      containers:
+        - name: app
+          image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+          resources:
+            limits:
+              memory: {{ .Values.resources.limits.memory }}
+
+# values.yaml
+replicas: 3
+image:
+  repository: myapp
+  tag: "1.0.0"
+resources:
+  limits:
+    memory: "256Mi"
+
+# values-production.yaml (override for prod)
+replicas: 10
+resources:
+  limits:
+    memory: "1Gi"
+```
+
+```bash
+helm install myapp ./chart -f values-production.yaml
+```
+
+### Kustomize (base + overlays)
+
+```yaml
+# base/deployment.yaml (plain Kubernetes YAML)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myapp
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: app
+          image: myapp:1.0.0
+
+# base/kustomization.yaml
+resources:
+  - deployment.yaml
+  - service.yaml
+
+# overlays/production/kustomization.yaml
+resources:
+  - ../../base
+patches:
+  - target:
+      kind: Deployment
+      name: myapp
+    patch: |
+      - op: replace
+        path: /spec/replicas
+        value: 10
+images:
+  - name: myapp
+    newTag: "2.0.0"
+namePrefix: prod-
+```
+
+```bash
+kubectl apply -k overlays/production/
+```
+
+## Feature comparison
+
+| Feature | Helm | Kustomize |
+|---|---|---|
+| **Approach** | Templating (Go templates) | Patching (overlays) |
+| **Package distribution** | Chart repositories (OCI, HTTP) | Git repos |
+| **Dependency management** | Chart dependencies | None |
+| **Rollback** | `helm rollback` (built-in) | Manual (kubectl or GitOps) |
+| **Release tracking** | Helm releases (stored in cluster) | None |
+| **Hooks** | Pre/post install, upgrade, delete | None |
+| **Testing** | `helm test` | None (use external tools) |
+| **kubectl integration** | External binary | Built-in (`kubectl -k`) |
+| **Learning curve** | Moderate (Go templates) | Low (plain YAML + patches) |
+| **GitOps** | ArgoCD + Flux support | ArgoCD + Flux support (native) |
+
+## Third-party software
+
+Helm is the standard for installing third-party software:
+
+```bash
+# Install Prometheus
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm install monitoring prometheus-community/kube-prometheus-stack
+
+# Install NGINX Ingress
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm install ingress ingress-nginx/ingress-nginx
+
+# Install cert-manager
+helm install cert-manager jetstack/cert-manager --set crds.enabled=true
+```
+
+There is no Kustomize equivalent for consuming packaged third-party software. You would clone the project's repo and apply kustomize overlays — which is fragile and hard to version.
+
+## Using both together
+
+Many teams use Helm for third-party charts and Kustomize for their own applications:
+
+```yaml
+# Use Helm to render, Kustomize to patch
+# kustomization.yaml
+helmCharts:
+  - name: nginx-ingress
+    repo: https://kubernetes.github.io/ingress-nginx
+    version: 4.8.0
+    valuesFile: values.yaml
+
+patches:
+  - target:
+      kind: Deployment
+      name: nginx-ingress-controller
+    patch: |
+      - op: add
+        path: /spec/template/metadata/annotations/custom
+        value: "true"
+```
+
+ArgoCD supports both Helm and Kustomize natively — render Helm charts, then apply Kustomize overlays.
+
+## Decision guide
+
+### Choose Helm when:
+- **Installing third-party software** (Prometheus, NGINX, cert-manager)
+- You need **package distribution** (share charts across teams/organizations)
+- **Release management** matters (rollback, upgrade, history)
+- **Hooks** are needed (run jobs before/after install)
+- Complex applications with **dependency management**
+
+### Choose Kustomize when:
+- **Your own applications** — plain YAML with environment overlays
+- **GitOps** — Kustomize's directory structure maps naturally to Git
+- **Simplicity** — no templating language to learn, just patches
+- You want **kubectl-native** tooling (no extra binary)
+- **Environment promotion** — base → dev → staging → production overlays
+
+### Use both when:
+- Helm for third-party, Kustomize for your apps
+- Helm to render, Kustomize to patch (ArgoCD supports this)
+
+<BlogPromoCard />
+
+## Related
+
+- [Kustomize vs Helm 2026](/blog/kustomize-vs-helm-2026/)
+- [ArgoCD vs Flux 2026](/blog/argocd-vs-flux-2026/)
+- [Tekton vs GitHub Actions 2026](/blog/tekton-vs-github-actions-2026/)
+- [EKS vs GKE vs AKS 2026](/blog/eks-vs-gke-vs-aks-2026/)

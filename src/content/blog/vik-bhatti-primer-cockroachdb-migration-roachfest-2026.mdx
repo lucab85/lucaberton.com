@@ -1,0 +1,66 @@
+---
+draft: false
+title: "Vik Bhatti (Primer): Move Before You Hit the Write Ceiling"
+seoTitle: "Primer's Vik Bhatti: Migration Lessons | RoachFest"
+snippet: "Vik Bhatti of Primer on zero-downtime CockroachDB migration, rejecting self-managed sharding, and a post-cutover write bug."
+description: "Vik Bhatti of Primer on CockroachDB migration, the four-pillar operating model, rejecting DIY sharding, and a post-cutover consistency bug."
+publishDate: "2026-07-14"
+lastModified: "2026-07-14"
+image:
+  src: "/blog/events/roachfest-london-2026/roachfest-london-2026-primer-write-capacity.jpg"
+  alt: "Primer's slide 'How can we add write capacity?' comparing scaling up a single writer versus self-managed sharding at RoachFest London 2026"
+category: "database"
+author: "Luca Berton"
+tags:
+  - "CockroachDB"
+  - "Primer"
+  - "Payments"
+  - "Database Migration"
+  - "RoachFest"
+  - "Sharding"
+  - "PostgreSQL"
+---
+
+**"Until you get to the point where you are on the biggest node."** That's the line I caught on the floor at **RoachFest London 2026**, mid-sentence, from **Vik Bhatti**, Senior Engineering Manager at **Primer** — the unified payment operations platform. It's a fragment, but it names the exact moment every growing single-writer database eventually reaches: the point where scaling up stops being an option, because there's no bigger node left to move to. I covered Primer's migration pattern briefly in my [RoachFest London recap](/blog/roachfest-london-2026-distributed-sql-ai-resilience/) — the "don't copy it, archive it" split between hot and cold data. This is the deeper version: the operating model Primer built around **CockroachDB**, why they ruled out sharding their own **Postgres** cluster before ever touching a migration plan, and the specific bug that only showed up after cutover.
+
+## Four Pillars of a New Operating Model
+
+Bhatti framed Primer's shift to CockroachDB as more than a database swap — a change in how the team relates to its data infrastructure, built on four pillars. **Elastic infrastructure** means infrastructure that shrinks and expands with demand, rather than being sized once for a peak that may never arrive. **Database visibility** shifts the operational unit from a single cluster to a full database estate. **Agentic operations** puts humans in charge of policy and governance while agents handle execution, moving the team from human-operated to human-supervised. And **modernized economics** extends CockroachDB beyond mission-critical transaction processing into extracting knowledge and insight from data at scale, rather than treating analytics as a bolted-on afterthought.
+
+That framing matters because it explains why Primer didn't just migrate a database — they were building toward a different relationship with their data layer entirely, one where the migration is the entry ticket rather than the destination.
+
+## Why DIY Sharding Never Made the Shortlist
+
+The write-capacity wall came first. Primer's platform is write-heavy — payment records that are created and updated constantly, not read-mostly workloads that a single Postgres primary with read replicas handles well. A single-primary architecture gives you a hard write ceiling and a single point of failure at the same time, which is an uncomfortable combination for a payments platform. On the slide Bhatti presented, the two conventional paths out from under that ceiling are stated plainly: scale up the one writer, or shard it yourself.
+
+Scaling up the writer runs out of room — that's the "biggest node" moment. Sharding it yourself is the other option most engineering teams reach for by default, and it's the one Primer spent real time rejecting. Splitting a dataset across multiple clusters does reduce per-cluster load, but it hands your team a second full-time job: resharding as data grows unevenly, routing every query to the correct shard, and handling shard failure without a distributed transaction layer to fall back on. None of that is CockroachDB's problem to solve for you when you build it yourself — it's your team's problem, indefinitely.
+
+The detail that actually killed the sharding option, rather than just making it unappealing, was concrete: Primer's largest new merchant alone would have exceeded a single shard's capacity. If one customer can blow past a shard on their own, the sharding key you'd pick today doesn't survive contact with tomorrow's biggest account — the whole scheme is undersized before it ships. That's what pushed Primer toward CockroachDB instead: massive horizontal write scale, distributed ACID transactions, native change data capture, resilient failover, and zero-downtime upgrades, with active-active multi-region already in the pipeline. Being a fully managed SaaS database also meant none of it required standing up a dedicated DBA organization — a meaningful consideration for a team that would rather stay small.
+
+## Move Before You Hit the Ceiling
+
+The migration-timing lesson Bhatti offered is the sharpest line from the whole session: **"The best migration is the one you're not under pressure to deliver."** Primer moved while they still had capacity headroom and mental bandwidth to spare — not during a peak-load event, and not after the ceiling had already started constraining the business. Migrating under constant extreme-load conditions would have been anything but smooth. It's a simple idea that's easy to state and hard to act on, because the pressure to migrate a production database rarely peaks before the pain does — most teams start planning only once the ceiling is already visible in an incident review.
+
+## Not a Drop-In Replacement
+
+The most useful engineering detail was a bug that Postgres never surfaced. Primer had a delete-and-reinsert pattern — hammering the same primary key multiple times within a single transaction — that ran fine for years under Postgres. Under CockroachDB's stricter consistency model, that same pattern produced write conflicts, surfacing to the application as retryable errors. The fix was to version the data instead of repeatedly deleting and reinserting against the same key. It's a good reminder that "PostgreSQL-compatible wire protocol" does not mean "behaves identically under every write pattern you've never had a reason to question" — the patterns that survive a migration unscathed are rarely the ones you tested, they're the ones you didn't know you were relying on.
+
+## Designing for the Cost Model
+
+The last piece was economic rather than architectural: every reduction in data volume during the transition hits the bottom line directly. Archiving infrequently-accessed data before the migration, rather than carrying it across wholesale, saved Primer significant money — the hot-versus-cold split I described in the recap wasn't only a pattern for ongoing storage, it was a cost-engineering decision made deliberately before cutover, not discovered afterward as an optimization.
+
+## Why This Matters Beyond Payments
+
+Primer's specific numbers won't transfer to every team, but the sequence of decisions will: identify the ceiling before you're forced to react to it, price out DIY sharding honestly enough to notice when your largest customer alone breaks the plan, and audit your write patterns for the ones that only worked because your old database was lenient about it. Most platforms carry at least one delete-and-reinsert pattern nobody has looked at in years — the question a migration forces you to finally ask is whether it was ever correct, or just never tested.
+
+## Related Reading
+
+- [RoachFest London 2026: Distributed SQL Meets AI Resilience](/blog/roachfest-london-2026-distributed-sql-ai-resilience/)
+- [Form3 and Kevin Holditch: Surviving Cloud Outages with CockroachDB](/blog/form3-kevin-holditch-multi-cloud-payments-roachfest-2026/)
+- [Human in the Loop: AI and Database Migrations](/blog/human-in-the-loop-ai-database-migrations-roachfest-2026/)
+- [Inside Cockroach Labs' AI Playbook: The Database Reckoning](/blog/cockroach-labs-agentic-ai-database-reckoning-roachfest-2026/)
+- [Major Tim Peake at RoachFest London: What Space Missions Teach Engineers](/blog/tim-peake-astronaut-lessons-roachfest-london-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I work at the intersection of distributed systems, platform engineering, and enterprise AI deployments. [Book a consultation](https://calendly.com/lucaberton/).

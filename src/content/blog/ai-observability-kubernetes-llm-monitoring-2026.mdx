@@ -1,0 +1,306 @@
+---
+title: "AI Observability on Kubernetes: Monitor LLM Performance"
+seoTitle: "AI Observability on Kubernetes: Monitor LLM Performance"
+snippet: "Implement AI observability for LLM workloads on Kubernetes. Track token latency, TTFT, throughput, hallucination rates, and cost per request."
+description: "Implement AI observability for LLM workloads on Kubernetes. Track token latency, TTFT, throughput, hallucination rates, and cost per request with Prometheus and Grafana."
+publishDate: "2026-06-05"
+lastModified: "2026-07-01"
+image:
+  src: "/blog/thumbnails/ai-observability-kubernetes-llm-monitoring-2026.jpg"
+  alt: "AI Observability on Kubernetes: Monitor LLM Performance"
+tags:
+  - "ai"
+  - "kubernetes"
+  - "observability"
+  - "monitoring"
+  - "llm"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import YouTube from "../../components/YouTube.astro";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+## Why AI Observability Is Different
+
+Traditional observability (RED metrics, golden signals) doesn't capture AI-specific performance:
+
+| Traditional Metrics | AI Metrics |
+|-------------------|------------|
+| Request latency | Time-to-first-token (TTFT) |
+| Error rate | Hallucination rate |
+| Throughput (req/s) | Token throughput (tok/s) |
+| CPU/memory | GPU utilization, KV-cache |
+| Uptime | Model accuracy drift |
+
+## The AI Observability Stack
+
+```
+┌─────────────────────────────────────────────┐
+│              Grafana Dashboards              │
+└──────────────────┬──────────────────────────┘
+                   │
+┌──────────────────┼──────────────────────────┐
+│           Prometheus + Thanos               │
+└──────┬───────────┼───────────┬──────────────┘
+       │           │           │
+┌──────▼───┐ ┌────▼────┐ ┌────▼─────┐
+│   vLLM   │ │  DCGM   │ │  Custom  │
+│ /metrics │ │Exporter │ │ Exporter │
+└──────────┘ └─────────┘ └──────────┘
+```
+
+## Key Metrics to Track
+
+### 1. Inference Performance
+
+```yaml
+# Prometheus rules for AI inference
+groups:
+  - name: ai-inference
+    rules:
+      # Time to first token (TTFT)
+      - record: ai:ttft_seconds:p50
+        expr: histogram_quantile(0.50, rate(vllm_time_to_first_token_seconds_bucket[5m]))
+
+      - record: ai:ttft_seconds:p99
+        expr: histogram_quantile(0.99, rate(vllm_time_to_first_token_seconds_bucket[5m]))
+
+      # Inter-token latency
+      - record: ai:itl_seconds:p50
+        expr: histogram_quantile(0.50, rate(vllm_time_per_output_token_seconds_bucket[5m]))
+
+      # Token throughput
+      - record: ai:tokens_per_second
+        expr: sum(rate(vllm_generation_tokens_total[1m]))
+
+      # Request throughput
+      - record: ai:requests_per_second
+        expr: sum(rate(vllm_request_success_total[1m]))
+```
+
+### 2. GPU Health
+
+```yaml
+      # GPU utilization
+      - record: ai:gpu_utilization:avg
+        expr: avg(DCGM_FI_DEV_GPU_UTIL)
+
+      # GPU memory used
+      - record: ai:gpu_memory_used_bytes
+        expr: DCGM_FI_DEV_FB_USED * 1024 * 1024
+
+      # GPU temperature
+      - record: ai:gpu_temperature_celsius
+        expr: DCGM_FI_DEV_GPU_TEMP
+
+      # GPU power usage
+      - record: ai:gpu_power_watts
+        expr: DCGM_FI_DEV_POWER_USAGE
+```
+
+### 3. KV-Cache and Memory
+
+```yaml
+      # KV-cache utilization
+      - record: ai:kv_cache_usage_percent
+        expr: vllm_gpu_cache_usage_perc * 100
+
+      # Pending requests (queue depth)
+      - record: ai:pending_requests
+        expr: sum(vllm_num_requests_waiting)
+
+      # Active sequences
+      - record: ai:active_sequences
+        expr: sum(vllm_num_requests_running)
+```
+
+## Alerting Rules
+
+```yaml
+groups:
+  - name: ai-inference-alerts
+    rules:
+      # TTFT degradation
+      - alert: HighTimeToFirstToken
+        expr: ai:ttft_seconds:p99 > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "P99 TTFT exceeds 5s (current: {{ $value }}s)"
+          runbook: "https://wiki.internal/runbooks/ai-ttft-high"
+
+      # GPU memory exhaustion
+      - alert: GPUMemoryNearFull
+        expr: (DCGM_FI_DEV_FB_USED / DCGM_FI_DEV_FB_TOTAL) > 0.95
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "GPU {{ $labels.gpu }} memory at {{ $value | humanizePercentage }}"
+
+      # Model serving errors
+      - alert: HighInferenceErrorRate
+        expr: |
+          sum(rate(vllm_request_failure_total[5m])) /
+          sum(rate(vllm_request_success_total[5m])) > 0.05
+        for: 3m
+        labels:
+          severity: critical
+
+      # KV-cache pressure
+      - alert: KVCachePressure
+        expr: ai:kv_cache_usage_percent > 90
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "KV-cache at {{ $value }}% — requests may be rejected"
+
+      # GPU thermal throttling
+      - alert: GPUThermalThrottle
+        expr: DCGM_FI_DEV_GPU_TEMP > 85
+        for: 2m
+        labels:
+          severity: warning
+```
+
+## Grafana Dashboard
+
+### Panel Definitions
+
+```json
+{
+  "panels": [
+    {
+      "title": "Token Throughput",
+      "type": "timeseries",
+      "targets": [{"expr": "sum(rate(vllm_generation_tokens_total[1m]))"}]
+    },
+    {
+      "title": "TTFT (P50 / P99)",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "ai:ttft_seconds:p50", "legendFormat": "P50"},
+        {"expr": "ai:ttft_seconds:p99", "legendFormat": "P99"}
+      ]
+    },
+    {
+      "title": "GPU Utilization per Pod",
+      "type": "heatmap",
+      "targets": [{"expr": "DCGM_FI_DEV_GPU_UTIL"}]
+    },
+    {
+      "title": "KV-Cache Usage",
+      "type": "gauge",
+      "targets": [{"expr": "avg(vllm_gpu_cache_usage_perc) * 100"}],
+      "thresholds": [60, 80, 90]
+    },
+    {
+      "title": "Cost per 1M Tokens",
+      "type": "stat",
+      "targets": [{"expr": "(sum(node_gpu_cost_per_hour) / sum(rate(vllm_generation_tokens_total[1h]))) * 1000000"}]
+    }
+  ]
+}
+```
+
+## Cost Tracking
+
+### Per-Request Cost Calculation
+
+```python
+# Custom metrics exporter
+from prometheus_client import Histogram, Counter, Gauge
+
+token_cost = Histogram(
+    'ai_request_cost_dollars',
+    'Cost per inference request in dollars',
+    buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0]
+)
+
+# Calculate based on GPU-hour cost and tokens generated
+GPU_COST_PER_HOUR = 3.25  # A100 spot price
+GPU_COST_PER_SECOND = GPU_COST_PER_HOUR / 3600
+
+def track_request_cost(duration_seconds, tokens_generated):
+    cost = duration_seconds * GPU_COST_PER_SECOND
+    token_cost.observe(cost)
+```
+
+### Cost Dashboard Queries
+
+```yaml
+# Cost per 1M tokens (PromQL)
+(
+  sum(rate(node_gpu_cost_hourly[1h])) /
+  sum(rate(vllm_generation_tokens_total[1h]))
+) * 1000000
+
+# Daily inference spend
+sum(rate(node_gpu_cost_hourly[24h])) * 24
+
+# Cost by model
+sum by (model) (rate(ai_request_cost_dollars_sum[1h]))
+```
+
+## OpenTelemetry Integration
+
+### Auto-Instrumentation for AI Services
+
+```yaml
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: ai-instrumentation
+spec:
+  python:
+    env:
+      - name: OTEL_PYTHON_DISABLED_INSTRUMENTATIONS
+        value: ""
+  env:
+    - name: OTEL_TRACES_EXPORTER
+      value: otlp
+    - name: OTEL_METRICS_EXPORTER
+      value: prometheus
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: http://otel-collector:4317
+```
+
+### Trace AI Request Flow
+
+```
+Client → API Gateway → Load Balancer → vLLM Pod
+  │                                        │
+  │  ┌─────────────────────────────────┐  │
+  │  │ Span: inference_request          │  │
+  │  │ ├── tokenize (2ms)              │  │
+  │  │ ├── prefill (150ms)             │  │
+  │  │ ├── decode (800ms, 200 tokens)  │  │
+  │  │ └── detokenize (1ms)            │  │
+  │  └─────────────────────────────────┘  │
+  │                                        │
+  └────────── Total: 953ms ────────────────┘
+```
+
+## Production Monitoring Checklist
+
+- [ ] TTFT, ITL, throughput dashboards
+- [ ] GPU utilization, memory, temperature
+- [ ] KV-cache pressure alerts
+- [ ] Cost per token tracking
+- [ ] Error rate and request queue depth
+- [ ] Model accuracy/quality monitoring (LLM judge)
+- [ ] Trace sampling for request debugging
+- [ ] SLO definition (P99 TTFT under 3s, error rate under 1%)
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [AI Model Serving: vLLM vs Triton vs NIM](/blog/ai-model-serving-kubernetes-vllm-triton-nim-2026/)
+- [Autoscale AI Inference with KEDA + GPUs](/blog/kubernetes-ai-inference-autoscaling-keda-gpu-2026/)
+- [LLM Inference Cost Optimization](/blog/llm-inference-cost-optimization-kubernetes-2026/)
+- [OpenTelemetry on Kubernetes](/blog/opentelemetry-kubernetes-observability-2026/)

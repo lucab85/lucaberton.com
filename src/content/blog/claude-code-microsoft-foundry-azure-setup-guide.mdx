@@ -1,0 +1,217 @@
+---
+draft: false
+title: "Claude Code on Microsoft Foundry: Complete Azure Setup Guide"
+snippet: "Deploy Claude Code through Microsoft Foundry on Azure — provisioning resources, configuring authentication, pinning model versions, and prompt caching."
+description: "Deploy Claude Code through Microsoft Foundry on Azure — from provisioning resources and configuring authentication to pinning model versions and enabling prompt caching."
+image: { src: "/blog/thumbnails/claude-code-microsoft-foundry-azure-2026.jpg", alt: "Claude Code on Microsoft Foundry Azure setup" }
+publishDate: "2026-05-30"
+lastModified: "2026-05-30"
+category: "AI"
+author: "Luca Berton"
+tags: ["claude code", "azure", "microsoft foundry", "ai", "enterprise"]
+---
+
+## Why Microsoft Foundry?
+
+If your organization runs on Azure, **Microsoft Foundry** gives you Claude Code with enterprise controls: Azure RBAC, Entra ID authentication, data residency, and centralized billing through your existing Azure subscription.
+
+Unlike the direct Anthropic API, Foundry lets you:
+
+- Keep all traffic within your Azure tenant
+- Use existing Azure credentials (no separate API keys)
+- Pin model versions to prevent breaking changes
+- Enable 1-hour prompt caching for cost optimization
+- Apply Azure RBAC for fine-grained access control
+
+## Prerequisites
+
+- Azure subscription with Microsoft Foundry access
+- RBAC permissions to create Foundry resources and deployments
+- Claude Code v2.1.149+ installed (`brew install --cask claude-code`)
+- Azure CLI (optional — only for Entra ID auth)
+
+## Step 1: Provision Your Foundry Resource
+
+1. Navigate to the [Microsoft Foundry portal](https://ai.azure.com)
+2. Create a new resource — note your **resource name**
+3. Create model deployments for:
+   - **Claude Opus** (reasoning, complex tasks)
+   - **Claude Sonnet** (balanced, daily coding)
+   - **Claude Haiku** (fast, background tasks)
+
+## Step 2: Configure Authentication
+
+### Option A: API Key (Simplest)
+
+```bash
+# Get your key from Foundry portal → Endpoints and keys
+export ANTHROPIC_FOUNDRY_API_KEY=your-azure-api-key
+```
+
+### Option B: Microsoft Entra ID (Recommended for Teams)
+
+When `ANTHROPIC_FOUNDRY_API_KEY` is not set, Claude Code automatically uses the Azure SDK default credential chain:
+
+```bash
+# Login via Azure CLI
+az login
+```
+
+This supports managed identities, service principals, and all standard Azure auth methods — ideal for CI/CD and shared workstations.
+
+> **Note:** When using Foundry, the `/logout` command in Claude Code is unavailable since authentication is handled through Azure credentials.
+
+## Step 3: Set Environment Variables
+
+```bash
+# Enable Microsoft Foundry integration
+export CLAUDE_CODE_USE_FOUNDRY=1
+
+# Your Azure resource endpoint
+export ANTHROPIC_FOUNDRY_RESOURCE=https://your-resource.services.ai.azure.com/anthropic
+```
+
+## Step 4: Pin Model Versions
+
+**This is critical.** Without pinning, Claude Code may attempt to use newer model versions that are not deployed in your Foundry account, breaking all users when Anthropic releases updates.
+
+```bash
+# Pin to specific versions you deployed
+export ANTHROPIC_DEFAULT_OPUS_MODEL='claude-opus-4-8'
+export ANTHROPIC_DEFAULT_SONNET_MODEL='claude-sonnet-4-6'
+export ANTHROPIC_DEFAULT_HAIKU_MODEL='claude-haiku-4-5'
+```
+
+Without `ANTHROPIC_DEFAULT_OPUS_MODEL`, the opus alias resolves to Opus 4.6 — set it explicitly to use the latest.
+
+Background tasks (session titles, summaries) default to your primary model if no Haiku deployment exists. Set `ANTHROPIC_DEFAULT_HAIKU_MODEL` to reduce costs on these lightweight operations.
+
+## Step 5: Enable Prompt Caching
+
+```bash
+# Request 1-hour cache TTL (default is 5 minutes)
+export ENABLE_PROMPT_CACHING_1H=1
+```
+
+The 1-hour cache significantly reduces costs for long coding sessions where context remains stable. Cache writes at 1-hour TTL are billed at a higher rate, but cache *hits* save substantially on repeated prompts.
+
+## Step 6: Launch Claude Code
+
+```bash
+# Navigate to your project
+cd ~/projects/my-app
+
+# Start Claude Code
+claude
+```
+
+You should see:
+
+```
+Sonnet 4.6 · Microsoft Foundry
+~/projects/my-app
+```
+
+The status bar confirms you are connected through Foundry with your pinned model version.
+
+## Complete Shell Configuration
+
+Add this to your `~/.zshrc` or `~/.bashrc`:
+
+```bash
+# Claude Code — Microsoft Foundry
+export CLAUDE_CODE_USE_FOUNDRY=1
+export ANTHROPIC_FOUNDRY_RESOURCE=https://your-resource.services.ai.azure.com/anthropic
+export ANTHROPIC_DEFAULT_OPUS_MODEL='claude-opus-4-8'
+export ANTHROPIC_DEFAULT_SONNET_MODEL='claude-sonnet-4-6'
+export ANTHROPIC_DEFAULT_HAIKU_MODEL='claude-haiku-4-5'
+export ENABLE_PROMPT_CACHING_1H=1
+```
+
+## Azure RBAC Configuration
+
+The built-in **Azure AI User** and **Cognitive Services User** roles include all required permissions.
+
+For least-privilege access, create a custom role:
+
+```json
+{
+  "permissions": [
+    {
+      "dataActions": [
+        "Microsoft.CognitiveServices/accounts/providers/*"
+      ]
+    }
+  ]
+}
+```
+
+## Troubleshooting
+
+### FailedToOpenSocket / Connection Timeout
+
+```
+Unable to connect to API (FailedToOpenSocket)
+Retrying in 19s · attempt 7/10
+```
+
+**Causes:**
+- Network firewall blocking outbound HTTPS to `*.services.ai.azure.com`
+- VPN/proxy not configured for Azure endpoints
+- Resource name typo in `ANTHROPIC_FOUNDRY_RESOURCE`
+
+**Fix:** Verify connectivity:
+
+```bash
+curl -I https://your-resource.services.ai.azure.com/anthropic
+```
+
+### ChainedTokenCredential Authentication Failed
+
+```
+Failed to get token from azureADTokenProvider
+```
+
+**Fix:** Either set `ANTHROPIC_FOUNDRY_API_KEY` or ensure Entra ID is configured:
+
+```bash
+az login
+az account show  # Verify correct subscription
+```
+
+### Model Not Available
+
+If Claude Code tries to use a model version you have not deployed:
+
+```bash
+# Check your deployed models in Foundry portal
+# Then pin explicitly:
+export ANTHROPIC_DEFAULT_SONNET_MODEL='claude-sonnet-4-6'
+```
+
+## Auto Mode (Preview)
+
+Auto mode is available on Foundry for Opus 4.7 and Opus 4.8:
+
+```bash
+export CLAUDE_CODE_ENABLE_AUTO_MODE=1
+```
+
+This lets Claude autonomously plan and execute multi-step tasks without confirmation prompts.
+
+## Plugins and Skills
+
+Claude Code v2.1.149 introduced automatic plugin loading from `.claude/skills` directories:
+
+```bash
+# Scaffold a new plugin
+claude plugin init my-custom-tool
+```
+
+Plugins in `.claude/skills` are loaded automatically — no marketplace registration required.
+
+## Related Content
+
+- [Fix Claude Code Installation on macOS](/blog/fix-claude-code-homebrew-macos-node-26-install/)
+- [Claude Code Bootcamp Workshop](/blog/claude-code-bootcamp-workshop-2026/)
+- [Karpathy's CLAUDE.md: Encoding LLM Discipline](/blog/karpathy-claude-md-llm-coding-principles-2026/)

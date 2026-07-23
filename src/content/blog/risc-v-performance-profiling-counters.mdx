@@ -1,0 +1,90 @@
+---
+title: "Performance Profiling and Counters on RISC-V"
+snippet: "Make RISC-V code fast — hardware performance counters (HPM), the cycle and instret CSRs, perf on Linux, and a sane workflow for finding real bottlenecks."
+description: "Make RISC-V code fast — hardware performance counters (HPM), the cycle and instret CSRs, perf on Linux, and a sane workflow for finding real bottlenecks."
+publishDate: "2026-06-11"
+lastModified: "2026-06-11"
+author: "Luca Berton"
+category: "RISC-V"
+tags: ["RISC-V", "performance", "profiling", "perf", "optimization"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-16.jpg"
+  alt: "RISC-V performance engineering and profiling session at RISC-V Summit Europe 2026"
+faq:
+  - question: "What are hardware performance counters on RISC-V?"
+    answer: "They are special registers that count microarchitectural events — cycles, retired instructions, cache misses, branch mispredictions, and more. RISC-V standardizes them as the Hardware Performance Monitor (HPM): the cycle, time, and instret counters are architectural, and mhpmcounter registers provide additional programmable event counters that profiling tools read to explain where time goes."
+  - question: "Can I use Linux perf on RISC-V?"
+    answer: "Yes. The Linux perf subsystem works on RISC-V and reads the hardware performance counters exposed by the core. You can run perf stat for summary counts and perf record/report for sampled profiles, just as on x86 or Arm, provided the kernel and the specific core expose the relevant events."
+  - question: "What is the difference between cycles and retired instructions?"
+    answer: "The cycle counter measures elapsed clock cycles, while instret counts instructions that actually completed (retired). Dividing them gives instructions-per-cycle (IPC), a key efficiency metric. A low IPC suggests the core is stalling — on cache misses, branch mispredictions, or dependencies — which points you toward the real bottleneck."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+"Make it faster" is easy to say and hard to do well — mostly because intuition about *where* a program spends its time is usually wrong. The cure is measurement, and RISC-V gives you a clean, standardized set of tools for it. Here is how performance profiling works on RISC-V, from raw counters to `perf`.
+
+![RISC-V performance engineering and profiling session at the Summit](/blog/events/riscv-summit-2026/riscv-summit-16.jpg)
+
+## Measure, Don't Guess
+
+The first rule of optimization is to **profile before you change anything**. Modern cores are deep and out-of-order enough that a hot loop may be limited by memory, by branches, or by a dependency chain — not by the line you suspect. RISC-V's answer is a standardized **Hardware Performance Monitor (HPM)** baked into the [ISA](/blog/what-is-risc-v-open-isa-explained/), so the same measurement approach works across implementations.
+
+## The Architectural Counters
+
+Three counters are part of the base architecture and readable as **CSRs** (control and status registers):
+
+| CSR | Counts |
+| --- | --- |
+| `cycle` | Clock cycles elapsed |
+| `time` | Wall-clock time (fixed frequency) |
+| `instret` | Instructions retired (completed) |
+
+You can read them directly in [assembly](/blog/risc-v-assembly-language-tutorial/):
+
+```asm
+rdcycle   t0    # cycles
+rdinstret t1    # retired instructions
+```
+
+The single most useful derived metric is **IPC** = `instret / cycle`. A low IPC means the core is **stalling** — and that tells you to go hunting for the cause.
+
+## Programmable Event Counters
+
+Beyond the fixed three, RISC-V defines **`mhpmcounter`** registers — programmable counters you point at specific microarchitectural events: **cache misses**, **branch mispredictions**, TLB misses, and more (the exact event set depends on the core). These are the counters that turn "it's slow" into "it's slow *because* the L2 miss rate is high," which is the difference between guessing and engineering.
+
+## Profiling on Linux with perf
+
+On application-class RISC-V running [Linux](/blog/risc-v-linux-distributions-guide/), you do not poke CSRs by hand — you use **`perf`**, which reads the HPM counters for you:
+
+```bash
+perf stat ./myprogram          # summary: cycles, instructions, IPC, misses
+perf record ./myprogram        # sampled profile
+perf report                    # interactive hotspot view
+```
+
+`perf stat` gives the high-level numbers; `perf record`/`perf report` show you the **hot functions**. Start at the top of the profile — that is where optimization pays off.
+
+## A Sane Optimization Workflow
+
+1. **Profile** to find the real hotspot (`perf record`/`report`).
+2. **Check IPC** on that hotspot — is it compute-bound or stall-bound?
+3. **Drill into events** — cache misses? branch mispredicts? — with programmable counters.
+4. **Change one thing**, then **re-measure** to confirm it actually helped.
+5. For data-parallel hotspots, consider the [vector extension (RVV)](/blog/risc-v-vector-extension-rvv-programming/).
+
+Resist the urge to optimize code that the profile says is cold — it is wasted effort and adds risk.
+
+## Microarchitecture Matters
+
+Two chips implementing the same ISA can behave very differently — pipeline depth, cache sizes, and predictors all vary between [cores](/blog/risc-v-open-source-cores-cva6-xiangshan/). That is *why* you profile on the actual target rather than trusting a number from a different machine. Tools like the open RISC-V cores even expose rich counters for research-grade analysis.
+
+<BlogPromoCard variant="course" />
+
+## The Bottom Line
+
+RISC-V makes performance work refreshingly principled: architectural **`cycle`**, **`time`**, and **`instret`** counters give you IPC for free, programmable **`mhpmcounter`** events explain *why* a hotspot stalls, and **`perf`** on Linux ties it all together. Measure first, change one thing at a time, and always re-measure. Done that way, optimization stops being folklore and becomes exactly what it should be — an engineering discipline grounded in real numbers from real hardware.
+
+---
+
+*Part of my RISC-V series. See also the [assembly tutorial](/blog/risc-v-assembly-language-tutorial/) and the [vector extension](/blog/risc-v-vector-extension-rvv-programming/).*

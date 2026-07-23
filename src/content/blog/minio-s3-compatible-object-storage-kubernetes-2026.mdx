@@ -1,0 +1,143 @@
+---
+title: "MinIO: S3-Compatible Object Storage on Kubernetes"
+snippet: "Run MinIO for S3-compatible storage — AI/ML data lakes, backup targets, Thanos/Loki backends, and multi-tenant enterprise deployments."
+description: "Run MinIO for S3-compatible storage — AI/ML data lakes, backup targets, Thanos/Loki backends, and multi-tenant enterprise deployments."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Kubernetes', 'Storage', 'Open Source']
+image:
+  src: "/blog/thumbnails/minio-s3-compatible-object-storage-kubernetes-2026.jpg"
+  alt: "MinIO: S3-Compatible Object Storage on Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What Is MinIO?
+
+[MinIO](https://github.com/minio/minio) is a high-performance, S3-compatible object storage system. Use it as the storage backend for Thanos, Loki, MLflow, Velero, Harbor, and any S3-compatible workload — on-prem or in Kubernetes.
+
+## Why Run Your Own S3?
+
+| Scenario | AWS S3 | MinIO |
+|----------|--------|-------|
+| Data sovereignty | ❌ AWS regions only | ✅ Your datacenter |
+| Egress costs | $0.09/GB | $0 |
+| GPU training data | High latency | Local NVMe speed |
+| Air-gapped | ❌ | ✅ |
+| Cost at 100TB | ~$2,300/mo | Hardware amortized |
+
+## Kubernetes Deployment (Operator)
+
+```bash
+# Install MinIO Operator
+kubectl krew install minio
+kubectl minio init
+
+# Create a tenant
+kubectl minio tenant create ml-storage \
+  --servers 4 \
+  --volumes 16 \
+  --capacity 10Ti \
+  --namespace minio-tenant \
+  --storage-class local-nvme
+```
+
+### Tenant YAML
+
+```yaml
+apiVersion: minio.min.io/v2
+kind: Tenant
+metadata:
+  name: production
+  namespace: minio
+spec:
+  pools:
+    - servers: 4
+      volumesPerServer: 4
+      volumeClaimTemplate:
+        spec:
+          storageClassName: local-nvme
+          resources:
+            requests:
+              storage: 1Ti
+  features:
+    encryption:
+      enabled: true
+    bucketDNS: true
+  prometheusOperator: true
+```
+
+## Use Cases
+
+### 1. Thanos Long-Term Metrics
+
+```yaml
+# thanos objstore config
+type: S3
+config:
+  bucket: thanos-metrics
+  endpoint: minio.minio.svc:9000
+  access_key: ${MINIO_ACCESS_KEY}
+  secret_key: ${MINIO_SECRET_KEY}
+  insecure: true  # Internal cluster traffic
+```
+
+### 2. Velero Backup Target
+
+```bash
+velero install \
+  --provider aws \
+  --plugins velero/velero-plugin-for-aws:v1.10.0 \
+  --bucket velero-backups \
+  --backup-location-config \
+    region=minio,s3ForcePathStyle=true,s3Url=http://minio.minio.svc:9000
+```
+
+### 3. ML Training Data Lake
+
+```python
+import boto3
+
+s3 = boto3.client('s3',
+    endpoint_url='http://minio.minio.svc:9000',
+    aws_access_key_id='minioadmin',
+    aws_secret_access_key='minioadmin'
+)
+
+# Upload training dataset
+s3.upload_file('dataset.parquet', 'ml-data', 'training/v3/dataset.parquet')
+```
+
+## Performance
+
+MinIO is designed for throughput:
+
+| Configuration | Read | Write |
+|--------------|------|-------|
+| 4 nodes, NVMe | 35 GB/s | 20 GB/s |
+| 8 nodes, NVMe | 70 GB/s | 40 GB/s |
+| 16 nodes, NVMe | 140 GB/s | 80 GB/s |
+
+For AI/ML workloads, local MinIO eliminates the S3 egress bottleneck entirely.
+
+## Erasure Coding
+
+MinIO uses erasure coding (not replication) — survive disk/node failures with minimal overhead:
+
+```
+4 servers × 4 drives = 16 drives total
+EC:4 = survive loss of 4 drives (any combination)
+Overhead: 33% (vs 100% for replication)
+Usable: 67% of raw capacity
+```
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Prometheus + Thanos](/blog/prometheus-thanos-long-term-metrics-kubernetes-2026/)
+- [Velero: K8s Backup](/blog/velero-kubernetes-backup-disaster-recovery-2026/)
+- [Longhorn: Distributed Storage](/blog/longhorn-distributed-storage-kubernetes-bare-metal-2026/)

@@ -1,0 +1,176 @@
+---
+draft: false
+title: "I Lost a Day to @Retryable — Amsterdam JUG at Doctolib"
+snippet: "Kath Alfaro Ramirez shares how a silent Spring AOP proxy bug cost a day of debugging at Doctolib, and why @Retryable is the dangerous outlier."
+description: "Kath Alfaro Ramirez shares how a silent Spring AOP proxy bug cost a full day of debugging at Doctolib, and why @Retryable is the dangerous outlier in your annotation toolkit."
+image: { src: "/blog/thumbnails/amsterdam-jug-doctolib-retryable-2026.jpg", alt: "Amsterdam JUG meetup at Doctolib office — Kath Alfaro presenting on Spring AOP" }
+publishDate: "2026-05-27"
+lastModified: "2026-05-27"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["java", "spring", "aop", "retryable", "aspectj", "meetup", "amsterdam"]
+---
+
+export const prerender = true;
+
+The Amsterdam Java User Group hosted an evening meetup at the **Doctolib** office in central Amsterdam on May 27, 2026. The headline talk was a production war story that every Spring developer needs to hear.
+
+## "I Lost a Day to @Retryable" — Kath Alfaro Ramirez
+
+**Kath Alfaro Ramirez**, software engineer at Doctolib, delivered a masterclass in debugging Spring's AOP proxy behavior. The talk title says it all — a single annotation silently failed in production, and it took a full day to figure out why.
+
+### The Setup: Mixed AOP Modes
+
+Doctolib's codebase uses **AspectJ Compile-Time Weaving (CTW)** for most annotations. This means `@Transactional`, `@Async`, and `@Cacheable` all work perfectly with self-calls — the aspect is woven directly into the bytecode at compile time.
+
+![How to know which mode your project uses](/blog/events/amsterdam-jug-doctolib-1.jpg)
+
+The configuration lives in three places: the Java config class (`@EnableTransactionManagement(mode = AdviceMode.ASPECTJ)`), the `aspectj-maven-plugin` in `pom.xml`, and the aspect library ordering.
+
+![Doctolib office — attendees watching the presentation](/blog/events/amsterdam-jug-doctolib-2.jpg)
+
+### The Cheat Sheet
+
+Here is the critical table every Spring developer should bookmark:
+
+| Annotation | AOP Mode | Self-calls work? |
+|---|---|---|
+| `@Transactional` | AspectJ CTW | ✅ |
+| `@Async` | AspectJ CTW | ✅ |
+| `@Cacheable` | AspectJ CTW | ✅ |
+| **`@Retryable`** | **Proxy (always)** | ❌ |
+
+`@Retryable` is the outlier. It **only** supports proxy mode. There is no `RetryableAspect` in `spring-aspects`.
+
+![The cheat sheet slide](/blog/events/amsterdam-jug-doctolib-4.jpg)
+
+### Why @Retryable Is the Exception
+
+The feature request for AspectJ Load-Time Weaving support (issue #111) was open from **April 2018** until **September 2025** — over 7 years. It was closed when Spring Retry entered maintenance mode with the guidance: *"migrate to Spring Framework Retry API. See new `@EnableResilientMethods`."*
+
+![@Retryable is the exception — history of issue #111](/blog/events/amsterdam-jug-doctolib-5.jpg)
+
+Key points:
+- `@EnableRetry` has no `AdviceMode.ASPECTJ` option
+- `@Retryable` is always proxy-based, always breaks on self-calls
+- `@EnableResilientMethods` exposes `proxyTargetClass`, exposes order, and also has no `AdviceMode`
+
+### The Actual Buggy Code
+
+Kath showed the real production code that bit them:
+
+![The actual buggy code — CaseReadingService](/blog/events/amsterdam-jug-doctolib-6.jpg)
+
+```java
+@Service
+public class CaseReadingService {
+
+    public void markTileAsSeen(long tileId, List<String> caseIdList,
+                               RequestUser requestUser) {
+        // ... preamble: MySQL state update, wall-group lookup ...
+
+        if (!caseIdList.isEmpty()) {
+            updateCasesSeenDocs(caseIdList, requestUser.getUserId(), wallGroupId);
+            // ↑ SELF-CALL — bypasses the proxy
+        }
+    }
+
+    @Retryable(retryFor = OptimisticLockingFailureException.class, maxAttempts = 3)
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    private void updateCasesSeenDocs(List<String> caseIdList,
+                                     long userId,
+                                     long wallGroupId) {
+        // ... build the updated CasesSeenDocuments from cases + topic data ...
+        casesSeenRepository.saveAll(updatedDocs); // ← OLE thrown here on contention
+    }
+}
+```
+
+The `@Transactional` works because it is woven via AspectJ CTW. But `@Retryable`? Proxy-only. The self-call bypasses it completely.
+
+### The Silence Is the Worst Part
+
+![The silence is the worst part — no log, no warning, no exception](/blog/events/amsterdam-jug-doctolib-8.jpg)
+
+> *"No log. No warning. No exception."*
+
+When `@Transactional` fails on a self-call in proxy mode, you get an obvious "no transaction available" symptom. When `@Retryable` self-call "fails," your original method runs normally with **zero retry attempts**. It looks like the retry decided not to fire. It did not decide. **It was never installed.**
+
+### The Fix: Extract to a Dedicated Bean
+
+![Fixed code — extracted to helper bean](/blog/events/amsterdam-jug-doctolib-9.jpg)
+
+The recommended fix is straightforward — extract the retryable method into a separate `@Service`:
+
+```java
+@Service
+public class CaseReadingService {
+
+    private final CasesSeenDocsService casesSeenDocsService; // Injected
+
+    public void markTileAsSeen(long tileId, List<String> caseIdList,
+                               RequestUser requestUser) {
+        // ... preamble ...
+        if (!caseIdList.isEmpty()) {
+            casesSeenDocsService.updateCasesSeenDocs(
+                caseIdList, requestUser.getUserId(), wallGroupId);
+            // ↑ via injected bean — goes through proxy — retry fires ✓
+        }
+    }
+}
+
+@Service
+public class CasesSeenDocsService {
+
+    @Retryable(retryFor = OptimisticLockingFailureException.class, maxAttempts = 3)
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public void updateCasesSeenDocs(List<String> caseIdList, // had to become public
+                                    long userId,
+                                    long wallGroupId) {
+        // ... body unchanged ...
+    }
+}
+```
+
+### Alternative: Self-Injection (Not Recommended)
+
+![Alternative: self-injection](/blog/events/amsterdam-jug-doctolib-10.jpg)
+
+You can also `@Autowired` the bean into itself (`private CaseReadingService self;`) and call `self.updateCasesSeenDocs()`. This works — Spring injects the proxy of THIS bean — but Kath advises against it:
+
+> *"It looks clever; clever is the wrong shape for production code. Default to extraction."*
+
+### Verifying the Fix: TestNG, Mockito, and Datadog
+
+Beyond the code fix, the team verified retry behavior using **TestNG + Mockito** for unit testing (mocking the `OptimisticLockingFailureException` and asserting retry count) and **Datadog** for production observability — confirming retries actually fire under real contention.
+
+### The Final Cheat Sheet
+
+![The cheat sheet with action column](/blog/events/amsterdam-jug-doctolib-11.jpg)
+
+| Annotation | AOP Mode | Self-calls work? | Action |
+|---|---|---|---|
+| `@Transactional` | AspectJ CTW | ✅ | No action — self-calls work |
+| `@Async` | AspectJ CTW | ✅ | No action — self-calls work |
+| `@Cacheable` | AspectJ CTW | ✅ | No action — self-calls work |
+| `@Retryable` | Proxy (always) | ❌ | **Extract to a dedicated bean** |
+
+### 3 Takeaways
+
+![3 takeaways](/blog/events/amsterdam-jug-doctolib-12.jpg)
+
+1. **Know which AOP mode your project uses.** Check the three places.
+2. **`@Retryable` is the outlier** — and stays the outlier in Spring 7. Do not trust the "self-calls work" intuition you have built. The helper-class fix survives the migration to `@EnableResilientMethods`.
+3. **Silent failures are worse than loud ones.** The bug took a day because nothing screamed.
+
+## About the Venue
+
+The meetup was hosted at **Doctolib**'s Amsterdam office — the French-German healthtech company building "La solution sécurisée pour les professionnels de santé" (the secure solution for healthcare professionals). Their platform centralizes network information, connects caregivers, and facilitates coordination missions across Europe.
+
+## About the Amsterdam JUG
+
+The Amsterdam Java User Group brings together Java developers from across the Netherlands for regular evening meetups featuring talks on JVM ecosystem topics — from Spring internals to observability, from reactive programming to AI integration.
+
+---
+
+*Have you been bitten by silent proxy failures? I write about Java, Spring, Kubernetes, and production debugging at [lucaberton.com](https://lucaberton.com). Book a free consultation on [Calendly](https://calendly.com/lucaberton/) to discuss your platform challenges.*

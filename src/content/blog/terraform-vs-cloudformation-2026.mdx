@@ -1,0 +1,158 @@
+---
+draft: false
+title: "Terraform vs CloudFormation 2026: IaC Comparison"
+snippet: "Terraform vs AWS CloudFormation compared for 2026. Multi-cloud vs AWS-native, HCL vs JSON/YAML, state management, and which IaC tool to choose."
+description: "Terraform vs CloudFormation IaC comparison 2026. Multi-cloud vs AWS-native, HCL vs YAML, state, drift detection, and decision guide."
+image:
+  src: "/blog/thumbnails/terraform-vs-cloudformation-2026.jpg"
+  alt: "Terraform vs CloudFormation: Infrastructure as Code"
+publishDate: "2026-04-04"
+lastModified: "2026-05-03"
+author: "Luca Berton"
+category: "DevOps"
+tags:
+  - "terraform"
+  - "cloudformation"
+  - "aws"
+  - "infrastructure-as-code"
+---
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+**Terraform** is HashiCorp's multi-cloud IaC tool using HCL. **AWS CloudFormation** is AWS's native IaC service using JSON or YAML. Both provision infrastructure declaratively, but they serve different architectural philosophies — multi-cloud portability vs deep AWS integration.
+
+## Architecture
+
+**Terraform** runs as a CLI binary on your machine or CI runner. It reads `.tf` files, builds a dependency graph, and calls provider APIs to create/update/destroy resources. State is stored in a backend (S3, Terraform Cloud, PostgreSQL).
+
+```hcl
+# Terraform: VPC + EC2 in HCL
+provider "aws" {
+  region = "eu-west-1"
+}
+
+resource "aws_vpc" "main" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_hostnames = true
+  tags = { Name = "production" }
+}
+
+resource "aws_instance" "web" {
+  ami           = "ami-0abcdef1234567890"
+  instance_type = "t3.medium"
+  subnet_id     = aws_subnet.public.id
+
+  tags = { Name = "web-server" }
+}
+```
+
+**CloudFormation** is a managed AWS service. You upload a template, and AWS handles orchestration, rollback, and state management. No state file to manage — AWS tracks everything internally.
+
+```yaml
+# CloudFormation: same infrastructure in YAML
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  MainVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: production
+
+  WebServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: ami-0abcdef1234567890
+      InstanceType: t3.medium
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: web-server
+```
+
+## Feature Comparison
+
+| Capability | Terraform | CloudFormation |
+|---|---|---|
+| **Cloud support** | AWS, Azure, GCP, 3000+ providers | AWS only |
+| **Language** | HCL (purpose-built) | JSON or YAML |
+| **State management** | External backend (you manage) | Managed by AWS (zero maintenance) |
+| **Drift detection** | `terraform plan` (manual) | Built-in drift detection |
+| **Rollback** | Manual (apply previous state) | Automatic on stack failure |
+| **Modules/reuse** | Terraform Registry + private modules | Nested stacks + CloudFormation Registry |
+| **Preview changes** | `terraform plan` | Change sets |
+| **Cost** | Free (OSS) or Terraform Cloud ($$$) | Free (AWS service) |
+| **Import existing** | `terraform import` | `aws cloudformation import` |
+| **Secret handling** | Sensitive variables, Vault integration | SSM Parameter Store, Secrets Manager |
+| **IDE support** | Excellent (VS Code, IntelliJ) | AWS Toolkit, cfn-lint |
+| **Testing** | Terratest, `terraform test` | cfn-guard, TaskCat |
+
+## State Management: The Critical Difference
+
+Terraform's state file is both its greatest strength and biggest operational burden. State enables powerful features like `plan` (preview changes before applying) and resource dependency tracking. But you must:
+
+- Store state securely (encrypted S3 + DynamoDB locking)
+- Never lose it (state loss = orphaned resources)
+- Handle state locking in CI/CD pipelines
+- Manage state across team access
+
+```hcl
+# Terraform remote state backend
+terraform {
+  backend "s3" {
+    bucket         = "mycompany-terraform-state"
+    key            = "prod/vpc/terraform.tfstate"
+    region         = "eu-west-1"
+    encrypt        = true
+    dynamodb_table = "terraform-locks"
+  }
+}
+```
+
+CloudFormation has no state file concept. AWS manages the stack state internally. This eliminates an entire category of operational issues — no state corruption, no locking races, no accidental deletion.
+
+## When to Use Each
+
+**Use Terraform when:**
+- You deploy across multiple clouds (AWS + Azure + GCP)
+- Your team manages non-AWS resources (Cloudflare, Datadog, PagerDuty, GitHub)
+- You want a single IaC tool for everything
+- You need the Terraform module ecosystem
+- You are considering [OpenTofu](/blog/terraform-vs-opentofu-2026/) for license flexibility
+
+**Use CloudFormation when:**
+- You are 100% AWS and plan to stay there
+- You want zero state management overhead
+- You need automatic rollback on deployment failures
+- You use AWS-specific features on day one (new service support)
+- Your organization has AWS Enterprise Support (CloudFormation support included)
+
+**Consider CDK (AWS Cloud Development Kit):**
+If you want CloudFormation's managed state but dislike YAML, AWS CDK lets you write infrastructure in TypeScript, Python, or Java that synthesizes to CloudFormation templates.
+
+## Migration Path
+
+Moving from CloudFormation to Terraform:
+
+```bash
+# 1. Import existing CloudFormation-managed resources
+terraform import aws_vpc.main vpc-0123456789abcdef
+
+# 2. Generate config from state
+terraform show -no-color > imported.tf
+
+# 3. Refine and plan
+terraform plan
+```
+
+Moving from Terraform to CloudFormation is harder — you must recreate templates and carefully decommission Terraform state without destroying resources.
+
+## Related Reading
+
+- [Terraform vs OpenTofu](/blog/terraform-vs-opentofu-2026/)
+- [Terraform vs Pulumi](/blog/terraform-vs-pulumi-2026/)
+- [Crossplane vs Terraform](/blog/crossplane-vs-terraform-2026/)
+- [Terraform vs Ansible](/blog/terraform-vs-ansible-when-to-use-which-2026/)
+
+<BlogPromoCard />

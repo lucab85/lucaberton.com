@@ -1,0 +1,138 @@
+---
+title: "Harbor: Enterprise Container Registry on Kubernetes"
+seoTitle: "Harbor: Enterprise Container Registry on Kubernetes"
+snippet: "Deploy Harbor for vulnerability scanning, image signing, replication, RBAC, and Helm chart hosting — the CNCF graduated registry."
+description: "Deploy Harbor for vulnerability scanning, image signing, replication, RBAC, and Helm chart hosting — the CNCF graduated registry."
+publishDate: "2026-06-05"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['Kubernetes', 'Security', 'DevOps']
+image:
+  src: "/blog/thumbnails/harbor-container-registry-kubernetes-setup-2026.jpg"
+  alt: "Harbor: Enterprise Container Registry on Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What Is Harbor?
+
+[Harbor](https://github.com/goharbor/harbor) is an enterprise container registry with vulnerability scanning, image signing, replication, and RBAC. CNCF Graduated, 25K+ GitHub stars.
+
+### Harbor vs Docker Hub vs ECR
+
+| Feature | Harbor | Docker Hub | ECR/GCR/ACR |
+|---------|--------|------------|-------------|
+| Self-hosted | ✅ | ❌ | ❌ |
+| Vulnerability scanning | ✅ (Trivy) | ⚠️ Paid | ✅ |
+| Image signing | ✅ (Cosign/Notary) | ❌ | ⚠️ |
+| Replication | ✅ (multi-site) | ❌ | ⚠️ (cross-region) |
+| RBAC | ✅ Fine-grained | ⚠️ Basic | ✅ |
+| Helm charts | ✅ | ❌ | ⚠️ |
+| Quotas | ✅ Per-project | 💰 | ✅ |
+| Cost | $0 + infra | $7-25/mo | Per-GB |
+
+## Helm Installation
+
+```bash
+helm repo add harbor https://helm.goharbor.io
+helm install harbor harbor/harbor \
+  --namespace harbor \
+  --create-namespace \
+  --set expose.type=ingress \
+  --set expose.ingress.hosts.core=registry.yourdomain.com \
+  --set expose.tls.certSource=secret \
+  --set persistence.persistentVolumeClaim.registry.size=500Gi \
+  --set persistence.persistentVolumeClaim.database.size=50Gi \
+  --set harborAdminPassword=your-secure-password \
+  --set trivy.enabled=true
+```
+
+## Key Features
+
+### Automatic Vulnerability Scanning
+
+Every pushed image is scanned with Trivy:
+
+```bash
+# Push triggers automatic scan
+docker push registry.yourdomain.com/myproject/api:v1.2.3
+
+# Harbor blocks pull if critical CVEs found (configurable)
+# Policy: prevent deployment of images with Critical/High CVEs
+```
+
+### Image Signing (Supply Chain Security)
+
+```bash
+# Sign with Cosign
+cosign sign --key cosign.key registry.yourdomain.com/myproject/api:v1.2.3
+
+# Kubernetes admission controller verifies signatures
+# Only signed images can run in production namespaces
+```
+
+### Replication (Multi-Site)
+
+```
+┌──────────────┐         ┌──────────────┐
+│  Harbor EU   │◀──sync──▶│  Harbor US   │
+│  (primary)   │         │  (replica)   │
+└──────────────┘         └──────────────┘
+       │
+       │  push from CI/CD
+       │
+┌──────▼──────┐
+│  Developers │
+└─────────────┘
+```
+
+Images replicated across regions for HA and faster pulls.
+
+### Garbage Collection
+
+```bash
+# Schedule GC to reclaim storage from deleted tags
+# Harbor Admin → Configuration → Garbage Collection → Schedule
+# Recommended: weekly, during low-traffic hours
+```
+
+## Integration with Kubernetes
+
+```yaml
+# ImagePullSecret for Harbor
+apiVersion: v1
+kind: Secret
+metadata:
+  name: harbor-registry
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: <base64-encoded-config>
+---
+# Pod spec
+spec:
+  imagePullSecrets:
+    - name: harbor-registry
+  containers:
+    - name: app
+      image: registry.yourdomain.com/production/api:v1.2.3
+```
+
+## Storage Sizing
+
+| Images | Tags/Image | Avg Size | Total Storage |
+|--------|-----------|----------|---------------|
+| 50 | 10 | 500MB | 250GB |
+| 200 | 20 | 500MB | 2TB |
+| 500 | 30 | 1GB | 15TB |
+
+Enable layer deduplication — reduces actual storage by 40-60%.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Cilium: eBPF Networking](/blog/cilium-ebpf-kubernetes-networking-security-2026/)
+- [External Secrets Operator](/blog/external-secrets-operator-kubernetes-vault-2026/)
+- [Velero: K8s Backup](/blog/velero-kubernetes-backup-disaster-recovery-2026/)

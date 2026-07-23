@@ -1,0 +1,135 @@
+---
+title: "RISC-V Vector Programming with RVV 1.0"
+seoTitle: "RISC-V Vector Programming with RVV 1.0"
+snippet: "A hands-on introduction to the RISC-V Vector extension (RVV 1.0) — the vector-length-agnostic model, key instructions, and a worked SAXPY example you can run."
+description: "A hands-on introduction to the RISC-V Vector extension (RVV 1.0) — the vector-length-agnostic model, key instructions, and a worked SAXPY example you can run."
+publishDate: "2026-06-11"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "RISC-V"
+tags: ["RISC-V", "RVV", "vector", "SIMD", "tutorial"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-66.jpg"
+  alt: "Tape-out RISC-V chips, representing vector-capable silicon"
+faq:
+  - question: "What is vector-length-agnostic programming?"
+    answer: "It is a model where you write vector code without hardcoding the vector width. The hardware reports how many elements it can process per iteration via the vsetvl instruction, and your loop adapts automatically — so the same binary runs efficiently on chips with different vector register lengths."
+  - question: "How is RISC-V Vector different from AVX or NEON?"
+    answer: "AVX and NEON have fixed register widths, so code is tied to a specific width and must be rewritten for new generations. RVV is length-agnostic: you query the runtime vector length and stripmine your loop, so one binary scales across implementations from 128-bit to multi-kilobit vector registers."
+  - question: "How can I try RISC-V vector code without hardware?"
+    answer: "Use QEMU with the vector extension enabled, for example 'qemu-system-riscv64 -cpu rv64,v=true,vlen=128', or a board built on the SpacemiT K1 such as the Banana Pi BPI-F3, which implements RVV 1.0."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+The **RISC-V Vector extension (RVV 1.0)** is one of the most important pieces of the [ISA](/blog/risc-v-extensions-explained-isa-alphabet/) — the foundation of RISC-V's push into AI and HPC. But it works differently from the SIMD you may know from x86 (AVX) or ARM (NEON). This hands-on guide explains the *vector-length-agnostic* model and walks through a runnable example.
+
+![Tape-out RISC-V chips on display at the Summit](/blog/events/riscv-summit-2026/riscv-summit-66.jpg)
+
+## The Big Idea: Length-Agnostic Vectors
+
+Traditional SIMD bakes the register width into the instruction set. AVX-512 means 512-bit registers; NEON means 128-bit. When a new, wider generation arrives, you rewrite or recompile your kernels. That is a recurring tax.
+
+RISC-V takes a different path. With RVV, you do **not** hardcode the width. Instead, your code *asks* the hardware how many elements it can handle right now, processes that many, and loops. The same binary runs on a 128-bit implementation and a multi-kilobit one — each just does more or fewer elements per iteration. This is **vector-length-agnostic (VLA)** programming, and it is RVV's defining feature.
+
+## The Core Mechanism: vsetvl
+
+The instruction that makes VLA work is **`vsetvli`** (set vector length). You tell it how many elements you *want* to process and the element type; it returns how many it *will* process this iteration (the "vl"), capped by the hardware's capability.
+
+```asm
+# a0 = number of elements remaining
+# request that many 32-bit (e32) elements, grouping registers x1 (m1)
+vsetvli t0, a0, e32, m1, ta, ma   # t0 = granted vector length (vl)
+```
+
+Key parameters:
+
+- **SEW (Selected Element Width)** — `e8`, `e16`, `e32`, `e64`: the size of each element.
+- **LMUL (vector register grouping)** — `m1`, `m2`, `m4`, `m8` (or fractional `mf2`): how many vector registers to gang together for more elements per pass.
+- **Tail/mask policy** — `ta`/`tu` and `ma`/`mu` control what happens to unused tail and masked elements.
+
+You then operate on whole vectors and advance your pointers by `vl` elements. This loop pattern is called **stripmining**.
+
+## A Worked Example: SAXPY
+
+SAXPY (`y = a*x + y`, single-precision) is the "hello world" of vector code. Here is the VLA loop in RISC-V vector assembly:
+
+```asm
+# void saxpy(size_t n, float a, const float *x, float *y)
+# a0 = n, fa0 = a, a1 = x, a2 = y
+saxpy:
+.loop:
+    vsetvli  t0, a0, e32, m8, ta, ma   # t0 = elements this pass
+    vle32.v  v0, (a1)                  # load x[i..i+vl]
+    sub      a0, a0, t0                # n -= vl
+    slli     t1, t0, 2                 # bytes = vl * 4
+    add      a1, a1, t1                # x += vl
+    vle32.v  v8, (a2)                  # load y[i..i+vl]
+    vfmacc.vf v8, fa0, v0             # y = a*x + y (fused multiply-add)
+    vse32.v  v8, (a2)                  # store y back
+    add      a2, a2, t1                # y += vl
+    bnez     a0, .loop                 # repeat until done
+    ret
+```
+
+Notice there is **no hardcoded width** anywhere. The same routine runs optimally whether the chip has 128-bit or 2048-bit vector registers — `vsetvli` adapts every iteration.
+
+## You Usually Don't Write Assembly
+
+In practice you let the compiler vectorize. Modern **GCC** and **Clang/LLVM** auto-vectorize for RVV, and you can also use **intrinsics** for control without dropping to assembly:
+
+```c
+#include <riscv_vector.h>
+
+void saxpy(size_t n, float a, const float *x, float *y) {
+    for (size_t vl; n > 0; n -= vl, x += vl, y += vl) {
+        vl = __riscv_vsetvl_e32m8(n);
+        vfloat32m8_t vx = __riscv_vle32_v_f32m8(x, vl);
+        vfloat32m8_t vy = __riscv_vle32_v_f32m8(y, vl);
+        vy = __riscv_vfmacc_vf_f32m8(vy, a, vx, vl);
+        __riscv_vse32_v_f32m8(y, vy, vl);
+    }
+}
+```
+
+Compile it with the vector extension enabled:
+
+```bash
+riscv64-linux-gnu-gcc -march=rv64gcv -O3 -c saxpy.c
+# or with Clang:
+clang --target=riscv64-linux-gnu -march=rv64gcv -O3 -c saxpy.c
+```
+
+(See [Build a RISC-V Toolchain](/blog/build-risc-v-toolchain-gcc-llvm/) if you do not have a cross-compiler yet.)
+
+## Running It Without Hardware
+
+You do not need a vector board to experiment. Enable RVV in QEMU:
+
+```bash
+qemu-system-riscv64 -machine virt -cpu rv64,v=true,vlen=128 ...
+```
+
+Or run user-mode binaries with a vector-capable CPU model. For real silicon, the [Banana Pi BPI-F3](/blog/risc-v-development-boards-2026-guide/) (SpacemiT K1) implements RVV 1.0 and is the most accessible vector board in 2026.
+
+## Why VLA Wins for AI and HPC
+
+The length-agnostic model is exactly what a fast-moving field like AI wants: write the kernel once, and it scales as vector hardware grows — no per-generation rewrites. This is why RVV underpins the [Monte Cimone HPC results](/blog/risc-v-datacenter-servers-sovereign-ai-2026/) and why the ecosystem is layering **matrix extensions (IME/VME)** on top, with a unified LLVM/MLIR lowering path so AI frameworks target them automatically.
+
+## Tips and Pitfalls
+
+- **Pick LMUL deliberately.** `m8` maximizes throughput but uses more registers; `m1` leaves room for other live vectors. Profile both.
+- **Mind the tail.** VLA loops handle remainder elements naturally — no scalar cleanup loop needed. That is a real advantage over fixed-width SIMD.
+- **Use FMA.** `vfmacc` fuses multiply-add for better accuracy and throughput.
+- **Let the compiler try first.** `-O3 -march=rv64gcv` auto-vectorizes a lot; reach for intrinsics only where it falls short.
+
+<BlogPromoCard variant="course" />
+
+## The Bottom Line
+
+RVV 1.0 reframes SIMD around a simple, powerful idea: ask the hardware how wide it is, then loop. That single decision delivers binary portability across vector widths and makes RISC-V genuinely future-proof for AI and HPC. Start with the compiler, drop to intrinsics when you must, and verify in [QEMU](/blog/getting-started-risc-v-qemu-emulation-linux/) before moving to silicon.
+
+---
+
+*Part of my RISC-V series — see also [RISC-V Extensions Explained](/blog/risc-v-extensions-explained-isa-alphabet/) and [RISC-V AI Accelerators](/blog/risc-v-ai-accelerators-open-silicon-2026/).*

@@ -1,0 +1,174 @@
+---
+title: "etcd Backup & Maintenance for Production Kubernetes"
+snippet: "Protect your cluster state — automated etcd snapshots, defragmentation schedules, performance tuning, and disaster recovery procedures."
+description: "Protect your cluster state — automated etcd snapshots, defragmentation schedules, performance tuning, and disaster recovery procedures."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['Kubernetes', 'DevOps', 'Disaster Recovery']
+image:
+  src: "/blog/thumbnails/kubernetes-etcd-backup-maintenance-production-2026.jpg"
+  alt: "etcd Backup and Maintenance for Production Kubernetes Clusters"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## Why etcd Matters
+
+etcd stores **everything** in your Kubernetes cluster — every pod, service, secret, configmap, RBAC rule. Lose etcd, lose your cluster.
+
+```
+Kubernetes API Server → etcd (single source of truth)
+                         │
+                         ├── All resource definitions
+                         ├── All secrets (encrypted at rest)
+                         ├── All RBAC policies
+                         ├── All CRD instances
+                         └── Lease objects (leader election)
+```
+
+## Automated Backup
+
+### CronJob Approach
+
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-backup
+  namespace: kube-system
+spec:
+  schedule: "0 */4 * * *"  # Every 4 hours
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          hostNetwork: true
+          nodeSelector:
+            node-role.kubernetes.io/control-plane: ""
+          tolerations:
+            - effect: NoSchedule
+              operator: Exists
+          containers:
+            - name: backup
+              image: registry.k8s.io/etcd:3.5.15
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  etcdctl snapshot save /backup/etcd-$(date +%Y%m%d-%H%M%S).db \
+                    --endpoints=https://127.0.0.1:2379 \
+                    --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+                    --cert=/etc/kubernetes/pki/etcd/server.crt \
+                    --key=/etc/kubernetes/pki/etcd/server.key
+                  # Upload to S3
+                  aws s3 cp /backup/etcd-*.db s3://cluster-backups/etcd/
+                  # Keep only last 10 local
+                  ls -t /backup/*.db | tail -n +11 | xargs rm -f
+              volumeMounts:
+                - name: etcd-certs
+                  mountPath: /etc/kubernetes/pki/etcd
+                  readOnly: true
+                - name: backup-dir
+                  mountPath: /backup
+          volumes:
+            - name: etcd-certs
+              hostPath:
+                path: /etc/kubernetes/pki/etcd
+            - name: backup-dir
+              hostPath:
+                path: /var/lib/etcd-backups
+```
+
+## Restore Procedure
+
+```bash
+# 1. Stop API server and etcd on all control plane nodes
+systemctl stop kubelet
+
+# 2. Restore snapshot
+ETCDCTL_API=3 etcdctl snapshot restore snapshot.db \
+  --data-dir=/var/lib/etcd-restored \
+  --name=control-plane-1 \
+  --initial-cluster=control-plane-1=https://10.0.0.1:2380 \
+  --initial-advertise-peer-urls=https://10.0.0.1:2380
+
+# 3. Replace etcd data directory
+mv /var/lib/etcd /var/lib/etcd-old
+mv /var/lib/etcd-restored /var/lib/etcd
+
+# 4. Restart
+systemctl start kubelet
+```
+
+## Defragmentation
+
+etcd accumulates dead space over time (deleted keys leave gaps). Defrag periodically:
+
+```bash
+# Check fragmentation
+etcdctl endpoint status --write-out=table
+# Look at DB SIZE vs DB SIZE IN USE
+
+# Defragment (one member at a time!)
+etcdctl defrag --endpoints=https://etcd-0:2379
+etcdctl defrag --endpoints=https://etcd-1:2379
+etcdctl defrag --endpoints=https://etcd-2:2379
+```
+
+**Schedule:** Weekly defrag during maintenance windows. Never defrag all members simultaneously.
+
+## Performance Tuning
+
+```yaml
+# /etc/kubernetes/manifests/etcd.yaml
+spec:
+  containers:
+    - command:
+        - etcd
+        - --quota-backend-bytes=8589934592    # 8GB (default 2GB)
+        - --auto-compaction-retention=8h       # Compact history older than 8h
+        - --auto-compaction-mode=periodic
+        - --snapshot-count=10000               # Snapshot every 10K transactions
+        - --heartbeat-interval=250             # 250ms (latency-sensitive)
+        - --election-timeout=2500              # 2.5s
+```
+
+## Monitoring
+
+| Metric | Warning | Critical |
+|--------|---------|----------|
+| DB size | over 4GB | over 6GB |
+| Leader changes | over 3/hour | over 10/hour |
+| WAL fsync duration | over 50ms | over 100ms |
+| Proposal failures | over 0 | over 5/min |
+| gRPC request duration (P99) | over 100ms | over 500ms |
+
+```yaml
+# PrometheusRule
+- alert: EtcdDBSizeHigh
+  expr: etcd_mvcc_db_total_size_in_bytes > 6e9
+  for: 5m
+  labels:
+    severity: critical
+```
+
+## Disaster Scenarios
+
+| Scenario | Recovery |
+|----------|----------|
+| 1 of 3 members lost | Auto-heals (quorum intact) |
+| 2 of 3 members lost | Restore from snapshot (quorum lost) |
+| All members lost | Restore from latest backup |
+| Data corruption | Restore from backup + reconcile |
+| Disk full | Emergency compaction + defrag |
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Velero: K8s Backup](/blog/velero-kubernetes-backup-disaster-recovery-2026/)
+- [Longhorn: Distributed Storage](/blog/longhorn-distributed-storage-kubernetes-bare-metal-2026/)
+- [Prometheus + Thanos](/blog/prometheus-thanos-long-term-metrics-kubernetes-2026/)

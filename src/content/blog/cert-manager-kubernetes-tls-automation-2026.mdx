@@ -1,0 +1,170 @@
+---
+title: "cert-manager: Automate TLS Certificates in Kubernetes"
+snippet: "Zero-touch TLS with cert-manager — Let's Encrypt, Venafi, Vault CA, wildcard certs, and automatic renewal for all your Ingress resources."
+description: "Zero-touch TLS with cert-manager — Let's Encrypt, Venafi, Vault CA, wildcard certs, and automatic renewal for all your Ingress resources."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['Kubernetes', 'Security', 'DevOps']
+image:
+  src: "/blog/thumbnails/cert-manager-kubernetes-tls-automation-2026.jpg"
+  alt: "cert-manager: Automate TLS Certificates in Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What Is cert-manager?
+
+[cert-manager](https://github.com/cert-manager/cert-manager) automates TLS certificate management in Kubernetes. Issue certificates from Let's Encrypt, Vault, Venafi, or any ACME-compatible CA — with automatic renewal. CNCF Graduated, 12K+ stars.
+
+## Installation
+
+```bash
+helm repo add jetstack https://charts.jetstack.io
+helm install cert-manager jetstack/cert-manager \
+  --namespace cert-manager \
+  --create-namespace \
+  --set crds.enabled=true
+```
+
+## ClusterIssuer (Let's Encrypt)
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: admin@yourdomain.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+      - dns01:
+          cloudDNS:
+            project: my-gcp-project
+          selector:
+            dnsZones:
+              - "yourdomain.com"
+```
+
+## Automatic Certificate for Ingress
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: my-app
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+    - hosts:
+        - app.yourdomain.com
+      secretName: app-tls  # cert-manager creates this automatically
+  rules:
+    - host: app.yourdomain.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: my-app
+                port:
+                  number: 8080
+```
+
+That's it. cert-manager will:
+1. Detect the annotation
+2. Request a certificate from Let's Encrypt
+3. Complete the HTTP-01 or DNS-01 challenge
+4. Store the cert in the `app-tls` Secret
+5. Renew automatically 30 days before expiry
+
+## Wildcard Certificates (DNS-01)
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: wildcard-cert
+  namespace: default
+spec:
+  secretName: wildcard-tls
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+    - "yourdomain.com"
+    - "*.yourdomain.com"
+```
+
+Wildcard requires DNS-01 challenge (not HTTP-01).
+
+## Internal CA (HashiCorp Vault)
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: vault-issuer
+spec:
+  vault:
+    server: https://vault.example.com
+    path: pki_int/sign/kubernetes
+    auth:
+      kubernetes:
+        role: cert-manager
+        mountPath: /v1/auth/kubernetes
+        serviceAccountRef:
+          name: cert-manager
+```
+
+## Certificate Lifecycle
+
+```
+┌─────────────┐     ┌──────────────┐     ┌─────────────┐
+│  Certificate│────▶│ CertRequest  │────▶│   Order     │
+│  (desired)  │     │ (internal)   │     │ (ACME)      │
+└─────────────┘     └──────────────┘     └──────┬──────┘
+                                                 │
+                    ┌──────────────┐     ┌───────▼──────┐
+                    │   Secret     │◀────│  Challenge   │
+                    │ (TLS cert)   │     │ (HTTP/DNS)   │
+                    └──────────────┘     └──────────────┘
+                           │
+                    Auto-renew at 66% lifetime
+```
+
+## Monitoring
+
+```yaml
+# PrometheusRule for cert-manager
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+spec:
+  groups:
+    - name: cert-manager
+      rules:
+        - alert: CertificateExpiringSoon
+          expr: certmanager_certificate_expiration_timestamp_seconds - time() < 7*24*3600
+          labels:
+            severity: warning
+          annotations:
+            summary: "Certificate {{ $labels.name }} expires in 7 days"
+```
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [External Secrets Operator](/blog/external-secrets-operator-kubernetes-vault-2026/)
+- [Keycloak: IAM on K8s](/blog/keycloak-identity-access-management-kubernetes-2026/)
+- [Istio Service Mesh](/blog/istio-service-mesh-kubernetes-production-2026/)

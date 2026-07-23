@@ -1,0 +1,181 @@
+---
+draft: false
+title: "Kubernetes Migration Strategy: Enterprise Guide 2026"
+snippet: "Complete Kubernetes migration strategy for enterprise workloads: assessment frameworks, migration patterns, tooling, and a phased rollout plan."
+description: "Complete Kubernetes migration strategy for enterprise workloads — assessment frameworks, migration patterns (lift-and-shift, refactor, replatform), tooling, and a phased rollout plan."
+image: { src: "/blog/thumbnails/kubernetes-migration-strategy-2026.jpg", alt: "Kubernetes migration strategy enterprise guide 2026" }
+publishDate: "2026-06-01"
+lastModified: "2026-06-01"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "migration", "platform engineering", "enterprise", "strategy"]
+---
+
+## Why Migrate to Kubernetes in 2026?
+
+If you are still running workloads on VMs, bare metal, or legacy orchestrators (Docker Swarm, Mesos, Nomad), the question is no longer *if* but *how* to migrate to Kubernetes. The ecosystem maturity, operational tooling, and talent availability in 2026 make K8s the default for any workload that needs to scale, self-heal, or deploy frequently.
+
+But migration is not a weekend project. It requires **assessment**, **planning**, **execution**, and **validation** — especially at enterprise scale where downtime costs real money.
+
+## The Migration Assessment Framework
+
+Before touching any workload, score each application on five dimensions:
+
+### Application Readiness Matrix
+
+| Dimension | Score 1 (Hard) | Score 3 (Medium) | Score 5 (Easy) |
+|-----------|----------------|-------------------|-----------------|
+| **State** | Persistent local disk | External DB + local cache | Fully stateless |
+| **Config** | Hardcoded, env-specific | Config files, some env vars | 12-factor, all env vars |
+| **Networking** | Fixed IPs, host networking | DNS-based, some port assumptions | Service discovery ready |
+| **Dependencies** | Tight coupling, shared libs | API boundaries, some shared state | Loosely coupled microservices |
+| **Observability** | No health checks, custom logs | Basic health endpoints | Structured logs, metrics, probes |
+
+**Score 20-25**: Migrate immediately (lift-and-shift works)
+**Score 12-19**: Replatform with minor changes
+**Score 5-11**: Refactor required before migration
+
+## Three Migration Patterns
+
+### 1. Lift-and-Shift (Containerize As-Is)
+
+**Best for**: Stateless web apps, APIs, batch jobs scoring 20+
+
+```yaml
+# Minimal Deployment — same binary, new orchestrator
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: legacy-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: legacy-api
+  template:
+    spec:
+      containers:
+      - name: api
+        image: registry.company.com/legacy-api:v2.3.1
+        ports:
+        - containerPort: 8080
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: db-credentials
+              key: url
+```
+
+**Effort**: Low (days)
+**Risk**: Low
+**Benefit**: Immediate K8s scheduling, scaling, self-healing
+
+### 2. Replatform (Containerize + Adapt)
+
+**Best for**: Apps that need config externalization, health checks, or log format changes
+
+Common replatforming tasks:
+- Extract config to ConfigMaps/Secrets
+- Add liveness/readiness probes
+- Switch to stdout/stderr logging
+- Replace file-based sessions with Redis/external cache
+- Add graceful shutdown handling (SIGTERM)
+
+**Effort**: Medium (weeks)
+**Risk**: Medium
+**Benefit**: Production-grade K8s deployment with proper observability
+
+### 3. Refactor (Redesign for Cloud-Native)
+
+**Best for**: Monoliths that need to become microservices, tightly coupled systems
+
+This is the most expensive option and should only be chosen when:
+- The monolith is actively blocking feature delivery
+- Performance requirements demand horizontal scaling of specific components
+- Team structure aligns with service boundaries (Conway's Law)
+
+**Effort**: High (months)
+**Risk**: High
+**Benefit**: True cloud-native architecture with independent scaling and deployment
+
+## The Phased Rollout Plan
+
+### Phase 1: Foundation (Weeks 1-4)
+
+1. **Provision cluster** — EKS/AKS/GKE or on-prem with kubeadm/Rancher
+2. **Set up platform** — Ingress controller, cert-manager, external-dns, monitoring stack
+3. **CI/CD pipeline** — Container build + deploy to K8s (ArgoCD/Flux/Tekton)
+4. **Security baseline** — Network policies, RBAC, pod security standards, image scanning
+
+### Phase 2: Pilot (Weeks 5-8)
+
+1. **Select 2-3 low-risk workloads** scoring 20+ on the readiness matrix
+2. **Containerize and deploy** alongside existing infrastructure
+3. **Run in parallel** with traffic splitting (10/90 → 50/50 → 100/0)
+4. **Validate** — performance, reliability, observability parity
+
+### Phase 3: Batch Migration (Weeks 9-16)
+
+1. **Group remaining workloads** by dependency clusters
+2. **Migrate in waves** — 5-10 services per sprint
+3. **Decommission old infrastructure** after 2-week validation period
+4. **Document patterns** — create internal runbooks for common migration scenarios
+
+### Phase 4: Optimization (Ongoing)
+
+1. **Right-size resources** — VPA recommendations, request/limit tuning
+2. **Cost optimization** — spot/preemptible nodes, cluster autoscaler, Karpenter
+3. **Advanced patterns** — service mesh, GitOps, progressive delivery
+4. **Platform team handoff** — self-service for development teams
+
+## Migration Tooling
+
+| Tool | Purpose | When to Use |
+|------|---------|-------------|
+| **Kompose** | Convert docker-compose.yml to K8s manifests | Docker Compose to K8s |
+| **Move2Kube** | IBM tool for automated migration planning | Complex multi-app migrations |
+| **Konveyor** | Open-source migration toolkit (formerly Tackle) | Enterprise Java/VM migrations |
+| **Helm** | Package and version K8s manifests | Any migration with templating needs |
+| **Kustomize** | Overlay-based config management | Multi-env deployments |
+| **ArgoCD** | GitOps continuous delivery | Post-migration deployment |
+
+## Common Pitfalls
+
+### 1. Migrating Everything at Once
+Start small. Prove the platform works with low-risk workloads before touching revenue-critical systems.
+
+### 2. Ignoring Stateful Workloads
+Databases, message queues, and caches need special attention. Consider:
+- **Managed services** (RDS, CloudSQL) — often better than running in K8s
+- **StatefulSets + PVCs** — for workloads that must run in-cluster
+- **Operators** — for complex stateful systems (PostgreSQL Operator, Strimzi for Kafka)
+
+### 3. Skipping the Observability Layer
+If you cannot monitor it, you cannot migrate it safely. Deploy Prometheus + Grafana + Loki before migrating workloads.
+
+### 4. Under-investing in Developer Experience
+Developers will resist K8s if it makes their workflow harder. Invest in:
+- Local development parity (Tilt, Skaffold, or Telepresence)
+- Self-service namespace provisioning
+- Clear documentation and golden paths
+
+### 5. No Rollback Plan
+Every migration wave should have a documented rollback procedure. Keep the old infrastructure warm until the new deployment is validated.
+
+## Success Metrics
+
+| Metric | Target | How to Measure |
+|--------|--------|----------------|
+| Deployment frequency | 2x improvement | ArgoCD/Flux sync count |
+| Lead time for changes | 50% reduction | Commit to production time |
+| Mean time to recovery | Under 5 minutes | Incident duration (PagerDuty/OpsGenie) |
+| Infrastructure cost | 20-30% reduction | Cloud billing vs previous quarter |
+| Container density | 3-5x vs VMs | Pods per node vs VMs per host |
+
+## Related Content
+
+- [Kustomize vs Helm 2026](/blog/kustomize-vs-helm-2026/)
+- [Platform Engineering at Scale](/blog/platform-engineering-business-case/)
+- [KEDA vs HPA: Kubernetes Autoscaling](/blog/keda-vs-hpa-2026/)
+- [Internal Developer Platforms 2026](/blog/internal-developer-platforms-2026/)

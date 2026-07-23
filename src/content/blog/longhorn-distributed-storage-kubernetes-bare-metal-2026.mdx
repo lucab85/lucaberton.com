@@ -1,0 +1,168 @@
+---
+title: "Longhorn: Distributed Storage for Kubernetes Bare Metal"
+snippet: "Run production storage without cloud provider — Longhorn provides replicated volumes, snapshots, backups, and DR across bare-metal Kubernetes nodes."
+description: "Run production storage without cloud provider — Longhorn provides replicated volumes, snapshots, backups, and DR across bare-metal Kubernetes nodes."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Kubernetes', 'Storage', 'Open Source']
+image:
+  src: "/blog/thumbnails/longhorn-distributed-storage-kubernetes-bare-metal-2026.jpg"
+  alt: "Longhorn: Distributed Block Storage for Kubernetes Bare Metal"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What Is Longhorn?
+
+[Longhorn](https://github.com/longhorn/longhorn) provides distributed block storage for Kubernetes — no cloud provider required. Built for bare-metal clusters, edge deployments, and on-prem infrastructure. CNCF Incubating, 6K+ stars.
+
+## Why Longhorn for Bare Metal?
+
+| Storage | Cloud Provider | Bare Metal |
+|---------|---------------|------------|
+| AWS EBS | ✅ | ❌ |
+| GCE PD | ✅ | ❌ |
+| Azure Disk | ✅ | ❌ |
+| Longhorn | ✅ | ✅ |
+| OpenEBS | ✅ | ✅ |
+| Rook/Ceph | ✅ | ✅ (complex) |
+
+| Feature | Longhorn | Rook/Ceph |
+|---------|----------|-----------|
+| Complexity | Low (Helm install) | High (operator + OSDs) |
+| Min nodes | 3 | 3 |
+| Min disks | 1 per node | 3 per node (dedicated) |
+| Management UI | ✅ Built-in | ⚠️ Ceph Dashboard |
+| DR (cross-cluster) | ✅ Native | ⚠️ Complex |
+| Performance | Good (replicated) | Excellent (erasure coded) |
+
+## Installation
+
+```bash
+helm repo add longhorn https://charts.longhorn.io
+helm install longhorn longhorn/longhorn \
+  --namespace longhorn-system \
+  --create-namespace \
+  --set defaultSettings.defaultReplicaCount=3
+```
+
+## How It Works
+
+```
+┌──────────────────────────────────────────────────┐
+│                Longhorn Manager                    │
+└──────────────────────┬───────────────────────────┘
+                       │
+    ┌──────────────────┼──────────────────┐
+    │                  │                  │
+┌───▼────┐       ┌────▼───┐        ┌────▼───┐
+│ Node 1 │       │ Node 2 │        │ Node 3 │
+│┌──────┐│       │┌──────┐│        │┌──────┐│
+││Replica││       ││Replica││        ││Replica││
+││  1    ││       ││  2    ││        ││  3    ││
+│└──────┘│       │└──────┘│        │└──────┘│
+│ /dev/sdb│       │ /dev/sdb│        │ /dev/sdb│
+└────────┘       └────────┘        └────────┘
+```
+
+Each volume has 3 replicas across different nodes. If a node dies, data survives.
+
+## StorageClass
+
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: longhorn-fast
+provisioner: driver.longhorn.io
+parameters:
+  numberOfReplicas: "3"
+  staleReplicaTimeout: "2880"
+  diskSelector: "ssd"  # Target SSD disks only
+  nodeSelector: "storage"
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+allowVolumeExpansion: true
+```
+
+## Backup to S3/MinIO
+
+```yaml
+# Backup target configuration
+apiVersion: longhorn.io/v1beta2
+kind: Setting
+metadata:
+  name: backup-target
+  namespace: longhorn-system
+value: "s3://longhorn-backups@us-east-1/"
+---
+apiVersion: longhorn.io/v1beta2
+kind: Setting
+metadata:
+  name: backup-target-credential-secret
+value: "longhorn-s3-secret"
+```
+
+Schedule automatic backups:
+
+```yaml
+apiVersion: longhorn.io/v1beta2
+kind: RecurringJob
+metadata:
+  name: daily-backup
+  namespace: longhorn-system
+spec:
+  cron: "0 2 * * *"
+  task: backup
+  retain: 7
+  concurrency: 2
+  labels:
+    tier: production
+```
+
+## Disaster Recovery (Cross-Cluster)
+
+```
+┌──────────────┐         ┌──────────────┐
+│   Primary    │  backup  │   DR Site    │
+│   Cluster    │────────▶│   Cluster    │
+│              │  (S3)    │              │
+│  Longhorn    │         │  Longhorn    │
+│  Volumes     │         │  (standby)   │
+└──────────────┘         └──────────────┘
+```
+
+Volumes replicated to S3; DR cluster restores from same bucket. RPO depends on backup frequency (hourly = 1h RPO).
+
+## Performance Tuning
+
+```yaml
+# High-performance settings
+defaultSettings:
+  guaranteedInstanceManagerCPU: 12  # Dedicated CPU for I/O
+  storageOverProvisioningPercentage: 200
+  storageMinimalAvailablePercentage: 15
+  replicaAutoBalance: best-effort
+
+# For database workloads
+parameters:
+  numberOfReplicas: "2"  # Trade durability for performance
+  dataLocality: "best-effort"  # Prefer local replica
+```
+
+| Workload | Replicas | Data Locality | IOPS |
+|----------|----------|---------------|------|
+| Database (PostgreSQL) | 2 | best-effort | 15K |
+| General app | 3 | disabled | 10K |
+| Batch/analytics | 1 | strict-local | 25K |
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [MinIO: S3 Object Storage](/blog/minio-s3-compatible-object-storage-kubernetes-2026/)
+- [Velero: K8s Backup](/blog/velero-kubernetes-backup-disaster-recovery-2026/)
+- [CloudNativePG: PostgreSQL on K8s](/blog/cloudnativepg-postgresql-kubernetes-operator/)

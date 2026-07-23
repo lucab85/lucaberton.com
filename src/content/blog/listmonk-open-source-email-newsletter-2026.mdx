@@ -1,0 +1,205 @@
+---
+title: "Listmonk: Open-Source Newsletter & Mailing List Manager"
+snippet: "Listmonk handles millions of subscribers on a single server — Go-powered, PostgreSQL-backed, with templating, segmentation, and analytics."
+description: "Listmonk handles millions of subscribers on a single server — Go-powered, PostgreSQL-backed, with templating, segmentation, and analytics."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Open Source"
+tags: ['Open Source', 'Email', 'Self-Hosted']
+image:
+  src: "/blog/thumbnails/listmonk-open-source-email-newsletter-2026.jpg"
+  alt: "Listmonk: High-Performance Open-Source Newsletter and Mailing List Manager"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What Is Listmonk?
+
+[Listmonk](https://github.com/knadh/listmonk) is a high-performance newsletter and mailing list manager. Written in Go, backed by PostgreSQL — it handles millions of subscribers on a single server. 16K+ GitHub stars.
+
+### Listmonk vs Mailchimp vs Kit.com
+
+| Feature | Listmonk | Mailchimp | Kit.com |
+|---------|----------|-----------|---------|
+| Self-hosted | ✅ | ❌ | ❌ |
+| Subscribers (free) | Unlimited | 500 | 10,000 |
+| Monthly emails | Unlimited | 1,000 | Unlimited |
+| Price | $0 + SMTP | $13-350/mo | $0-29/mo |
+| Template editor | ✅ HTML + WYSIWYG | ✅ | ✅ |
+| Segmentation | ✅ SQL-powered | ✅ | ✅ |
+| Analytics | ✅ Opens/clicks | ✅ | ✅ |
+| Automation | ⚠️ Basic | ✅ | ✅ |
+| Landing pages | ❌ | ✅ | ✅ |
+| Data ownership | ✅ | ❌ | ❌ |
+
+## Architecture
+
+```
+┌───────────────────────────────────┐
+│         Listmonk (Go)            │
+│                                   │
+│  ┌───────────┐  ┌─────────────┐  │
+│  │  Web UI   │  │  REST API   │  │
+│  └─────┬─────┘  └──────┬──────┘  │
+│        │                │         │
+│  ┌─────▼────────────────▼──────┐  │
+│  │        Core Engine          │  │
+│  │  • Campaign Manager         │  │
+│  │  • Template Renderer        │  │
+│  │  • Subscriber Manager       │  │
+│  │  • Queue + Rate Limiter     │  │
+│  └─────────────┬──────────────┘  │
+│                │                  │
+│  ┌─────────────▼──────────────┐  │
+│  │       PostgreSQL           │  │
+│  └─────────────────────────────┘  │
+│                                   │
+│  SMTP: SES, Mailgun, Postmark    │
+└───────────────────────────────────┘
+```
+
+## Docker Deployment
+
+```yaml
+version: "3.9"
+services:
+  listmonk:
+    image: listmonk/listmonk:latest
+    ports:
+      - "9000:9000"
+    environment:
+      - TZ=Europe/Amsterdam
+    volumes:
+      - ./config.toml:/listmonk/config.toml
+    depends_on:
+      - db
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=listmonk
+      - POSTGRES_PASSWORD=listmonk
+      - POSTGRES_DB=listmonk
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+```
+
+### config.toml
+
+```toml
+[app]
+address = "0.0.0.0:9000"
+admin_username = "admin"
+admin_password = "your-secure-password"
+
+[db]
+host = "db"
+port = 5432
+user = "listmonk"
+password = "listmonk"
+database = "listmonk"
+
+# Amazon SES
+[smtp.ses]
+enabled = true
+host = "email-smtp.eu-west-1.amazonaws.com"
+port = 587
+auth_protocol = "login"
+username = "YOUR_SES_KEY"
+password = "YOUR_SES_SECRET"
+max_conns = 10
+max_msg_retries = 3
+idle_timeout = "15s"
+```
+
+## Performance
+
+Listmonk is written in Go — it's incredibly efficient:
+
+| Subscribers | Send Rate | Server Requirements |
+|-------------|-----------|-------------------|
+| 10K | 500/min | 1 CPU, 1GB RAM |
+| 100K | 5,000/min | 2 CPU, 2GB RAM |
+| 1M | 50,000/min | 4 CPU, 8GB RAM |
+| 10M | 200,000/min | 8 CPU, 16GB RAM |
+
+Compare: Mailchimp charges $350/month for 100K subscribers. Listmonk handles it on a $10/month VPS.
+
+## SMTP Provider Costs
+
+| Provider | Per 1K emails | 100K emails/mo |
+|----------|--------------|----------------|
+| Amazon SES | $0.10 | $10 |
+| Mailgun | $0.80 | $80 |
+| Postmark | $1.25 | $125 |
+| SendGrid | $0.75 | $75 |
+
+**Total cost for 100K subscribers:** Listmonk ($0) + Hetzner VPS ($8) + SES ($10) = **$18/month** vs Mailchimp's $350/month.
+
+## Key Features
+
+### SQL-Powered Segmentation
+
+```sql
+-- Target subscribers who opened last campaign but didn't click
+SELECT * FROM subscribers
+WHERE id IN (
+  SELECT subscriber_id FROM campaign_views
+  WHERE campaign_id = 42
+)
+AND id NOT IN (
+  SELECT subscriber_id FROM link_clicks
+  WHERE campaign_id = 42
+);
+```
+
+### Template System
+
+```html
+{{ template "header" . }}
+
+<h1>Hello {{ .Subscriber.FirstName }}!</h1>
+
+{{ if eq .Subscriber.Attribs.plan "pro" }}
+  <p>As a Pro member, here's your exclusive content...</p>
+{{ else }}
+  <p>Upgrade to Pro for exclusive access.</p>
+{{ end }}
+
+{{ template "footer" . }}
+```
+
+### REST API
+
+```bash
+# Add subscriber
+curl -u admin:password http://listmonk:9000/api/subscribers \
+  -d '{"email":"new@user.com","name":"New User","lists":[1]}'
+
+# Send transactional email
+curl -u admin:password http://listmonk:9000/api/tx \
+  -d '{"subscriber_email":"user@domain.com","template_id":1,"data":{"order_id":"12345"}}'
+```
+
+## When to Use Listmonk
+
+- ✅ Budget-conscious (under $20/mo for any scale)
+- ✅ Data ownership requirements (GDPR, regulated industry)
+- ✅ Developer-friendly (API-first, SQL segmentation)
+- ✅ High volume (millions of subscribers)
+- ❌ Non-technical team (no landing page builder)
+- ❌ Need complex automation sequences (use n8n + Listmonk)
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [n8n: Self-Hosted Workflow Automation](/blog/n8n-workflow-automation-self-hosted-kubernetes-2026/)
+- [Ghost CMS: Built-In Newsletters](/blog/ghost-cms-headless-self-hosted-kubernetes-2026/)
+- [Plausible: Privacy-First Analytics](/blog/plausible-analytics-privacy-first-self-hosted-2026/)
+- [Coolify: Deploy Anything](/blog/coolify-open-source-heroku-self-hosted-paas-2026/)

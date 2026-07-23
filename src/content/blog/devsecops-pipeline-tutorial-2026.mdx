@@ -1,0 +1,152 @@
+---
+draft: false
+title: "DevSecOps Pipeline Tutorial: Shift Left"
+seoTitle: "DevSecOps Pipeline Tutorial: Shift Left (2026)"
+snippet: "Build a DevSecOps pipeline. SAST, DAST, SCA, container scanning, IaC scanning, and secrets detection in GitHub Actions and GitLab CI."
+description: "Build a DevSecOps pipeline. SAST, DAST, SCA, container scanning, IaC scanning, and secrets detection in GitHub Actions and GitLab CI."
+image:
+  src: "/blog/thumbnails/devsecops-pipeline-tutorial-2026.jpg"
+  alt: "DevSecOps Pipeline Tutorial: Shift Left Security in CI/CD (2026)"
+publishDate: "2026-04-04"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["devsecops", "Tutorial", "2026", "DevOps", "DevOps"]
+---
+This tutorial shows you how to build a complete DevSecOps pipeline that integrates security scanning at every stage.
+
+## Pipeline Architecture
+
+```
+Code → SAST → Build → Image Scan → Deploy to Staging → DAST → Deploy to Production
+```
+
+Every stage gates on security — if vulnerabilities are found above your threshold, the pipeline stops.
+
+## Stage 1: Static Analysis (SAST)
+
+Scan source code before building:
+
+```yaml
+# GitHub Actions
+- name: Run Semgrep SAST
+  uses: returntocorp/semgrep-action@v1
+  with:
+    config: p/owasp-top-ten p/security-audit
+
+- name: Run Trivy filesystem scan
+  run: |
+    trivy fs --severity HIGH,CRITICAL --exit-code 1 .
+```
+
+## Stage 2: Dependency Scanning
+
+```yaml
+- name: Check dependencies for vulnerabilities
+  run: |
+    trivy fs --scanners vuln --severity HIGH,CRITICAL .
+
+- name: Check for secret leaks
+  uses: trufflesecurity/trufflehog@main
+  with:
+    extra_args: --only-verified
+```
+
+## Stage 3: Container Image Scanning
+
+```yaml
+- name: Build image
+  run: docker build -t myapp:${{ github.sha }} .
+
+- name: Scan image
+  run: |
+    trivy image --severity HIGH,CRITICAL --exit-code 1 myapp:${{ github.sha }}
+```
+
+## Stage 4: Infrastructure as Code Scanning
+
+```yaml
+- name: Scan Terraform
+  run: |
+    trivy config --severity HIGH,CRITICAL terraform/
+
+- name: Scan Kubernetes manifests
+  run: |
+    trivy config --severity HIGH,CRITICAL k8s/
+```
+
+## Stage 5: Dynamic Analysis (DAST)
+
+After deploying to staging, run DAST against the live application:
+
+```yaml
+- name: OWASP ZAP Scan
+  uses: zaproxy/action-full-scan@v0.10.0
+  with:
+    target: "https://staging.example.com"
+    fail_action: "warn"
+```
+
+## Stage 6: Runtime Security
+
+Once deployed, monitor for runtime threats:
+
+```yaml
+# Falco runtime security
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: falco
+  namespace: security
+# Detects: shell in container, sensitive file access,
+# unexpected network connections, privilege escalation
+```
+
+## Complete GitHub Actions Pipeline
+
+```yaml
+name: DevSecOps Pipeline
+on: [push, pull_request]
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: SAST - Semgrep
+        uses: returntocorp/semgrep-action@v1
+      - name: Secret scanning
+        run: trivy fs --scanners secret .
+      - name: Dependency scan
+        run: trivy fs --scanners vuln .
+      - name: Build image
+        run: docker build -t myapp:ci .
+      - name: Image scan
+        run: trivy image --exit-code 1 --severity CRITICAL myapp:ci
+      - name: IaC scan
+        run: trivy config k8s/
+```
+
+## Security Gates
+
+Define your thresholds:
+
+| Severity | Development | Staging | Production |
+|----------|------------|---------|------------|
+| Critical | Block | Block | Block |
+| High | Warn | Block | Block |
+| Medium | Info | Warn | Block |
+| Low | Info | Info | Warn |
+
+## Tips and Tricks
+
+- Start with `--exit-code 0` (warn only) then gradually tighten to `--exit-code 1` (block)
+- Use `.trivyignore` for accepted risks with documented justification
+- Run SAST on every PR, full DAST on staging deploys only
+- Generate SBOM (Software Bill of Materials) for every production image
+- Sign images with Cosign for supply chain integrity
+
+## Related Resources
+
+- [Trivy Cheat Sheet](/blog/trivy-cheat-sheet-2026/)
+- [Container Security Scanning Tutorial](/blog/container-security-scanning-trivy-tutorial/)
+- [Git Cheat Sheet](/blog/git-cheat-sheet-2026/)

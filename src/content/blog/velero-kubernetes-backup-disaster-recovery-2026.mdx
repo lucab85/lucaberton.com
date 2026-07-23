@@ -1,0 +1,177 @@
+---
+title: "Velero: Kubernetes Backup and Disaster Recovery Guide"
+seoTitle: "Velero: Kubernetes Backup and Disaster Recovery Guide"
+snippet: "Protect your Kubernetes clusters with Velero — scheduled backups, cross-cluster migration, volume snapshots, and restore testing."
+description: "Protect your Kubernetes clusters with Velero — scheduled backups, cross-cluster migration, volume snapshots, and restore testing."
+publishDate: "2026-06-05"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['Kubernetes', 'DevOps', 'Disaster Recovery']
+image:
+  src: "/blog/thumbnails/velero-kubernetes-backup-disaster-recovery-2026.jpg"
+  alt: "Velero: Kubernetes Backup and Disaster Recovery Guide"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What Is Velero?
+
+[Velero](https://github.com/vmware-tanzu/velero) backs up Kubernetes resources and persistent volumes, enabling disaster recovery, cluster migration, and data protection. 9K+ GitHub stars.
+
+## What Gets Backed Up
+
+- All Kubernetes resources (Deployments, Services, ConfigMaps, Secrets, CRDs)
+- Persistent Volume data (via CSI snapshots or Restic/Kopia)
+- Namespace-level or cluster-level backups
+- Label-selected subsets
+
+## Installation
+
+```bash
+velero install \
+  --provider aws \
+  --plugins velero/velero-plugin-for-aws:v1.10.0 \
+  --bucket velero-backups \
+  --backup-location-config region=eu-west-1 \
+  --snapshot-location-config region=eu-west-1 \
+  --secret-file ./credentials-velero \
+  --use-node-agent \
+  --default-volumes-to-fs-backup
+```
+
+## Scheduled Backups
+
+```yaml
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily-production
+  namespace: velero
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  template:
+    includedNamespaces:
+      - production
+      - payments
+      - database
+    storageLocation: default
+    volumeSnapshotLocations:
+      - default
+    ttl: 720h  # Retain 30 days
+    defaultVolumesToFsBackup: true
+---
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: hourly-critical
+spec:
+  schedule: "0 * * * *"  # Hourly
+  template:
+    includedNamespaces:
+      - database
+    labelSelector:
+      matchLabels:
+        backup: critical
+    ttl: 168h  # Retain 7 days
+```
+
+## Restore
+
+```bash
+# List available backups
+velero backup get
+
+# Restore entire namespace
+velero restore create --from-backup daily-production-20260605020000
+
+# Restore specific resources only
+velero restore create --from-backup daily-production-20260605020000 \
+  --include-resources deployments,services,configmaps \
+  --include-namespaces payments
+
+# Restore to different namespace (migration)
+velero restore create --from-backup daily-production-20260605020000 \
+  --namespace-mappings production:staging
+```
+
+## Cross-Cluster Migration
+
+```bash
+# Source cluster: create backup
+velero backup create migration-backup --include-namespaces app1,app2
+
+# Destination cluster: restore (same object storage configured)
+velero restore create --from-backup migration-backup
+```
+
+Works across cloud providers — back up from EKS, restore to GKE.
+
+## Backup Strategies
+
+| Strategy | RPO | RTO | Cost |
+|----------|-----|-----|------|
+| Hourly snapshots | 1h | 15min | Medium |
+| Daily full + hourly PV | 1h (data), 24h (config) | 30min | Low |
+| Continuous (Kopia) | Minutes | 10min | High |
+| Cross-region replication | 1h | 1h (failover) | Medium |
+
+## Disaster Recovery Runbook
+
+```bash
+# 1. Verify backup health
+velero backup describe daily-production-latest --details
+
+# 2. If cluster is lost, deploy new cluster
+
+# 3. Install Velero (same object storage config)
+velero install --provider aws --bucket velero-backups ...
+
+# 4. Verify backups are visible
+velero backup get
+
+# 5. Restore
+velero restore create disaster-recovery --from-backup daily-production-latest
+
+# 6. Verify
+kubectl get pods -A
+velero restore describe disaster-recovery --details
+```
+
+## Testing Restores (Critical!)
+
+```yaml
+# CronJob to test restore weekly
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: velero-restore-test
+spec:
+  schedule: "0 4 * * 0"  # Sunday 4 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: test
+              image: bitnami/kubectl
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  velero restore create test-$(date +%s) \
+                    --from-backup daily-production-latest \
+                    --namespace-mappings production:restore-test
+                  sleep 300
+                  kubectl get pods -n restore-test
+                  kubectl delete namespace restore-test
+```
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Harbor: Container Registry](/blog/harbor-container-registry-kubernetes-setup-2026/)
+- [External Secrets Operator](/blog/external-secrets-operator-kubernetes-vault-2026/)
+- [Argo CD: GitOps Deployment](/blog/argo-cd-gitops-kubernetes-deployment-2026/)

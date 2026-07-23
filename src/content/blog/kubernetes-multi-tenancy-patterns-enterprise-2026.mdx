@@ -1,0 +1,178 @@
+---
+title: "Kubernetes Multi-Tenancy: Namespace, vCluster, Fleet"
+snippet: "Isolate teams on shared clusters — namespace-per-tenant, vCluster virtual clusters, Capsule policies, and Rancher Fleet at scale."
+description: "Isolate teams on shared clusters — namespace-per-tenant, vCluster virtual clusters, Capsule policies, and Rancher Fleet at scale."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Kubernetes', 'Platform Engineering', 'Security']
+image:
+  src: "/blog/thumbnails/kubernetes-multi-tenancy-patterns-enterprise-2026.jpg"
+  alt: "Kubernetes Multi-Tenancy: Namespace, vCluster, and Fleet Patterns"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## Multi-Tenancy Spectrum
+
+```
+Less Isolation ──────────────────────────────▶ More Isolation
+
+Namespace-per-tenant → Capsule/Hierarchical → vCluster → Separate Clusters
+   (RBAC + Quotas)      (Policy engine)        (Virtual)    (Physical)
+   Cost: Low            Cost: Low              Cost: Medium  Cost: High
+   Isolation: Soft      Isolation: Medium      Isolation: Strong  Isolation: Full
+```
+
+## Pattern 1: Namespace-per-Tenant
+
+Simplest approach — each team gets a namespace with RBAC + ResourceQuota.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: team-payments
+  labels:
+    tenant: payments
+    cost-center: "CC-1234"
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: team-quota
+  namespace: team-payments
+spec:
+  hard:
+    requests.cpu: "20"
+    requests.memory: "40Gi"
+    limits.cpu: "40"
+    limits.memory: "80Gi"
+    pods: "100"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: team-admin
+  namespace: team-payments
+subjects:
+  - kind: Group
+    name: payments-team
+roleRef:
+  kind: ClusterRole
+  name: edit
+```
+
+**Pros:** Simple, native, no extra tools
+**Cons:** No hierarchical namespaces, CRDs are cluster-scoped, noisy neighbors
+
+## Pattern 2: Capsule (Policy-Based)
+
+[Capsule](https://github.com/projectcapsule/capsule) adds tenant abstraction over namespaces:
+
+```yaml
+apiVersion: capsule.clastix.io/v1beta2
+kind: Tenant
+metadata:
+  name: payments-team
+spec:
+  owners:
+    - name: payments-admin
+      kind: Group
+  namespaceOptions:
+    quota: 5  # Max 5 namespaces
+  resourceQuotas:
+    scope: Tenant  # Shared across all tenant namespaces
+    items:
+      - hard:
+          requests.cpu: "40"
+          requests.memory: "80Gi"
+          pods: "200"
+  networkPolicies:
+    items:
+      - policyTypes: [Ingress, Egress]
+        ingress:
+          - from:
+              - namespaceSelector:
+                  matchLabels:
+                    capsule.clastix.io/tenant: payments-team
+  limitRanges:
+    items:
+      - limits:
+          - default:
+              cpu: "500m"
+              memory: "512Mi"
+            type: Container
+```
+
+Tenants can create multiple namespaces within their quota — self-service without cluster-admin.
+
+## Pattern 3: vCluster (Virtual Clusters)
+
+[vCluster](https://github.com/loft-sh/vcluster) runs full virtual Kubernetes clusters inside namespaces:
+
+```bash
+# Create a virtual cluster
+vcluster create team-payments --namespace vcluster-payments
+
+# Connect
+vcluster connect team-payments --namespace vcluster-payments
+
+# Tenant sees their own cluster!
+kubectl get nodes   # Virtual nodes
+kubectl get ns      # Their own namespaces
+kubectl create ns anything  # Full freedom
+```
+
+Architecture:
+```
+┌────────────────── Host Cluster ──────────────────┐
+│                                                   │
+│  ┌─── Namespace: vcluster-payments ───────────┐  │
+│  │                                             │  │
+│  │  ┌─────────────────────────────────────┐   │  │
+│  │  │  vCluster (virtual control plane)   │   │  │
+│  │  │  - API server                       │   │  │
+│  │  │  - Controller manager               │   │  │
+│  │  │  - etcd (or SQLite)                 │   │  │
+│  │  └─────────────────────────────────────┘   │  │
+│  │                                             │  │
+│  │  Synced pods run in host namespace          │  │
+│  └─────────────────────────────────────────────┘  │
+│                                                   │
+│  ┌─── Namespace: vcluster-frontend ───────────┐  │
+│  │  (Another tenant's virtual cluster)         │  │
+│  └─────────────────────────────────────────────┘  │
+└───────────────────────────────────────────────────┘
+```
+
+**Pros:** Full cluster experience per tenant, CRDs isolated, admin-level access
+**Cons:** Extra resource overhead (1 API server per tenant), more complex networking
+
+## Decision Matrix
+
+| Requirement | Namespace | Capsule | vCluster | Separate |
+|-------------|-----------|---------|----------|----------|
+| Teams need CRDs | ❌ | ❌ | ✅ | ✅ |
+| Teams need cluster-admin | ❌ | ❌ | ✅ | ✅ |
+| Cost efficiency | ✅ Best | ✅ | ⚠️ | ❌ |
+| Compliance isolation | ❌ | ⚠️ | ✅ | ✅ Best |
+| Operational overhead | Low | Low | Medium | High |
+| Self-service namespaces | ❌ | ✅ | ✅ | ✅ |
+
+## My Recommendation
+
+- **Under 10 teams:** Namespace-per-tenant + NetworkPolicies + ResourceQuotas
+- **10-50 teams:** Capsule for self-service namespace management
+- **Regulated/compliance:** vCluster for strong isolation without physical clusters
+- **Different K8s versions needed:** Separate clusters (or vCluster with version pinning)
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Kubernetes RBAC](/blog/kubernetes-rbac-least-privilege-production-2026/)
+- [Network Policies: Zero Trust](/blog/kubernetes-network-policies-zero-trust-guide-2026/)
+- [Resource Limits Best Practices](/blog/kubernetes-resource-limits-requests-best-practices-2026/)

@@ -1,0 +1,158 @@
+---
+draft: false
+title: "Fix OpenClaw ERR_STRING_TOO_LONG Session Error"
+snippet: "OpenClaw agent fails with 'Cannot create a string longer than 0x1fffffe8 characters'? It's a bloated session JSONL hitting Node's string limit. Here's the fix."
+description: "Fix OpenClaw ERR_STRING_TOO_LONG — 'Cannot create a string longer than 0x1fffffe8 characters'. Diagnose the bloated session transcript and recover the agent."
+image:
+  src: "/blog/thumbnails/openclaw-err-string-too-long-bloated-session-fix.jpg"
+  alt: "Fix OpenClaw ERR_STRING_TOO_LONG bloated session error"
+publishDate: "2026-06-10"
+lastModified: "2026-06-10"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["OpenClaw", "Troubleshooting", "Node.js", "AI Agents", "DevOps"]
+faq:
+  - question: 'What causes ERR_STRING_TOO_LONG in OpenClaw?'
+    answer: >-
+      OpenClaw tried to load a single JavaScript string larger than Node's hard limit
+      of 0x1fffffe8 (about 536 million UTF-16 characters). This is almost always a
+      session JSONL transcript that has grown to hundreds of megabytes, often from
+      base64-encoded images and months of conversation history.
+  - question: 'Does increasing --max-old-space-size fix it?'
+    answer: >-
+      No. ERR_STRING_TOO_LONG is a per-string limit baked into V8, not a heap-size
+      limit. Raising --max-old-space-size gives you more total memory but cannot make
+      a single string exceed 0x1fffffe8 characters.
+  - question: 'How do I recover a poisoned OpenClaw session?'
+    answer: >-
+      Send /new (or /reset) as a standalone message in the affected channel. OpenClaw
+      handles those bare commands without invoking the model, so they work even when
+      normal replies fail. Then archive the oversized session JSONL file.
+  - question: 'How do I prevent the session file from growing again?'
+    answer: >-
+      Set a tool-result ceiling with openclaw config set
+      agents.defaults.contextLimits.toolResultMaxChars 16000, and make tools stream or
+      chunk large output instead of capturing it whole.
+---
+
+If your OpenClaw agent suddenly stops replying with:
+
+```text
+⚠️ Agent failed before reply: Cannot create a string longer than 0x1fffffe8 characters.
+```
+
+you've hit Node.js `ERR_STRING_TOO_LONG`. OpenClaw (or one of its tools) tried to materialize a single JavaScript string larger than **`0x1fffffe8` — 536,870,888 UTF-16 characters**. This is a hard limit in V8, so raising `--max-old-space-size` will **not** fix it.
+
+The usual culprit: a **session transcript JSONL file that has ballooned to hundreds of megabytes**. When OpenClaw reads that file back to rehydrate the conversation, Node chokes on the enormous string.
+
+## Why It Happens
+
+The per-string ceiling is independent of total heap memory. A session file grows past it when:
+
+- A tool reads a large file with `readFile`/`readFileSync`.
+- Binary data is converted to base64 or UTF-8 (pasted **images get base64-encoded** straight into the transcript).
+- An enormous command result is captured whole instead of streamed.
+- A plugin concatenates logs or HTTP responses.
+- Months of conversation history accumulate in one session.
+
+## Diagnose It
+
+Tail the logs and reproduce the failed request to see the stack trace:
+
+```bash
+openclaw logs --follow --plain --no-color
+```
+
+Scan existing logs for the signature error and the call that triggered it:
+
+```bash
+openclaw logs \
+  --limit 1000 \
+  --max-bytes 2000000 \
+  --plain --no-color | grep -nE -B20 -A40 \
+  'ERR_STRING_TOO_LONG|Cannot create a string|Buffer\.toString|JSON\.(parse|stringify)|readFile'
+```
+
+Then find the oversized files. Session JSONL files live under `~/.openclaw/agents/<agent>/sessions/`; gateway logs live under `/tmp/openclaw/`:
+
+```bash
+find ~/.openclaw /tmp/openclaw \
+  -type f -size +100M \
+  -exec du -h {} + 2>/dev/null | sort -h
+```
+
+A single session weighing **hundreds of MB** is your smoking gun:
+
+```text
+516M  ~/.openclaw/agents/main/sessions/60dcebd2-….jsonl   ← the one that locks
+ 52M  ~/.openclaw/agents/main/sessions/13439494-….jsonl
+ 49M  ~/.openclaw/agents/main/sessions/89e8f2e3-….jsonl
+```
+
+## Recover the Agent
+
+Send this as a **standalone message** in the affected channel:
+
+```text
+/new
+```
+
+or:
+
+```text
+/reset
+```
+
+OpenClaw handles bare `/new` and `/reset` commands **without invoking the model**, so they can recover a poisoned session even when normal replies fail. Then run the read-only health check:
+
+```bash
+openclaw doctor --lint --json
+```
+
+Do **not** run a full `openclaw reset` yet — depending on its scope, it can remove configuration, credentials, and sessions.
+
+## Archive the Bloated Session
+
+Moving the file is safer than deleting it. Your `MEMORY.md` and ordinary workspace files are untouched — you're only relocating one session JSONL:
+
+```bash
+mkdir -p ~/openclaw-session-backups
+mv ~/.openclaw/agents/main/sessions/60dcebd2-*.jsonl \
+  ~/openclaw-session-backups/
+```
+
+Start a fresh session in the channel, and the agent responds normally again.
+
+## Prevent Recurrence
+
+Add a tool-result ceiling so persisted results can't grow without bound:
+
+```bash
+openclaw config set \
+  agents.defaults.contextLimits.toolResultMaxChars \
+  16000
+```
+
+The limit only helps if the underlying tool doesn't build a giant string **before** the limit is applied — so bound output at the source. For shell tools, cap explicitly rather than capturing everything:
+
+```bash
+some-command | head -c 1000000
+tail -n 1000 huge.log
+sed -n '1,2000p' huge-file.txt
+```
+
+The responsible tool or skill should **stream or chunk** data instead of constructing one giant string, and large binaries (especially images) should be referenced by path rather than inlined as base64.
+
+## Key Takeaways
+
+- `ERR_STRING_TOO_LONG` is a **V8 per-string limit** (`0x1fffffe8`), not a heap problem — `--max-old-space-size` won't help.
+- The cause is almost always a **bloated session JSONL** from inlined images and long history.
+- Recover with a standalone `/new` or `/reset`, then **archive** the oversized file.
+- Prevent it with `toolResultMaxChars` plus tools that stream and cap their output.
+
+## Related Articles
+
+- [OpenClaw SQLite Memory Store: Bootstrap and Permissions](/blog/openclaw-sqlite-memory-store-bootstrap-and-permissions/)
+- [OpenClaw Session Memory, Hooks, and Knowledge Capture](/blog/openclaw-session-memory-hooks-knowledge-capture/)
+- [OpenClaw Agent Tool Execution Errors and Sandbox Permissions](/blog/openclaw-agent-tool-execution-errors-and-sandbox-permissions/)
+- [The Complete Guide to OpenClaw: Your Personal AI Agent](/blog/openclaw-complete-guide-personal-ai-agent-2026/)

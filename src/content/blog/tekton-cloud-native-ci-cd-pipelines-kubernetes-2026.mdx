@@ -1,0 +1,170 @@
+---
+title: "Tekton: Cloud-Native CI/CD Pipelines on Kubernetes"
+snippet: "Build CI/CD pipelines as Kubernetes resources with Tekton — Tasks, Pipelines, Triggers, and integration with Argo CD for full GitOps."
+description: "Build CI/CD pipelines as Kubernetes resources with Tekton — Tasks, Pipelines, Triggers, and integration with Argo CD for full GitOps."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['DevOps', 'Kubernetes', 'CI/CD']
+image:
+  src: "/blog/thumbnails/tekton-cloud-native-ci-cd-pipelines-kubernetes-2026.jpg"
+  alt: "Tekton: Cloud-Native CI/CD Pipelines on Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What Is Tekton?
+
+[Tekton](https://github.com/tektoncd/pipeline) provides Kubernetes-native CI/CD — pipelines defined as CRDs, running as pods, with no external CI server. Part of the CD Foundation (Linux Foundation).
+
+## Why Tekton over Jenkins/GitHub Actions?
+
+| Feature | Tekton | Jenkins | GitHub Actions |
+|---------|--------|---------|----------------|
+| Runs on | Kubernetes (native) | JVM (standalone) | GitHub cloud |
+| Defined as | K8s CRDs | Groovy/XML | YAML |
+| Scalability | Pod-per-task (infinite) | Executor agents | Runner limits |
+| Self-hosted | ✅ | ✅ | ⚠️ (runners) |
+| GitOps native | ✅ (resources in Git) | ❌ | ❌ |
+| Vendor lock-in | None (CDF standard) | None | GitHub |
+
+## Core Concepts
+
+```
+Pipeline
+├── Task 1 (clone)
+│   └── Step 1: git clone
+├── Task 2 (build)
+│   ├── Step 1: compile
+│   └── Step 2: test
+├── Task 3 (image)
+│   ├── Step 1: docker build
+│   └── Step 2: docker push
+└── Task 4 (deploy)
+    └── Step 1: kubectl apply
+```
+
+## Installation
+
+```bash
+kubectl apply -f https://storage.googleapis.com/tekton-releases/pipeline/latest/release.yaml
+kubectl apply -f https://storage.googleapis.com/tekton-releases/triggers/latest/release.yaml
+kubectl apply -f https://storage.googleapis.com/tekton-releases/dashboard/latest/release.yaml
+```
+
+## Task Definition
+
+```yaml
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-and-push
+spec:
+  params:
+    - name: image
+      type: string
+    - name: dockerfile
+      type: string
+      default: ./Dockerfile
+  workspaces:
+    - name: source
+  steps:
+    - name: build
+      image: gcr.io/kaniko-project/executor:latest
+      args:
+        - --dockerfile=$(params.dockerfile)
+        - --destination=$(params.image)
+        - --context=$(workspaces.source.path)
+        - --cache=true
+```
+
+## Pipeline
+
+```yaml
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: build-deploy
+spec:
+  params:
+    - name: repo-url
+    - name: image
+    - name: namespace
+  workspaces:
+    - name: shared-workspace
+  tasks:
+    - name: clone
+      taskRef:
+        name: git-clone  # From Tekton Hub
+      params:
+        - name: url
+          value: $(params.repo-url)
+      workspaces:
+        - name: output
+          workspace: shared-workspace
+
+    - name: build
+      taskRef:
+        name: build-and-push
+      runAfter: [clone]
+      params:
+        - name: image
+          value: $(params.image)
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+
+    - name: deploy
+      taskRef:
+        name: kubernetes-actions
+      runAfter: [build]
+      params:
+        - name: script
+          value: |
+            kubectl set image deployment/app app=$(params.image) -n $(params.namespace)
+```
+
+## Triggers (Webhook → Pipeline)
+
+```yaml
+apiVersion: triggers.tekton.dev/v1beta1
+kind: EventListener
+metadata:
+  name: github-listener
+spec:
+  triggers:
+    - name: github-push
+      bindings:
+        - ref: github-push-binding
+      template:
+        ref: build-deploy-template
+---
+apiVersion: triggers.tekton.dev/v1beta1
+kind: TriggerBinding
+metadata:
+  name: github-push-binding
+spec:
+  params:
+    - name: repo-url
+      value: $(body.repository.clone_url)
+    - name: revision
+      value: $(body.head_commit.id)
+```
+
+## Tekton + Argo CD (Full GitOps)
+
+```
+GitHub Push → Tekton (build + test + push image) → Update Git manifest → Argo CD syncs
+```
+
+Tekton handles CI (build artifacts), Argo CD handles CD (deploy to cluster). Clean separation.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Argo CD: GitOps Deployment](/blog/argo-cd-gitops-kubernetes-deployment-2026/)
+- [Gitea: Self-Hosted Git](/blog/gitea-self-hosted-git-server-kubernetes-2026/)
+- [Harbor: Container Registry](/blog/harbor-container-registry-kubernetes-setup-2026/)

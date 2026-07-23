@@ -1,0 +1,255 @@
+---
+draft: false
+title: "OpenClaw allowedOrigins: Complete Configuration Guide"
+seoTitle: "OpenClaw allowedOrigins Config: Complete Reference"
+snippet: "Complete OpenClaw gateway.controlui.allowedOrigins configuration reference: syntax, env-var form, Docker, Tailscale, and reverse-proxy examples for 2026."
+description: "Complete reference for OpenClaw gateway.controlui.allowedorigins: syntax, valid values, env-var form, Docker / Tailscale / reverse-proxy examples, and."
+image:
+  src: "/blog/thumbnails/openclaw-gateway-controlui-allowedorigins-complete-configuration-guide.jpg"
+  alt: "OpenClaw gateway.controlui.allowedOrigins configuration guide"
+publishDate: "2026-04-03"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["OpenClaw", "Gateway", "Configuration", "Docker", "Tailscale"]
+faq:
+  - question: 'What is gateway.controlui.allowedOrigins in OpenClaw?'
+    answer: >-
+      It is the allowlist of browser origins permitted to open the Control UI when
+      the gateway binds to a non-loopback address. Each entry is a full origin —
+      protocol, host, and port — for example http://192.168.1.100:18789.
+  - question: 'How do I set allowedOrigins from the command line?'
+    answer: >-
+      Run openclaw config set gateway.controlui.allowedOrigins '["http://192.168.1.100:18789"]'
+      and then restart the gateway so the new allowlist takes effect.
+  - question: 'Can I configure allowedOrigins with an environment variable?'
+    answer: >-
+      Yes. Set OPENCLAW_GATEWAY_CONTROLUI_ALLOWEDORIGINS to a JSON array string,
+      such as ["http://YOUR_HOST_IP:18789"]. This is the most convenient form for
+      Docker and Kubernetes deployments.
+  - question: 'Which origin do I use behind a reverse proxy?'
+    answer: >-
+      Use the public URL the browser actually sees. If your proxy terminates TLS on
+      port 443, use https://openclaw.example.com with no port — not the gateway's
+      internal http address or internal port.
+---
+
+If you are configuring OpenClaw's Control UI for remote access, `gateway.controlui.allowedOrigins` is the setting that decides which browsers can connect. This guide is a complete configuration reference for every deployment pattern — Docker, Tailscale, reverse proxies, and environment variables.
+
+> **Just need the quick fix** for the runtime **"origin not allowed"** browser error? See [Fix 'Origin Not Allowed' — OpenClaw Control UI](/blog/openclaw-origin-not-allowed-fix/). This page is the in-depth configuration reference.
+
+## The Exact Error
+
+```text
+Origin not allowed (open the Control UI from the gateway host or allow it in gateway.controlui.allowedOrigins)
+```
+
+You will also see one of these variants in the gateway logs:
+
+```text
+gateway failed to start: error: non-loopback control UI requires gateway.controlui.allowedOrigins (set explicit origins), or set gateway.controlui.dangerouslyAllowHostHeaderOriginFallback=true to use host-header origin fallback mode
+```
+
+**TL;DR fix** — set the allowed origins for the host(s) you will use to reach the Control UI:
+
+```bash
+openclaw config set gateway.controlui.allowedOrigins '["http://192.168.1.100:18789"]'
+openclaw gateway restart
+```
+
+Continue below for Docker, Tailscale, reverse-proxy, and environment-variable variants.
+
+I have deployed OpenClaw on bare metal, Docker, Kubernetes, Azure VMs, and Raspberry Pis. The `gateway.controlui.allowedOrigins` setting is the single most common configuration question I see. Let me walk through every deployment pattern.
+
+## What gateway.controlui.allowedOrigins Does
+
+When your OpenClaw [gateway bind modes](/blog/openclaw-gateway-bind-modes-loopback-lan-tailnet-auto-custom/)s to a non-loopback address (anything other than `127.0.0.1`), it requires you to explicitly list which browser origins can access the Control UI. This prevents unauthorized access from unknown domains.
+
+```yaml
+# openclaw.json
+{
+  "gateway": {
+    "controlui": {
+      "allowedOrigins": [
+        "http://192.168.1.100:18789",
+        "https://openclaw.example.com"
+      ]
+    }
+  }
+}
+```
+
+## Configuration by Deployment Type
+
+### Local Network (LAN) Access
+
+The most common scenario — you want to access OpenClaw from another device on your network:
+
+```bash
+# Step 1: Set bind to LAN
+openclaw config set gateway.bind lan
+
+# Step 2: Find your IP
+ip addr show | grep 'inet ' | grep -v 127.0.0.1
+
+# Step 3: Set allowed origins
+openclaw config set gateway.controlui.allowedOrigins '["http://192.168.1.100:18789"]'
+
+# Step 4: Restart
+openclaw gateway restart
+```
+
+Replace `192.168.1.100` with your actual machine IP. Include the port number.
+
+### Docker Deployment
+
+Docker adds a layer because the container IP differs from the host:
+
+```yaml
+# docker-compose.yml
+services:
+  openclaw:
+    image: openclaw/openclaw:latest
+    ports:
+      - "18789:18789"
+    environment:
+      - OPENCLAW_GATEWAY_BIND=0.0.0.0
+      - OPENCLAW_GATEWAY_CONTROLUI_ALLOWEDORIGINS=["http://YOUR_HOST_IP:18789"]
+    volumes:
+      - ./openclaw-data:/home/node/.openclaw
+```
+
+**Common Docker mistakes:**
+- Using `localhost` in allowedOrigins when accessing from another machine
+- Forgetting to map the port with `-p 18789:18789`
+- Using the container internal IP instead of the host IP
+
+### Tailscale Setup
+
+Tailscale gives you a stable hostname:
+
+```bash
+# Get your Tailscale IP
+tailscale ip -4
+
+# Configure with Tailscale hostname
+openclaw config set gateway.bind tailnet
+openclaw config set gateway.controlui.allowedOrigins '["http://your-machine.tail12345.ts.net:18789"]'
+openclaw gateway restart
+```
+
+### Reverse Proxy (Nginx/Caddy)
+
+When using a reverse proxy with HTTPS:
+
+```bash
+# Your proxy terminates TLS, so allowedOrigins uses the public URL
+openclaw config set gateway.controlui.allowedOrigins '["https://openclaw.yourdomain.com"]'
+```
+
+**Nginx config:**
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name openclaw.yourdomain.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:18789;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+### Multiple Origins
+
+You can allow multiple origins for different access methods:
+
+```bash
+openclaw config set gateway.controlui.allowedOrigins '[
+  "http://192.168.1.100:18789",
+  "http://my-machine.tail12345.ts.net:18789",
+  "https://openclaw.example.com"
+]'
+```
+
+## The dangerouslyAllowHostHeaderOriginFallback Option
+
+If you cannot predict the exact origin (dynamic IPs, multiple access methods):
+
+```bash
+openclaw config set gateway.controlui.dangerouslyAllowHostHeaderOriginFallback true
+```
+
+**When to use it:**
+- Development and testing environments
+- Home networks with DHCP (changing IPs)
+- Quick prototyping
+
+**When NOT to use it:**
+- Production deployments exposed to the internet
+- Multi-tenant environments
+- Any setup where untrusted users could access the network
+
+## Troubleshooting
+
+### Error: "origin not allowed"
+
+Your browser URL does not match any entry in `allowedOrigins`:
+
+```bash
+# Check current config
+openclaw config get gateway.controlui.allowedOrigins
+
+# Compare with the URL in your browser address bar
+# They must match EXACTLY (protocol + host + port)
+```
+
+### Error: "non-loopback control UI requires gateway.controlui.allowedOrigins"
+
+You changed `gateway.bind` away from loopback but did not set `allowedOrigins`:
+
+```bash
+# Either set allowedOrigins
+openclaw config set gateway.controlui.allowedOrigins '["http://YOUR_IP:18789"]'
+
+# Or use the fallback (less secure)
+openclaw config set gateway.controlui.dangerouslyAllowHostHeaderOriginFallback true
+
+# Then restart
+openclaw gateway restart
+```
+
+### Docker Permission Denied
+
+If OpenClaw cannot read its config file in Docker:
+
+```bash
+# Fix permissions on the mounted volume
+sudo chown -R 1000:1000 ./openclaw-data
+```
+
+## Environment Variables Reference
+
+All `gateway.controlui` settings can be set via environment variables:
+
+| Setting | Environment Variable |
+|---------|---------------------|
+| `gateway.bind` | `OPENCLAW_GATEWAY_BIND` |
+| `gateway.controlui.allowedOrigins` | `OPENCLAW_GATEWAY_CONTROLUI_ALLOWEDORIGINS` |
+| `gateway.controlui.dangerouslyAllowHostHeaderOriginFallback` | `OPENCLAW_GATEWAY_CONTROLUI_DANGEROUSLYALLOWHOSTHEADERORIGINFALLBACK` |
+| `gateway.controlui.allowInsecureAuth` | `OPENCLAW_GATEWAY_CONTROLUI_ALLOWINSECUREAUTH` |
+| `gateway.controlui.basePath` | `OPENCLAW_GATEWAY_CONTROLUI_BASEPATH` |
+
+## Related Articles
+
+- [Fix: OpenClaw Origin Not Allowed Error](/blog/openclaw-origin-not-allowed-fix/)
+- [Fix: OpenClaw Non-Loopback Control UI Error](/blog/openclaw-gateway-controlui-allowedorigins-fix/)
+- [Understanding dangerouslyAllowHostHeaderOriginFallback](/blog/understanding-openclaw-dangerouslyallowhostheaderoriginfallback/)
+- [Configuring OpenClaw Gateway Bind and Control UI on Azure](/blog/configuring-openclaw-gateway-bind-and-control-ui/)
+- [OpenClaw Docker Troubleshooting](/blog/troubleshooting-openclaw-docker-deployments/)
+- [Setting Up OpenClaw Hybrid Memory Search](/blog/setting-up-openclaw-hybrid-memory-search-with-local-embeddings/)

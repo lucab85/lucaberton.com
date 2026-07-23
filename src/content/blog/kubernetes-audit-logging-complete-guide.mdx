@@ -1,0 +1,378 @@
+---
+draft: false
+title: "Kubernetes Audit Logging: Complete Setup and Analysis Guide"
+snippet: "Configure Kubernetes API server audit logging to track who did what, when — with policy examples, backend options, and log analysis patterns."
+description: "Configure Kubernetes API server audit logging to track who did what, when — with policy examples, backend options, log analysis patterns, and security alerting integration."
+image: { src: "/blog/thumbnails/kubernetes-audit-logging-guide-2026.jpg", alt: "Kubernetes audit logging complete guide" }
+publishDate: "2026-06-02"
+lastModified: "2026-06-02"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["kubernetes", "security", "audit", "logging", "compliance"]
+---
+
+## Why Audit Logging Matters
+
+Kubernetes audit logs answer four questions for every API request:
+- **Who** made the request (user, service account, or anonymous)
+- **What** they did (verb: get, create, patch, delete)
+- **When** it happened (timestamp with nanosecond precision)
+- **On what** resource (pods, secrets, configmaps, etc.)
+
+Without audit logging, you cannot detect:
+- Unauthorized secret access
+- Privilege escalation attempts
+- Accidental or malicious resource deletion
+- Compliance violations
+
+## Audit Policy Structure
+
+The audit policy defines what to log and at what detail level:
+
+```yaml
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Don't log read-only requests to certain endpoints
+  - level: None
+    users: ["system:kube-proxy"]
+    verbs: ["watch"]
+    resources:
+      - group: ""
+        resources: ["endpoints", "services", "services/status"]
+
+  # Log secret access at Metadata level (who accessed, not the content)
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets", "configmaps", "tokenreviews"]
+
+  # Log all write operations with request body
+  - level: Request
+    verbs: ["create", "update", "patch", "delete"]
+    resources:
+      - group: ""
+      - group: "apps"
+      - group: "batch"
+
+  # Log everything else at metadata level
+  - level: Metadata
+    omitStages:
+      - RequestReceived
+```
+
+### Audit Levels
+
+| Level | What Is Logged |
+|-------|---------------|
+| `None` | Nothing — skip this rule |
+| `Metadata` | Request metadata (user, timestamp, resource, verb) |
+| `Request` | Metadata + request body |
+| `RequestResponse` | Metadata + request body + response body |
+
+**Warning**: `RequestResponse` on secrets would log secret values. Use `Metadata` for sensitive resources.
+
+## Enabling Audit Logging
+
+### Log Backend (File)
+
+```yaml
+# kube-apiserver manifest
+spec:
+  containers:
+    - command:
+        - kube-apiserver
+        - --audit-policy-file=/etc/kubernetes/audit-policy.yaml
+        - --audit-log-path=/var/log/kubernetes/audit.log
+        - --audit-log-maxage=30
+        - --audit-log-maxbackup=10
+        - --audit-log-maxsize=100
+      volumeMounts:
+        - name: audit-policy
+          mountPath: /etc/kubernetes/audit-policy.yaml
+          readOnly: true
+        - name: audit-logs
+          mountPath: /var/log/kubernetes
+  volumes:
+    - name: audit-policy
+      hostPath:
+        path: /etc/kubernetes/audit-policy.yaml
+        type: File
+    - name: audit-logs
+      hostPath:
+        path: /var/log/kubernetes
+        type: DirectoryOrCreate
+```
+
+### Webhook Backend (Real-time)
+
+Send audit events to an external service:
+
+```yaml
+apiVersion: v1
+kind: Config
+clusters:
+  - name: audit-webhook
+    cluster:
+      server: https://audit-collector.internal:9443/audit
+      certificate-authority: /etc/kubernetes/pki/webhook-ca.crt
+contexts:
+  - name: default
+    context:
+      cluster: audit-webhook
+current-context: default
+```
+
+```yaml
+# kube-apiserver flags
+- --audit-webhook-config-file=/etc/kubernetes/audit-webhook.yaml
+- --audit-webhook-batch-max-size=10
+- --audit-webhook-batch-max-wait=5s
+```
+
+## Production Audit Policy
+
+Here is a battle-tested policy that balances security visibility with log volume:
+
+```yaml
+apiVersion: audit.k8s.io/v1
+kind: Policy
+rules:
+  # Skip noisy read-only system requests
+  - level: None
+    userGroups: ["system:nodes"]
+    verbs: ["get", "list", "watch"]
+    resources:
+      - group: ""
+        resources: ["nodes", "nodes/status"]
+
+  - level: None
+    users:
+      - "system:kube-scheduler"
+      - "system:kube-controller-manager"
+    verbs: ["get", "list", "watch"]
+
+  # Skip health checks and metrics
+  - level: None
+    nonResourceURLs:
+      - "/healthz*"
+      - "/readyz*"
+      - "/livez*"
+      - "/metrics"
+
+  # CRITICAL: Log all secret access
+  - level: Metadata
+    resources:
+      - group: ""
+        resources: ["secrets"]
+
+  # Log RBAC changes with full request body
+  - level: RequestResponse
+    resources:
+      - group: "rbac.authorization.k8s.io"
+        resources: ["clusterroles", "clusterrolebindings", "roles", "rolebindings"]
+
+  # Log authentication events
+  - level: Metadata
+    resources:
+      - group: "authentication.k8s.io"
+      - group: "authorization.k8s.io"
+
+  # Log all deletions with request body
+  - level: Request
+    verbs: ["delete", "deletecollection"]
+
+  # Log pod exec and port-forward (high-risk)
+  - level: Request
+    resources:
+      - group: ""
+        resources: ["pods/exec", "pods/portforward", "pods/attach"]
+
+  # Log workload mutations
+  - level: Request
+    verbs: ["create", "update", "patch"]
+    resources:
+      - group: "apps"
+        resources: ["deployments", "daemonsets", "statefulsets"]
+      - group: "batch"
+        resources: ["jobs", "cronjobs"]
+
+  # Default: metadata only
+  - level: Metadata
+    omitStages:
+      - RequestReceived
+```
+
+## Analyzing Audit Logs
+
+### Common Queries with jq
+
+```bash
+# Who accessed secrets in the last hour?
+cat /var/log/kubernetes/audit.log | \
+  jq -r 'select(.objectRef.resource == "secrets") |
+    [.requestReceivedTimestamp, .user.username, .verb, .objectRef.namespace + "/" + .objectRef.name] |
+    @tsv'
+
+# Failed authentication attempts
+cat /var/log/kubernetes/audit.log | \
+  jq -r 'select(.responseStatus.code >= 400 and .responseStatus.code < 500) |
+    [.requestReceivedTimestamp, .user.username, .verb, .responseStatus.code, .responseStatus.reason] |
+    @tsv'
+
+# All pod exec commands (potential breakglass)
+cat /var/log/kubernetes/audit.log | \
+  jq -r 'select(.objectRef.subresource == "exec") |
+    [.requestReceivedTimestamp, .user.username, .objectRef.namespace + "/" + .objectRef.name] |
+    @tsv'
+
+# RBAC changes (privilege escalation detection)
+cat /var/log/kubernetes/audit.log | \
+  jq -r 'select(.objectRef.apiGroup == "rbac.authorization.k8s.io" and
+    (.verb == "create" or .verb == "update" or .verb == "patch")) |
+    [.requestReceivedTimestamp, .user.username, .verb, .objectRef.resource, .objectRef.name] |
+    @tsv'
+```
+
+### Shipping to EFK/Loki
+
+```yaml
+# Fluent Bit config for audit logs
+[INPUT]
+    Name              tail
+    Path              /var/log/kubernetes/audit.log
+    Parser            json
+    Tag               kube.audit.*
+    Refresh_Interval  5
+
+[FILTER]
+    Name    modify
+    Match   kube.audit.*
+    Add     log_type kubernetes_audit
+
+[OUTPUT]
+    Name            es
+    Match           kube.audit.*
+    Host            elasticsearch.logging
+    Port            9200
+    Index           kube-audit
+    Type            _doc
+```
+
+## Security Alerting Rules
+
+### Prometheus AlertManager (via audit-exporter)
+
+```yaml
+groups:
+  - name: kubernetes-audit-security
+    rules:
+      - alert: SecretAccessByUnknownUser
+        expr: |
+          count by (user) (
+            kube_audit_event_total{
+              resource="secrets",
+              verb=~"get|list|watch",
+              user!~"system:.*|admin"
+            }
+          ) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Unknown user {{ $labels.user }} accessed secrets"
+
+      - alert: ClusterRoleBindingCreated
+        expr: |
+          kube_audit_event_total{
+            resource="clusterrolebindings",
+            verb="create"
+          } > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "New ClusterRoleBinding created — potential privilege escalation"
+
+      - alert: PodExecDetected
+        expr: |
+          kube_audit_event_total{
+            subresource="exec"
+          } > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "Pod exec by {{ $labels.user }} in {{ $labels.namespace }}"
+```
+
+## Managed Kubernetes Audit Logging
+
+### EKS
+
+```bash
+# Enable via eksctl
+eksctl utils update-cluster-logging \
+  --cluster my-cluster \
+  --enable-types audit \
+  --approve
+
+# Logs go to CloudWatch Logs group: /aws/eks/my-cluster/cluster
+# Query via CloudWatch Insights:
+fields @timestamp, user.username, verb, objectRef.resource, objectRef.name
+| filter objectRef.resource = "secrets"
+| sort @timestamp desc
+| limit 50
+```
+
+### GKE
+
+```bash
+# Admin Activity logs are always on (free)
+# Data Access logs (secret reads) must be enabled:
+gcloud projects get-iam-policy PROJECT_ID --format=json > policy.json
+# Add "DATA_READ" for "k8s.io" service
+```
+
+### AKS
+
+```bash
+# Enable diagnostic settings
+az monitor diagnostic-settings create \
+  --resource /subscriptions/.../managedClusters/my-cluster \
+  --name audit-logs \
+  --logs '[{"category":"kube-audit","enabled":true}]' \
+  --workspace /subscriptions/.../workspaces/my-workspace
+```
+
+## Storage and Retention
+
+Audit logs grow fast. Plan for:
+
+| Cluster Size | Daily Volume | 30-Day Retention |
+|:---:|:---:|:---:|
+| Small (under 50 nodes) | 1-5 GB/day | 30-150 GB |
+| Medium (50-200 nodes) | 5-20 GB/day | 150-600 GB |
+| Large (200+ nodes) | 20-100+ GB/day | 600 GB - 3 TB |
+
+**Cost optimization:**
+- Use `None` level aggressively for known-safe traffic
+- Set `omitStages: ["RequestReceived"]` to halve event count
+- Archive to cold storage after 7 days, keep hot for alerting
+
+
+## Deepen Your Kubernetes Skills
+
+If you found this article useful, check out my books for hands-on Kubernetes mastery:
+
+- **[Kubernetes Recipes](https://amzn.to/3DzC8QA)** — A practical guide for container orchestration and deployment with real-world patterns
+- **[Ansible for Kubernetes by Example](https://amzn.to/3NLCAMB)** — Automate Kubernetes cluster operations with Ansible playbooks
+
+Both books follow the same practical, example-driven approach you see in my articles.
+
+## Related Content
+
+- [Kubernetes Secrets Management Best Practices](/blog/kubernetes-secrets-management-best-practices-2026/)
+- [EFK Stack on Kubernetes Complete Setup](/blog/kubernetes-audit-logging-complete-guide/)
+- [Kubernetes RBAC Troubleshooting Guide](/blog/kubernetes-rbac-best-practices/)
+- [Kubernetes NetworkPolicy Default Deny Configuration](/blog/zero-trust-kubernetes-service-mesh-opa/)

@@ -1,0 +1,374 @@
+---
+draft: false
+title: "AWS EBS Snapshots: \"Failed to Delete\" — How to Find and Remove AMI-Linked Snapshots"
+seoTitle: "Fix AWS EBS Snapshot 'Failed to Delete' (AMI-Linked)"
+snippet: "Fix the AWS error 'Failed to delete snapshots' when EBS snapshots are tied to AMIs or AWS Backup. Deregister AMIs and clean up orphaned snapshots."
+description: "Fix the common AWS error 'Failed to delete snapshots' when EBS snapshots are tied to AMIs or AWS Backup. Step-by-step guide to deregister AMIs, find disabled images, and clean up orphaned snapshots."
+image: { src: "/blog/thumbnails/aws-ebs-snapshots-delete-ami-2026.jpg", alt: "AWS EBS snapshots failed to delete troubleshooting guide" }
+publishDate: "2026-06-01"
+lastModified: "2026-06-01"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["aws", "ebs", "snapshots", "ami", "cloud", "troubleshooting"]
+---
+
+## The Error
+
+You select 50 EBS snapshots in the AWS Console, click **Delete**, and get:
+
+> **Failed to delete 50 snapshots.**
+> To delete snapshots in use by AMIs you must first deregister all the associated AMIs.
+
+This happens because AWS protects snapshots that back registered AMIs. You cannot delete the snapshot until the AMI is gone — even if the AMI is disabled.
+
+## Why Snapshots Get Stuck
+
+Every AMI (Amazon Machine Image) consists of one or more EBS snapshots. AWS maintains a hard dependency:
+
+```
+AMI (ami-0abc123...)
+  └── Snapshot (snap-0def456...)  ← PROTECTED
+  └── Snapshot (snap-0ghi789...)  ← PROTECTED
+```
+
+Common scenarios that create orphaned-but-protected snapshots:
+
+1. **Old AMIs you forgot about** — created by golden image pipelines (Packer, EC2 Image Builder)
+2. **Disabled AMIs** — deprecated but not deregistered
+3. **AWS Backup snapshots** — managed by Backup service, cannot be deleted directly
+4. **Cross-account shared AMIs** — the snapshot is shared with another account that registered an AMI from it
+
+## Step 1: Find Which AMI Uses the Snapshot
+
+### AWS Console
+
+1. Go to **EC2 → Snapshots**
+2. Select the snapshot that fails to delete
+3. In the **Description** field, look for: `Created by CreateImage(i-xxx) for ami-xxx`
+4. Copy the `ami-xxx` ID
+
+### AWS CLI (Batch)
+
+```bash
+# Find AMIs using a specific snapshot
+aws ec2 describe-images \
+  --filters "Name=block-device-mapping.snapshot-id,Values=snap-0abc123def456" \
+  --query "Images[].{ID:ImageId,Name:Name,State:State}" \
+  --output table
+
+# Find ALL AMIs owned by you (to bulk audit)
+aws ec2 describe-images \
+  --owners self \
+  --query "Images[].{ID:ImageId,Name:Name,Created:CreationDate,State:State}" \
+  --output table
+```
+
+### Find Disabled AMIs
+
+Disabled AMIs do not show in the default Console view:
+
+```bash
+# Include disabled AMIs
+aws ec2 describe-images \
+  --owners self \
+  --include-disabled \
+  --query "Images[?State=='disabled'].{ID:ImageId,Name:Name}" \
+  --output table
+```
+
+In the Console: **EC2 → AMIs → Filter → Disabled images**
+
+## Step 2: Deregister the AMI
+
+Once you have identified the AMI:
+
+### Single AMI
+
+```bash
+aws ec2 deregister-image --image-id ami-0abc123def456
+```
+
+### Bulk Deregister (Careful!)
+
+```bash
+# Deregister all disabled AMIs
+aws ec2 describe-images \
+  --owners self \
+  --include-disabled \
+  --query "Images[?State=='disabled'].ImageId" \
+  --output text | tr '\t' '\n' | while read ami; do
+    echo "Deregistering $ami"
+    aws ec2 deregister-image --image-id "$ami"
+done
+```
+
+### Safety Check: Is the AMI in Use?
+
+Before deregistering, verify no running instances use it:
+
+```bash
+aws ec2 describe-instances \
+  --filters "Name=image-id,Values=ami-0abc123def456" \
+  --query "Reservations[].Instances[].{ID:InstanceId,State:State.Name}" \
+  --output table
+```
+
+## Step 3: Delete the Snapshot
+
+After deregistering the AMI, the snapshot is unprotected:
+
+```bash
+# Delete single snapshot
+aws ec2 delete-snapshot --snapshot-id snap-0abc123def456
+
+# Bulk delete (pipe from a file of snapshot IDs)
+cat snapshot-ids.txt | while read snap; do
+  aws ec2 delete-snapshot --snapshot-id "$snap"
+  echo "Deleted $snap"
+done
+```
+
+## Handling AWS Backup Snapshots
+
+If the snapshot was created by AWS Backup, you will see a different error:
+
+> This snapshot is managed by the AWS Backup service and cannot be deleted via EC2 APIs. If you wish to delete this snapshot, please do so via the Backup console.
+
+Similarly, AMIs created by Backup return:
+
+> This image is managed by AWS Backup and cannot be deleted via EC2 APIs. To delete this image, please use the AWS Backup APIs, CLI, or console.
+
+**You cannot use `aws ec2 delete-snapshot` or `aws ec2 deregister-image` for Backup-managed resources.** The EC2 API will reject every attempt. You must go through the Backup API.
+
+### Step-by-Step: Delete All Backup-Managed Snapshots
+
+**1. List your backup vaults:**
+
+```bash
+REGION=us-east-1
+
+aws backup list-backup-vaults \
+  --region "$REGION" \
+  --query 'BackupVaultList[].BackupVaultName' \
+  --output table
+```
+
+**2. Check recovery point count:**
+
+```bash
+VAULT=Default
+
+aws backup describe-backup-vault \
+  --backup-vault-name "$VAULT" \
+  --region "$REGION" \
+  --query '{Vault:BackupVaultName,RecoveryPoints:NumberOfRecoveryPoints,Locked:Locked}'
+```
+
+If `Locked: true`, the vault has a lock policy — you cannot delete recovery points until the lock expires or is removed.
+
+**3. Delete all recovery points in a vault:**
+
+```bash
+REGION=us-east-1
+VAULT=Default
+
+while true; do
+  RPS=$(aws backup list-recovery-points-by-backup-vault \
+    --backup-vault-name "$VAULT" \
+    --region "$REGION" \
+    --query 'RecoveryPoints[].RecoveryPointArn' \
+    --output text)
+
+  [ -z "$RPS" ] && break
+
+  for RP in $RPS; do
+    echo "Deleting recovery point: $RP"
+    aws backup delete-recovery-point \
+      --backup-vault-name "$VAULT" \
+      --recovery-point-arn "$RP" \
+      --region "$REGION" || true
+  done
+
+  sleep 5
+done
+```
+
+The `while true` loop handles pagination — AWS returns results in batches. The `sleep 5` avoids API throttling.
+
+**4. Delete the backup vault itself:**
+
+```bash
+aws backup delete-backup-vault \
+  --backup-vault-name "$VAULT" \
+  --region "$REGION"
+```
+
+A vault must have 0 recovery points before it can be deleted.
+
+**5. Delete the backup plan (prevents recreation):**
+
+```bash
+# List plans
+aws backup list-backup-plans --region "$REGION" \
+  --query 'BackupPlansList[].{Name:BackupPlanName,ID:BackupPlanId}' --output table
+
+# Delete each plan
+aws backup delete-backup-plan \
+  --backup-plan-id <PLAN_ID> \
+  --region "$REGION"
+```
+
+### What Happens After Deletion
+
+Once all recovery points are deleted:
+- EC2 snapshots previously owned by Backup **disappear automatically** (usually within minutes)
+- Backup-managed AMIs are also released and deregistered
+- You do **not** need to re-run `aws ec2 delete-snapshot` — AWS handles the cleanup
+
+### Multi-Vault, Multi-Region Cleanup
+
+```bash
+for REGION in $(aws ec2 describe-regions --query 'Regions[].RegionName' --output text); do
+  for VAULT in $(aws backup list-backup-vaults --region "$REGION" \
+    --query 'BackupVaultList[].BackupVaultName' --output text 2>/dev/null); do
+
+    echo "=== $REGION / $VAULT ==="
+
+    while true; do
+      RPS=$(aws backup list-recovery-points-by-backup-vault \
+        --backup-vault-name "$VAULT" \
+        --region "$REGION" \
+        --query 'RecoveryPoints[].RecoveryPointArn' \
+        --output text 2>/dev/null)
+
+      [ -z "$RPS" ] && break
+
+      for RP in $RPS; do
+        echo "  Deleting: $RP"
+        aws backup delete-recovery-point \
+          --backup-vault-name "$VAULT" \
+          --recovery-point-arn "$RP" \
+          --region "$REGION" 2>/dev/null || true
+      done
+      sleep 5
+    done
+
+    aws backup delete-backup-vault \
+      --backup-vault-name "$VAULT" \
+      --region "$REGION" 2>/dev/null || true
+  done
+done
+```
+
+## Automation: Full Cleanup Script
+
+This script finds and cleans orphaned snapshots in bulk:
+
+```bash
+#!/bin/bash
+# cleanup-orphaned-snapshots.sh
+# Finds snapshots whose AMIs no longer exist and deletes them
+
+REGION=${1:-us-east-1}
+
+echo "=== Finding all self-owned snapshots ==="
+SNAPSHOTS=$(aws ec2 describe-snapshots \
+  --owner-ids self \
+  --region "$REGION" \
+  --query "Snapshots[].SnapshotId" \
+  --output text)
+
+TOTAL=$(echo "$SNAPSHOTS" | wc -w)
+echo "Found $TOTAL snapshots. Checking AMI associations..."
+
+ORPHANED=0
+for SNAP in $SNAPSHOTS; do
+  # Check if any AMI references this snapshot
+  AMI=$(aws ec2 describe-images \
+    --filters "Name=block-device-mapping.snapshot-id,Values=$SNAP" \
+    --region "$REGION" \
+    --query "Images[0].ImageId" \
+    --output text 2>/dev/null)
+  
+  if [ "$AMI" == "None" ] || [ -z "$AMI" ]; then
+    # Check if it is a Backup-managed snapshot
+    BACKUP_TAG=$(aws ec2 describe-snapshots \
+      --snapshot-ids "$SNAP" \
+      --region "$REGION" \
+      --query "Snapshots[0].Tags[?Key=='aws:backup:source-resource'].Value" \
+      --output text 2>/dev/null)
+    
+    if [ -z "$BACKUP_TAG" ] || [ "$BACKUP_TAG" == "None" ]; then
+      echo "ORPHANED: $SNAP (no AMI, no Backup)"
+      # Uncomment to actually delete:
+      # aws ec2 delete-snapshot --snapshot-id "$SNAP" --region "$REGION"
+      ((ORPHANED++))
+    else
+      echo "BACKUP-MANAGED: $SNAP (use AWS Backup console)"
+    fi
+  fi
+done
+
+echo "=== Summary: $ORPHANED orphaned snapshots out of $TOTAL total ==="
+```
+
+## Cost Impact
+
+EBS snapshots cost **$0.05/GB-month** (us-east-1). Fifty forgotten 100 GB snapshots cost:
+
+```
+50 × 100 GB × $0.05 = $250/month
+```
+
+That is $3,000/year for snapshots nobody uses. Regular cleanup pays for itself.
+
+## Prevention: Tag and Lifecycle
+
+### Tag at Creation
+
+```bash
+aws ec2 create-image \
+  --instance-id i-0abc123 \
+  --name "golden-image-$(date +%Y%m%d)" \
+  --tag-specifications \
+    "ResourceType=image,Tags=[{Key=Environment,Value=production},{Key=ExpireAfter,Value=90d}]" \
+    "ResourceType=snapshot,Tags=[{Key=Environment,Value=production},{Key=ExpireAfter,Value=90d}]"
+```
+
+### Data Lifecycle Manager (DLM)
+
+Automate snapshot retention with DLM policies:
+
+```bash
+aws dlm create-lifecycle-policy \
+  --description "Delete AMI snapshots after 30 days" \
+  --state ENABLED \
+  --execution-role-arn arn:aws:iam::123456789012:role/AWSDataLifecycleManagerDefaultRole \
+  --policy-details '{
+    "PolicyType": "IMAGE_MANAGEMENT",
+    "ResourceTypes": ["INSTANCE"],
+    "TargetTags": [{"Key": "Backup", "Value": "true"}],
+    "Schedules": [{
+      "Name": "Monthly cleanup",
+      "CreateRule": {"Interval": 24, "IntervalUnit": "HOURS"},
+      "RetainRule": {"Count": 30},
+      "DeprecateRule": {"Count": 25}
+    }]
+  }'
+```
+
+## Quick Reference
+
+| Scenario | Solution |
+|----------|----------|
+| Snapshot linked to active AMI | Deregister AMI first, then delete snapshot |
+| Snapshot linked to disabled AMI | Filter "Disabled images" in Console, deregister, then delete |
+| AWS Backup managed snapshot | Delete recovery point from Backup console/CLI |
+| Cross-account shared snapshot | Contact the other account to deregister their AMI copy |
+| Truly orphaned (no AMI found) | Delete directly — it was likely from a deregistered AMI |
+
+## Related Content
+
+- [AWS RDS PostgreSQL Minor Version Deprecation](/blog/aws-rds-postgresql-minor-version-deprecation-may-2026/)
+- [HashiCorp Vault vs AWS Secrets Manager](/blog/vault-vs-aws-secrets-manager/)
+- [Platform Engineering at Scale](/blog/platform-engineering-business-case/)

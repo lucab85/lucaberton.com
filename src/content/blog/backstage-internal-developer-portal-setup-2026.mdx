@@ -1,0 +1,188 @@
+---
+title: "Backstage: Build an Internal Developer Portal on Kubernetes"
+snippet: "Deploy Spotify's Backstage on Kubernetes — service catalog, software templates, TechDocs, and plugin ecosystem for platform engineering."
+description: "Deploy Spotify's Backstage on Kubernetes — service catalog, software templates, TechDocs, and plugin ecosystem for platform engineering."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Platform Engineering', 'Developer Experience', 'Kubernetes']
+image:
+  src: "/blog/thumbnails/backstage-internal-developer-portal-setup-2026.jpg"
+  alt: "Backstage: Build an Internal Developer Portal on Kubernetes"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What Is Backstage?
+
+[Backstage](https://github.com/backstage/backstage) is Spotify's open-source developer portal — now a CNCF Incubating project. It provides a single pane of glass for all your services, documentation, APIs, and infrastructure. 29K+ GitHub stars.
+
+## Core Features
+
+### 1. Software Catalog
+Every service, library, and resource in one searchable catalog:
+
+```yaml
+# catalog-info.yaml (lives in each repo)
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: payment-service
+  description: Handles all payment processing
+  annotations:
+    github.com/project-slug: myorg/payment-service
+    backstage.io/techdocs-ref: dir:.
+  tags:
+    - python
+    - payments
+spec:
+  type: service
+  lifecycle: production
+  owner: team-payments
+  system: checkout
+  dependsOn:
+    - resource:payments-db
+    - component:auth-service
+  providesApis:
+    - payments-api
+```
+
+### 2. Software Templates (Scaffolding)
+
+Create new services from templates:
+
+```yaml
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: python-fastapi-service
+  title: Python FastAPI Service
+spec:
+  owner: platform-team
+  type: service
+  parameters:
+    - title: Service Info
+      properties:
+        name:
+          title: Service Name
+          type: string
+        owner:
+          title: Owner Team
+          type: string
+          ui:field: OwnerPicker
+    - title: Infrastructure
+      properties:
+        database:
+          title: Database
+          type: string
+          enum: [postgres, mysql, none]
+  steps:
+    - id: fetch-template
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values:
+          name: ${{ parameters.name }}
+    - id: publish
+      action: publish:github
+      input:
+        repoUrl: github.com?owner=myorg&repo=${{ parameters.name }}
+    - id: register
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps.publish.output.repoContentsUrl }}
+```
+
+### 3. TechDocs (Documentation)
+
+Auto-publish MkDocs from every repo:
+
+```yaml
+# mkdocs.yml in your service repo
+site_name: Payment Service
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - API Reference: api.md
+  - Runbook: runbook.md
+
+plugins:
+  - techdocs-core
+```
+
+### 4. Kubernetes Plugin
+
+See pod status, deployments, and logs for every service:
+
+```yaml
+# catalog-info.yaml annotation
+metadata:
+  annotations:
+    backstage.io/kubernetes-id: payment-service
+    backstage.io/kubernetes-namespace: payments
+```
+
+## Kubernetes Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backstage
+  namespace: backstage
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: backstage
+          image: myregistry/backstage:latest
+          ports:
+            - containerPort: 7007
+          env:
+            - name: POSTGRES_HOST
+              value: "postgres.backstage.svc"
+            - name: POSTGRES_PORT
+              value: "5432"
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: backstage-secrets
+                  key: github-token
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+```
+
+## Plugin Ecosystem
+
+| Category | Plugins |
+|----------|---------|
+| CI/CD | GitHub Actions, Jenkins, Argo CD, Tekton |
+| Cloud | AWS, GCP, Azure |
+| Monitoring | Prometheus, Grafana, Datadog, PagerDuty |
+| Security | Snyk, SonarQube, Trivy |
+| Infrastructure | Terraform, Crossplane, Kubernetes |
+| Cost | Kubecost, CloudBilling |
+
+## Who Needs Backstage?
+
+| Team Size | Need Backstage? |
+|-----------|----------------|
+| under 10 devs | ❌ Overkill |
+| 10-50 devs | ⚠️ Maybe (if many services) |
+| 50-200 devs | ✅ Strongly recommended |
+| 200+ devs | ✅ Essential |
+
+The value scales with complexity — more services, more teams, more value.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Crossplane: Cloud Infrastructure from K8s](/blog/crossplane-kubernetes-infrastructure-control-plane-2026/)
+- [Argo CD: GitOps Deployment](/blog/argo-cd-gitops-kubernetes-deployment-2026/)
+- [Terraform vs OpenTofu](/blog/terraform-vs-opentofu-migration-guide-2026/)

@@ -1,0 +1,72 @@
+---
+draft: false
+title: "When Kubernetes Pod Disruption Budgets Aren't Enough for Multi-Cloud CockroachDB"
+seoTitle: "Multi-Cloud Pod Disruption Budgets | RoachFest 2026"
+snippet: "Why cluster-scoped Kubernetes Pod Disruption Budgets can silently break quorum for multi-cloud CockroachDB, and how a custom cross-cluster PDB fixes it."
+description: "Why cluster-scoped Kubernetes Pod Disruption Budgets can break quorum in multi-cloud CockroachDB, and how a cross-cluster PDB closes the gap."
+publishDate: "2026-07-14"
+lastModified: "2026-07-14"
+image:
+  src: "/blog/events/roachfest-london-2026/roachfest-london-2026-pod-disruption-budgets.jpg"
+  alt: "A speaker on stage in front of the RoachFest logo at RoachFest London 2026, mid-explanation of cross-cluster Kubernetes Pod Disruption Budgets"
+category: "database"
+author: "Luca Berton"
+tags:
+  - "CockroachDB"
+  - "Kubernetes"
+  - "Multi-Cloud"
+  - "RoachFest"
+  - "Site Reliability"
+  - "High Availability"
+  - "Distributed Systems"
+---
+
+**"Each cloud has its own independent Kubernetes cluster."** That single sentence, from the same RoachFest London 2026 session where [Form3 walked through its V2 multi-cloud payments architecture and overnight chaos testing](/blog/form3-kevin-holditch-multi-cloud-payments-roachfest-2026/), is the whole problem in miniature. It sounds like an implementation detail. For a multi-cloud CockroachDB deployment, it is the gap that can take the database down during a routine, boring Tuesday-afternoon maintenance window.
+
+This piece and [Form3's chaos-testing story](/blog/form3-kevin-holditch-multi-cloud-payments-roachfest-2026/) come from the same platform team's talk — the recording I worked from didn't capture a name badge for this specific segment, but the setting, timing, and subject matter all point to the same Form3 engineers who described their V2 architecture and nightly chaos runs. I'm treating it as a continuation of that story rather than a separate, unrelated one.
+
+## The Setup That Looks Solid on Paper
+
+The scenario I was walked through on the floor was concrete: a CockroachDB cluster running **6 pods** across multiple cloud providers, configured to keep **5 pods live at all times**. Lose an entire availability zone, and the database stays online — exactly the resilience multi-region, multi-cloud CockroachDB is designed to deliver, and the same architectural bet [Form3 made for its V2 payments platform](/blog/form3-kevin-holditch-multi-cloud-payments-roachfest-2026/).
+
+Then a second, entirely ordinary event lands on top of it: rolling **VM security patches**, non-negotiable for any regulated environment. Patching a VM means draining the Kubernetes node it runs on, which means evicting the pod scheduled there, which means a **Pod Disruption Budget (PDB)** decides whether that eviction is allowed right now.
+
+## What a Pod Disruption Budget Actually Guards
+
+A PDB is a Kubernetes object that caps how many pods from a workload can be voluntarily taken down at once — via a node drain, a cluster upgrade, or a `kubectl` eviction — so an operator or autoscaler cannot accidentally evict enough replicas to break quorum. For a stateful, Raft-based database like CockroachDB, that guard rail matters far more than for a stateless web frontend: lose quorum and the ranges affected stop taking writes, full stop.
+
+The configuration in this scenario was `maxUnavailable: 1` — sensible on its face. But here is the detail that breaks the model: **each cloud runs its own independent Kubernetes cluster**, and a PDB is scoped to the cluster it lives in. `maxUnavailable: 1` does not mean "one pod down across the whole database." It means one pod down *per cluster, enforced independently, with no coordination between them* — three clouds, each running its own PDB, each perfectly happy to let one of its own pods go dark for patching at the exact same moment, because nothing tells any of them what the others are doing.
+
+Run that arithmetic against 6 pods needing 5 live: three simultaneous single-cloud drains take out 3 pods, and the cluster is still technically inside every individual PDB's rules while sitting well under quorum. Add the failure mode multi-cloud is supposed to protect against in the first place — an entire cloud provider going down on top of the patching window — and the math goes from tight to fatal: **6 pods becomes 4, and the database goes down**, exactly the scenario multi-cloud replication was deployed to prevent.
+
+## The Gap Is at the Orchestration Layer, Not the Database
+
+The unsettling part is that CockroachDB itself did nothing wrong. Raft consensus worked correctly, quorum math worked correctly, the multi-cloud topology worked correctly. The gap sits one layer up, in an orchestration primitive never designed with "this workload spans multiple independent Kubernetes control planes" in mind. PDBs are cluster-scoped by construction — not a bug, the API working exactly as documented — but it was never built for a world where one logical stateful workload is quorum-coupled across clusters with no shared source of truth about each other's state.
+
+That is a genuinely under-discussed problem. Most Kubernetes operational guidance — including [PDB and rolling-update guidance written for a single cluster](/blog/kubernetes-pod-disruption-budgets-rolling-updates-2026/) — implicitly assumes the workload it protects lives inside one cluster's blast radius. Multi-cloud CockroachDB breaks that assumption on purpose, for good reasons, and inherits a coordination gap nobody was watching for.
+
+## The Fix: A Custom Cross-Cluster PDB
+
+The same team, continuing the same session, described a concrete fix they had built after hitting this exact wall: a **custom cross-cluster Pod Disruption Budget** spanning multiple Kubernetes clusters simultaneously, rather than one PDB object per cluster acting in isolation.
+
+The mechanics: a single disruption budget is enforced across every cluster in real time. When a scheduler on any cloud — AWS was the example given — wants to drain a node, it first checks *global* state before proceeding, not just the state of its own cluster. If another cluster already has a pod offline for any reason, the new eviction request gets blocked, even though the requesting cluster's own local PDB would have happily approved it. The result quoted was **at least 8 pods guaranteed running at all times** — a real, verifiable resilience floor, not an assumption baked into a YAML file that only holds within cluster boundaries.
+
+Building this required admission control or a custom controller watching disruption requests across cluster boundaries and vetoing based on a shared view of the world — real engineering effort well beyond `kubectl apply -f pdb.yaml`. It is also a clean, almost textbook example of Kubernetes' extensibility model doing what it is meant to do: when a built-in primitive's scope stops matching the shape of the actual system, you build the missing coordination layer on top rather than pretend the gap does not exist.
+
+## Why This Matters Beyond CockroachDB
+
+The specific numbers here — 6 pods, 5 required, 8 guaranteed — belong to one conversation on one show floor. The pattern generalizes to any stateful, quorum-based system spread across independently-managed Kubernetes clusters: multi-region message queues, distributed caches, consensus-based config stores, anything where "voluntary disruption" in one cluster has consequences for correctness in another. If your resilience model depends on a global invariant — quorum, replication factor, a minimum live-node count — but your enforcement mechanism is scoped per cluster, you do not have the resilience model you think you have. You have N independent local approximations of it, and the day they all approve a drain at once is the day you find out.
+
+The takeaway is not "don't use PDBs" — it is to explicitly check, for every stateful multi-cluster workload, whether the coordination boundary you need matches the boundary Kubernetes gives you by default. For a single-cluster deployment, the built-in PDB is the right and sufficient tool. The moment a workload's failure domain crosses cluster or cloud boundaries, that assumption needs to be checked, not inherited.
+
+## Related Reading
+
+- [RoachFest London 2026: Distributed SQL Meets AI Resilience](/blog/roachfest-london-2026-distributed-sql-ai-resilience/)
+- [Form3 and Kevin Holditch: Surviving Cloud Outages with CockroachDB](/blog/form3-kevin-holditch-multi-cloud-payments-roachfest-2026/)
+- [Pod Disruption Budgets & Zero-Downtime Rolling Updates](/blog/kubernetes-pod-disruption-budgets-rolling-updates-2026/)
+- [Kubernetes Multi-Cluster Management: Enterprise Patterns](/blog/kubernetes-multi-cluster-management-enterprise-2026/)
+- [Data Residency in Multi-Cloud Kubernetes](/blog/data-residency-multi-cloud-kubernetes/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I work at the intersection of distributed systems, platform engineering, and enterprise AI deployments. [Book a consultation](https://calendly.com/lucaberton/).

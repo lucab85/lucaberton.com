@@ -1,0 +1,150 @@
+---
+title: "Flux CD vs Argo CD: GitOps Tools Compared (2026)"
+snippet: "Head-to-head comparison of Flux CD and Argo CD — architecture, multi-tenancy, Helm support, scalability, and which to choose."
+description: "Head-to-head comparison of Flux CD and Argo CD — architecture, multi-tenancy, Helm support, scalability, and which to choose."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['DevOps', 'GitOps', 'Kubernetes']
+image:
+  src: "/blog/thumbnails/fluxcd-vs-argocd-gitops-comparison-2026.jpg"
+  alt: "Flux CD vs Argo CD: GitOps Tools Compared (2026)"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## Two Approaches to GitOps
+
+Both Flux and Argo CD sync Kubernetes state from Git. But their architectures differ fundamentally:
+
+| Aspect | Flux CD | Argo CD |
+|--------|---------|---------|
+| Architecture | Multi-controller (modular) | Single application (monolithic) |
+| UI | ❌ No built-in (Weave GitOps optional) | ✅ Rich web UI |
+| Multi-tenancy | ✅ Native (Kustomization per tenant) | ⚠️ Projects + AppSets |
+| Helm support | ✅ HelmRelease CRD | ✅ Application source |
+| OCI artifacts | ✅ Native | ⚠️ Limited |
+| Notification | ✅ Provider-agnostic (alerts CRD) | ✅ Built-in |
+| Image automation | ✅ (Image Reflector + Updater) | ❌ (use Argo Image Updater) |
+| CNCF status | Graduated | Graduated |
+| GitHub stars | 7K | 18K |
+| Adoption | Platform teams | App teams |
+
+## Flux CD Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│              Flux Controllers                │
+│                                             │
+│  ┌─────────────┐  ┌──────────────────────┐ │
+│  │   Source    │  │    Kustomize         │ │
+│  │  Controller │  │    Controller        │ │
+│  └──────┬──────┘  └──────────┬───────────┘ │
+│         │                    │             │
+│  ┌──────▼──────┐  ┌─────────▼──────────┐  │
+│  │    Helm     │  │  Notification      │  │
+│  │  Controller │  │  Controller        │  │
+│  └─────────────┘  └────────────────────┘  │
+│                                             │
+│  ┌─────────────────────────────────────┐   │
+│  │  Image Reflector + Image Updater    │   │
+│  └─────────────────────────────────────┘   │
+└─────────────────────────────────────────────┘
+```
+
+### Flux Example
+
+```yaml
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: app-repo
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: https://github.com/myorg/app-deployments
+  ref:
+    branch: main
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: production-apps
+  namespace: flux-system
+spec:
+  interval: 5m
+  path: ./clusters/production
+  sourceRef:
+    kind: GitRepository
+    name: app-repo
+  prune: true
+  healthChecks:
+    - apiVersion: apps/v1
+      kind: Deployment
+      name: payment-service
+      namespace: payments
+```
+
+## Argo CD Architecture
+
+```
+┌─────────────────────────────────────┐
+│         Argo CD Server              │
+│                                     │
+│  ┌─────────┐  ┌──────────────────┐ │
+│  │   API   │  │   Web UI         │ │
+│  │  Server │  │   (React)        │ │
+│  └────┬────┘  └────────┬─────────┘ │
+│       │                 │           │
+│  ┌────▼─────────────────▼────────┐  │
+│  │     Application Controller    │  │
+│  │     (reconciliation loop)     │  │
+│  └───────────────┬───────────────┘  │
+│                  │                  │
+│  ┌───────────────▼───────────────┐  │
+│  │       Repo Server             │  │
+│  │  (Helm template, Kustomize)   │  │
+│  └───────────────────────────────┘  │
+└─────────────────────────────────────┘
+```
+
+## Decision Framework
+
+### Choose Flux when:
+- ✅ Platform engineering team manages infrastructure
+- ✅ Need multi-tenancy with strict isolation
+- ✅ Want modular, composable controllers
+- ✅ Image automation (auto-update on new container image)
+- ✅ OCI artifact support
+- ✅ Don't need a web UI
+
+### Choose Argo CD when:
+- ✅ Teams want visual deployment status
+- ✅ Need a web UI for non-CLI users
+- ✅ ApplicationSets for managing many environments
+- ✅ Progressive delivery (with Argo Rollouts)
+- ✅ Larger community, more plugins
+- ✅ SSO/RBAC for multiple teams in UI
+
+### Choose Both (Yes, Really):
+
+Some orgs use **Flux for infrastructure** (Crossplane, cert-manager, monitoring) and **Argo CD for applications** (team-facing deployments with UI).
+
+## Performance at Scale
+
+| Metric | Flux (1000 apps) | Argo CD (1000 apps) |
+|--------|-----------------|---------------------|
+| Memory | 512MB (split across controllers) | 2-4GB (single process) |
+| Reconciliation time | 30s (parallel per controller) | 60-120s (sequential) |
+| Git polling | Per-source (efficient) | Per-application |
+| Multi-cluster | ✅ (Kustomization per cluster) | ✅ (Cluster secrets) |
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Argo CD: GitOps Deployment Guide](/blog/argo-cd-gitops-kubernetes-deployment-2026/)
+- [Crossplane: Infrastructure from K8s](/blog/crossplane-kubernetes-infrastructure-control-plane-2026/)
+- [Backstage: Developer Portal](/blog/backstage-internal-developer-portal-setup-2026/)

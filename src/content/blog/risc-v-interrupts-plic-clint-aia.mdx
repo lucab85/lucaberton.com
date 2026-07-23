@@ -1,0 +1,121 @@
+---
+title: "RISC-V Interrupts: CLINT, PLIC and the AIA"
+seoTitle: "RISC-V Interrupts: CLINT, PLIC and the AIA"
+snippet: "How interrupts work on RISC-V — traps, the CLINT and PLIC, and the modern Advanced Interrupt Architecture (AIA) with MSIs. A guide for systems devs."
+description: "How interrupts work on RISC-V — traps, the CLINT and PLIC, and the modern Advanced Interrupt Architecture (AIA) with MSIs. A guide for systems devs."
+publishDate: "2026-06-11"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "RISC-V"
+tags: ["RISC-V", "interrupts", "PLIC", "AIA", "systems"]
+image:
+  src: "/blog/events/riscv-summit-2026/riscv-summit-75.jpg"
+  alt: "RISC-V silicon and systems on display at RISC-V Summit Europe 2026"
+faq:
+  - question: "What is the difference between the CLINT and the PLIC in RISC-V?"
+    answer: "The CLINT (Core-Local Interruptor) handles core-local interrupts — the timer and software (inter-processor) interrupts — for each hart. The PLIC (Platform-Level Interrupt Controller) routes external device interrupts (UART, network, storage) to harts and manages their priorities. They are complementary: CLINT for timer/IPI, PLIC for peripherals."
+  - question: "What is the RISC-V Advanced Interrupt Architecture (AIA)?"
+    answer: "The AIA is the modern RISC-V interrupt specification that replaces the legacy PLIC for advanced systems. It adds message-signaled interrupts (MSIs) via the IMSIC, the APLIC for wired interrupts, and proper virtualization support — essential for high-core-count servers and virtual machines."
+  - question: "What are the RISC-V trap CSRs?"
+    answer: "Key control and status registers include mtvec/stvec (trap vector base address), mcause/scause (why the trap happened), mepc/sepc (the faulting instruction's address), mstatus/sstatus (status including interrupt-enable bits), and mie/mip (interrupt-enable and interrupt-pending masks). They drive how a hart enters and returns from a trap."
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Interrupts are how a processor responds to the world — a key press, a network packet, a timer tick. On RISC-V the interrupt story has two layers: a clean, minimal **trap mechanism** in the core ISA, and a set of **interrupt controllers** (CLINT, PLIC, and the modern AIA) that decide what reaches each hart. This guide untangles all three.
+
+![RISC-V silicon and systems on display at the Summit](/blog/events/riscv-summit-2026/riscv-summit-75.jpg)
+
+## Traps: The Foundation
+
+In RISC-V, **interrupts** (asynchronous, from external events) and **exceptions** (synchronous, like an illegal instruction or page fault) are handled by the same underlying machinery: the **trap**. When a trap fires, the hart:
+
+1. Saves the current PC into `mepc`/`sepc`.
+2. Records the reason in `mcause`/`scause`.
+3. Updates `mstatus`/`sstatus` (disabling further interrupts, saving the previous privilege).
+4. Jumps to the handler address in `mtvec`/`stvec`.
+
+Your handler runs, then executes `mret`/`sret` to restore state and resume. The relevant **CSRs** — `mtvec`, `mcause`, `mepc`, `mstatus`, `mie`, `mip` — are the same regardless of which interrupt controller delivered the signal. This clean trap model sits right alongside the [privilege architecture](/blog/risc-v-security-privilege-pmp-confidential-computing/).
+
+## The Three Interrupt Sources
+
+RISC-V defines three standard interrupt causes per privilege level:
+
+- **Software interrupts** — used for inter-processor interrupts (one hart waking another)
+- **Timer interrupts** — fired when the machine timer reaches a comparison value
+- **External interrupts** — from peripherals (UART, NIC, storage, GPIO…)
+
+The first two are *core-local*; the third comes from the outside world and needs routing. That split is exactly why RISC-V has two classic controllers.
+
+## The CLINT: Timer and Software Interrupts
+
+The **CLINT (Core-Local Interruptor)** is the simple one. Per hart it provides:
+
+- **`mtime`** — a free-running machine timer, and **`mtimecmp`** — write a future value here and a timer interrupt fires when `mtime` reaches it. This is the heartbeat behind the OS scheduler tick.
+- **`msip`** — a software-interrupt pending bit; writing it triggers an IPI to that hart.
+
+The kernel does not poke the CLINT directly in M-mode; it asks the firmware via the [SBI](/blog/risc-v-boot-flow-opensbi-uboot-firmware/) (`sbi_set_timer`, IPI calls), which keeps the OS portable across platforms.
+
+## The PLIC: External Device Interrupts
+
+The **PLIC (Platform-Level Interrupt Controller)** handles everything external. It:
+
+- Accepts interrupt lines from many devices
+- Assigns each a **priority** and a **threshold** per hart
+- Lets a hart **claim** the highest-priority pending interrupt and **complete** it when done
+
+The classic claim/complete handshake:
+
+```c
+uint32_t irq = *PLIC_CLAIM;     // read = claim highest-priority pending IRQ
+handle_device(irq);             // service the device
+*PLIC_CLAIM = irq;              // write back = signal completion
+```
+
+The PLIC is simple and has served well, but it has limits — notably no native **message-signaled interrupts** and weak virtualization support. That is what the AIA fixes.
+
+## The AIA: The Modern Architecture
+
+The **Advanced Interrupt Architecture (AIA)** is the modern replacement designed for high-core-count servers and virtualization — increasingly important as [RISC-V scales into the datacenter](/blog/risc-v-datacenter-servers-sovereign-ai-2026/). It has two main pieces:
+
+- **IMSIC (Incoming MSI Controller)** — per-hart, receives **message-signaled interrupts (MSIs)**. Instead of a dedicated wire, a device signals an interrupt by writing to a memory address — the same model PCIe uses. This scales far better to many cores and many devices.
+- **APLIC (Advanced PLIC)** — handles traditional **wired** interrupts and can convert them into MSIs for the IMSIC.
+
+Crucially, the AIA was designed with the **[hypervisor extension](/blog/risc-v-profiles-rva23-explained/)** in mind, so interrupts can be delivered directly to guest virtual machines with low overhead — essential for cloud and [confidential computing](/blog/risc-v-security-privilege-pmp-confidential-computing/) workloads.
+
+## CLINT/PLIC vs AIA: Which Will You See?
+
+- **[Embedded and microcontroller](/blog/risc-v-embedded-iot-microcontroller-guide/) parts** typically use CLINT + PLIC (or a vendor CLIC variant for fast vectored interrupts). Simple, small, perfect for the job.
+- **Application-class and server SoCs** are moving to the AIA (IMSIC/APLIC) for MSI support and virtualization.
+
+Both deliver into the same core trap machinery — only the routing layer differs, which is why the same kernel can support both with the right drivers.
+
+## A Minimal Handler Sketch
+
+In M-mode, a trap handler reads `mcause` to decide what happened:
+
+```asm
+trap_handler:
+    csrr  t0, mcause
+    bltz  t0, interrupt        # high bit set => interrupt, not exception
+    # ... handle synchronous exception ...
+interrupt:
+    # mask off the interrupt code in t0 and dispatch:
+    #   timer    -> reschedule
+    #   software -> handle IPI
+    #   external -> claim from PLIC/IMSIC and service device
+    mret
+```
+
+You can single-step this logic in QEMU and a [debugger](/blog/risc-v-debugging-openocd-gdb-jtag/) to watch the CSRs change as traps fire.
+
+<BlogPromoCard variant="course" />
+
+## The Bottom Line
+
+RISC-V keeps the *trap* mechanism beautifully simple and pushes complexity out to interrupt controllers. The **CLINT** handles core-local timer and software interrupts; the **PLIC** routes external device interrupts; and the modern **AIA** (IMSIC + APLIC) brings MSIs and virtualization for servers. Learn the trap CSRs once and the rest is just understanding which controller is delivering the signal — knowledge that pays off whether you are writing firmware, an RTOS, or a kernel driver.
+
+---
+
+*Part of my RISC-V series. See also the [boot flow](/blog/risc-v-boot-flow-opensbi-uboot-firmware/) and [debugging RISC-V](/blog/risc-v-debugging-openocd-gdb-jtag/).*

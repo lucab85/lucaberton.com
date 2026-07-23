@@ -1,0 +1,415 @@
+---
+draft: false
+title: "Recover Azure VM SSH Access When the Private Key Is Lost"
+seoTitle: "Recover Azure VM SSH Access: Lost Key and Agent Not Ready"
+snippet: "Lost an Azure VM private SSH key? Try portal reset once, then use offline OS disk repair if the Azure Linux Agent is not ready."
+description: "Lost an Azure VM private SSH key? Try portal reset once, then use offline OS disk repair if the Azure Linux Agent is not ready."
+publishDate: "2026-06-29"
+lastModified: "2026-07-01"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - "azure"
+  - "linux"
+  - "ssh"
+  - "vm"
+  - "troubleshooting"
+  - "openclaw"
+  - "security"
+image:
+  src: "/blog/openclaw/setting-up-azure-vm.jpg"
+  alt: "Azure Linux virtual machine SSH recovery"
+faq:
+  - question: "Can Azure recover a lost private SSH key?"
+    answer: "No. Azure stores or accepts the public SSH key, but it cannot recover your private key. You need to create a new key pair and install the new public key on the VM."
+  - question: "Can I use Reset SSH public key if the Azure VM Agent is not ready?"
+    answer: "You can try it once from the Azure portal, but it may fail because Reset SSH public key, Run command, and VMAccess depend on a working guest agent path. If the Azure Linux Agent is not ready and the reset fails or times out, repairing the OS disk from a repair VM is the more reliable method."
+  - question: "Should I delete the old SSH public key after recovery?"
+    answer: "Yes, if the old private key may have been copied, leaked, or stored on a lost device. Remove the matching old public-key line from authorized_keys after you regain access."
+---
+
+If you lose the private SSH key for an Azure Linux VM, you cannot download it again from Azure. The private key only exists wherever you created and stored it. Recovery means creating a new SSH key pair and adding the new public key to the VM.
+
+When the VM also reports **Agent status: Not Ready**, the easy Azure recovery paths can fail. Portal **Reset SSH public key**, `az vm user update`, Run Command, and the VMAccess extension all depend on the guest agent path being healthy enough to complete the change.
+
+That does not mean you must start with disk repair. If you are already on the Azure portal reset screen, try the portal reset once. If it succeeds, you are done with SSH recovery and can move directly to repairing the Azure Linux Agent. If it fails, times out, or reports a VMAccess/Guest Agent provisioning problem, stop retrying and use the offline OS disk repair procedure.
+
+The recovery order is:
+
+1. Try **Reset password / Reset SSH public key** once from the Azure portal.
+2. Save the generated private key immediately if the portal creates one.
+3. Test SSH access.
+4. If the reset fails because of `VMAccessForLinux`, `Guest Agent`, `Provisioning failed`, or a timeout, snapshot the OS disk.
+5. Create an Azure repair VM.
+6. Mount a copy of the original OS disk.
+7. Edit `authorized_keys` offline.
+8. Restore the repaired disk.
+9. Fix the Azure Linux Agent after login.
+
+The examples below use:
+
+```text
+Resource group: rg-openclaw
+VM name:        vm-openclaw-01
+Repair group:  rg-openclaw-repair
+Repair VM:     vm-openclaw-01-repair
+```
+
+Change these values for your environment.
+
+## Why You Cannot Recover the Lost Private Key
+
+SSH key authentication is asymmetric:
+
+- The **public key** can be stored on the VM and in Azure metadata.
+- The **private key** stays on your local machine and must remain secret.
+
+Azure can help add or replace public keys, but it cannot reconstruct a lost private key. If the private key is gone, create a new pair.
+
+## Step 1: Try the Azure Portal Reset Once
+
+If you are on the Azure VM **Reset password** screen, try the portal flow once before doing disk repair.
+
+Use these values:
+
+| Field | Value |
+|-------|-------|
+| **Mode** | `Add SSH public key` |
+| **Username** | `azureuser` only if that was the original login username |
+| **SSH public key source** | `Generate new key pair` |
+| **SSH Key Type** | `Ed25519 SSH Format` |
+| **Key pair name** | `vm-openclaw-01-recovery-20260629` |
+
+Do **not** select **Reset configuration only**. That resets SSH configuration but does not install your replacement key.
+
+Click **Update** at the bottom of the page.
+
+Azure can reset SSH credentials for an existing user or create a new sudo-enabled user from this screen. The important detail is the username: use the real VM login user. If the VM was created with `azureuser`, use `azureuser`. If you created it with another admin user, use that user instead.
+
+## Step 2: Save the Portal-Generated Private Key
+
+If Azure generates the key pair, it should prompt you to download a `.pem` private key. Save it immediately. You cannot reconstruct the private key from the public key later.
+
+On your Mac:
+
+```bash
+mkdir -p ~/.ssh
+
+mv ~/Downloads/vm-openclaw-01-recovery-20260629.pem \
+   ~/.ssh/vm-openclaw-01-recovery-20260629.pem
+
+chmod 600 ~/.ssh/vm-openclaw-01-recovery-20260629.pem
+```
+
+Connect with:
+
+```bash
+ssh -i ~/.ssh/vm-openclaw-01-recovery-20260629.pem \
+  azureuser@<VM_PUBLIC_IP>
+```
+
+If the portal reset succeeds, immediately back up the new private key somewhere secure and continue with [Step 9: Repair the Azure Linux Agent](#step-9-repair-the-azure-linux-agent).
+
+If the Azure portal notification, **Activity log**, or extension status reports `VMAccessForLinux`, `Guest Agent`, `Provisioning failed`, or a timeout, stop retrying. The VM previously showed:
+
+```text
+Agent status: Not Ready
+```
+
+The reset page uses the **VMAccessForLinux** extension. Azure VM extensions require the guest agent to be running and reporting ready enough to process the request. When that path is broken, the dependable recovery method is offline OS disk repair.
+
+## Step 3: Generate a Replacement SSH Key for Offline Repair
+
+On your Mac or Linux workstation, create a new ED25519 key:
+
+```bash
+ssh-keygen -t ed25519 -a 100 \
+  -f ~/.ssh/vm-openclaw-01-20260629 \
+  -C "vm-openclaw-01"
+```
+
+Use a passphrase when prompted.
+
+This creates two files:
+
+```text
+~/.ssh/vm-openclaw-01-20260629       # private key: never share it
+~/.ssh/vm-openclaw-01-20260629.pub   # public key: safe to install on the VM
+```
+
+Display the public key:
+
+```bash
+cat ~/.ssh/vm-openclaw-01-20260629.pub
+```
+
+You will paste that complete single-line public key into `authorized_keys` later.
+
+If you already have a working `.pub` key from the failed portal attempt, you can use that public key instead. The point is to have a public key you can safely install into `authorized_keys` and a private key you still control.
+
+## Step 4: Take a Safety Snapshot
+
+Open Azure Cloud Shell in the Azure portal and choose **Bash**.
+
+Confirm the active subscription:
+
+```bash
+az account show -o table
+```
+
+Get the OS disk ID:
+
+```bash
+OS_DISK_ID=$(az vm show \
+  --resource-group rg-openclaw \
+  --name vm-openclaw-01 \
+  --query 'storageProfile.osDisk.managedDisk.id' \
+  --output tsv)
+```
+
+Create a snapshot before touching the disk:
+
+```bash
+az snapshot create \
+  --resource-group rg-openclaw \
+  --name vm-openclaw-01-osdisk-before-ssh-recovery-20260629 \
+  --source "$OS_DISK_ID"
+```
+
+Do not skip this step. A snapshot gives you a recovery point if you mount the wrong partition, edit the wrong file, or discover a separate filesystem issue.
+
+## Step 5: Create an Azure Repair VM
+
+Install or update the Azure VM repair extension in Cloud Shell:
+
+```bash
+az extension add --name vm-repair --upgrade
+```
+
+Create a temporary password for the repair VM:
+
+```bash
+read -s -p "Temporary repair VM password: " REPAIR_PASS
+echo
+```
+
+Create the repair VM:
+
+```bash
+az vm repair create \
+  --resource-group rg-openclaw \
+  --name vm-openclaw-01 \
+  --repair-group-name rg-openclaw-repair \
+  --repair-vm-name vm-openclaw-01-repair \
+  --associate-public-ip \
+  --repair-username repairadmin \
+  --repair-password "$REPAIR_PASS" \
+  --verbose
+
+unset REPAIR_PASS
+```
+
+This creates a repair VM and attaches a copy of the original OS disk as a data disk. Keep the Azure-created repair tags intact, because the restore command uses them.
+
+Before connecting, open the repair VM's **Networking** page in the Azure portal and restrict inbound SSH on port `22` to your public IP address.
+
+Get the repair VM public IP:
+
+```bash
+REPAIR_IP=$(az vm list-ip-addresses \
+  --resource-group rg-openclaw-repair \
+  --name vm-openclaw-01-repair \
+  --query '[0].virtualMachine.network.publicIpAddresses[0].ipAddress' \
+  --output tsv)
+
+echo "$REPAIR_IP"
+```
+
+Connect to the repair VM:
+
+```bash
+ssh repairadmin@"$REPAIR_IP"
+```
+
+Use the temporary repair password.
+
+## Step 6: Mount the Copied OS Disk
+
+On the repair VM, inspect the attached disks:
+
+```bash
+lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS,LABEL
+```
+
+Find the large unmounted Linux partition from the copied OS disk. It is often `/dev/sdc1`, but Azure device names can vary. Verify before mounting.
+
+Mount the candidate root partition:
+
+```bash
+sudo mkdir -p /mnt/recovery
+sudo mount /dev/sdc1 /mnt/recovery
+```
+
+Confirm you mounted the original VM root filesystem:
+
+```bash
+sudo test -f /mnt/recovery/etc/os-release \
+  && echo "Correct root filesystem" \
+  || echo "Wrong partition - unmount and inspect lsblk again"
+```
+
+Find the original VM users with home directories:
+
+```bash
+awk -F: '$6 ~ /^\/home\// {print $1, $6}' \
+  /mnt/recovery/etc/passwd
+```
+
+Use the correct admin username in the next step. Common Azure examples use `azureuser`, but your VM may use a different account.
+
+## Step 7: Add the New Public Key
+
+Replace `YOUR_USERNAME` with the real admin user from `/mnt/recovery/etc/passwd`.
+
+Replace the `PUBKEY` value with the complete public key line from your `.pub` file:
+
+```bash
+ADMIN_USER="YOUR_USERNAME"
+PUBKEY='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA... vm-openclaw-01'
+
+HOME_DIR="/mnt/recovery/home/$ADMIN_USER"
+AUTH="$HOME_DIR/.ssh/authorized_keys"
+
+sudo install -d -m 700 "$HOME_DIR/.ssh"
+
+if sudo test -f "$AUTH"; then
+  sudo cp -a "$AUTH" "$AUTH.bak.$(date +%s)"
+fi
+
+sudo grep -qxF "$PUBKEY" "$AUTH" 2>/dev/null || \
+  printf '%s\n' "$PUBKEY" | sudo tee -a "$AUTH" >/dev/null
+
+sudo chmod 700 "$HOME_DIR/.ssh"
+sudo chmod 600 "$AUTH"
+sudo chown --reference="$HOME_DIR" "$HOME_DIR/.ssh" "$AUTH"
+
+sudo sync
+sudo umount /mnt/recovery
+exit
+```
+
+This preserves the existing `authorized_keys` file, backs it up, appends the new key only if it is not already present, and fixes the file permissions SSH expects.
+
+If the old private key might have been stolen or copied, remove the old public-key line after you regain access.
+
+## Step 8: Restore the Repaired Disk
+
+Back in Azure Cloud Shell, restore the repaired OS disk copy to the original VM:
+
+```bash
+az vm repair restore \
+  --resource-group rg-openclaw \
+  --name vm-openclaw-01 \
+  --yes \
+  --verbose
+```
+
+Use the same VM and resource-group capitalization that you used during `az vm repair create`.
+
+Now connect with the new private key:
+
+```bash
+ssh -i ~/.ssh/vm-openclaw-01-20260629 \
+  YOUR_USERNAME@<VM_PUBLIC_IP>
+```
+
+If SSH still fails, run the client in verbose mode:
+
+```bash
+ssh -vvv -i ~/.ssh/vm-openclaw-01-20260629 \
+  YOUR_USERNAME@<VM_PUBLIC_IP>
+```
+
+Check for these common problems:
+
+- Wrong username.
+- Wrong public key pasted into `authorized_keys`.
+- Incorrect `.ssh` or `authorized_keys` ownership.
+- SSH blocked by the Network Security Group.
+- OS disk partition was not the actual root filesystem.
+
+## Step 9: Repair the Azure Linux Agent
+
+After SSH access works, fix the Azure Linux Agent so future Azure operations work again.
+
+Restart and inspect the service:
+
+```bash
+sudo systemctl restart walinuxagent
+sudo systemctl status walinuxagent --no-pager
+```
+
+Check whether auto-update is enabled:
+
+```bash
+sudo grep -i '^AutoUpdate.Enabled' /etc/waagent.conf
+```
+
+Test connectivity to the Azure fabric address:
+
+```bash
+sudo curl -fsS 'http://168.63.129.16/?comp=versions' | head
+```
+
+Inspect recent agent logs:
+
+```bash
+sudo tail -n 100 /var/log/waagent.log
+```
+
+If the service is missing or broken on Ubuntu 24.04, reinstall it:
+
+```bash
+sudo apt-get -qq update
+sudo apt-get install --reinstall -y walinuxagent
+sudo systemctl enable --now walinuxagent
+sudo systemctl status walinuxagent --no-pager
+```
+
+Once the agent returns to a ready state, Azure portal operations such as Run Command and VMAccess-based recovery should become reliable again.
+
+## Security Cleanup
+
+After you are back in the VM:
+
+1. Restrict SSH in the NSG to trusted source IPs only.
+2. Remove any old public key whose private key is lost or untrusted.
+3. Store the new private key in a password manager or secure backup.
+4. Keep the disk snapshot until you verify the VM and applications are healthy.
+5. Delete the repair resource group when it is no longer needed.
+
+For OpenClaw deployments, also verify that Docker services are healthy:
+
+```bash
+cd ~/openclaw
+docker compose ps
+docker compose logs --tail=100
+```
+
+## Related Microsoft Documentation
+
+- [Create and use an SSH key pair for Linux VMs in Azure](https://learn.microsoft.com/en-us/azure/virtual-machines/linux/mac-create-ssh-keys)
+- [Create SSH keys in the Azure portal](https://learn.microsoft.com/en-us/azure/virtual-machines/ssh-keys-portal)
+- [Troubleshoot SSH connection issues to an Azure VM](https://learn.microsoft.com/en-us/troubleshoot/azure/virtual-machines/linux/troubleshoot-ssh-connection)
+- [VMAccess Extension for Linux](https://learn.microsoft.com/en-us/azure/virtual-machines/extensions/vmaccess-linux)
+- [Troubleshoot Azure VM extension failures](https://learn.microsoft.com/en-us/azure/virtual-machines/extensions/troubleshoot)
+- [Repair a Linux VM by using the Azure Virtual Machine repair commands](https://learn.microsoft.com/en-us/troubleshoot/azure/virtual-machines/linux/repair-linux-vm-using-azure-virtual-machine-repair-commands)
+- [Troubleshoot the Azure Linux Agent](https://learn.microsoft.com/en-us/troubleshoot/azure/virtual-machines/linux/linux-azure-guest-agent)
+
+## Key Takeaways
+
+You cannot recover a lost private SSH key from Azure. Create a new key pair and install the new public key.
+
+If the Azure Linux Agent is **Not Ready**, try the portal reset once if you are already there, then prefer offline disk repair through an Azure repair VM if the reset fails or times out.
+
+Always snapshot before editing a VM disk offline, verify the mounted root filesystem, preserve `authorized_keys`, and repair the Azure Linux Agent after access is restored.

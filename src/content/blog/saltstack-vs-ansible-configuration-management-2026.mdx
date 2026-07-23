@@ -1,0 +1,207 @@
+---
+title: "SaltStack vs Ansible 2026: Speed, Scale, and Simplicity"
+snippet: "SaltStack vs Ansible for configuration management at scale. Event-driven architecture, agent vs agentless, performance at 10K+ nodes, and migration guide."
+description: "SaltStack vs Ansible for configuration management at scale. Event-driven architecture, agent vs agentless, performance at 10K+ nodes, and migration guide."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+image:
+  src: "/blog/thumbnails/saltstack-vs-ansible-configuration-management-2026.jpg"
+  alt: "SaltStack vs Ansible 2026: Speed, Scale, and Simplicity"
+tags:
+  - "ansible"
+  - "saltstack"
+  - "configuration-management"
+  - "automation"
+category: "Automation"
+author: "Luca Berton"
+draft: false
+---
+
+import YouTube from "../../components/YouTube.astro";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+## The Core Difference
+
+**Ansible** = Agentless, push-based, YAML playbooks, SSH transport
+**SaltStack** = Agent-based, event-driven, YAML states, ZeroMQ transport
+
+```
+Ansible:                          SaltStack:
+┌──────────┐                      ┌──────────┐
+│ Control  │──SSH──▶ Node 1       │  Master  │◀──ZMQ──┐
+│  Node    │──SSH──▶ Node 2       └────┬─────┘        │
+│(Playbook)│──SSH──▶ Node 3            │         ┌────┴────┐
+└──────────┘                      ┌────▼────┐    │ Minion  │
+                                  │ Minion  │    │   N     │
+                                  │   1     │    └─────────┘
+                                  └─────────┘
+```
+
+## Speed and Scale
+
+This is SaltStack's biggest advantage:
+
+| Metric | Ansible | SaltStack |
+|--------|---------|-----------|
+| 10 nodes | 5s | 3s |
+| 100 nodes | 45s | 5s |
+| 1,000 nodes | 8min | 8s |
+| 10,000 nodes | 60min+ | 15s |
+
+SaltStack's ZeroMQ pub/sub executes commands on **all minions simultaneously**. Ansible's SSH is sequential per fork (default 5 forks, max ~50 practical).
+
+### Why the Speed Difference?
+
+**Ansible:** Opens SSH connection → transfers Python modules → executes → returns result → next host
+**SaltStack:** Publishes command via ZeroMQ → all minions execute concurrently → return results via ZeroMQ
+
+## Configuration Examples
+
+### Package Installation
+
+**Ansible:**
+```yaml
+# playbook.yml
+- hosts: webservers
+  become: true
+  tasks:
+    - name: Install nginx
+      ansible.builtin.dnf:
+        name: nginx
+        state: present
+    
+    - name: Start nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: started
+        enabled: true
+    
+    - name: Deploy config
+      ansible.builtin.template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/nginx.conf
+      notify: Restart nginx
+
+  handlers:
+    - name: Restart nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+```
+
+**SaltStack:**
+```yaml
+# /srv/salt/nginx/init.sls
+nginx:
+  pkg.installed: []
+  service.running:
+    - enable: True
+    - watch:
+      - file: /etc/nginx/nginx.conf
+
+/etc/nginx/nginx.conf:
+  file.managed:
+    - source: salt://nginx/files/nginx.conf
+    - template: jinja
+    - require:
+      - pkg: nginx
+```
+
+### Applying Configuration
+
+```bash
+# Ansible
+ansible-playbook -i inventory playbook.yml --limit webservers
+
+# SaltStack
+salt 'web*' state.apply nginx
+salt -G 'role:webserver' state.apply nginx
+```
+
+## Event-Driven Automation
+
+SaltStack's **reactor system** responds to events in real-time:
+
+```yaml
+# /etc/salt/master.d/reactor.conf
+reactor:
+  - 'salt/minion/*/start':
+    - /srv/reactor/minion_start.sls
+  - 'salt/beacon/*/disk_usage':
+    - /srv/reactor/disk_alert.sls
+```
+
+```yaml
+# /srv/reactor/disk_alert.sls
+{% if data['usage'] > 90 %}
+cleanup_disk:
+  local.state.apply:
+    - tgt: {{ data['id'] }}
+    - arg:
+      - disk_cleanup
+{% endif %}
+```
+
+Ansible has no equivalent real-time event system (Event-Driven Ansible / EDA is a separate product requiring AAP).
+
+## Targeting
+
+**Ansible** uses inventory groups and patterns:
+```bash
+ansible webservers -m ping
+ansible 'web*:&production' -m ping
+```
+
+**SaltStack** uses grains, pillars, and compound targeting:
+```bash
+salt -G 'os:RedHat' test.ping
+salt -C 'G@os:RedHat and G@role:web' state.apply
+salt -N production_web state.apply
+```
+
+## Secret Management
+
+**Ansible Vault:**
+```bash
+ansible-vault encrypt secrets.yml
+ansible-playbook site.yml --ask-vault-pass
+```
+
+**SaltStack Pillar:**
+```yaml
+# /srv/pillar/secrets.sls (encrypted with GPG)
+#!gpg|yaml
+db_password: |
+  -----BEGIN PGP MESSAGE-----
+  ...
+  -----END PGP MESSAGE-----
+```
+
+## When to Choose
+
+### Choose Ansible when:
+- **No agents allowed** — strict security policies, DMZ hosts
+- **Simple infrastructure** — under 500 nodes
+- **Multi-purpose** — provisioning + config + deployment + networking
+- **Team familiarity** — YAML is approachable for all skill levels
+- **Red Hat ecosystem** — AAP, Tower/Controller, EDA, Lightspeed AI
+- **Network automation** — Cisco, Juniper, Arista modules
+- **Cloud provisioning** — AWS, Azure, GCP modules
+
+### Choose SaltStack when:
+- **Scale** — 1,000+ nodes needing sub-second execution
+- **Real-time events** — reactor-driven automation
+- **Remote execution** — ad-hoc commands at massive scale
+- **Windows heavy** — Salt minion works well on Windows
+- **Speed is critical** — parallel execution across fleet
+
+### Consider Both:
+Many organizations use Ansible for **provisioning and orchestration** but SaltStack for **day-2 configuration at scale**.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Red Hat Ansible Automation Platform 2.7](/blog/aap-2-7-automation-portal-execution-environment-builder-2026/)
+- [Event-Driven Ansible: 12 New Collections](/blog/event-driven-ansible-new-collections-platform-enhancements-2026/)
+- [Automation Orchestrator: AI-Driven Pipelines](/blog/ansible-automation-orchestrator-ai-driven-it-operations-2026/)

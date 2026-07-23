@@ -1,0 +1,314 @@
+---
+import Layout from "@layouts/Layout.astro";
+import Container from "@components/container.astro";
+import Breadcrumb from "@components/Breadcrumb.astro";
+import Collapsible from "@components/Collapsible.astro";
+import ServiceRelatedPosts from "@components/ServiceRelatedPosts.astro";
+import MagneticButton from "@components/react/MagneticButton.tsx";
+
+export const prerender = true;
+export const lastModified = '2026-07-11';
+
+const faqs = [
+  {
+    q: "What is MIG partitioning?",
+    a: "Multi-Instance GPU (MIG) is a hardware feature on NVIDIA A100, H100, and newer data-center GPUs that splits a single physical GPU into up to seven isolated instances, each with dedicated compute cores, memory, and cache bandwidth. Because the isolation happens in silicon, one MIG instance cannot see or interfere with another's memory or compute, which makes it the only GPU-sharing approach that gives true hardware-level tenant isolation on OpenShift AI."
+  },
+  {
+    q: "Can you mix MIG and time-slicing on the same cluster?",
+    a: "Yes. The NVIDIA GPU Operator lets you apply different configurations per node or per node pool, so it's common to run MIG-partitioned nodes for production inference and time-sliced nodes for development namespaces within the same OpenShift AI cluster. What you cannot do is mix MIG and time-slicing on the exact same physical GPU at the exact same time — a given GPU is configured one way or the other."
+  },
+  {
+    q: "How many teams can share one GPU?",
+    a: "With MIG on an A100 or H100, up to seven teams can share one physical GPU with hardware isolation, using profiles like 1g.5gb through 7g.40gb. With time-slicing there is no hardware limit — the device plugin can expose a GPU as an arbitrary number of shareable replicas — but every additional slice increases context-switch overhead and reduces the effective throughput available to each tenant, so most platforms cap replicas at 2-4 for meaningful workloads."
+  },
+  {
+    q: "Does OpenShift AI support NVIDIA multi-instance GPU natively?",
+    a: "Yes. Red Hat OpenShift AI integrates the NVIDIA GPU Operator, which manages MIG configuration, drivers, and the device plugin as first-class cluster resources. MIG profiles are exposed as schedulable Kubernetes resources, so workloads request them the same way they would request a full GPU, just with a MIG-specific resource name and profile size."
+  },
+  {
+    q: "What is the difference between GPU scheduling and GPU isolation?",
+    a: "GPU scheduling is about which pod gets access to a GPU resource and when — handled by Kubernetes' scheduler, resource quotas, and the device plugin. GPU isolation is about what happens once two workloads are running on the same physical card — whether one tenant's process can see, starve, or corrupt another's memory and compute. Namespaces and ResourceQuota solve scheduling; only MIG (not time-slicing, and not namespaces alone) solves isolation at the memory level."
+  }
+];
+const faqSchema = {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": faqs.map(f => ({
+    "@type": "Question",
+    "name": f.q,
+    "acceptedAnswer": { "@type": "Answer", "text": f.a }
+  }))
+};
+---
+
+<Layout title="OpenShift AI Multi-Tenant GPU Architecture" description="How to design multi-tenant GPU platforms on OpenShift AI: MIG partitioning, time-slicing, namespace isolation, scheduling, and chargeback, by Luca Berton.">
+  <script type="application/ld+json" set:html={JSON.stringify(faqSchema)} />
+  <Breadcrumb items={[{ name: "OpenShift AI Multi-Tenant GPU Architecture" }]} />
+
+  <!-- Hero -->
+  <section class="bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 py-16">
+    <Container>
+      <div class="max-w-3xl" data-reveal>
+        <span class="chip bg-blue-950/60 text-blue-300 border border-blue-400/30">
+          <span class="chip-dot"></span>
+          GPU Platform Architecture
+        </span>
+        <h1 class="mt-4 text-3xl md:text-4xl font-bold text-white leading-tight">
+          OpenShift AI <span class="text-brand">Multi-Tenant GPU Architecture</span>
+        </h1>
+        <p class="text-slate-400 mt-4 text-lg">
+          GPUs are the most expensive, most contended resource on any AI platform. Most teams either over-isolate — dedicating a GPU per team and eating the idle capacity — or under-isolate, throwing every workload into one shared pool and living with noisy neighbors, security exposure, and no way to attribute cost.
+        </p>
+        <div class="flex flex-wrap gap-4 mt-8">
+          <a href="/contact/" class="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-lg transition-all hover:scale-105 active:scale-95 cursor-pointer">Book a Discovery Call</a>
+          <a href="/gpu-cost-calculator/" class="border border-slate-600 hover:border-slate-400 text-slate-300 hover:text-white font-semibold py-3 px-8 rounded-lg transition-all cursor-pointer">Try the GPU Cost Calculator</a>
+        </div>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Direct Answer Box -->
+  <section class="py-10 bg-white">
+    <Container>
+      <div class="max-w-4xl mx-auto" data-reveal>
+        <div class="bg-slate-50 border-l-4 border-blue-600 rounded-r-lg p-6">
+          <p class="text-gray-800 leading-relaxed">
+            <strong>Multi-tenant GPU architecture on OpenShift AI</strong> is the practice of letting several teams or applications safely share a pool of physical GPUs instead of each getting dedicated hardware. It combines the NVIDIA GPU Operator for driver and device lifecycle management, MIG partitioning or time-slicing to divide GPUs at the hardware or software level, namespace-scoped isolation and scheduling to enforce fair access, and chargeback to attribute usage back to cost centers. Luca Berton, who spoke on this exact topic at KubeCon + CloudNativeCon Europe 2026 in Amsterdam ("Lessons Learned Orchestrating Multi-Tenant GPUs on OpenShift AI with NVIDIA KAI (G/H200)"), designs these platforms for enterprises moving AI workloads into production.
+          </p>
+        </div>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Why multi-tenancy matters -->
+  <section class="py-16 bg-white">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">Why multi-tenancy matters</h2>
+        <p class="text-gray-600 mb-6">
+          A single H100 costs more per hour than most of the rest of a Kubernetes node combined, and GPU supply is almost always the tightest constraint on an AI platform — tighter than CPU, memory, or storage. That scarcity forces a choice. Give every team its own dedicated GPUs and you get predictable performance but pay for capacity that sits idle outside business hours, during off-peak traffic, or between training runs. Put every workload into one shared pool with no isolation and utilization goes up, but so does risk: one tenant's runaway batch job starves another's production inference, a memory leak in one container can corrupt another's compute context, and finance has no reliable way to say which team's usage drove the bill.
+        </p>
+        <div class="grid md:grid-cols-2 gap-6">
+          <div class="bg-red-50 border border-red-100 rounded-xl p-5">
+            <p class="text-sm text-red-800 font-semibold mb-2">Without multi-tenancy</p>
+            <ul class="space-y-2 text-sm text-red-700">
+              <li>❌ Dedicated GPUs per team sit idle 40-70% of the time</li>
+              <li>❌ Shared pools with no isolation create noisy-neighbor incidents</li>
+              <li>❌ No security boundary between tenant memory and compute</li>
+              <li>❌ Cost is a single line item — no way to attribute spend by team</li>
+            </ul>
+          </div>
+          <div class="bg-green-50 border border-green-100 rounded-xl p-5">
+            <p class="text-sm text-green-800 font-semibold mb-2">With a multi-tenant platform</p>
+            <ul class="space-y-2 text-sm text-green-700">
+              <li>✓ MIG and time-slicing raise utilization without buying more GPUs</li>
+              <li>✓ Namespace isolation and quotas remove noisy-neighbor risk</li>
+              <li>✓ Hardware-level memory isolation where it matters (MIG)</li>
+              <li>✓ Chargeback turns raw usage into a per-team cost report</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Core building blocks -->
+  <section class="py-16 bg-slate-50">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-2">Core building blocks</h2>
+        <p class="text-gray-500 mb-8">The pieces that make GPU multi-tenancy work in practice on OpenShift AI.</p>
+        <div class="grid md:grid-cols-2 gap-6">
+          <div class="spotlight-card grad-border bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">⚙️</div>
+            <h3 class="font-bold text-gray-900 mb-2">NVIDIA GPU Operator</h3>
+            <p class="text-sm text-gray-600">Manages the full driver, CUDA toolkit, and device plugin lifecycle as Kubernetes-native resources. It's what lets OpenShift AI expose MIG profiles and time-sliced GPUs as schedulable objects instead of hand-configured host state.</p>
+          </div>
+          <div class="spotlight-card grad-border bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">🔪</div>
+            <h3 class="font-bold text-gray-900 mb-2">MIG partitioning</h3>
+            <p class="text-sm text-gray-600">Hardware-level slicing available on A100, H100, and newer data-center GPUs. Splits one physical card into up to seven instances with dedicated compute and memory — true isolation, not just scheduling.</p>
+          </div>
+          <div class="spotlight-card grad-border bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">🕐</div>
+            <h3 class="font-bold text-gray-900 mb-2">Time-slicing</h3>
+            <p class="text-sm text-gray-600">Software-level sharing that lets multiple pods take turns on the same GPU's streaming multiprocessors. No memory isolation, but works on any GPU generation and is ideal for bursty or low-utilization dev workloads.</p>
+          </div>
+          <div class="spotlight-card grad-border bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">🚧</div>
+            <h3 class="font-bold text-gray-900 mb-2">Namespace isolation & scheduling</h3>
+            <p class="text-sm text-gray-600">ResourceQuota and LimitRange constrain how many GPU resources a namespace can request. Combined with node selectors and taints, this keeps tenant workloads on the right MIG or time-sliced node pool.</p>
+          </div>
+          <div class="spotlight-card grad-border bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">💳</div>
+            <h3 class="font-bold text-gray-900 mb-2">Chargeback / showback</h3>
+            <p class="text-sm text-gray-600">Tags GPU usage by namespace or label and rolls it up into a cost-per-team report. Turns "the GPU bill went up" into "team X's inference workload drove 60% of last month's spend."</p>
+          </div>
+          <div class="spotlight-card grad-border bg-white rounded-xl p-6 border border-slate-100 shadow-sm">
+            <div class="text-2xl mb-3">📈</div>
+            <h3 class="font-bold text-gray-900 mb-2">Monitoring</h3>
+            <p class="text-sm text-gray-600">The DCGM exporter feeds per-GPU, per-MIG-instance metrics into Prometheus, visualized in Grafana. This is the data layer that makes both isolation problems and chargeback numbers visible.</p>
+          </div>
+        </div>
+      </div>
+    </Container>
+  </section>
+
+  <!-- MIG vs time-slicing vs full-GPU passthrough -->
+  <section class="py-16 bg-white">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">MIG vs time-slicing vs full-GPU passthrough</h2>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-200 text-left">
+                <th class="py-2 pr-4 text-gray-600 font-medium">Approach</th>
+                <th class="py-2 pr-4 text-gray-600 font-medium">Isolation level</th>
+                <th class="py-2 pr-4 text-gray-600 font-medium">Granularity</th>
+                <th class="py-2 pr-4 text-gray-600 font-medium">Best for</th>
+                <th class="py-2 text-gray-600 font-medium">Overhead</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr class="border-b border-gray-100">
+                <td class="py-2.5 pr-4 text-gray-900 font-medium">MIG partitioning</td>
+                <td class="py-2.5 pr-4 text-gray-600">Hardware-level (separate compute + memory slices)</td>
+                <td class="py-2.5 pr-4 text-gray-600">Fixed profiles (e.g. 1g.5gb up to 7g.40gb on A100)</td>
+                <td class="py-2.5 pr-4 text-gray-600">Predictable multi-team production workloads</td>
+                <td class="py-2.5 text-gray-600">None (native silicon feature, A100/H100 class only)</td>
+              </tr>
+              <tr class="border-b border-gray-100">
+                <td class="py-2.5 pr-4 text-gray-900 font-medium">Time-slicing</td>
+                <td class="py-2.5 pr-4 text-gray-600">Software-level (shared SM, no memory isolation)</td>
+                <td class="py-2.5 pr-4 text-gray-600">Configurable time-slice count per GPU</td>
+                <td class="py-2.5 pr-4 text-gray-600">Dev/test, bursty or low-utilization workloads</td>
+                <td class="py-2.5 text-gray-600">Context-switch overhead, no hard isolation</td>
+              </tr>
+              <tr>
+                <td class="py-2.5 pr-4 text-gray-900 font-medium">Full-GPU passthrough</td>
+                <td class="py-2.5 pr-4 text-gray-600">Full isolation (one tenant = one GPU)</td>
+                <td class="py-2.5 pr-4 text-gray-600">Whole GPU only</td>
+                <td class="py-2.5 pr-4 text-gray-600">Latency-sensitive production inference, training</td>
+                <td class="py-2.5 text-gray-600">Lowest utilization, highest cost per tenant</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="text-sm text-gray-500 mt-4">Most production platforms combine all three — MIG for steady-state serving, time-slicing for dev namespaces, and full passthrough for training jobs that need every streaming multiprocessor on the card.</p>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Isolation and security considerations -->
+  <section class="py-16 bg-slate-50">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">Isolation and security considerations</h2>
+        <ul class="space-y-4 text-gray-600">
+          <li><strong class="text-gray-900">Namespace-scoped ResourceQuota and device plugin limits.</strong> Every tenant namespace should have an explicit cap on GPU, MIG-profile, and time-slice resource requests — without it, one team's deployment can silently consume capacity another team was counting on.</li>
+          <li><strong class="text-gray-900">PodSecurity and SCC constraints.</strong> GPU workloads often want elevated privileges for driver access; OpenShift's Security Context Constraints should scope that access as narrowly as possible per tenant namespace, not grant it cluster-wide.</li>
+          <li><strong class="text-gray-900">Network policies between tenant namespaces.</strong> GPU isolation solves compute and memory boundaries, not network exposure — tenant namespaces still need explicit NetworkPolicy rules to stop lateral movement between workloads sharing a node.</li>
+          <li><strong class="text-gray-900">"Isolation" means more than a Kubernetes namespace.</strong> A namespace boundary controls scheduling and RBAC, but it says nothing about what happens on the GPU silicon itself. Two pods in separate namespaces, time-sliced onto the same physical GPU, can still share device memory address space at the hardware level.</li>
+          <li><strong class="text-gray-900">Memory isolation is only guaranteed with MIG.</strong> Time-slicing shares the same GPU memory across all tenants on that device — a workload with a memory leak, or one deliberately probing for leftover data, can potentially observe another tenant's memory contents. If tenants have real security requirements (regulated data, competitive workloads, untrusted code), MIG or full-GPU passthrough are the only options that provide a hardware-enforced boundary.</li>
+          <li><strong class="text-gray-900">Treat GPU isolation policy as a data-sensitivity decision, not just a capacity one.</strong> Decide per workload whether the requirement is "don't starve each other" (time-slicing is fine) or "must not be able to see each other's data" (MIG or passthrough required) before allocating.</li>
+        </ul>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Illustrative scenario -->
+  <section class="py-16 bg-white">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-2">Illustrative scenario</h2>
+        <p class="text-sm text-gray-500 mb-6 italic">This is an illustrative example to show the reasoning process — not a specific client engagement.</p>
+        <p class="text-gray-600 mb-4">
+          Picture an 8-node H100 cluster on OpenShift AI, shared by 5 internal teams: two production inference teams, two fine-tuning/experimentation teams, and one shared dev/test group. A reasonable allocation might look like this:
+        </p>
+        <ul class="space-y-3 text-gray-600">
+          <li><strong class="text-gray-900">Production inference teams (2):</strong> MIG profiles on a dedicated set of nodes, sized to each team's expected request volume — for example a 3g.40gb slice for the higher-traffic team and a 2g.20gb slice for the other. Hardware isolation gives both teams a predictable SLA regardless of what else is running on the card.</li>
+          <li><strong class="text-gray-900">Shared dev/test namespace:</strong> Time-sliced GPUs on a separate node pool, configured for 4-way sharing. Dev workloads are bursty and rarely latency-sensitive, so the context-switch overhead is an acceptable tradeoff for far higher utilization than dedicating hardware to a namespace that's idle most of the day.</li>
+          <li><strong class="text-gray-900">Fine-tuning / experimentation teams (2):</strong> Full-GPU access on a rotating schedule — each team gets scheduled windows with exclusive access to a subset of nodes for training runs that need every SM on the card, then releases the nodes back to the pool when the run completes.</li>
+        </ul>
+        <p class="text-gray-600 mt-4">
+          The result: five teams sharing eight nodes instead of each needing dedicated hardware, with isolation guarantees matched to what each workload actually requires.
+        </p>
+      </div>
+    </Container>
+  </section>
+
+  <!-- Monitoring and chargeback -->
+  <section class="py-16 bg-slate-50">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">Monitoring and chargeback</h2>
+        <p class="text-gray-600 mb-4">
+          None of this works without visibility. The DCGM exporter runs alongside the GPU Operator and exposes per-GPU and per-MIG-instance metrics — utilization, memory usage, temperature, ECC errors — into Prometheus. Grafana dashboards built on top turn that into per-namespace, per-team views: which tenant is actually using their allocated MIG slice, which time-sliced namespace is starving its neighbors, which full-GPU allocation sat idle overnight.
+        </p>
+        <p class="text-gray-600 mb-4">
+          Chargeback (or showback, if you're not billing internal teams directly) takes those raw utilization metrics and rolls them into a cost-per-team report — GPU-hours consumed, tagged by namespace or label, priced against the platform's actual per-GPU cost. That's the mechanism that closes the loop between "we bought this hardware" and "here's what each team's usage cost."
+        </p>
+        <p class="text-gray-600">
+          This is also the lever behind the 30% average cloud cost reduction we typically see on platforms we help design: utilization visibility is what lets teams right-size their allocation instead of over-provisioning "just in case." Without per-tenant metrics, most organizations default to buying more GPUs; with them, the same workloads often fit on less hardware.
+        </p>
+      </div>
+    </Container>
+  </section>
+
+  <!-- FAQ -->
+  <section class="py-16 bg-white">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">Frequently asked questions</h2>
+        {faqs.map(f => (
+          <Collapsible title={f.q}>{f.a}</Collapsible>
+        ))}
+      </div>
+    </Container>
+  </section>
+
+  <!-- Related pillar pages -->
+  <section class="py-16 bg-slate-50">
+    <Container>
+      <div class="max-w-4xl mx-auto">
+        <h2 class="text-2xl font-bold text-gray-900 mb-6">Related pillar pages</h2>
+        <div class="grid md:grid-cols-3 gap-4">
+          <a href="/gpu-cost-optimization/" class="spotlight-card grad-border bg-white rounded-xl p-5 border border-slate-100 hover:shadow-md transition-all hover:-translate-y-0.5 cursor-pointer">
+            <h3 class="font-bold text-gray-900 text-sm">GPU Cost Optimization</h3>
+            <p class="text-xs text-gray-500 mt-1">Turn utilization visibility into a lower monthly GPU bill.</p>
+          </a>
+          <a href="/ai-infrastructure-consultant-regulated-enterprises/" class="spotlight-card grad-border bg-white rounded-xl p-5 border border-slate-100 hover:shadow-md transition-all hover:-translate-y-0.5 cursor-pointer">
+            <h3 class="font-bold text-gray-900 text-sm">AI Infrastructure for Regulated Enterprises</h3>
+            <p class="text-xs text-gray-500 mt-1">Governance and compliance patterns for AI platforms in finance, healthcare, and public sector.</p>
+          </a>
+          <a href="/enterprise-mlops-governance/" class="spotlight-card grad-border bg-white rounded-xl p-5 border border-slate-100 hover:shadow-md transition-all hover:-translate-y-0.5 cursor-pointer">
+            <h3 class="font-bold text-gray-900 text-sm">Enterprise MLOps Governance</h3>
+            <p class="text-xs text-gray-500 mt-1">Model registry, approval workflow, and audit-ready evidence for production AI.</p>
+          </a>
+        </div>
+      </div>
+    </Container>
+  </section>
+
+  <Container>
+    <ServiceRelatedPosts keywords={['openshift-ai', 'gpu', 'nvidia', 'mlops', 'kubernetes', 'inference']} />
+  </Container>
+
+  <!-- Closing CTA -->
+  <section class="bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 py-16">
+    <Container>
+      <div class="text-center max-w-2xl mx-auto" data-reveal>
+        <p class="text-slate-400 text-sm mb-4">
+          Written by Luca Berton — AI & Cloud Advisor, Docker Captain, former Red Hat engineer. Speaker at KubeCon + CloudNativeCon Europe 2026 on multi-tenant GPUs on OpenShift AI, and Red Hat Summit 2026. <a href="/about/" class="text-blue-400 hover:underline">More about Luca →</a>
+        </p>
+        <h2 class="text-3xl font-bold text-white">Ready to design your multi-tenant GPU platform?</h2>
+        <p class="text-slate-400 mt-3">30-minute discovery call. We look at your GPU utilization, tenant isolation requirements, and identify the fastest path to a platform teams can safely share.</p>
+        <MagneticButton client:load>
+          <a href="/contact/" class="mt-6 inline-block bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-8 rounded-lg transition-all hover:scale-105 active:scale-95 cursor-pointer">Book a Free Call</a>
+        </MagneticButton>
+      </div>
+    </Container>
+  </section>
+</Layout>

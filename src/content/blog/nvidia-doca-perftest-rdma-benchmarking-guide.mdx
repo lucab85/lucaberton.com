@@ -1,0 +1,380 @@
+---
+title: "NVIDIA DOCA Perftest: RDMA Benchmarking Guide"
+seoTitle: "NVIDIA DOCA Perftest: RDMA Benchmarking Guide"
+snippet: "How to use DOCA Perftest to benchmark RDMA on BlueField-3 DPUs. Covers CLI and JSON modes, GPU memory types, traffic patterns, bandwidth and latency."
+description: "NVIDIA DOCA Perftest guide for RDMA benchmarking on BlueField DPUs. CLI and JSON modes, GPU memory, traffic patterns, bandwidth/latency tests."
+publishDate: "2026-04-28"
+lastModified: "2026-07-01"
+image:
+  src: "/blog/thumbnails/nvidia-doca-perftest-rdma-benchmarking-guide.jpg"
+  alt: "NVIDIA DOCA Perftest RDMA benchmarking guide for BlueField DPUs"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "NVIDIA"
+  - "RDMA"
+  - "BlueField"
+  - "DPU"
+  - "DOCA"
+  - "Networking"
+  - "Performance"
+  - "InfiniBand"
+draft: false
+---
+
+## What Is DOCA Perftest?
+
+DOCA Perftest is NVIDIA's next-generation RDMA benchmarking tool, built on the DOCA SDK. It replaces the traditional `perftest` suite (`ib_write_bw`, `ib_read_lat`, etc.) with a unified binary that supports BlueField-3 DPU features, GPU memory types, and JSON-structured output for automation.
+
+If you run InfiniBand or RoCE networks with BlueField DPUs, DOCA Perftest is the tool you need for validating RDMA throughput and latency before deploying AI training or inference workloads.
+
+## Why Not Just Use Traditional Perftest?
+
+Traditional `perftest` works. It has been the standard RDMA benchmark for over a decade. But it lacks:
+
+- **GPU memory support** — cannot benchmark GPU Direct RDMA (GDR) or GPU memory types natively
+- **JSON output** — only human-readable text, hard to parse in CI/CD pipelines
+- **BlueField-specific features** — no DPU offload testing, no DOCA integration
+- **Complex traffic patterns** — limited to simple client-server pairs
+
+DOCA Perftest addresses all of these. It is a single binary with two modes: **CLI** (familiar perftest-like flags) and **JSON** (structured configuration files).
+
+## Installation
+
+DOCA Perftest is included in the DOCA SDK. On a BlueField-3 DPU or a host with DOCA installed:
+
+```bash
+# Check if doca_perftest is available
+which doca_perftest
+
+# If not, install the DOCA tools package
+sudo apt install doca-tools    # Ubuntu/Debian
+sudo dnf install doca-tools    # RHEL/Rocky
+```
+
+Verify the version:
+
+```bash
+doca_perftest --version
+```
+
+## CLI Mode: Quick Bandwidth Test
+
+The CLI mode mirrors traditional perftest syntax. Start a server on one node and a client on another.
+
+### Server
+
+```bash
+doca_perftest --test=write_bw --device=mlx5_0 --server
+```
+
+### Client
+
+```bash
+doca_perftest --test=write_bw --device=mlx5_0 \
+  --server-ip=192.168.1.100 \
+  --msg-size=65536 \
+  --num-iters=10000
+```
+
+### Available Test Types
+
+| Test | Description |
+|------|-------------|
+| `write_bw` | RDMA Write bandwidth |
+| `write_lat` | RDMA Write latency |
+| `read_bw` | RDMA Read bandwidth |
+| `read_lat` | RDMA Read latency |
+| `send_bw` | Send/Receive bandwidth |
+| `send_lat` | Send/Receive latency |
+
+### Key CLI Flags
+
+```bash
+# Specify message size (bytes)
+--msg-size=4096
+
+# Number of iterations
+--num-iters=5000
+
+# Number of QPs (queue pairs)
+--num-qps=4
+
+# Connection type
+--connection-type=RC    # Reliable Connected (default)
+--connection-type=UC    # Unreliable Connected
+--connection-type=UD    # Unreliable Datagram
+
+# Port number
+--port=18515
+
+# GID index for RoCE
+--gid-index=3
+
+# Inline data threshold
+--inline-size=64
+```
+
+## JSON Mode: Structured Configuration
+
+JSON mode is where DOCA Perftest shines for automation. Define your test in a JSON file:
+
+```json
+{
+  "test": {
+    "type": "write_bw",
+    "device": "mlx5_0",
+    "connection": {
+      "type": "RC",
+      "num_qps": 4
+    },
+    "traffic": {
+      "msg_size": 65536,
+      "num_iters": 10000,
+      "sl": 0,
+      "inline_size": 0
+    },
+    "output": {
+      "format": "json",
+      "file": "/tmp/results.json"
+    }
+  }
+}
+```
+
+Run with:
+
+```bash
+# Server
+doca_perftest --json=config.json --server
+
+# Client
+doca_perftest --json=config.json --server-ip=192.168.1.100
+```
+
+The JSON output file contains structured results:
+
+```json
+{
+  "test": "write_bw",
+  "results": {
+    "bandwidth_gbps": 198.4,
+    "bandwidth_msg_rate": 378000,
+    "msg_size": 65536,
+    "num_iters": 10000
+  },
+  "latency": {
+    "avg_usec": 1.23,
+    "p50_usec": 1.15,
+    "p99_usec": 2.45,
+    "max_usec": 12.8
+  }
+}
+```
+
+This is easy to parse in Python, Grafana, or CI/CD systems for automated performance regression testing.
+
+## GPU Memory Types
+
+DOCA Perftest supports benchmarking different memory types — critical for validating GPU Direct RDMA paths:
+
+```bash
+# Host memory (default)
+doca_perftest --test=write_bw --memory-type=host
+
+# GPU memory (GPU Direct RDMA)
+doca_perftest --test=write_bw --memory-type=gpu --gpu-id=0
+
+# Managed memory (CUDA unified)
+doca_perftest --test=write_bw --memory-type=managed --gpu-id=0
+
+# Device memory on BlueField DPU
+doca_perftest --test=write_bw --memory-type=dpu
+```
+
+### Why GPU Memory Testing Matters
+
+When training large models across multiple nodes, data flows through this path:
+
+```
+GPU → NVLink → NVSwitch → PCIe → NIC → Network → NIC → PCIe → NVSwitch → NVLink → GPU
+```
+
+With GPU Direct RDMA (GDR), the NIC reads/writes directly to GPU memory, bypassing the CPU and host memory entirely:
+
+```
+GPU → PCIe → NIC → Network → NIC → PCIe → GPU
+```
+
+DOCA Perftest with `--memory-type=gpu` benchmarks this GDR path. If you see significantly lower bandwidth with GPU memory compared to host memory, your GDR path is not working correctly — check PCIe ACS settings, IOMMU configuration, and GPU Direct kernel modules.
+
+## Traffic Patterns
+
+### Bidirectional Bandwidth
+
+```bash
+doca_perftest --test=write_bw --bidirectional \
+  --device=mlx5_0 --server-ip=192.168.1.100
+```
+
+### Multi-QP Scaling
+
+Test how bandwidth scales with multiple queue pairs:
+
+```bash
+for qps in 1 2 4 8 16; do
+  echo "Testing with $qps QPs..."
+  doca_perftest --test=write_bw --num-qps=$qps \
+    --device=mlx5_0 --server-ip=192.168.1.100 \
+    --msg-size=65536 --num-iters=5000
+done
+```
+
+### Message Size Sweep
+
+```bash
+for size in 64 512 4096 65536 1048576; do
+  doca_perftest --test=write_bw --msg-size=$size \
+    --device=mlx5_0 --server-ip=192.168.1.100 \
+    --num-iters=5000
+done
+```
+
+## Latency Testing
+
+For latency-sensitive workloads (inference, real-time systems):
+
+```bash
+# RDMA Write latency
+doca_perftest --test=write_lat --device=mlx5_0 \
+  --server-ip=192.168.1.100 --msg-size=4 --num-iters=50000
+
+# Expected results on ConnectX-7 / BlueField-3:
+# P50: ~0.8-1.2 usec
+# P99: ~1.5-2.5 usec
+```
+
+### Latency vs Bandwidth Trade-off
+
+| Message Size | Dominated by | Typical Metric |
+|-------------|-------------|----------------|
+| under 4 KB | Latency | P50/P99 latency |
+| 4 KB - 64 KB | Transition | Both matter |
+| over 64 KB | Bandwidth | Gbps throughput |
+
+For AI training (NCCL AllReduce), large messages dominate — bandwidth is the primary concern. For inference (KV cache transfer), small messages matter — latency is critical.
+
+## SLURM Integration
+
+In HPC clusters managed by SLURM, run DOCA Perftest across node pairs:
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=rdma-bench
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=1
+#SBATCH --time=00:10:00
+#SBATCH --partition=gpu
+
+NODES=($(scontrol show hostname $SLURM_JOB_NODELIST))
+SERVER=${NODES[0]}
+CLIENT=${NODES[1]}
+
+# Start server
+srun --nodes=1 --nodelist=$SERVER \
+  doca_perftest --test=write_bw --device=mlx5_0 --server &
+
+sleep 2
+
+# Start client
+srun --nodes=1 --nodelist=$CLIENT \
+  doca_perftest --test=write_bw --device=mlx5_0 \
+  --server-ip=$SERVER --msg-size=65536 --num-iters=10000
+
+wait
+```
+
+### All-to-All Benchmarking
+
+For multi-node AI clusters, benchmark all node pairs:
+
+```bash
+#!/bin/bash
+NODES=(node01 node02 node03 node04)
+
+for i in "${!NODES[@]}"; do
+  for j in "${!NODES[@]}"; do
+    if [ $i -lt $j ]; then
+      echo "Testing ${NODES[$i]} <-> ${NODES[$j]}"
+      ssh ${NODES[$i]} "doca_perftest --test=write_bw --device=mlx5_0 --server" &
+      sleep 1
+      ssh ${NODES[$j]} "doca_perftest --test=write_bw --device=mlx5_0 \
+        --server-ip=${NODES[$i]} --msg-size=65536 --num-iters=5000"
+      kill %1 2>/dev/null
+    fi
+  done
+done
+```
+
+## Expected Performance on BlueField-3
+
+| Metric | ConnectX-7 400G | BlueField-3 400G |
+|--------|----------------|------------------|
+| **Write BW (unidirectional)** | ~395 Gbps | ~395 Gbps |
+| **Write BW (bidirectional)** | ~780 Gbps | ~780 Gbps |
+| **Write latency (4B)** | ~0.9 usec | ~1.1 usec |
+| **GDR Write BW** | ~380 Gbps | ~380 Gbps |
+
+If your numbers are significantly below these, check:
+
+1. **PFC configuration** — see [Enable PFC on Mellanox ConnectX NICs](/blog/mellanox-priority-flow-control-pfc-rdma/)
+2. **PCIe width** — `lspci -vvs` should show x16 Gen5
+3. **NUMA affinity** — ensure NIC and GPU are on the same NUMA node
+4. **MTU** — InfiniBand uses 4096 by default; RoCE should use 9000 (jumbo frames)
+
+## Automating Performance Regression Testing
+
+Combine JSON mode with CI/CD for automated network validation:
+
+```python
+#!/usr/bin/env python3
+import json
+import subprocess
+import sys
+
+# Run DOCA Perftest with JSON output
+result = subprocess.run([
+    "doca_perftest", "--test=write_bw",
+    "--device=mlx5_0", "--server-ip=192.168.1.100",
+    "--msg-size=65536", "--num-iters=5000",
+    "--output-format=json", "--output-file=/tmp/result.json"
+], capture_output=True, text=True)
+
+with open("/tmp/result.json") as f:
+    data = json.load(f)
+
+bw = data["results"]["bandwidth_gbps"]
+print(f"Bandwidth: {bw} Gbps")
+
+# Fail if bandwidth is below threshold
+THRESHOLD = 350.0  # Gbps
+if bw < THRESHOLD:
+    print(f"FAIL: {bw} Gbps below threshold {THRESHOLD} Gbps")
+    sys.exit(1)
+
+print("PASS: Bandwidth within expected range")
+```
+
+---
+
+**Building AI infrastructure with BlueField DPUs?** I help enterprises design, benchmark, and optimize RDMA networking for GPU clusters running AI training and inference workloads.
+
+[Book an Infrastructure Assessment →](https://calendly.com/lucaberton/)
+
+## Related Resources
+
+- [Enable PFC on Mellanox ConnectX NICs](/blog/mellanox-priority-flow-control-pfc-rdma/)
+- [Linux NIC Tuning: Ring Buffers, Coalescing, and IRQ Affinity](/blog/linux-nic-tuning-client-performance/)
+- [NVIDIA NIM Multi-Node Inference on Kubernetes](/blog/nvidia-nim-multi-node-deployment-helm-kubernetes-2026/)
+- [SR-IOV: NVIDIA Network Operator vs Intel NIC](/blog/sr-iov-nvidia-network-operator-vs-intel-nic/)
+- [GPU Operator on Kubernetes Guide](/blog/nvidia-gpu-operator-kubernetes-setup/)

@@ -1,0 +1,286 @@
+---
+title: "AI Model Serving on K8s: vLLM vs Triton vs NIM (2026)"
+seoTitle: "AI Model Serving on K8s: vLLM vs Triton vs NIM (2026)"
+snippet: "Compare vLLM, Triton Inference Server, and NVIDIA NIM for serving LLMs on Kubernetes. Throughput benchmarks, deployment patterns, and production configuration."
+description: "Compare vLLM, Triton Inference Server, and NVIDIA NIM for serving LLMs on Kubernetes. Throughput benchmarks, deployment patterns, and production configuration."
+publishDate: "2026-06-05"
+lastModified: "2026-07-01"
+image:
+  src: "/blog/thumbnails/ai-model-serving-kubernetes-vllm-triton-nim-2026.jpg"
+  alt: "AI Model Serving on K8s: vLLM vs Triton vs NIM (2026)"
+tags:
+  - "ai"
+  - "kubernetes"
+  - "vllm"
+  - "triton"
+  - "nvidia-nim"
+  - "inference"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import YouTube from "../../components/YouTube.astro";
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+## The Serving Stack Decision
+
+Every production LLM deployment needs a serving framework. The three leaders:
+
+| Framework | Creator | Best For | License |
+|-----------|---------|----------|---------|
+| vLLM | UC Berkeley | Max throughput, open models | Apache 2.0 |
+| Triton | NVIDIA | Multi-framework, multi-model | BSD |
+| NIM | NVIDIA | Enterprise turnkey deployment | Proprietary |
+
+## vLLM: Maximum Open-Source Throughput
+
+vLLM pioneered **PagedAttention** — treating KV-cache like virtual memory pages for near-optimal GPU utilization.
+
+### Deployment on Kubernetes
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-llama70b
+spec:
+  replicas: 2
+  template:
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.8.4
+          args:
+            - "--model"
+            - "meta-llama/Llama-3.1-70B-Instruct"
+            - "--tensor-parallel-size"
+            - "2"
+            - "--max-model-len"
+            - "8192"
+            - "--gpu-memory-utilization"
+            - "0.92"
+            - "--enable-prefix-caching"
+            - "--max-num-seqs"
+            - "64"
+            - "--dtype"
+            - "auto"
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 10
+```
+
+### vLLM Strengths
+
+- **PagedAttention** — 24x higher throughput than HuggingFace Transformers
+- **Continuous batching** — dynamic batch formation for optimal GPU use
+- **Tensor parallelism** — split models across GPUs seamlessly
+- **OpenAI-compatible API** — drop-in replacement
+- **Speculative decoding** — use draft model for faster generation
+- **Prefix caching** — share KV-cache for common system prompts
+- **Quantization** — AWQ, GPTQ, FP8 native support
+
+### vLLM Limitations
+
+- Single-framework (PyTorch only)
+- No built-in model management
+- No multi-model serving (one model per process)
+- Limited ensemble support
+
+## Triton Inference Server: Multi-Model Platform
+
+Triton serves **any model from any framework** with a unified API. It's an inference platform, not just an LLM server.
+
+### Architecture
+
+```
+┌────────────────────────────────────────────┐
+│            Triton Inference Server          │
+│                                            │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐  │
+│  │  Model A │ │  Model B │ │  Model C │  │
+│  │(PyTorch) │ │(TensorRT)│ │ (ONNX)   │  │
+│  └──────────┘ └──────────┘ └──────────┘  │
+│                                            │
+│  ┌──────────────────────────────────────┐  │
+│  │     Dynamic Batching Scheduler       │  │
+│  └──────────────────────────────────────┘  │
+│  ┌──────────────────────────────────────┐  │
+│  │     Model Repository (S3/GCS/local)  │  │
+│  └──────────────────────────────────────┘  │
+└────────────────────────────────────────────┘
+```
+
+### Deployment with vLLM Backend
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton-llm
+spec:
+  template:
+    spec:
+      containers:
+        - name: triton
+          image: nvcr.io/nvidia/tritonserver:24.05-vllm-python-py3
+          args:
+            - "tritonserver"
+            - "--model-repository=/models"
+            - "--model-control-mode=poll"
+            - "--repository-poll-secs=30"
+          volumeMounts:
+            - name: model-repo
+              mountPath: /models
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+```
+
+### Model Repository Structure
+
+```
+models/
+├── llama-70b/
+│   ├── config.pbtxt
+│   ├── 1/
+│   │   └── model.json
+│   └── llama-70b-config.yaml
+├── embedding-model/
+│   ├── config.pbtxt
+│   └── 1/
+│       └── model.onnx
+└── reranker/
+    ├── config.pbtxt
+    └── 1/
+        └── model.pt
+```
+
+### Triton Strengths
+
+- **Multi-model** — serve LLM + embeddings + reranker in one server
+- **Multi-framework** — PyTorch, TensorRT, ONNX, TensorFlow, vLLM
+- **Model ensembles** — chain models (embed → retrieve → rerank → generate)
+- **Dynamic batching** — framework-agnostic request batching
+- **Model versioning** — hot-swap models without downtime
+- **Metrics** — Prometheus metrics out of the box
+
+### Triton Limitations
+
+- **Complex configuration** — `config.pbtxt` files for every model
+- **Steeper learning curve** — model repository structure is rigid
+- **LLM throughput** — slightly lower than native vLLM (abstraction overhead)
+- **Resource overhead** — heavier base footprint
+
+## NVIDIA NIM: Enterprise Turnkey
+
+NIM packages optimized models as **containerized microservices**. Pull, run, serve.
+
+### Deployment
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nim-llama70b
+spec:
+  template:
+    spec:
+      containers:
+        - name: nim
+          image: nvcr.io/nim/meta/llama-3.1-70b-instruct:latest
+          env:
+            - name: NGC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ngc-secret
+                  key: api-key
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              nvidia.com/gpu: "2"
+```
+
+That's it. No model download, no config files, no optimization tuning.
+
+### NIM Strengths
+
+- **Zero configuration** — pre-optimized for each GPU type
+- **TensorRT-LLM backend** — maximum inference performance
+- **Model profiles** — automatic GPU memory/throughput optimization
+- **Enterprise support** — NVIDIA AI Enterprise license includes SLA
+- **Security** — signed containers, vulnerability scanning
+
+### NIM Limitations
+
+- **Proprietary** — requires NVIDIA AI Enterprise license ($$$)
+- **Limited model selection** — only NGC catalog models
+- **No customization** — can't modify serving behavior
+- **Vendor lock-in** — NVIDIA GPUs only
+
+## Performance Benchmarks
+
+Llama 3.1 70B on 2x A100 80GB, 32 concurrent requests:
+
+| Metric | vLLM | Triton+vLLM | NIM |
+|--------|------|-------------|-----|
+| Throughput (tok/s) | 2,100 | 1,950 | 2,400 |
+| TTFT P50 | 180ms | 210ms | 150ms |
+| TTFT P99 | 450ms | 520ms | 380ms |
+| ITL P50 | 28ms | 32ms | 24ms |
+| Memory efficiency | 92% | 88% | 95% |
+| Setup time | 10 min | 30 min | 2 min |
+
+NIM wins on raw performance (TensorRT-LLM optimization), vLLM wins on flexibility and cost.
+
+## Decision Framework
+
+### Choose vLLM when:
+- ✅ Open-source models (Llama, Mistral, Qwen)
+- ✅ Maximum flexibility and customization
+- ✅ Budget-conscious (no license fees)
+- ✅ Need speculative decoding or experimental features
+- ✅ Self-hosted, full control
+
+### Choose Triton when:
+- ✅ Serving multiple model types (LLM + embedding + classifier)
+- ✅ Model ensemble pipelines (RAG, reranking)
+- ✅ Mixed framework environment (ONNX + PyTorch + TensorRT)
+- ✅ Need model versioning and A/B testing
+- ✅ Existing NVIDIA infrastructure
+
+### Choose NIM when:
+- ✅ Enterprise with NVIDIA AI Enterprise license
+- ✅ Fastest time-to-production
+- ✅ Team lacks ML infrastructure expertise
+- ✅ Need vendor support and SLAs
+- ✅ Compliance requires signed, scanned containers
+
+## Cost Comparison (Monthly, 2x A100 80GB)
+
+| Component | vLLM | Triton | NIM |
+|-----------|------|--------|-----|
+| GPU compute | $4,745 | $4,745 | $4,745 |
+| Software license | $0 | $0 | ~$4,500 (NVAIE) |
+| Engineering time | 40h setup | 60h setup | 4h setup |
+| **Total Year 1** | **$59,940** | **$63,540** | **$110,940** |
+
+For teams with ML platform engineers, vLLM is the clear cost winner. For teams without, NIM's premium pays for itself in engineering time savings.
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [NVIDIA NIM Support Matrix 2026](/blog/nvidia-nim-support-matrix-models-gpus-profiles-2026/)
+- [NVIDIA Dynamo: Triton Successor for LLM Inference](/blog/nvidia-dynamo-inference-framework-distributed-serving-2026/)
+- [LLM Inference Cost Optimization on Kubernetes](/blog/llm-inference-cost-optimization-kubernetes-2026/)
+- [Autoscale AI Inference with KEDA + GPUs](/blog/kubernetes-ai-inference-autoscaling-keda-gpu-2026/)

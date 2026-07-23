@@ -1,0 +1,195 @@
+---
+draft: false
+title: "Kustomize Cheat Sheet 2026: Kubernetes Overlays"
+seoTitle: "Kustomize Cheat Sheet 2026: Kubernetes Overlays"
+snippet: "Kustomize cheat sheet. Bases, overlays, patches, generators, transformers, and component composition. Copy-paste ready commands for daily operations."
+description: "Kustomize cheat sheet. Bases, overlays, patches, generators, transformers, and component composition. Copy-paste ready commands for daily operations."
+image:
+  src: "/blog/thumbnails/kustomize-cheat-sheet-2026.jpg"
+  alt: "Kustomize Cheat Sheet 2026: Kubernetes Overlays"
+publishDate: "2026-04-04"
+lastModified: "2026-07-01"
+author: "Luca Berton"
+category: "DevOps"
+tags: ["Cheat Sheet", "Reference", "DevOps", "2026"]
+---
+A quick reference for Kustomize — template-free Kubernetes configuration. Bookmark this page.
+
+## Basic Commands
+
+```bash
+# Build (render final YAML)
+kustomize build .
+kustomize build overlays/production
+
+# Apply directly
+kubectl apply -k .
+kubectl apply -k overlays/production
+
+# Preview diff
+kubectl diff -k overlays/production
+
+# Delete
+kubectl delete -k .
+```
+
+## Kustomization File Structure
+
+```yaml
+# kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+
+namespace: my-app
+
+commonLabels:
+  app: my-app
+  team: backend
+
+commonAnnotations:
+  owner: backend-team
+
+namePrefix: prod-
+nameSuffix: -v2
+
+images:
+  - name: nginx
+    newName: my-registry.com/nginx
+    newTag: "1.25"
+```
+
+## Patches
+
+```yaml
+# Strategic merge patch (partial overlay)
+patches:
+  - path: increase-replicas.yaml
+    target:
+      kind: Deployment
+      name: my-app
+
+# JSON patch
+patches:
+  - target:
+      kind: Deployment
+      name: my-app
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 5
+
+# Inline patch
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: my-app
+      spec:
+        replicas: 5
+```
+
+## Overlay Pattern
+
+```
+├── base/
+│   ├── kustomization.yaml
+│   ├── deployment.yaml
+│   └── service.yaml
+├── overlays/
+│   ├── development/
+│   │   └── kustomization.yaml
+│   ├── staging/
+│   │   └── kustomization.yaml
+│   └── production/
+│       ├── kustomization.yaml
+│       └── increase-replicas.yaml
+```
+
+```yaml
+# overlays/production/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+
+namespace: production
+
+patches:
+  - path: increase-replicas.yaml
+
+images:
+  - name: my-app
+    newTag: "v2.1.0"
+```
+
+## ConfigMap and Secret Generators
+
+```yaml
+configMapGenerator:
+  - name: app-config
+    literals:
+      - DATABASE_HOST=postgres.production.svc
+      - LOG_LEVEL=info
+    files:
+      - config.properties
+
+secretGenerator:
+  - name: app-secrets
+    literals:
+      - DB_PASSWORD=supersecret
+    type: Opaque
+
+generatorOptions:
+  disableNameSuffixHash: true
+```
+
+## Components (Reusable Mixins)
+
+```yaml
+# components/monitoring/kustomization.yaml
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - servicemonitor.yaml
+
+patches:
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: my-app
+      spec:
+        template:
+          metadata:
+            annotations:
+              prometheus.io/scrape: "true"
+              prometheus.io/port: "8080"
+```
+
+```yaml
+# Use in overlay
+components:
+  - ../../components/monitoring
+```
+
+## Tips and Tricks
+
+- Use `kubectl kustomize .` as an alias for `kustomize build .`
+- Use `--enable-helm` flag to render Helm charts within Kustomize
+- Use components for cross-cutting concerns (monitoring, security)
+- Use `replacements` (not `vars`) for field cross-references in newer versions
+- Combine with ArgoCD for GitOps: point ArgoCD at your overlay directory
+
+## Related Resources
+
+- [Helm Cheat Sheet](/blog/helm-cheat-sheet-2026/)
+- [ArgoCD Cheat Sheet](/blog/argocd-cheat-sheet-2026/)
+- [YAML Cheat Sheet](/blog/yaml-cheat-sheet-2026/)

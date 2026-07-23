@@ -1,0 +1,166 @@
+---
+title: "Supabase: Open-Source Firebase Alternative on PostgreSQL"
+snippet: "Supabase gives you PostgreSQL, Auth, Storage, Realtime, and Edge Functions — fully open-source and self-hostable on Kubernetes."
+description: "Supabase gives you PostgreSQL, Auth, Storage, Realtime, and Edge Functions — fully open-source and self-hostable on Kubernetes."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ['Open Source', 'Database', 'Platform Engineering']
+image:
+  src: "/blog/thumbnails/supabase-open-source-firebase-alternative-2026.jpg"
+  alt: "Supabase: The Open-Source Firebase Alternative with Real PostgreSQL"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## What Is Supabase?
+
+[Supabase](https://github.com/supabase/supabase) is a backend-as-a-service built on PostgreSQL. It gives you a database, auth, file storage, realtime subscriptions, edge functions, and vector search — all open-source. 78K+ GitHub stars.
+
+### Supabase vs Firebase
+
+| Feature | Supabase | Firebase |
+|---------|----------|----------|
+| Database | PostgreSQL (relational) | Firestore (NoSQL) |
+| Auth | ✅ (GoTrue) | ✅ |
+| Storage | ✅ (S3-compatible) | ✅ |
+| Realtime | ✅ (PostgreSQL CDC) | ✅ |
+| Edge Functions | ✅ (Deno) | ✅ (Node.js) |
+| Vector search | ✅ (pgvector) | ❌ |
+| SQL queries | ✅ Full SQL | ❌ |
+| Self-hosted | ✅ | ❌ |
+| Vendor lock-in | None (it's just Postgres) | High |
+| Pricing model | Per-project | Pay-per-read/write |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│             Supabase Platform               │
+│                                             │
+│  ┌──────────┐ ┌──────────┐ ┌───────────┐  │
+│  │  PostgREST│ │  GoTrue  │ │  Storage  │  │
+│  │  (API)    │ │  (Auth)  │ │  (S3)     │  │
+│  └─────┬─────┘ └────┬─────┘ └─────┬─────┘  │
+│        │             │             │        │
+│  ┌─────▼─────────────▼─────────────▼─────┐  │
+│  │              PostgreSQL                │  │
+│  │  + pgvector + pg_cron + pg_net        │  │
+│  └────────────────────────────────────────┘  │
+│                                             │
+│  ┌──────────┐ ┌──────────┐ ┌───────────┐  │
+│  │ Realtime │ │  Kong    │ │   Edge    │  │
+│  │ (CDC)    │ │(Gateway) │ │ Functions │  │
+│  └──────────┘ └──────────┘ └───────────┘  │
+└─────────────────────────────────────────────┘
+```
+
+## Self-Host on Kubernetes
+
+```yaml
+# docker-compose for local dev / small deployments
+services:
+  db:
+    image: supabase/postgres:15.6.1
+    environment:
+      POSTGRES_PASSWORD: your-super-secret-password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  auth:
+    image: supabase/gotrue:v2.151.0
+    environment:
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:password@db:5432/postgres
+      GOTRUE_JWT_SECRET: your-jwt-secret
+
+  rest:
+    image: postgrest/postgrest:v12.2.0
+    environment:
+      PGRST_DB_URI: postgres://authenticator:password@db:5432/postgres
+      PGRST_JWT_SECRET: your-jwt-secret
+
+  storage:
+    image: supabase/storage-api:v1.0.6
+    environment:
+      STORAGE_BACKEND: s3
+      GLOBAL_S3_BUCKET: your-bucket
+
+  realtime:
+    image: supabase/realtime:v2.28.32
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+```
+
+## Key Use Cases
+
+### 1. AI Applications (pgvector)
+
+```sql
+-- Enable vector extension
+CREATE EXTENSION vector;
+
+-- Store embeddings alongside data
+CREATE TABLE documents (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  content TEXT,
+  embedding vector(1536),
+  metadata JSONB
+);
+
+-- Semantic search
+SELECT content, 1 - (embedding <=> query_embedding) as similarity
+FROM documents
+ORDER BY embedding <=> query_embedding
+LIMIT 5;
+```
+
+### 2. Row-Level Security (Multi-tenant)
+
+```sql
+-- Each user sees only their data
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users see own projects"
+  ON projects FOR SELECT
+  USING (auth.uid() = user_id);
+
+CREATE POLICY "Users insert own projects"
+  ON projects FOR INSERT
+  WITH CHECK (auth.uid() = user_id);
+```
+
+### 3. Realtime Subscriptions
+
+```javascript
+const channel = supabase
+  .channel('orders')
+  .on('postgres_changes', {
+    event: 'INSERT',
+    schema: 'public',
+    table: 'orders',
+  }, (payload) => {
+    console.log('New order:', payload.new);
+  })
+  .subscribe();
+```
+
+## Why PostgreSQL Matters
+
+Unlike Firebase's proprietary NoSQL, Supabase is **just PostgreSQL**:
+- Migrate away anytime with `pg_dump`
+- Use any PostgreSQL tool (DBeaver, pgAdmin, psql)
+- Join tables, use CTEs, window functions — real SQL
+- 40 years of battle-tested reliability
+- Extensions: PostGIS, pgvector, pg_cron, timescaledb
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Vector Databases: Qdrant vs Milvus vs pgvector](/blog/vector-database-kubernetes-qdrant-milvus-pgvector-2026/)
+- [CloudNativePG: PostgreSQL on Kubernetes](/blog/cloudnativepg-postgresql-kubernetes-operator/)
+- [Coolify: Self-Hosted PaaS](/blog/coolify-open-source-heroku-self-hosted-paas-2026/)

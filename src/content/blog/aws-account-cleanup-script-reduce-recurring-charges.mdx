@@ -1,0 +1,500 @@
+---
+draft: false
+title: "AWS Account Cleanup Script: Stop Paying for Idle Resources"
+snippet: "A battle-tested Bash script that audits and removes unused AWS resources across all regions — GuardDuty, Config, EC2, EBS, EIPs, NAT, S3, and SSM."
+description: "A battle-tested Bash script that audits and removes unused AWS resources across all regions — GuardDuty, AWS Config, EC2, EBS, Elastic IPs, NAT Gateways, S3, and SSM managed instances. Dry-run by default."
+image: { src: "/blog/thumbnails/aws-account-cleanup-script-2026.jpg", alt: "AWS account cleanup script to reduce recurring charges" }
+publishDate: "2026-06-02"
+lastModified: "2026-06-02"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["aws", "cost optimization", "cleanup", "cloud", "finops", "automation"]
+---
+
+## The $200/Month Surprise
+
+You check your AWS bill and see charges for services you do not remember enabling: GuardDuty running in 16 regions, AWS Config recording every API call, EBS snapshots multiplying daily, Elastic IPs sitting unattached, and NAT Gateways burning $0.045/hour doing nothing.
+
+This is the most common AWS cost problem: **forgotten resources across forgotten regions**.
+
+The solution is a single script that scans every region, finds billable resources, and optionally removes them — safely, with dry-run mode by default.
+
+## What This Script Cleans
+
+| Service | What It Removes | Typical Monthly Cost |
+|---------|----------------|---------------------|
+| **GuardDuty** | Active detectors in all regions | $4-50/region |
+| **AWS Config** | Configuration recorders + delivery channels | $2-20/region |
+| **EC2** | All instances (running, stopped) | $10-500+/instance |
+| **NAT Gateways** | Active gateways | $32/month + data |
+| **EBS Volumes** | Unattached volumes | $0.08-0.10/GB-month |
+| **EBS Snapshots** | All self-owned snapshots | $0.05/GB-month |
+| **Elastic IPs** | All allocated IPs | $3.60/month if unattached |
+| **S3** | All buckets (including versioned objects) | Varies |
+| **SSM** | Managed instances (non-EC2) | $0/instance but clutters inventory |
+
+## The Script
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ============================================================
+# AWS cleanup script for reducing recurring charges
+# Services: GuardDuty, AWS Config, EC2, EBS, Elastic IPs,
+# NAT Gateways, S3, Systems Manager managed instances
+#
+# Default: DRY RUN (nothing is deleted)
+# Usage:
+#   chmod +x aws-cleanup.sh
+#   ./aws-cleanup.sh                    # Dry run
+#   DRY_RUN=false ./aws-cleanup.sh      # Actually delete
+# ============================================================
+
+DRY_RUN="${DRY_RUN:-true}"
+
+echo "============================================================"
+echo "AWS cleanup script"
+echo "DRY_RUN=$DRY_RUN"
+echo "============================================================"
+
+ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+echo "AWS Account: $ACCOUNT_ID"
+echo
+
+run() {
+  echo "+ $*"
+  if [[ "$DRY_RUN" == "false" ]]; then
+    "$@"
+  else
+    echo "  DRY RUN: skipped"
+  fi
+  echo
+}
+
+echo "Fetching all AWS regions..."
+REGIONS="$(aws ec2 describe-regions --query 'Regions[].RegionName' --output text)"
+
+# ============================================================
+# Regional cleanup
+# ============================================================
+
+for REGION in $REGIONS; do
+  echo "============================================================"
+  echo "Region: $REGION"
+  echo "============================================================"
+
+  # ----------------------------
+  # GuardDuty
+  # ----------------------------
+  echo "Checking GuardDuty..."
+  DETECTORS="$(aws guardduty list-detectors \
+    --region "$REGION" \
+    --query 'DetectorIds[]' \
+    --output text 2>/dev/null || true)"
+
+  if [[ -n "$DETECTORS" ]]; then
+    for DETECTOR_ID in $DETECTORS; do
+      run aws guardduty delete-detector \
+        --detector-id "$DETECTOR_ID" \
+        --region "$REGION"
+    done
+  else
+    echo "No GuardDuty detector found."
+    echo
+  fi
+
+  # ----------------------------
+  # AWS Config
+  # ----------------------------
+  echo "Checking AWS Config..."
+  RECORDERS="$(aws configservice describe-configuration-recorders \
+    --region "$REGION" \
+    --query 'ConfigurationRecorders[].name' \
+    --output text 2>/dev/null || true)"
+
+  if [[ -n "$RECORDERS" ]]; then
+    for RECORDER in $RECORDERS; do
+      run aws configservice stop-configuration-recorder \
+        --configuration-recorder-name "$RECORDER" \
+        --region "$REGION"
+      run aws configservice delete-configuration-recorder \
+        --configuration-recorder-name "$RECORDER" \
+        --region "$REGION"
+    done
+  else
+    echo "No AWS Config recorder found."
+    echo
+  fi
+
+  CHANNELS="$(aws configservice describe-delivery-channels \
+    --region "$REGION" \
+    --query 'DeliveryChannels[].name' \
+    --output text 2>/dev/null || true)"
+
+  if [[ -n "$CHANNELS" ]]; then
+    for CHANNEL in $CHANNELS; do
+      run aws configservice delete-delivery-channel \
+        --delivery-channel-name "$CHANNEL" \
+        --region "$REGION"
+    done
+  else
+    echo "No AWS Config delivery channel found."
+    echo
+  fi
+
+  # ----------------------------
+  # EC2 instances
+  # ----------------------------
+  echo "Checking EC2 instances..."
+  INSTANCE_IDS="$(aws ec2 describe-instances \
+    --region "$REGION" \
+    --filters 'Name=instance-state-name,Values=pending,running,stopping,stopped' \
+    --query 'Reservations[].Instances[].InstanceId' \
+    --output text 2>/dev/null || true)"
+
+  if [[ -n "$INSTANCE_IDS" ]]; then
+    run aws ec2 terminate-instances \
+      --instance-ids $INSTANCE_IDS \
+      --region "$REGION"
+  else
+    echo "No EC2 instances found."
+    echo
+  fi
+
+  # ----------------------------
+  # NAT Gateways
+  # ----------------------------
+  echo "Checking NAT Gateways..."
+  NAT_GATEWAY_IDS="$(aws ec2 describe-nat-gateways \
+    --region "$REGION" \
+    --filter 'Name=state,Values=available,pending' \
+    --query 'NatGateways[].NatGatewayId' \
+    --output text 2>/dev/null || true)"
+
+  if [[ -n "$NAT_GATEWAY_IDS" ]]; then
+    for NAT_ID in $NAT_GATEWAY_IDS; do
+      run aws ec2 delete-nat-gateway \
+        --nat-gateway-id "$NAT_ID" \
+        --region "$REGION"
+    done
+  else
+    echo "No NAT Gateways found."
+    echo
+  fi
+
+  # ----------------------------
+  # Unattached EBS volumes
+  # ----------------------------
+  echo "Checking unattached EBS volumes..."
+  VOLUME_IDS="$(aws ec2 describe-volumes \
+    --region "$REGION" \
+    --filters 'Name=status,Values=available' \
+    --query 'Volumes[].VolumeId' \
+    --output text 2>/dev/null || true)"
+
+  if [[ -n "$VOLUME_IDS" ]]; then
+    for VOL_ID in $VOLUME_IDS; do
+      run aws ec2 delete-volume \
+        --volume-id "$VOL_ID" \
+        --region "$REGION"
+    done
+  else
+    echo "No unattached EBS volumes found."
+    echo
+  fi
+
+  # ----------------------------
+  # EBS snapshots
+  # ----------------------------
+  echo "Checking EBS snapshots..."
+  SNAPSHOT_IDS="$(aws ec2 describe-snapshots \
+    --owner-ids self \
+    --region "$REGION" \
+    --query 'Snapshots[].SnapshotId' \
+    --output text 2>/dev/null || true)"
+
+  if [[ -n "$SNAPSHOT_IDS" ]]; then
+    for SNAP_ID in $SNAPSHOT_IDS; do
+      run aws ec2 delete-snapshot \
+        --snapshot-id "$SNAP_ID" \
+        --region "$REGION"
+    done
+  else
+    echo "No EBS snapshots found."
+    echo
+  fi
+
+  # ----------------------------
+  # Elastic IPs
+  # ----------------------------
+  echo "Checking Elastic IPs..."
+  ALLOCATION_IDS="$(aws ec2 describe-addresses \
+    --region "$REGION" \
+    --query 'Addresses[].AllocationId' \
+    --output text 2>/dev/null || true)"
+
+  if [[ -n "$ALLOCATION_IDS" ]]; then
+    for ALLOC_ID in $ALLOCATION_IDS; do
+      run aws ec2 release-address \
+        --allocation-id "$ALLOC_ID" \
+        --region "$REGION"
+    done
+  else
+    echo "No Elastic IPs found."
+    echo
+  fi
+
+  # ----------------------------
+  # Systems Manager managed instances
+  # ----------------------------
+  echo "Checking SSM managed instances..."
+  MANAGED_INSTANCE_IDS="$(aws ssm describe-instance-information \
+    --region "$REGION" \
+    --query 'InstanceInformationList[].InstanceId' \
+    --output text 2>/dev/null || true)"
+
+  if [[ -n "$MANAGED_INSTANCE_IDS" ]]; then
+    for MI_ID in $MANAGED_INSTANCE_IDS; do
+      if [[ "$MI_ID" == mi-* ]]; then
+        run aws ssm deregister-managed-instance \
+          --instance-id "$MI_ID" \
+          --region "$REGION"
+      else
+        echo "Skipping EC2-backed SSM instance: $MI_ID"
+      fi
+    done
+    echo
+  else
+    echo "No SSM managed instances found."
+    echo
+  fi
+
+done
+
+# ============================================================
+# Global S3 cleanup
+# ============================================================
+
+echo "============================================================"
+echo "S3 cleanup"
+echo "============================================================"
+
+BUCKETS="$(aws s3api list-buckets --query 'Buckets[].Name' --output text 2>/dev/null || true)"
+
+if [[ -n "$BUCKETS" ]]; then
+  for BUCKET in $BUCKETS; do
+    echo "Bucket: $BUCKET"
+
+    BUCKET_REGION="$(aws s3api get-bucket-location \
+      --bucket "$BUCKET" \
+      --query 'LocationConstraint' \
+      --output text 2>/dev/null || true)"
+
+    if [[ "$BUCKET_REGION" == "None" || -z "$BUCKET_REGION" ]]; then
+      BUCKET_REGION="us-east-1"
+    fi
+
+    echo "Region: $BUCKET_REGION"
+
+    # Handle versioned objects and delete markers
+    VERSION_DELETE_JSON="$(aws s3api list-object-versions \
+      --bucket "$BUCKET" \
+      --output json 2>/dev/null || true)"
+
+    if [[ -n "$VERSION_DELETE_JSON" && "$VERSION_DELETE_JSON" != "null" ]]; then
+      VERSION_IDS="$(echo "$VERSION_DELETE_JSON" | \
+        jq -r '.Versions[]? | [.Key, .VersionId] | @tsv' 2>/dev/null || true)"
+      DELETE_MARKERS="$(echo "$VERSION_DELETE_JSON" | \
+        jq -r '.DeleteMarkers[]? | [.Key, .VersionId] | @tsv' 2>/dev/null || true)"
+
+      if [[ -n "$VERSION_IDS" ]]; then
+        while IFS=$'\t' read -r KEY VERSION_ID; do
+          [[ -z "$KEY" || -z "$VERSION_ID" ]] && continue
+          run aws s3api delete-object \
+            --bucket "$BUCKET" --key "$KEY" --version-id "$VERSION_ID"
+        done <<< "$VERSION_IDS"
+      fi
+
+      if [[ -n "$DELETE_MARKERS" ]]; then
+        while IFS=$'\t' read -r KEY VERSION_ID; do
+          [[ -z "$KEY" || -z "$VERSION_ID" ]] && continue
+          run aws s3api delete-object \
+            --bucket "$BUCKET" --key "$KEY" --version-id "$VERSION_ID"
+        done <<< "$DELETE_MARKERS"
+      fi
+    fi
+
+    run aws s3 rm "s3://$BUCKET" --recursive
+    run aws s3api delete-bucket --bucket "$BUCKET" --region "$BUCKET_REGION"
+  done
+else
+  echo "No S3 buckets found."
+  echo
+fi
+
+echo "============================================================"
+echo "Cleanup complete. DRY_RUN=$DRY_RUN"
+echo "============================================================"
+
+if [[ "$DRY_RUN" != "false" ]]; then
+  echo
+  echo "This was a dry run. Nothing was deleted."
+  echo "Run: DRY_RUN=false ./aws-cleanup.sh"
+fi
+```
+
+## How It Works
+
+The script uses a simple pattern:
+
+1. **Iterate all regions** — AWS resources hide in regions you forgot you used
+2. **List resources** — query each service for billable resources
+3. **Dry-run by default** — prints what it *would* do without touching anything
+4. **Delete on confirmation** — only acts when `DRY_RUN=false`
+
+The `run()` function wraps every destructive command:
+
+```bash
+run() {
+  echo "+ $*"
+  if [[ "$DRY_RUN" == "false" ]]; then
+    "$@"
+  else
+    echo "  DRY RUN: skipped"
+  fi
+}
+```
+
+## Prerequisites
+
+```bash
+# AWS CLI v2
+aws --version
+
+# jq for S3 versioned object cleanup
+sudo apt-get install jq  # Debian/Ubuntu
+brew install jq          # macOS
+
+# Verify credentials
+aws sts get-caller-identity
+```
+
+## Safe Usage Pattern
+
+```bash
+# Step 1: Make it executable
+chmod +x aws-cleanup.sh
+
+# Step 2: Dry run — review what would be deleted
+./aws-cleanup.sh | tee cleanup-dry-run.log
+
+# Step 3: Review the log carefully
+less cleanup-dry-run.log
+
+# Step 4: Only when confident, run destructive mode
+DRY_RUN=false ./aws-cleanup.sh | tee cleanup-actual.log
+```
+
+## Cost Breakdown: Common Hidden Charges
+
+Here is what typical forgotten resources cost per month:
+
+| Resource | Quantity | Monthly Cost |
+|----------|----------|--------------|
+| GuardDuty (16 regions) | 16 detectors | $64-800 |
+| AWS Config (16 regions) | 16 recorders | $32-320 |
+| NAT Gateway (idle) | 1 | $32 + data |
+| Elastic IP (unattached) | 3 | $10.80 |
+| EBS volumes (unattached, 100GB each) | 5 | $40-50 |
+| EBS snapshots (195 × 8GB) | 195 | $78 |
+| Stopped EC2 (EBS still charged) | 2 × 50GB | $8-10 |
+| **Total potential savings** | | **$265-1,290/month** |
+
+## What the Script Does NOT Touch
+
+For safety, this script skips:
+
+- **RDS databases** — too risky to auto-delete, handle manually
+- **Lambda functions** — usually free tier, minimal cost when idle
+- **CloudWatch Logs** — set retention policies instead
+- **Route 53** — hosted zones cost $0.50/month, usually intentional
+- **Load Balancers** — might serve production traffic
+- **EKS/ECS clusters** — complex dependencies
+
+## Adding Protections
+
+### Skip Specific Resources by Tag
+
+```bash
+# Only delete EC2 instances tagged "Environment=dev"
+INSTANCE_IDS="$(aws ec2 describe-instances \
+  --region "$REGION" \
+  --filters \
+    'Name=instance-state-name,Values=running,stopped' \
+    'Name=tag:Environment,Values=dev' \
+  --query 'Reservations[].Instances[].InstanceId' \
+  --output text 2>/dev/null || true)"
+```
+
+### Exclude Production Account
+
+Add this at the top:
+
+```bash
+if [[ "$ACCOUNT_ID" == "YOUR_PROD_ACCOUNT_ID" ]]; then
+  echo "ERROR: This is the production account. Aborting."
+  exit 1
+fi
+```
+
+### Region Allowlist
+
+```bash
+# Only clean specific regions
+REGIONS="us-east-1 eu-west-1 eu-central-1"
+```
+
+## Automating Monthly Audits
+
+Schedule a dry-run report via cron or EventBridge:
+
+```bash
+# Monthly audit report (dry-run only, email results)
+0 9 1 * * /opt/scripts/aws-cleanup.sh > /tmp/aws-audit.log 2>&1 && \
+  mail -s "AWS Monthly Audit" admin@company.com < /tmp/aws-audit.log
+```
+
+Or use AWS Lambda + EventBridge for serverless scheduling.
+
+## After Cleanup
+
+Once you have cleaned up:
+
+1. **Set billing alerts** — CloudWatch alarm at $50, $100, $200 thresholds
+2. **Enable Cost Anomaly Detection** — AWS detects unexpected spend spikes
+3. **Tag everything** — enforce tagging policies via AWS Organizations SCPs
+4. **Review monthly** — schedule a 15-minute bill review on the 1st of each month
+
+```bash
+# Set billing alarm (requires us-east-1)
+aws cloudwatch put-metric-alarm \
+  --alarm-name "MonthlyBillingAlarm-100USD" \
+  --metric-name EstimatedCharges \
+  --namespace AWS/Billing \
+  --statistic Maximum \
+  --period 21600 \
+  --threshold 100 \
+  --comparison-operator GreaterThanThreshold \
+  --evaluation-periods 1 \
+  --alarm-actions arn:aws:sns:us-east-1:025066287134:billing-alerts \
+  --dimensions Name=Currency,Value=USD \
+  --region us-east-1
+```
+
+## Related Content
+
+- [AWS Backup: Fix Failed Jobs and S3 Access Denied](/blog/aws-backup-failed-jobs-s3-access-denied-troubleshooting/)
+- [AWS EBS Snapshots: Failed to Delete — AMI Cleanup](/blog/aws-ebs-snapshots-failed-to-delete-ami-backup-guide/)
+- [AWS RDS PostgreSQL Minor Version Deprecation](/blog/aws-rds-postgresql-minor-version-deprecation-may-2026/)
+- [HashiCorp Vault vs AWS Secrets Manager](/blog/vault-vs-aws-secrets-manager/)

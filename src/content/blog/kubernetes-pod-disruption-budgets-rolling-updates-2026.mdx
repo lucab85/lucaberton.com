@@ -1,0 +1,162 @@
+---
+title: "Pod Disruption Budgets & Zero-Downtime Rolling Updates"
+snippet: "Ensure zero downtime during upgrades — PDBs, rolling update strategies, readiness gates, preStop hooks, and graceful shutdown patterns."
+description: "Ensure zero downtime during upgrades — PDBs, rolling update strategies, readiness gates, preStop hooks, and graceful shutdown patterns."
+publishDate: "2026-06-05"
+lastModified: "2026-06-05"
+author: "Luca Berton"
+category: "DevOps"
+tags: ['Kubernetes', 'DevOps', 'Reliability']
+image:
+  src: "/blog/thumbnails/kubernetes-pod-disruption-budgets-rolling-updates-2026.jpg"
+  alt: "Pod Disruption Budgets and Rolling Updates: Zero-Downtime Deployments"
+draft: false
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## Zero-Downtime Deployments
+
+Deployments should never cause user-facing errors. This requires coordinating:
+1. Rolling update strategy
+2. Pod Disruption Budgets (PDBs)
+3. Readiness probes
+4. Graceful shutdown (preStop hooks)
+5. Connection draining
+
+## Rolling Update Strategy
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api-server
+spec:
+  replicas: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1        # 1 extra pod during update
+      maxUnavailable: 0  # Never reduce below desired count
+  template:
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: api
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 15"]  # Drain connections
+```
+
+**Key settings:**
+- `maxUnavailable: 0` — never reduce capacity during update
+- `maxSurge: 1` — only create 1 extra pod at a time (controls rollout speed)
+- `preStop: sleep 15` — gives load balancer time to remove pod from rotation
+
+## Pod Disruption Budgets
+
+PDBs protect against voluntary disruptions (node drains, cluster upgrades, autoscaler scale-down):
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-server-pdb
+spec:
+  minAvailable: 3       # Always keep at least 3 pods running
+  # OR
+  # maxUnavailable: 1   # At most 1 pod unavailable at a time
+  selector:
+    matchLabels:
+      app: api-server
+```
+
+| Replicas | PDB Setting | Effect |
+|----------|-------------|--------|
+| 5 | minAvailable: 3 | 2 pods can be disrupted simultaneously |
+| 5 | maxUnavailable: 1 | Only 1 pod disrupted at a time |
+| 3 | minAvailable: 2 | 1 pod at a time |
+| 1 | minAvailable: 1 | Block all voluntary disruptions ⚠️ |
+
+**Warning:** `minAvailable: 1` with 1 replica blocks node drains entirely. Don't do this unless intentional.
+
+## The Complete Graceful Shutdown Flow
+
+```
+1. Pod marked for termination
+2. Removed from Service endpoints (async!)
+3. preStop hook executes (sleep 15)
+4. SIGTERM sent to container
+5. Application handles in-flight requests
+6. Container exits (or killed after terminationGracePeriodSeconds)
+```
+
+```go
+// Go graceful shutdown
+srv := &http.Server{Addr: ":8080"}
+
+go func() {
+    sig := make(chan os.Signal, 1)
+    signal.Notify(sig, syscall.SIGTERM)
+    <-sig
+
+    ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+    defer cancel()
+
+    srv.Shutdown(ctx)  // Finish in-flight requests
+}()
+```
+
+## Readiness Gates (Advanced)
+
+```yaml
+spec:
+  readinessGates:
+    - conditionType: "target-health.elbv2.k8s.aws/my-target-group"
+```
+
+Pod isn't "ready" until the AWS ALB target group confirms it's healthy. Prevents routing to pods that haven't registered with the load balancer yet.
+
+## Node Drain Procedure
+
+```bash
+# Cordon (prevent new scheduling)
+kubectl cordon node-1
+
+# Drain (evict pods respecting PDBs)
+kubectl drain node-1 \
+  --ignore-daemonsets \
+  --delete-emptydir-data \
+  --grace-period=60 \
+  --timeout=300s
+
+# If PDB blocks drain:
+# "Cannot evict pod as it would violate the pod's disruption budget"
+# Wait for other replicas to become ready, then retry
+```
+
+## Anti-Patterns
+
+| Anti-Pattern | Risk | Fix |
+|--------------|------|-----|
+| No PDB | All pods evicted simultaneously | Always create PDB |
+| No readiness probe | Traffic to unready pods | Add HTTP probe |
+| No preStop hook | Connections dropped during termination | Add sleep 15 |
+| terminationGracePeriod too short | Force-killed during drain | Set 60s+ |
+| maxUnavailable: 50% | Half capacity during update | Use maxUnavailable: 1 |
+
+<BlogPromoCard />
+
+## Related Articles
+
+- [Resource Limits Best Practices](/blog/kubernetes-resource-limits-requests-best-practices-2026/)
+- [Kubernetes RBAC](/blog/kubernetes-rbac-least-privilege-production-2026/)
+- [Velero: Backup and DR](/blog/velero-kubernetes-backup-disaster-recovery-2026/)

@@ -2,8 +2,8 @@
 draft: false
 title: "Connecting Hermes Agent to GitHub: Auth Setup and Gotchas"
 seoTitle: "Hermes Agent + GitHub: Token Setup, gh CLI, Gotchas"
-snippet: "Set up GitHub access for Hermes Agent's bundled github-auth skill — gh CLI or a token, the exact scopes it recommends, and two documented gotchas."
-description: "How to authenticate Hermes Agent against GitHub using the bundled github-auth skill: the gh CLI vs. token detection order, recommended token scopes, and two documented issues — a doctor false-positive and a Docker terminal-backend gotcha."
+snippet: "Set up GitHub access for Hermes Agent's bundled github-auth skill — gh CLI or a token, the exact scopes it recommends, and three documented gotchas."
+description: "How to authenticate Hermes Agent against GitHub using the bundled github-auth skill: the gh CLI vs. token detection order, recommended token scopes, a doctor false-positive, why the sandboxed terminal can't see your token by default, and why git push still needs a credential helper even once it can."
 publishDate: "2026-07-22"
 lastModified: "2026-07-22"
 image:
@@ -24,8 +24,10 @@ faq:
     answer: "For a classic personal access token, the github-auth skill itself recommends repo (full repository access — read, write, push, PRs), workflow (trigger and manage GitHub Actions), and read:org if you're working with organization repos, with a 90-day expiration as a reasonable default. A fine-grained token scoped to specific repositories with Contents/Pull requests/Issues read-write works just as well if you'd rather scope it tighter."
   - question: "Why does hermes doctor warn about a missing GITHUB_TOKEN even though I'm logged in with gh CLI?"
     answer: "This is a known, documented false positive (GitHub issue #16115) — the doctor check only looks for the GITHUB_TOKEN/GH_TOKEN environment variable, but the actual runtime correctly falls back to `gh auth token` when neither is set. The warning is cosmetic; GitHub features work fine through gh CLI regardless. Setting GITHUB_TOKEN anyway will suppress the warning, at the cost of not actually needing it."
-  - question: "Why can't Hermes see my GITHUB_TOKEN when I'm using the Docker terminal backend?"
-    answer: "This is a known, documented issue (GitHub issue #1436): GITHUB_TOKEN set via ~/.hermes/.env or `hermes config set` isn't automatically propagated into the terminal Docker provides for the agent's shell commands, since environment variables set on the host aren't passed into the container by default. No official fix was in place as of this writing — if you hit this, it's a known limitation of the Docker terminal backend specifically, not something wrong with your token."
+  - question: "Why can't Hermes's terminal see my GITHUB_TOKEN even though it's in ~/.hermes/.env?"
+    answer: "This is deliberate, not a bug: Hermes strips sensitive environment variables from the sandboxed processes used by its terminal and execute_code tools, specifically to prevent LLM-generated code from exfiltrating credentials. A variable only passes through if a loaded skill declares it in required_environment_variables (and it's already set in Hermes's own process environment), or if you explicitly add it to terminal.env_passthrough in ~/.hermes/config.yaml. Setting it in .env alone isn't enough — that only makes it available to Hermes itself, not to commands it runs on your behalf. This is also what's behind GitHub issue #1436, reported specifically against the Docker terminal backend, but the same stripping applies regardless of which backend you use."
+  - question: "I passed GITHUB_TOKEN through to the terminal, but git push still fails asking for a username. Why?"
+    answer: "Because git doesn't automatically use a GITHUB_TOKEN environment variable for HTTPS authentication — it needs a credential helper configured. Run `echo \"$GITHUB_TOKEN\" | gh auth login --hostname github.com --git-protocol https --with-token` followed by `gh auth setup-git`, both documented directly in the github-auth skill. That configures gh CLI as git's credential helper so a plain `git push` over HTTPS authenticates correctly."
 ---
 import BlogPromoCard from '../../components/BlogPromoCard.astro';
 
@@ -100,15 +102,74 @@ unset GITHUB_TOKEN
 
 In practice, once this is wired up you don't need to run these checks manually every time — you can just ask the agent directly (through whichever [messaging channel](/blog/connecting-hermes-agent-to-discord/) you've connected) to run a read-only auth check. It'll verify a token is present, call GitHub's `GET /user` endpoint, and report back only the username and whether authentication succeeded — never the token itself.
 
-## Two Known Gotchas
+## Three Known Gotchas
 
 ### `hermes doctor` Warns About a Missing Token Even With `gh` CLI Logged In
 
 This is a documented false positive ([issue #16115](https://github.com/NousResearch/hermes-agent/issues/16115)): the `doctor` check only looks for the `GITHUB_TOKEN`/`GH_TOKEN` environment variable, but the actual runtime correctly falls back to `gh auth token` when neither is set — the check just hasn't caught up to that fallback logic. If you're authenticated via `gh` and GitHub skills work fine in practice, the warning is cosmetic and safe to ignore. Setting `GITHUB_TOKEN` anyway will make the warning go away, at the cost of maintaining a token you didn't strictly need.
 
-### `GITHUB_TOKEN` Not Visible Under the Docker Terminal Backend
+### The Sandboxed Terminal Can't See `GITHUB_TOKEN` — By Design
 
-If you've configured Hermes to use [Docker as its terminal backend](/blog/hermes-agent-oracle-cloud-free-tier-deployment/) rather than local execution, a `GITHUB_TOKEN` set via `.env` or `hermes config set` may not be visible to commands the agent runs — because host environment variables aren't automatically passed into the container. This is a known, open issue ([#1436](https://github.com/NousResearch/hermes-agent/issues/1436)) with no official fix documented as of this writing. If GitHub commands fail specifically under the Docker backend despite a confirmed-working token, this mismatch is the likely cause, not a bad token.
+A token can be sitting in `~/.hermes/.env`, confirmed present, and still be invisible to a `printenv` run from inside the agent's own terminal. This isn't a bug: Hermes deliberately strips sensitive environment variables from the sandboxed processes behind its `terminal` and `execute_code` tools, specifically **to prevent LLM-generated code from exfiltrating credentials**. Setting a variable in `.env` only makes it available to Hermes itself — not automatically to commands Hermes runs on your behalf.
+
+A variable passes through in one of two ways:
+
+- **Automatically**, if a currently-loaded skill declares it in its `required_environment_variables` frontmatter *and* it's already set in Hermes's own process environment. Loading (or reloading) the relevant skill can be enough to trigger this.
+- **Explicitly**, by adding it to `terminal.env_passthrough` in `~/.hermes/config.yaml`:
+
+```yaml
+terminal:
+  env_passthrough:
+    - GITHUB_TOKEN
+```
+
+This is also the underlying cause of [issue #1436](https://github.com/NousResearch/hermes-agent/issues/1436), reported specifically against the Docker terminal backend — but the stripping behavior applies regardless of which [terminal backend](/blog/hermes-agent-oracle-cloud-free-tier-deployment/) you're using, not just Docker.
+
+Never add Hermes's own infrastructure secrets (Nous Portal's provider tokens, gateway credentials) to `env_passthrough` — it's meant for tool-specific tokens like this one, and Hermes's Skills Guard scans skill content for suspicious environment-variable access before installation precisely because this mechanism is a real trust boundary.
+
+### `git push` Still Asks for a Password Even With the Token Passed Through
+
+Getting the token into the terminal's environment isn't the whole story — `git` doesn't automatically use a `GITHUB_TOKEN` environment variable for HTTPS authentication. It needs a credential helper configured. On Ubuntu, `gh` is a plain `apt` install, no separate repository needed:
+
+```bash
+sudo apt update
+sudo apt install -y gh
+```
+
+From there you have two ways to authenticate it, depending on whether you're doing this by hand over SSH or scripting it for Hermes itself.
+
+**Interactive, from an SSH session** — just run `gh auth login` and follow the prompts (GitHub.com, HTTPS, "Authenticate Git with your GitHub credentials? Yes", "Login with a web browser"). On a headless VPS it can't actually open a browser for you:
+
+```text
+! Failed opening a web browser at https://github.com/login/device
+  exec: "xdg-open,x-www-browser,www-browser,wslview": executable file not found in $PATH
+  Please try entering the URL in your browser manually
+```
+
+That's fine — it still printed a one-time code first. Open `https://github.com/login/device` on your laptop or phone, enter the code, and the CLI on the VPS completes authentication as soon as you do. It'll confirm with `✓ Authentication complete.` and `✓ Logged in as <username>`, and print a reminder that credentials are saved to disk in plain text — the same tradeoff noted below.
+
+**Non-interactive, piping a token in** (what the `github-auth` skill itself documents, and the right choice if Hermes needs to do this on its own rather than you doing it by hand):
+
+```bash
+echo "$GITHUB_TOKEN" | gh auth login --hostname github.com --git-protocol https --with-token
+```
+
+Either way, finish by wiring `gh` in as git's credential helper:
+
+```bash
+gh auth setup-git
+```
+
+From then on, a plain `git push` over HTTPS picks up credentials automatically. Confirm all of it worked:
+
+```bash
+gh auth status
+git ls-remote origin HEAD
+```
+
+`gh auth status` also reports the token's actual scopes — if you went through the interactive browser login, expect `gist`, `read:org`, `repo`, `workflow` (gh's own OAuth app's default set), which is close to but not identical to the classic-PAT scopes recommended earlier.
+
+If `git push` still prompts for a username/password after all this, check `git config --global credential.helper` — it needs to actually point at `gh` (or `store`/`cache`) rather than being unset.
 
 ## Security Notes
 

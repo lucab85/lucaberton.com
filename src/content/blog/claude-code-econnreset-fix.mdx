@@ -19,7 +19,7 @@ tags:
   - "Networking"
 ---
 
-If you are mid-session in **Claude Code** and suddenly hit `ECONNRESET`, it means the TCP connection between your client and `api.anthropic.com` was closed by the other side before the request finished. The error is a *network* signal, not a code bug in your project. That distinction matters, because it tells you where to look first: the transport layer, not your source code.
+If you are mid-session in **Claude Code** and suddenly hit `ECONNRESET` — or the related **`API Error: Response stalled mid-stream. The response above may be incomplete`** — it means the TCP connection between your client and `api.anthropic.com` was closed by the other side before the request finished. The error is a *network* signal, not a code bug in your project. That distinction matters, because it tells you where to look first: the transport layer, not your source code. Both messages come from the same family of failure — the link dropped while data was still in flight.
 
 First, the reassuring part. As of this writing, the [Claude status page](https://status.anthropic.com/) shows **Claude API and Claude Code as operational**. Several incidents did occur and were resolved on July 22–23, 2026, so a brief retry after an incident window usually clears itself. If the status page is green and you are still seeing resets, the cause is almost always on your side of the network.
 
@@ -63,6 +63,19 @@ Update to the newest available version, then fully restart the terminal. Stale C
 
 For long API requests, use streaming or reduce the request duration. Anthropic notes that some networks terminate idle, non-streaming connections, so a long generation with no bytes on the wire can get killed by an intermediate proxy. Streaming keeps the connection alive with steady traffic.
 
+## API Error: Response stalled mid-stream
+
+`ECONNRESET` is the abrupt version of this failure. The **`Response stalled mid-stream`** message is the gentler cousin: the connection was held open, but bytes stopped arriving before the response completed, so Claude Code reports the output as potentially incomplete. Same root causes — a VPN, proxy, firewall, or unstable network silently cutting or throttling the stream — just surfaced at a different point in the request lifecycle.
+
+What to do when you see it:
+
+- **Retry the request.** If the stall was transient, a fresh connection usually completes. This is the same "restart and retry" first step as `ECONNRESET`.
+- **Drop the VPN/proxy or switch networks.** A re-signing or throttling proxy is the most common reason a stream stalls partway instead of failing outright.
+- **Enable streaming and keep requests shorter.** Mid-stream stalls are more likely on long, non-streaming generations where an intermediate proxy times out the idle connection. Streaming keeps bytes flowing; splitting a large task into smaller turns reduces how long any single connection stays open.
+- **Run `claude doctor` and the `curl -v https://api.anthropic.com` check** from the steps above to confirm the transport path is healthy.
+
+If the message says the response *may be incomplete*, treat the last block of output as suspect and re-run the task — the model may have lost part of its answer when the stream broke.
+
 ## Corporate networks
 
 On a locked-down corporate network, ask IT to allow outbound HTTPS traffic to `api.anthropic.com` on port `443`. No exceptions, no MITM proxy inspection on that host — a TLS-inspecting proxy that re-signs certificates is a frequent source of resets.
@@ -81,9 +94,13 @@ The reset is almost always local — a VPN, proxy, firewall, or unstable network
 **Why does streaming help?**
 Some networks drop idle, non-streaming connections. Streaming sends bytes continuously, keeping the connection from looking idle to intermediate proxies.
 
+**What is "Response stalled mid-stream"?**
+The same family of failure as `ECONNRESET`, but the connection was held open while bytes stopped arriving, so Claude Code flags the output as possibly incomplete. Retry, drop the VPN/proxy, and keep generations short and streamed.
+
 ## Key takeaways
 
 - `ECONNRESET` is a network fault, not a code bug — check the transport layer first.
+- `Response stalled mid-stream` is the same failure family; retry and treat the last output block as suspect.
 - Restart Claude Code, then drop the VPN/proxy before anything else.
 - `curl -v https://api.anthropic.com` is your fastest diagnostic: any HTTP status = reachable, TLS reset = network fault.
 - On corporate networks, allow outbound `443` to `api.anthropic.com` and avoid TLS-inspecting proxies.

@@ -1,12 +1,12 @@
 ---
 draft: false
-title: "Claude Code ECONNRESET: Fix the API Connection Reset Error"
-seoTitle: "Fix ECONNRESET in Claude Code: Connection Reset Guide"
-snippet: "ECONNRESET means the link between Claude Code and the API dropped. Here are six fixes, from restart to VPN and firewall checks, that get you back online fast."
-description: "ECONNRESET means the link between Claude Code and the API dropped. Here are six fixes, from restart to VPN and firewall checks, that get you back online fast."
+title: "Claude Code Errors: Fix ECONNRESET and Agent Crash Loops"
+seoTitle: "Fix ECONNRESET & Agent Crash Loops in Claude Code"
+snippet: "Claude Code errors explained and fixed: ECONNRESET, Response stalled mid-stream, and Agent process failed to restart after 5 consecutive crashes."
+description: "Claude Code errors explained and fixed: ECONNRESET, Response stalled mid-stream, and Agent process failed to restart after 5 consecutive crashes."
 image:
   src: "/blog/thumbnails/claude-code-econnreset-fix.jpg"
-  alt: "Fixing the ECONNRESET connection reset error in Claude Code"
+  alt: "Fixing ECONNRESET and agent crash loop errors in Claude Code"
 publishDate: "2026-07-23"
 lastModified: "2026-07-23"
 author: "Luca Berton"
@@ -17,7 +17,10 @@ tags:
   - "API"
   - "DevOps"
   - "Networking"
+  - "Agents"
 ---
+
+This is a practical Claude Code troubleshooting guide: the connection-reset family of errors (`ECONNRESET`, `Response stalled mid-stream`) and the agent crash loop (`Agent process failed to restart after 5 consecutive crashes`). Pick the section that matches what you saw.
 
 If you are mid-session in **Claude Code** and suddenly hit `ECONNRESET` — or the related **`API Error: Response stalled mid-stream. The response above may be incomplete`** — it means the TCP connection between your client and `api.anthropic.com` was closed by the other side before the request finished. The error is a *network* signal, not a code bug in your project. That distinction matters, because it tells you where to look first: the transport layer, not your source code. Both messages come from the same family of failure — the link dropped while data was still in flight.
 
@@ -76,6 +79,28 @@ What to do when you see it:
 
 If the message says the response *may be incomplete*, treat the last block of output as suspect and re-run the task — the model may have lost part of its answer when the stream broke.
 
+## Agent process failed to restart after 5 consecutive crashes
+
+This is a **different** failure class from the network errors above. The connection resets are about the link to the API; this message is about **Claude Code's own process stability**. It appears when the agent (or a background subagent) crashes five times in a row and the supervisor gives up trying to relaunch it. Your code is not the cause — something in the runtime environment is crashing the process on startup or shortly after.
+
+The usual suspects, in order of frequency:
+
+- **A hook, MCP server, or plugin that throws on startup.** A `PostToolUse`/`PreToolUse` hook that exits non-zero, a misconfigured MCP server, or a plugin loaded via `settings.json` can crash the agent before it settles. This is the single most common trigger for a repeated crash loop.
+- **Corrupted session/state or settings.** A partially-written session file, a malformed `settings.json`, or a broken `~/.claude.json` can make every launch fail.
+- **OOM / resource exhaustion.** On memory-constrained machines or large repos, the process can be killed by the OS (or by `systemd`/`cgroup` limits) before it stabilizes — especially when many subagents run in parallel.
+- **A native/memory bug in a specific build.** Rare, but real: a given CLI version can have a crash on certain platforms.
+
+### What to do, in order
+
+1. **Restart in safe mode.** Run `claude --safe-mode`. This disables all plugins, MCP servers, and hooks for that session. If the agent now starts cleanly, you have confirmed the fault is in a customization — a hook, MCP server, or plugin. That narrows the hunt enormously.
+2. **Run the diagnostics.** `claude doctor` (or `/doctor` inside Claude Code) checks your installation, settings, extensions, and context usage, and proposes fixes it can apply after you confirm. Run `/mcp` to check MCP server status — a crashed or misconfigured server shows up here.
+3. **Isolate the bad customization.** From safe mode, re-enable components one at a time: add back an MCP server, then a hook, then a plugin. The one that brings the crash back is your culprit. Fix or remove it in `settings.json` (user or project) or your MCP config.
+4. **Free memory and compact context.** Use `/compact` regularly to shrink context, close Claude Code between major tasks, and add large build/artifact directories to `.gitignore` so they are not scanned. If memory stays high, run `/heapdump` to write a memory breakdown (the `-diagnostics.json` file) and inspect it.
+5. **Resume, don't start cold.** Restarting does not lose your conversation. Run `claude --resume` in the same directory to pick the session back up, or `/clear` the earlier conversation if it is no longer needed and the state is what is crashing the relaunch.
+6. **Update, or roll back.** Update to the newest Claude Code version (`claude update`) and fully restart the terminal. If the crashes started right after an update, downgrade to the previous version while you wait for the fix — a specific build can have a platform-specific crash.
+
+On a corporate machine, an endpoint agent, EDR/antivirus, or a container `cgroup` memory cap is often what kills the process. Check the OS logs (`journalctl`, the macOS Console, or Windows Event Viewer) for an OOM kill or a terminated-process entry at the exact time of each crash.
+
 ## Corporate networks
 
 On a locked-down corporate network, ask IT to allow outbound HTTPS traffic to `api.anthropic.com` on port `443`. No exceptions, no MITM proxy inspection on that host — a TLS-inspecting proxy that re-signs certificates is a frequent source of resets.
@@ -97,10 +122,14 @@ Some networks drop idle, non-streaming connections. Streaming sends bytes contin
 **What is "Response stalled mid-stream"?**
 The same family of failure as `ECONNRESET`, but the connection was held open while bytes stopped arriving, so Claude Code flags the output as possibly incomplete. Retry, drop the VPN/proxy, and keep generations short and streamed.
 
+**"Agent process failed to restart after 5 consecutive crashes" — what now?**
+That is a process-stability fault, not a network one. Start `claude --safe-mode`; if it launches cleanly, a hook, MCP server, or plugin is the culprit. Run `/doctor` and `/mcp`, then re-enable customizations one at a time to isolate the bad one. Memory exhaustion (check `journalctl`/Event Viewer for an OOM kill) and a bad CLI build are the other common causes.
+
 ## Key takeaways
 
 - `ECONNRESET` is a network fault, not a code bug — check the transport layer first.
 - `Response stalled mid-stream` is the same failure family; retry and treat the last output block as suspect.
+- `Agent process failed to restart after 5 consecutive crashes` is a *process-stability* fault — launch `claude --safe-mode`; if it works, a hook/MCP server/plugin is crashing it.
 - Restart Claude Code, then drop the VPN/proxy before anything else.
 - `curl -v https://api.anthropic.com` is your fastest diagnostic: any HTTP status = reachable, TLS reset = network fault.
 - On corporate networks, allow outbound `443` to `api.anthropic.com` and avoid TLS-inspecting proxies.

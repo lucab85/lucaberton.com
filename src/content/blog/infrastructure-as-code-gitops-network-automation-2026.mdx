@@ -1,0 +1,230 @@
+---
+draft: false
+title: "Infrastructure as Code and GitOps for Networks"
+seoTitle: "Infrastructure as Code and GitOps for Networks"
+snippet: "Learn how declarative Infrastructure as Code and GitOps deliver safe, auditable, drift-free network changes with Terraform, Argo CD, and Batfish."
+description: "Learn how declarative Infrastructure as Code and GitOps deliver safe, auditable, drift-free network changes with Terraform, Argo CD, and Batfish."
+image:
+  src: "/blog/thumbnails/terraform-state-management-guide-2026.jpg"
+  alt: "Infrastructure as Code and GitOps for Networks"
+publishDate: "2026-07-24"
+lastModified: "2026-07-24"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ["infrastructure as code", "GitOps", "Network Automation", "Terraform", "Platform Engineering", "2026"]
+faq:
+  - question: "What is the difference between IaC and automation scripts?"
+    answer: "Automation scripts are imperative step-by-step instructions. IaC declares the desired end state and lets the tool compute the sequence, giving you idempotency, version control, and drift detection that plain scripts lack."
+  - question: "Why is Argo CD recommended for network GitOps?"
+    answer: "In a 2025 empirical study comparing operators on reconciliation determinism under concurrent changes, Argo CD serialized network configuration updates without race conditions, which matters when two routing or ACL changes can interact destructively."
+  - question: "Can LLMs write network configuration safely?"
+    answer: "LLMs accelerate diagnosis and suggest fixes for common patterns, but they can introduce new errors in complex interdependent configs. Every suggestion must still pass the Batfish validation gate before merge."
+---
+
+This is the operational playbook I wish every network team had before their first major outage. It comes straight out of the *NetOps Demystified* series, where we first established that legacy operations break at scale, that NetOps is the operating model that fixes it, and that SDN hands us the API surface to automate against. The question that always follows is: once we can automate network changes, what governs that automation so it stays safe at scale?
+
+The answer is two borrowed ideas from the application world — **Infrastructure as Code (IaC)** and **GitOps**. These are not buzzwords. Applied to network operations they are a rigorous set of principles that change how changes are proposed, reviewed, validated, shipped, and reversed.
+
+## What Infrastructure as Code Actually Means
+
+IaC is the practice of describing the *desired state* of your infrastructure in files that can be version controlled, reviewed, tested, and applied automatically. The word "code" here does not mean programming logic. It means structured, machine-readable declarations of what you want the network to look like. Four pillars hold the whole approach up — remove any one and it collapses.
+
+**1. Declarative intent.** You describe *what* you want, not *how* to achieve it. You write "this VPC should use CIDR 10.0.0.0/16 and contain two subnets in separate availability zones" — you do not write the API call sequence to create it. The tool figures out the order. This is the shift from imperative scripting to declarative configuration management.
+
+**2. Idempotency.** Running the same configuration description twice leaves the system in exactly the same state. If the VPC already exists with the correct CIDR, nothing changes. If it does not, it gets created. This is what makes automation safe to run inside loops — a drift-detection loop can reapply configuration every ten minutes without duplicating resources.
+
+**3. Immutability where feasible.** Rather than editing a running configuration in place, you replace it. In cloud networking this means swapping a security group rather than editing live rules while traffic flows. That pushes the entire category of in-flight modification failures toward zero.
+
+**4. Version-controlled state as the single source of truth.** Every configuration lives in a Git repository, and the commit history *is* the audit log. The current head of `main` is what should be running in production. Any divergence between the repository and the actual device state is, by definition, drift.
+
+A systematic review of IaC and GitOps practice shows these four properties together produce measurable governance gains: reduced drift, enforced change control through repository RBAC, automated rollback from Git history, and an immutable audit trail.
+
+### The distinction that trips teams up
+
+The principles are shared, but the *artifacts* differ — and misunderstanding this is the most common mistake. Application IaC manages server templates, Kubernetes manifests, container images, and service deployments. Those artifacts have clear lifecycle boundaries: a container is created, runs, and is destroyed. Immutability is straightforward because containers are designed to be ephemeral.
+
+Network IaC manages routing configurations, ACLs, VPC security-group rules, BGP policy, VLAN assignments, firewall rule sets, and topology definitions. These are stateful in a fundamentally different way. A BGP session once established carries live traffic; an ACL change is not ephemeral, it takes effect on packets in flight. Rolling back a bad ACL requires an API call back to the device — not just restarting a container.
+
+This does not weaken the principles for networks. It means the tooling must account for that stateful nature. Terraform does it through its state file, which tracks what was last applied. NETCONF does it through the candidate datastore, which separates staged changes from committed running configuration. Batfish does it through offline analysis before any change touches a live device. Production studies of network-management-as-code found teams adopting IaC principles for network configuration experienced significant reductions in misconfiguration incidents compared to CLI-centric teams. The mechanism is not magic: every change goes through review, every change is tested before deployment, and every change can be reversed in the time it takes to merge a revert commit.
+
+## GitOps: The Enforcement Model
+
+GitOps takes IaC and gives it continuous enforcement. The definition is precise:
+
+- **Git is the single source of truth** for the desired state of all infrastructure.
+- **A reconciliation loop**, implemented by an operator such as Argo CD, Flux, or Terraform Cloud, continuously compares the desired state in Git against the actual state of the infrastructure.
+- Any divergence is remediated automatically or flagged for human review.
+
+Make it concrete: a network engineer opens a feature branch, edits a security-group rule definition, commits, and opens a pull request. The CI pipeline runs syntax validation and pre-deployment verification. Two senior engineers review and approve. The merge triggers the reconciliation operator, which applies the change to the cloud provider API. Within seconds, intended state matches actual state.
+
+Now the alternative scenario: someone logs into the console, manually modifies the security-group rule, bypassing Git. Within the reconciliation interval the operator detects the divergence — the actual state no longer matches Git — and reverts the manual change. The out-of-band modification is gone. Nobody had to remember to undo it. That is the closed-loop property of GitOps: out-of-band changes are transient by design. They cannot silently accumulate into configuration drift because the operator detects and reverts them on the next cycle. For network operations, where drift is historically the source of the majority of outages, this is operational risk management with a continuous enforcement loop — not cosmetic.
+
+### Inside the reconciliation loop
+
+1. The Git repository holds the desired state.
+2. The operator runs on a schedule (typically every 1–5 minutes) and is also triggered by a webhook on every push to `main`.
+3. The operator queries the actual state through the provider API — AWS, Azure, GCP, or a NETCONF-capable device.
+4. It computes the difference between desired and actual state.
+5. If a diff exists, it applies the changes to bring actual in line with desired — or raises an alert for human review if the change is outside its authorized scope.
+6. Repeat.
+
+Webhook-triggered reconciliation means a change in Git reaches production in seconds; polling-based reaches production within the polling interval. Both are deterministic and auditable. Plan for the failure mode too: if the operator cannot reach the target infrastructure, a robust operator reports the reconciliation failure, raises an alert, and stops attempting changes rather than entering a retry loop that amplifies the blast radius. Evaluating operator behavior under failure conditions is a key selection criterion.
+
+## Secrets Never Go in Git
+
+Every network engineer adopting Git for configuration management must learn this before their first commit: **secrets never go in a Git repository.** API keys, device passwords, SSH private keys, TLS certificate private key material, database connection strings — anything that grants access. Not even in a private repository. Not even temporarily.
+
+The reason is structural. Git is designed to preserve history permanently. Once a secret is committed it exists in the repository even after deletion from the current working tree. Anyone with read access — including CI systems — can retrieve it from a historical commit. If the repository is ever exfiltrated or accidentally made public, all historical secrets are exposed.
+
+The HashiCorp Vault pattern is the most widely adopted open-source solution. Vault stores secrets opaquely, issues short-lived tokens scoped to specific operations, provides a full audit log of every secret access, and integrates natively with most CI/CD systems and cloud providers. The configuration that goes in Git references a Vault path; the actual credential is fetched at runtime inside the CI pipeline, used for the duration of the operation, and never written to disk or included in any log. Cloud-native secret managers (AWS Secrets Manager, Azure Key Vault, GCP Secret Manager) provide the same isolation with tighter integration to the cloud IAM model. For simpler environments, CI-scoped environment variables are a serviceable minimum, and GitHub Actions secrets cover the same need.
+
+Operationally this means: your Terraform HCL files in Git contain resource definitions, variable references, and backend configuration — no credential values. Your Ansible inventory contains host addresses and variable references — no passwords. Your NETCONF client scripts contain endpoint addresses and fetch credentials from Vault at execution time.
+
+## The Git Workflow
+
+The branch strategy follows the same model application teams use for software delivery, with one critical addition: **the `main` branch represents the production network state.**
+
+- **`main`** — protected, the current desired production state for all network resources. Direct commits are blocked; changes reach `main` only through a reviewed, CI-validated pull request.
+- **`feature/*`** — short-lived branches where individual changes are developed (`feature/vpc-peering`, `feature/ingestion-pipeline`).
+- **`bug/*`** and **`hotfix/*`** — for urgent production changes, following the same PR process but prioritized for rapid review.
+
+Protection rules are enforced at the repository level, not by convention: no direct push, at least one peer approval, all CI checks must pass, and a signed-commit requirement adds verification in high-security environments. This gives you change control enforced by code rather than by policy documents a human can bypass under pressure. A developer who tries to push directly to `main` is rejected by the server, even at 2 a.m. during a change window.
+
+### The pull request is atomic change control
+
+Compare it to the traditional change-advisory-board process. There, an engineer raises a ticket, summarizes the change in freeform prose, attaches a Word document with a rollback plan, waits for a CAB meeting, presents verbally, receives approval, schedules a window, executes manually, and updates the ticket afterward. That takes days to weeks, and the actual configuration is not reviewed until it is live on the device.
+
+In the GitOps model the engineer creates a feature branch, makes the change in code, pushes, and opens a pull request. The PR contains the exact diff — every line added, every line removed — in the actual configuration files. CI runs immediately. Peers review the actual change, not a prose description of it. When approved and merged, the configuration deploys automatically. The complete record of what changed, who reviewed it, what CI found, and when it shipped lives in the PR history. This is not a shortcut around governance — it is a higher-quality governance process.
+
+### Commit messages as operational records
+
+The commit message is the operational change record and must answer three questions precisely:
+
+1. **What changed?** The diff shows it; the message describes it at a semantic level — e.g. "Add inbound 443/tcp rule to web-tier group from ALB tier."
+2. **Why is it being made?** The most critical and most frequently absent piece — e.g. "Implements requirement SR-2026047 from security review; fixes BGP session with AS65001 after MTU mismatch in ticket NOC-4421."
+3. **What is the rollback plan?** For GitOps it is almost always a revert of this commit. Document it explicitly.
+
+A commit log full of "fixed stuff" is useless during an outage. A log with precise, context-rich messages is a searchable operational history.
+
+## Choosing the Right Operator
+
+Selecting a GitOps operator for network automation is not a matter of taste. A 2025 empirical benchmarking study compared Argo CD, Flux, and Config Sync specifically in network automation scenarios across three criteria: reconciliation latency, resource footprint, and reconciliation determinism under concurrent changes and failure.
+
+- **Argo CD** showed the strongest reconciliation determinism under concurrent change attempts — multiple branches applied simultaneously. It serialized the changes and applied them in expected order without race conditions. That determinism matters enormously for networks, where two concurrent ACL or routing-policy updates can interact destructively. Its resource footprint is moderate, and its dashboard gives clear visibility into reconciliation state.
+- **Flux CD** showed lower resource footprint and comparable latency, but under concurrent-change scenarios it exhibited occasional non-deterministic reconciliation ordering — a meaningful risk where change ordering matters. It is well suited to Kubernetes-native teams already embedded in the CNCF ecosystem.
+- **Config Sync (Google)** is designed for GKE fleet management. It showed the lowest latency in homogeneous Google Cloud environments but lacks the provider breadth needed for multi-cloud or on-premise network resources.
+
+For network automation where reconciliation determinism is the primary requirement, the evidence-based recommendation is **Argo CD**.
+
+## Rollback Is a First-Class Operation
+
+This is the mental-model shift for teams coming from manual operations. Manual rollback means finding an engineer who remembers the original configuration, logging into the device under pressure, executing the reversal from memory, and updating a change record that may or may not be accurate. It works in proportion to the clarity of the pre-change record and the calmness of the person executing it.
+
+In a GitOps workflow, rollback is `git revert <commit>`. That creates a new commit that exactly reverses the target change. The revert goes through the PR process; CI validates it is syntactically valid and passes pre-deployment analysis; peer review is fast because the diff is the exact reversal; once merged, the operator applies the reverse state and the incident is closed. No emergency console access, no tribal knowledge. The same safety properties as a normal forward change apply.
+
+The one exception: if the operator itself is unavailable and an emergency console change must be made, that out-of-band change must be immediately followed by a Git commit bringing the repository in line with the emergency change — creating a retrospective audit record and preventing the operator from reverting the emergency effects on the next cycle.
+
+## Terraform in Practice
+
+Terraform manages cloud resources by making API calls to providers. For networks the relevant resource types are VPCs, subnets, route tables, security groups, network ACLs, internet/NAT gateways, and transit gateways. It expresses these in HashiCorp Configuration Language (HCL), which is declarative — you describe the desired state and Terraform computes the API sequence. Crucially, Terraform stores a state file recording what it believes is deployed; that file is how it computes diffs. `terraform plan` shows exactly what would change before a single API call is made.
+
+In offline or educational environments you can run the full workflow against LocalStack, a local AWS-compatible API, with no cloud account.
+
+```hcl
+variable "vpc_cidr" {
+  type    = string
+  default = "10.0.0.0/16"
+}
+
+resource "aws_vpc" "netops_lab" {
+  cidr_block           = var.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+
+  tags = {
+    Name      = "NetOpsLab"
+    ManagedBy = "Terraform"
+  }
+}
+
+resource "aws_subnet" "app_tier" {
+  vpc_id            = aws_vpc.netops_lab.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "eu-west-1a"
+
+  tags = {
+    Name      = "AppTier"
+    ManagedBy = "Terraform"
+  }
+}
+```
+
+Terraform reads the `aws_vpc.netops_lab.id` reference and builds a dependency graph — it creates the VPC before the subnet that references it, with no explicit ordering required. Every rule should carry a `description`; it is not syntactically required, but it is operationally required for maintainability — when an auditor asks why a rule exists, the description in the file is the answer.
+
+`terraform plan` is your pre-deployment blast-radius report: every resource to be created, modified, or destroyed is listed with exact attribute values, generated before any API call. Your CI pipeline should surface this in the pull request so reviewers see the full computed impact, not just the HCL diff. After `terraform apply`, the state file is written — a JSON document recording every managed resource with its provider-assigned IDs and attributes. This file is the source of truth for drift detection and must live in a shared, encrypted, locking-enabled backend (S3 with DynamoDB locking for AWS), **never in Git**. Storing it in Git creates merge conflicts when engineers run Terraform concurrently and leaks sensitive resource attributes.
+
+Drift detection is then a single command: if someone adds an out-of-band SSH rule through the console, `terraform plan` shows the live state contains a rule the HCL does not declare, and `terraform apply` removes it — restoring intended state. The minus sign in the plan means Terraform will remove that rule.
+
+### On licensing
+
+In August 2023 HashiCorp moved Terraform from the Mozilla Public License to the Business Source License. The BSL restricts commercial use by organizations building products or services that compete with HashiCorp; most internal network-operations teams are unaffected. However, some legal policies forbid BSL-licensed software, and some regulated environments require certified open-source tooling. For those cases **OpenTofu** is a drop-in replacement: a Linux Foundation fork of the version immediately before the BSL change, licensed under MPL 2.0, with identical HCL syntax and provider compatibility. Use Terraform if your organization is comfortable with the BSL; use OpenTofu if not. The technical content applies to both.
+
+## The Validation Pipeline
+
+There are three testing layers for network configuration changes, each catching a different error class at a different pipeline point.
+
+**Syntax validation** is fastest and catches the simplest errors: `yamllint` for YAML, `terraform validate` for HCL, `ansible-lint` for playbooks. These run in seconds, before any reviewer's time is spent, at negligible cost. Every pipeline should run all three in stage one.
+
+**Semantic analysis** is where Batfish operates. Batfish does not check syntax — it analyzes the actual semantics of the configuration: where traffic can reach, whether ACL rules have unreachable (shadowed) entries, whether BGP policies correctly filter and attribute prefixes, and whether routing loops exist. It does this by simulating network behavior offline against the configuration files themselves, with no live device connection, supporting Cisco IOS, Juniper JunOS, Arista EOS, Palo Alto PAN-OS, and others. Reachability analysis — given a source IP, destination IP, and protocol, will a packet arrive, and if not, which ACL or policy drops it — catches the exact outage category where an incorrect ACL severed downstream service reachability. Shadowed rules are a real source of silent security gaps. Batfish is Apache 2.0, runs as a containerized service, and exposes a Python API for scripting inside CI:
+
+```python
+from pybatfish.client.commands import bf_set_snapshot
+from pybatfish.question import bfq
+
+bf_session.host = "localhost"
+bf_set_snapshot("/path/to/snapshot", name="netops-lab")
+
+# Will a packet from the web tier reach the database tier on 5432/tcp?
+result = bfq.reachability(
+    pathConstraints={
+        "srcIps": "10.0.1.0/24",
+        "dstIps": "10.0.2.0/24",
+        "applications": ["tcp_5432"],
+    }
+).answer()
+assert not result.frame().empty, "Unexpected reachability detected"
+```
+
+If any assertion fails, the pipeline fails and the PR is blocked. Every postmortem that identifies a configuration error becomes a new Batfish assertion — a growing regression suite for your network.
+
+**Formal verification** is model checking (e.g. Plankton) that exhaustively explores the reachable configuration space to mathematically prove specified reachability properties hold across the full topology. It is the most rigorous and slowest layer, typically reserved for core-to-core routing policy or security-critical ACLs rather than routine operational changes.
+
+### The LLM caveat
+
+LLMs can assist with configuration repair and generation. Benchmarks on real-world production configuration errors found LLMs successfully suggested correct fixes for common, well-documented patterns — a single BGP peer misconfiguration, a mismatched prefix list, a straightforward ACL error. That genuinely helps engineers who are not experts in every vendor syntax. But the same studies found that for scenarios involving complex inter-configuration dependencies, LLMs introduced new errors while fixing the reported one — a model that fixes a BGP peer might simultaneously produce a prefix-list entry that creates a route leak its topology context did not account for. Cascading failures are possible when suggestions are applied without verification.
+
+The operational implication is non-negotiable: LLMs accelerate the diagnosis and suggestion phase; they do **not** replace the verification gate. Every LLM-generated suggestion must pass through Batfish analysis before it is merged. The CI pipeline does not distinguish between human-authored and LLM-assisted changes — the same gate applies to both.
+
+### The complete loop
+
+1. Engineer pushes to a feature branch; CI triggers immediately.
+2. Syntax validation runs in parallel. Any failure blocks the pipeline and posts the specific error as a PR comment.
+3. Batfish analysis loads the snapshot, runs reachability, ACL, and BGP checks. Any failed assertion blocks the PR.
+4. The PR is ready for human review — green CI badge, full diff, Batfish summary. Approval takes minutes.
+5. Reviewer approves and merges; the GitOps operator detects the merge and applies the change.
+6. Post-deployment smoke test (a Prometheus metric check or synthetic transaction) confirms the change landed. If it fails, an alert fires and the `git revert` → PR → CI → operator rollback procedure begins.
+
+Every change, every time.
+
+## Key Takeaways
+
+- IaC means **declarative, idempotent, version-controlled configuration** — not the same as an automation script.
+- **GitOps** is the operational model that enforces IaC continuously: Git is the authority, the reconciliation operator is the enforcer.
+- Under GitOps, **drift is a detectable, alertable condition**, no longer a silent accumulator.
+- **Secrets never go in Git** — the Vault pattern or cloud-native secret managers are non-negotiable.
+- **Argo CD** is the evidence-based operator choice for networks, where reconciliation determinism is the priority.
+- **Rollback is `git revert` + PR + operator apply** — as safe as any forward change.
+- **`terraform plan` is your blast-radius report**; the state file belongs in a shared encrypted backend, not Git; **OpenTofu** is the BSL-free drop-in.
+- **Batfish is the semantic gate**; LLMs accelerate suggestions but never replace it.
+
+The tools exist, the workflow exists, and the evidence base supports adoption. What remains is the organizational will to change the network process. In the next section we move from change management to reliability operations — SLIs, SLOs, error budgets, runbook automation, chat-ops, LLM-assisted triage, and blameless postmortems.

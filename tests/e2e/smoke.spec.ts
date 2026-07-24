@@ -2,13 +2,13 @@ import { test, expect } from '@playwright/test';
 
 test.describe('site smoke tests', () => {
   test('home page renders and has expected title', async ({ page }) => {
-    const response = await page.goto('/');
+    const response = await page.goto('/', { waitUntil: 'domcontentloaded' });
     expect(response?.ok()).toBeTruthy();
     await expect(page).toHaveTitle(/Luca Berton/i);
   });
 
   test('blog index loads and lists posts', async ({ page }) => {
-    const response = await page.goto('/blog/');
+    const response = await page.goto('/blog/', { waitUntil: 'domcontentloaded' });
     expect(response?.ok()).toBeTruthy();
     // At least one anchor pointing to a blog post.
     const postLinks = page.locator('a[href^="/blog/"]');
@@ -16,19 +16,19 @@ test.describe('site smoke tests', () => {
   });
 
   test('about page renders', async ({ page }) => {
-    const response = await page.goto('/about/');
+    const response = await page.goto('/about/', { waitUntil: 'domcontentloaded' });
     expect(response?.ok()).toBeTruthy();
     await expect(page.locator('h1').first()).toBeVisible();
   });
 
   test('contact page exposes the contact form', async ({ page }) => {
-    const response = await page.goto('/contact/');
+    const response = await page.goto('/contact/', { waitUntil: 'domcontentloaded' });
     expect(response?.ok()).toBeTruthy();
     await expect(page.locator('#contact-form')).toBeVisible();
   });
 
   test('canonical link points to the same URL with trailing slash', async ({ page }) => {
-    await page.goto('/about/');
+    await page.goto('/about/', { waitUntil: 'domcontentloaded' });
     const canonical = await page.locator('link[rel="canonical"]').getAttribute('href');
     expect(canonical).toBeTruthy();
     expect(canonical!.endsWith('/about/')).toBeTruthy();

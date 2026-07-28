@@ -1,0 +1,127 @@
+---
+draft: false
+title: "Cloud Native Telecom Meetup Japan 2026 at NTT DOCOMO Open Lab Odaiba: My Recap"
+seoTitle: "Cloud Native Telecom Meetup Japan 2026 Recap"
+snippet: "My recap from the Cloud Native Telecom Meetup Japan 2026 at NTT DOCOMO: docomo SOP-grounded agentic AIOps and graduated autonomy."
+description: "My recap from the Cloud Native Telecom Meetup Japan 2026 at NTT DOCOMO: docomo SOP-grounded agentic AIOps and graduated autonomy."
+publishDate: "2026-07-28"
+lastModified: "2026-07-28"
+image:
+  src: "/blog/thumbnails/cloud-native-telecom-meetup-japan-2026.jpg"
+  alt: "Cloud Native Telecom Meetup Japan 2026 at NTT DOCOMO Open Lab Odaiba, Tokyo"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "cloud-native"
+  - "telecom"
+  - "kubernetes"
+  - "aiops"
+  - "agentic-ai"
+  - "ntt-docomo"
+  - "kubecon"
+  - "japan"
+  - "cnf"
+  - "conference"
+---
+
+## Why I was there
+
+I spent today at the **Cloud Native Telecom Meetup Japan 2026**, a sponsor- and community-hosted co-located event ahead of **KubeCon + CloudNativeCon Japan 2026**, held at **docomo R&D Open Lab Odaiba** (12F, 2-3-2 Daiba, Minato-ku, Tokyo). It ran 13:05–19:05, and it was exactly the kind of focused, operator-level gathering I look for: real telecom use cases on Kubernetes, cloud-native network functions (CNFs), platform engineering for telco workloads, and CNCF projects applied to 5G/6G.
+
+This one mattered to me for a second reason. I'm collaborating with **Dell Technologies** in Europe on a common **OpenShift AI** project, and a lot of what docomo presented — autonomous Day-0/Day-1/Day-2 operations, agents that reason over Kubernetes, SOP-driven remediation — maps directly onto the questions we're asking about running AI on telco-grade infrastructure. So this wasn't tourism; it was field research.
+
+## The throughline: from manual Day-0/Day-1 to agentic operations
+
+The clearest story of the day was docomo's own pain, told honestly on stage. Their **Current Status of Docomo Day-0/Day-1 Operation** slide is the kind of number that should make every platform team wince:
+
+- Each platform or application change forces a roughly **10-month, largely manual Day-0/Day-1 cycle**.
+- With the lifecycle now about **one year** (containers move faster than the VMs they replaced), repeating that error-prone effort every year is "very difficult."
+- The flowchart itself is a wall of manual steps: automation-tool updates, hardware parameter design, supplier kitting, racking/cabling, platform and VNF parameter design, app onboarding, instantiation, service launch — with red brackets marking where human effort dominates.
+- **Day-2** is no better: automation tools only cover the repetitive parts; "most of the analysis and work still falls to people."
+
+The strategic slide — **The Industry's Answer: Desired-State Operations Driven by Agentic AI** — frames the escape route. It cites the **TM Forum** definition of the *Autonomous Network*: humans stop scripting fixed scenarios and instead define a **desired state**, and AI maintains the network from **Day 0 to Day 2**. The honest open question on the slide is the one every regulated operator is wrestling with: *how do we prevent accidental changes — or should we prevent them at all?*
+
+## The architecture: ANO and three agents across the lifecycle
+
+docomo's answer has a name: **ANO (Autonomous Network Operations)**, and its centerpiece is **three agents across the full lifecycle**:
+
+- **Day 0 — ANPA (Provisioning Agent):** bare-metal discovery (Redfish/BMC), OS install via Tinkerbell, register EKS Hybrid Nodes, hardware validation and burn-in. Produces a **PhysicalTopology CRD**.
+- **Day 1 — ANDA (Deployment Agent):** 5G network functions (AMF · SMF · UPF · gNB), 3GPP-compliant dependency ordering, drain-aware zero-downtime upgrades, rollback on SOP-defined thresholds. Produces a **ServiceTopology CRD**.
+- **Day 2 — ANRA (Remediation Agent):** cross-layer alarm correlation, anomaly detection on KPIs, auto-remediation via SOP runbooks, escalation when confidence is low. Produces an **ImpactMap CRD**.
+
+The pragmatic kicker: it's delivered as an **EKS Community Add-on** through the native EKS Add-ons API (console / CLI / IaC), built on the open-source **Strands Agents SDK + Amazon Bedrock**, and it runs on clusters operators already use for 5G — including EKS Hybrid Nodes on-prem. *No new infrastructure required.*
+
+## Why CRDs, not a message broker
+
+This is the part I'd put in front of any platform team building multi-agent systems. The **Multi-Agent Coordination: CRDs as Inter-Agent Contract** talk made the case that coordination happens over *minutes, not milliseconds*, so you don't need Kafka/NATS/SQS between agents. Using Kubernetes CRDs as the inter-agent contract gets you:
+
+- **Crash recovery** — CRs persist in etcd, the pod just resumes
+- **Audit / compliance** — `kubectl get` *is* regulatory proof
+- **Schema validation** — admission control at write time
+- **Access control** — RBAC per agent, per resource
+- **Observability** — etcd watches feed existing dashboards
+- **Replay / debug** — `kubectl apply -f` re-triggers
+
+What they explicitly *didn't* build: a message broker, a service mesh for agent discovery, custom auth/mTLS, a separate observability stack, a persistence layer. What they used instead: etcd, the K8s API server, RBAC, CRD schema validation, and `kubectl` — all already running. The slide's bottom line: **$0 new infrastructure.**
+
+## SOP-grounded agents: the LLM reasons, it doesn't execute
+
+The most important architectural principle of the day, and the one I'll carry into the Dell/OpenShift AI work: **the LLM is the reasoning engine, not the executor.**
+
+The **Problem with Raw LLMs in Production Networks** slide is a clean two-column contrast:
+
+- **Raw LLM (freeform reasoning):** non-deterministic (unacceptable for live traffic), can invent CLI commands and config values, generates procedures that don't exist, not auditable, no reproducibility guarantees.
+- **SOP-grounded agent:** every action traced to an approved SOP, SOPs are version-controlled markdown runbooks, the LLM selects the step but execution is deterministic, fully auditable for telco compliance, and ISV-agnostic (the knowledge lives in the SOP).
+
+**How SOP-Grounded Agents Work** (Observe → Reason → Execute, deterministically) breaks it down:
+
+- **SOP = shippable deliverable:** vendor runbooks become markdown SOPs, GitOps-managed with the workflows you already use, agent code stays ISV-agnostic, reviewed and approved once then deployed everywhere. "SOPs are the CNF-specific knowledge layer."
+- **Dynamic SOP enrichment (closed loop):** embed real network topology (CRDs) into context, closed-loop evals validate correctness, corrections feed back so SOPs improve over time.
+
+## The live demo: ANRA remediating a 5G Core alarm
+
+The room got quiet for the **Live Demo: ANRA Remediating a 5G Core Alarm**. The scenario: *SMF pod OOM-killed → AMF detects session loss → alarm fires → ANRA auto-remediates.* The remediation pipeline runs six stages:
+
+1. **COLLECT** — 6 sources, 30s
+2. **DETECT** — 14 rules + 3σ
+3. **CORRELATE** — NetworkX, 4 layers
+4. **RESOLVE** — 19 SOPs + generate
+5. **ENRICH** — Bedrock + environment context
+6. **EXECUTE** — Strands agent
+
+On the dashboard we watched the "watch for" cues play out: the KPI cards turned red when the alarm fired, correlation suppressed related alarms, the agent selected an SOP from 19 candidates, Bedrock enriched it with cluster topology, and the Strands agent executed the steps. Under the hood: the agent reads the **ImpactMap CRD** for topology context, does cross-layer correlation (infra → NF → service), renders SOP markdown into deterministic steps, and each step is a `kubectl`, `helm`, or API call. The live activity feed streamed every reasoning step. Active alarms 0, SOPs executed 1, success rate 100% — a clean demo run.
+
+## Built-in trust: graduated autonomy via Strands evals
+
+Trust was the closing theme, and it's the right one. **Built-In Trust: Graduated Autonomy via Strands Evals** lays out an evaluation framework that gates autonomy:
+
+- **Tool Usage** — right SOP, right parameters?
+- **Grounding** — faithful to the SOP, not hallucinated?
+- **Goal Success** — did the Day 0/1/2 task complete?
+- **Resilience** — behavior under injected failures
+- **Deterministic** — code-based assertions for CI/CD
+- **Simulators** — multi-turn scenarios pre-production
+
+Mapped against **TM Forum Autonomy Levels**: L1 Assisted (does most work) → L2 Partial (approves each step) → L3 Conditional (exceptions only) → L4 High (oversight only) → L5 Full (autonomous). The target on screen: **L3→L4 in 2026 for known failure patterns.** And the rule that makes it credible: built on the open-source Strands Agents SDK, results stream to Amazon CloudWatch + Bedrock, AgentCore observability, and **deterministic evals gate CI/CD — a failing eval blocks promotion, just like a failing test.**
+
+## What this means for my OpenShift AI work with Dell
+
+Walking out of Odaiba, three things are going straight into how I think about our common OpenShift AI project:
+
+1. **Treat runbooks as the deliverable, not the agent.** Vendor- and ISV-specific knowledge should live in version-controlled markdown SOPs; the agent stays generic. That's what makes it auditable and portable across clusters.
+2. **Let Kubernetes be the coordination layer.** If your agents coordinate over minutes, CRDs + etcd + RBAC already give you persistence, audit, and access control for free. Don't stand up a broker you have to operate.
+3. **Earn autonomy with evals, not promises.** Graduated, eval-gated autonomy (L3→L4) is how you get a regulated environment to trust an agent near live traffic.
+
+## Sessions to watch when recordings drop
+
+The meetup was a co-located event ahead of KubeCon + CloudNativeCon Japan 2026 (Yokohama, July 28–30). The main conference recordings will land on the CNCF YouTube channel; if docomo's ANO and Strands-based AIOps talks appear there, they're worth your time.
+
+If you were at Odaiba today — or you're working on agentic AIOps for telco or any regulated workload — reach out. I'd especially like to compare notes with anyone running SOP-grounded agents on OpenShift or EKS Hybrid Nodes.
+
+*Luca Berton is an AI Platform Engineering Educator, Docker Captain, and CNCF/KubeCon media partner. He is collaborating with Dell Technologies on a common OpenShift AI project spanning Europe.*
+
+## Related Articles
+
+- [KubeCon + CloudNativeCon Japan 2026: Media-Partner Preview](/blog/kubecon-japan-2026-media-partner-preview/)
+- [Infrastructure as Code & GitOps for Network Automation 2026](/blog/infrastructure-as-code-gitops-network-automation-2026/)
+- [Zero Trust for Kubernetes Workloads](/blog/zero-trust-kubernetes-workloads/)

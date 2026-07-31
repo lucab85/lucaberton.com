@@ -1,0 +1,283 @@
+---
+draft: false
+title: "Hermes Agent Troubleshooting: Fix Model, Provider, Gateway & Credential Errors"
+seoTitle: "Hermes Agent Troubleshooting Guide"
+snippet: "Model 404, provider retries exhausted, silent Discord bot? Here is the diagnostic flow and exact commands to fix every Hermes Agent error."
+description: "Hermes Agent troubleshooting guide: fix model-not-found 404s, provider retry failures, credential pool issues, and gateway problems with exact commands."
+publishDate: "2026-07-31"
+lastModified: "2026-07-31"
+image:
+  src: "/blog/thumbnails/hermes-agent-troubleshooting.svg"
+  alt: "Hermes Agent troubleshooting flow: diagnose, fix model, credentials, and gateway"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "Hermes Agent"
+  - "Troubleshooting"
+  - "Nous Research"
+  - "AI Agents"
+  - "Discord"
+faq:
+  - question: "Why does Hermes say 'the model provider failed after retries'?"
+    answer: "Hermes called the LLM, the call failed, and the built-in retry loop gave up. The raw provider error is kept out of chat for privacy and written to the gateway logs instead. Check the logs with 'grep -i error ~/.hermes/logs/gateway.log' and then inspect your credential pool with 'hermes auth list' or switch models with 'hermes model'."
+  - question: "Why do I get 'HTTP 404: Model not found'?"
+    answer: "The exact model string Hermes is configured to use is not in its model map or the provider catalog. This usually means the model was deprecated or renamed (common with free tiers), there is a typo, or the provider is set wrong. Run 'hermes model' to pick a currently valid model."
+  - question: "My Hermes cron job fails with a model 404 — why?"
+    answer: "A per-job model override set at creation time does not follow the profile default afterwards. If that model disappears from the catalog, the job keeps 404-ing. Fix it with 'hermes cron list' then 'hermes cron edit <job_id>' to update or clear the override."
+  - question: "The Discord bot is silent — what is wrong?"
+    answer: "Most often the Message Content Intent is disabled. Enable it under Bot → Privileged Gateway Intents in the Discord developer portal, then restart the gateway with 'hermes gateway restart'."
+---
+
+Hermes Agent is provider-agnostic: it runs on OpenRouter, Anthropic, OpenAI,
+Google, DeepSeek, local models, and 20+ others. That flexibility is its biggest
+strength — and the single most common source of errors. When something breaks,
+nine times out of ten it is the **model/provider boundary**: a credential
+expires, a model is renamed in the catalog, or a provider returns an error that
+Hermes retries and then surfaces to you.
+
+This guide is the reference I wish I had when I first hit these errors. It walks
+through the real failure modes, the exact commands to diagnose them, and how to
+fix each one — with no private setup details, just the patterns that bite
+everyone.
+
+## The 30-second diagnostic checklist
+
+Run these in order. Most problems become obvious within the first three:
+
+```bash
+hermes doctor            # config + dependency health (use --fix to auto-repair)
+hermes status --all      # component status across the install
+hermes auth list         # show pooled credentials and exhaustion state
+hermes config check      # missing / outdated config keys
+```
+
+If the agent itself is misbehaving rather than the provider, read the logs:
+
+```bash
+grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
+```
+
+The files you will care about most:
+
+| What | Location |
+|------|----------|
+| Main config | `~/.hermes/config.yaml` |
+| Secrets / API keys | `~/.hermes/.env` |
+| Gateway + error logs | `~/.hermes/logs/` |
+| Credential pools (OAuth + keys) | `~/.hermes/auth.json` |
+| Session store (SQLite + FTS5) | `~/.hermes/state.db` |
+| Skills | `~/.hermes/skills/` |
+
+## Model and provider errors
+
+These are the most frequent failures and the easiest to misread.
+
+### "The model provider failed after retries"
+
+This means Hermes called the LLM, the call failed, and the built-in
+retry/backoff loop exhausted its attempts. The raw provider error is
+deliberately kept out of chat output for privacy — it lands in the gateway logs
+instead.
+
+Look there first:
+
+```bash
+grep -i "provider\|retry\|upstream\|timeout" ~/.hermes/logs/gateway.log | tail -40
+```
+
+The usual causes:
+
+- **Provider outage or partial degradation** — the upstream API is returning 5xx.
+- **Rate limiting (HTTP 429)** — you are over quota. With credential pools this
+  normally means every key in the pool is temporarily exhausted.
+- **Expired or exhausted API key** in the pool.
+- **Wrong `base_url`** for a custom endpoint (model section in `config.yaml`).
+- **Network or TLS** issues between the gateway and the provider.
+
+Fix it:
+
+```bash
+hermes auth list            # confirm the pool looks healthy
+hermes auth reset PROVIDER  # clear an exhaustion flag on a provider
+hermes auth add PROVIDER    # add or refresh a credential
+hermes model                # switch to a different model or provider
+```
+
+If the error is intermittent, move to a different provider and let the pool
+rotate. If it is constant, the key or `base_url` is the likely culprit.
+
+### "HTTP 404: Model 'X' not found"
+
+This means the exact model string Hermes is configured to use is not present in
+its internal model map **or** in the provider's catalog. Hermes looked, did not
+find it, and refused to send a request that would never succeed.
+
+Common causes:
+
+- **The model was deprecated or renamed** by the provider. This is very common
+  with free tiers (anything ending in `:free`) that get rotated.
+- **A typo in the model id**, e.g. `tencent/hy3:free` versus the current
+  catalog slug.
+- **Provider mismatch** — the model only exists on OpenRouter, but `provider`
+  is set to something else (anthropic, openai, …).
+- **A stale per-job model override** on a cron job pointing at a model that no
+  longer exists.
+
+Fix it:
+
+```bash
+hermes model                       # pick a currently-valid model interactively
+hermes chat -m openrouter/<model>  # smoke-test a model before committing to it
+hermes cron list                   # find jobs with a pinned model
+hermes cron edit <job_id>          # update or clear the per-job model override
+```
+
+For scheduled jobs, the model override is set at creation time and **does not**
+follow the profile default afterwards. A model that disappears from the catalog
+will keep 404-ing until you edit the job. Recreate or edit the job to use a model
+that still exists — and verify the slug on the provider's model page first.
+
+## Credentials and credential pools
+
+Multiple credentials per provider form a **pool** that rotates automatically and
+skips exhausted keys. Problems here usually show up as repeated provider
+failures rather than a clean auth error.
+
+```bash
+hermes auth                 # interactive credential manager
+hermes auth list [PROVIDER] # list pooled credentials + state
+hermes auth reset PROVIDER  # clear exhaustion status
+hermes auth remove PROVIDER INDEX
+hermes auth add [PROVIDER]  # add an OAuth or API-key credential
+```
+
+One important gotcha: a **Copilot 403**. A `gh auth login` token does **not**
+work for the Copilot API. You must authenticate through the Copilot-specific
+OAuth device flow: `hermes model` → GitHub Copilot, which opens the device-code
+prompt.
+
+## Gateway (messaging platform) issues
+
+The gateway is what connects Hermes to Discord, Telegram, Slack, WhatsApp, and
+more. Most gateway problems are environmental, not code.
+
+Read the logs first:
+
+```bash
+grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
+```
+
+**Gateway dies when you log out of SSH:**
+
+```bash
+sudo loginctl enable-linger $USER   # keep user services alive after logout
+```
+
+**Gateway dies when WSL2 closes:** WSL2 needs `systemd=true` in `/etc/wsl.conf`
+for user services to survive. Without it the gateway falls back to `nohup` and
+dies with the session.
+
+**Crash loop:**
+
+```bash
+systemctl --user reset-failed hermes-gateway
+```
+
+**Platform-specific:**
+
+- **Discord bot is silent** — enable **Message Content Intent** under Bot →
+  Privileged Gateway Intents.
+- **Slack bot only answers DMs** — subscribe to the `message.channels` event;
+  without it the bot ignores public channels.
+
+Control commands: `hermes gateway status`, `hermes gateway restart`,
+`hermes gateway setup`.
+
+## Tools and skills not available
+
+A tool or skill you expect is missing from the running session.
+
+```bash
+hermes tools list           # all toolsets and their enabled state
+hermes tools enable NAME    # enable a toolset (or `hermes tools` interactively)
+hermes skills list          # installed skills
+/skill <name>               # load a skill into the current session
+hermes -s <name>            # preload a skill at launch
+```
+
+Why it still does not appear: toolset and skill changes take effect on
+**`/reset`** (a new session). They are not applied mid-conversation, to preserve
+prompt caching.
+
+## Config changes not taking effect
+
+| Change type | Action |
+|-------------|--------|
+| Gateway config | `/restart` (slash command) |
+| CLI config | exit and relaunch `hermes` |
+| Tools / skills | `/reset` (new session) |
+| Code changes | restart the CLI or gateway process |
+
+One exception worth flagging: `security.redact_secrets` is snapshotted at import
+time. Toggling it mid-session (even via an env var) will **not** take effect for
+the running process. Change it in `config.yaml` and start a new session.
+
+## Auxiliary models (vision, compression, session_search)
+
+If vision analysis, context compression, or session search fail *silently*, the
+`auto` provider cannot find a backend. Fix it by providing a key or pinning each
+auxiliary task explicitly:
+
+```bash
+# give the auto-resolver a key to use
+export OPENROUTER_API_KEY=...      # or GOOGLE_API_KEY
+
+# or pin a provider/model per auxiliary task
+hermes config set auxiliary.vision.provider <provider>
+hermes config set auxiliary.vision.model <model_name>
+```
+
+## Voice (STT / TTS)
+
+**Speech-to-text not working:**
+
+```yaml
+# config.yaml
+stt:
+  enabled: true
+  provider: local     # local | groq | openai | mistral
+```
+
+`local` needs `pip install faster-whisper` (free, no key). Otherwise set the
+matching API key.
+
+**Text-to-speech not working:** pick a provider in config — `edge` (free,
+default), `elevenlabs`, `openai`, `minimax`, `mistral`, or local `neutts`.
+
+Slash commands: `/voice on` (voice-to-voice), `/voice tts` (always voice),
+`/voice off`.
+
+## Escalation and reporting
+
+When you have isolated the problem but still need help:
+
+- **Isolate project rules from Hermes:** `hermes --ignore-rules` skips all
+  `.hermes.md` / `AGENTS.md` / `CLAUDE.md` / `SOUL.md` injection. If the bug
+  disappears, it is in your project context file, not Hermes.
+- **Upload a debug report:** `/debug` collects system info plus logs and returns
+  shareable links.
+- **Docs:** [https://hermes-agent.nousresearch.com/docs/](https://hermes-agent.nousresearch.com/docs/)
+
+## Quick reference: error to action
+
+| Symptom | First command | Likely fix |
+|---------|---------------|------------|
+| "model provider failed after retries" | `hermes auth list` | refresh/rotate key, or `hermes model` to switch |
+| "HTTP 404: Model 'X' not found" | `hermes model` | pick a model that exists in the catalog |
+| cron job fails on model 404 | `hermes cron edit <id>` | update the per-job model override |
+| gateway silent on Discord | check Bot intents | enable Message Content Intent |
+| gateway dies after SSH logout | `loginctl enable-linger` | keep user service alive |
+| tool/skill missing | `hermes tools` / `/skill` | enable, then `/reset` |
+| config change ignored | `/restart` or relaunch | new session / process |
+| aux vision/compression broken | `hermes config set auxiliary.*` | set provider or key |
+| Copilot 403 | `hermes model` → GitHub Copilot | use device-code OAuth, not `gh` token |

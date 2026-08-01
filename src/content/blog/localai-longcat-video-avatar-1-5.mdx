@@ -1,0 +1,148 @@
+---
+draft: false
+title: "LocalAI LongCat-Video-Avatar 1.5: Local Talking Avatars"
+seoTitle: "LocalAI LongCat-Video-Avatar 1.5"
+snippet: "Run an open-source, audio-driven talking avatar on your own GPU with LocalAI 4.7.0 and LongCat-Video-Avatar 1.5 — MIT, Whisper-Large lip sync, no API."
+description: "Run an open-source, audio-driven talking avatar on your own GPU with LocalAI 4.7.0 and LongCat-Video-Avatar 1.5 — MIT, Whisper-Large lip sync, no API."
+publishDate: "2026-08-01"
+lastModified: "2026-08-01"
+image:
+  src: "/blog/thumbnails/localai-longcat-video-avatar-1-5.svg"
+  alt: "LocalAI and LongCat-Video-Avatar 1.5: self-hosted audio-driven talking avatar pipeline"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "LocalAI"
+  - "LongCat"
+  - "Video Generation"
+  - "Avatar"
+  - "Open Source AI"
+  - "Self-Hosted"
+faq:
+  - question: "Do I need an NVIDIA GPU to run LongCat-Video-Avatar 1.5 on LocalAI?"
+    answer: "Yes. The longcat-video backend ships only for Linux with NVIDIA CUDA 12 or CUDA 13 on x86_64, plus CUDA 13 on ARM64 (DGX Spark). There are no CPU, macOS, or ROCm builds, and the base checkpoint is loaded alongside the avatar weights, so plan for substantial VRAM and disk."
+  - question: "Can I drive the avatar without writing code?"
+    answer: "Yes. After installing the gallery model, open Studio, choose the Video page, select longcat-video-avatar-1.5, type a prompt, upload a portrait under Reference media, drop your speech under Avatar audio, and press Generate. The same request is also available as a single POST to the /video endpoint."
+  - question: "Why does my request fail with HTTP 400?"
+    answer: "Avatar 1.5 requires audio, so a request without the audio field returns 400 'audio is required'. A second 400, 'request needs too many segments', means the speech is longer than max_segments allows — trim the audio or raise max_segments in the model options."
+---
+
+LocalAI 4.7.0 quietly shipped something I have wanted for a while: a self-hosted, **audio-driven talking avatar** you can run entirely on your own hardware. The new `longcat-video` backend serves Meituan's open-source **LongCat-Video-Avatar 1.5** through the same OpenAI-compatible API and Studio UI you already use for text, images, and speech. No third-party API, no per-minute billing, no data leaving your GPU.
+
+If you publish video regularly, this is the missing piece for a local "presenter" pipeline. Here is what it is, how to run it, and the hardware reality you need to know before you start.
+
+## What LongCat-Video-Avatar 1.5 actually is
+
+It is an upgraded, production-oriented framework for **audio-driven human video generation**, built on the LongCat-Video foundation model. The headline upgrades in 1.5:
+
+- **Whisper-Large audio encoder** replaces the older Wav2Vec2, giving noticeably smoother and more natural lip movement.
+- **Production stability**: accurate lip-sync, full-body temporal coherence, and identity consistency across long clips.
+- **Stylized generalization**: it holds up on anime, animals, and messy real-world scenes (multi-person interaction, object handling).
+- **8-step inference** via DMD2 distillation — fast serving with high visual fidelity.
+
+The weights are released under the **MIT license**, which is what makes this interesting for self-hosting: you can use it commercially without a vendor's terms of service.
+
+It supports three native tasks: **Audio-Text-to-Video (AT2V)**, **Audio-Text-Image-to-Video (ATI2V)**, and **video continuation** for longer speech. Both single-stream and multi-stream audio are accepted.
+
+## Why run it through LocalAI
+
+You could clone the upstream repo and stand up the native pipeline, but LocalAI removes most of the plumbing:
+
+- One **OpenAI-compatible `/video` endpoint** that already handles staged audio, reference images, and video parameters.
+- A **Studio Video page** with upload controls for the portrait and the speech track — no scripting required.
+- The model is **self-describing** via a small YAML config, so attachment-aware clients and `GET /v1/models/capabilities` report the right input/output modalities automatically.
+
+For anyone already running LocalAI as their local AI stack, this means a talking avatar drops in next to your LLM, TTS, and image models with no new infrastructure.
+
+## The hardware reality (read this first)
+
+This is the part that decides whether the project is viable for you:
+
+- **NVIDIA only.** CUDA 12 or CUDA 13 on x86_64, or CUDA 13 on ARM64 (DGX Spark). There is **no CPU, macOS, or ROCm** build.
+- **Big footprint.** Avatar 1.5 loads components from the base `LongCat-Video` checkpoint too, so you need substantial GPU (or unified) memory and disk.
+- **One GPU per process.** Tensor or context parallel sizes above one are rejected.
+- **Unified memory (DGX Spark):** start with **BF16** (`use_int8: false`, the default). INT8 lowers steady-state memory but can spike higher at load time because the full model is materialized before quantization is applied.
+
+On a DGX Spark or similar ARM64 Blackwell system, prefer a CUDA 13 ARM64 image — the backend defaults to PyTorch SDPA, which sidesteps the FlashAttention dependency that is often missing on those boards.
+
+## Install from the gallery
+
+Install the avatar recipe (and optionally the base text-to-video model) from the CLI — the web UI has the same entries under **Models**:
+
+```bash
+local-ai models install longcat-video
+local-ai models install longcat-video-avatar-1.5
+```
+
+LocalAI pulls the required OCI backend automatically on first load and the hardware detector selects the right CUDA variant. If you prefer to declare it explicitly, a manual Avatar 1.5 config looks like this:
+
+```yaml
+name: longcat-video-avatar-1.5
+backend: longcat-video
+known_usecases:
+  - video
+known_input_modalities:
+  - text
+  - image
+  - audio
+known_output_modalities:
+  - video
+options:
+  - attention_backend:sdpa
+  - use_distill:true
+  - max_segments:8
+parameters:
+  model: meituan-longcat/LongCat-Video-Avatar-1.5
+```
+
+The explicit modality declarations are what let clients discover behavior from the config instead of guessing from the checkpoint name. Key load options: `attention_backend` (`sdpa`, `auto`, `flash2`, `flash3`, or `xformers`), `use_distill` (required `true` for 1.5), `use_int8` (Avatar-only INT8 DiT), `base_model` (defaults to the base checkpoint), `max_segments` (default 8), and `resolution` (`480p` or `720p`).
+
+## Generate via the API
+
+The `/video` endpoint takes a JSON body. For the avatar you supply text, an optional portrait, and **required audio**. Each staged input is capped at 128 MiB:
+
+```bash
+curl http://localhost:8080/video \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "longcat-video-avatar-1.5",
+    "prompt": "A friendly presenter speaking naturally to camera",
+    "start_image": "'"$(base64 --wrap=0 portrait.png)"'",
+    "audio": "'"$(base64 --wrap=0 speech.wav)"'",
+    "width": 832,
+    "height": 480
+  }'
+```
+
+The response is OpenAI-compatible — a `data` array with a `url` to the generated MP4 (or `b64_json` if you ask for it). Avatar output is generated at **25 FPS and muxed with your submitted audio**, so the clip already talks. If you leave `num_frames` and `params.num_segments` unset, LocalAI derives the continuation count from the audio length, up to `max_segments`.
+
+A few per-request knobs worth knowing:
+
+- `params.audio_guidance_scale` — raise it (3–5 range) for tighter lip-sync when distillation is off.
+- `params.ref_img_index` (default 10) — values 0–24 improve consistency; 30 helps reduce repeated gestures.
+- `params.mask_frame_range` (default 3) — larger values reduce repetition artifacts but can introduce blur at boundaries.
+- `params.offload_kv_cache` — offload continuation KV cache to ease memory.
+
+With distillation on, the model uses **eight inference steps** and fixed text/audio guidance of `1.0`. To tune `step`, `cfg_scale`, or `audio_guidance_scale` instead, disable `use_distill` in the config.
+
+## Generate in Studio
+
+No code needed:
+
+1. Open **Studio → Video**.
+2. Select `longcat-video-avatar-1.5`.
+3. Write a prompt and pick `832x480` or `1280x720`.
+4. Expand **Reference media** to upload a start image; for Avatar 1.5, upload or record speech under **Avatar audio**.
+5. Press **Generate**.
+
+## A practical use case
+
+I publish a video most days, and burned-in (hardcoded) captions are my preferred short-form format. A local talking avatar fits this workflow cleanly: record the voiceover once, feed it plus a portrait to the avatar model, and you get a speaking presenter clip you can then edit and caption — all without sending audio or likeness to a cloud service. It is the same idea as a teleprompter host, but the rendering stays on your own GPU.
+
+## Pitfalls and troubleshooting
+
+- **HTTP 400 "audio is required"** — Avatar 1.5 was selected without the `audio` field. Always include it.
+- **HTTP 400 "request needs too many segments"** — the audio is longer than `max_segments` allows. Trim it or raise `max_segments` in the model options.
+- **HTTP 412** — the installed LocalAI runtime cannot pick a compatible NVIDIA backend image; check your CUDA image.
+- **Out of memory while loading** — on unified-memory hardware use BF16, close other GPU workloads, or reduce concurrency. INT8 is not guaranteed to lower peak load memory.
+- **Slow first request** — the backend and checkpoints download and load on demand; later requests reuse the pipeline.

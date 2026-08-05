@@ -1,6 +1,10 @@
 ---
 // src/components/posthog.astro
-// PostHog product analytics — EU cloud region.
+// PostHog product analytics — routed through a self-hosted reverse proxy
+// (r.lucaberton.com) so all event traffic is first-party and never leaks to a
+// *.posthog.com origin. This keeps ad blockers / tracking protection from
+// silently dropping events and avoids a Content-Security-Policy exception for
+// the third-party domain.
 //
 // SECURITY: the project API key is injected at build time via the
 // PUBLIC_POSTHOG_KEY environment variable, which CI sets from a GitHub secret.
@@ -11,16 +15,14 @@
 // publicly visible to site visitors in the browser. That is inherent to any
 // public web-analytics snippet — PostHog needs it client-side. Keeping it in a
 // GitHub secret (rather than committed) only protects it from the repo/history,
-// not from end users. The host below is not secret and is safe to keep here.
+// not from end users. Because ingestion goes through the reverse proxy, the key
+// is still rotated (key rotation lives in the provider + this secret).
 //
-// CSP: if the site later sets a Content-Security-Policy, PostHog needs
-//   script-src 'self' https://*.posthog.com;
-//   connect-src 'self' https://*.posthog.com;
-//   worker-src  'self' blob: data:;
-// or a reverse proxy so traffic is first-party. Without it, events silently fail.
-// Currently the site has no CSP, so nothing extra is required.
+// ui_host points back to the PostHog app so links in the toolbar / surveys /
+// recordings resolve to the correct project UI.
 const POSTHOG_KEY = import.meta.env.PUBLIC_POSTHOG_KEY;
-const POSTHOG_HOST = import.meta.env.PUBLIC_POSTHOG_HOST || "https://eu.i.posthog.com";
+const POSTHOG_HOST = import.meta.env.PUBLIC_POSTHOG_HOST || "https://r.lucaberton.com";
+const POSTHOG_UI_HOST = import.meta.env.PUBLIC_POSTHOG_UI_HOST || "https://eu.posthog.com";
 
 // Only render the snippet when a key is actually provided. Local dev and
 // forked-PR builds (which have no access to the secret) simply skip analytics
@@ -29,7 +31,7 @@ const enabled = Boolean(POSTHOG_KEY);
 ---
 
 {enabled && (
-  <script is:inline define:vars={{ POSTHOG_KEY, POSTHOG_HOST }}>
+  <script is:inline define:vars={{ POSTHOG_KEY, POSTHOG_HOST, POSTHOG_UI_HOST }}>
     !function (t, e) {
       var o, n, p, r;
       e.__SV || (
@@ -41,6 +43,10 @@ const enabled = Boolean(POSTHOG_KEY);
             2 == o.length && (t = t[o[0]], e = o[1]),
               t[e] = function () { t.push([e].concat(Array.prototype.slice.call(arguments, 0))) }
           }
+          // NOTE: always load array.js from the proxy. The default loader
+          // rewrites ".i.posthog.com" → "-assets.i.posthog.com", which would
+          // send the script request to the third-party origin. With a proxy we
+          // keep it on our own domain so the asset stays first-party.
           (p = t.createElement("script")).type = "text/javascript",
             p.crossOrigin = "anonymous",
             p.async = !0,
@@ -63,11 +69,16 @@ const enabled = Boolean(POSTHOG_KEY);
       )
     }(document, window.posthog || []);
     posthog.init(POSTHOG_KEY, {
-      api_host: POSTHOG_HOST,
+      api_host: POSTHOG_HOST,        // your managed reverse proxy domain
+      ui_host: POSTHOG_UI_HOST,      // points PostHog UI links back to the app
       defaults: "2026-05-30",
       // Capture client-side routes & SPA navigations as pageviews.
       capture_pageview: true,
       autocapture: true,
+      // Only build person profiles for identified visitors (e.g. after
+      // posthog.identify). Anonymous traffic stays anonymous — privacy-friendly
+      // and keeps profile count / ingestion cost down.
+      person_profiles: "identified_only",
       // --- Session recording ---
       // Defaults to ON when the key is present; the flag is explicit here so the
       // behaviour is auditable in source (and can be flipped without a new key).

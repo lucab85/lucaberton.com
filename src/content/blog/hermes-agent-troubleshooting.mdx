@@ -5,7 +5,7 @@ seoTitle: "Hermes Agent Troubleshooting Guide"
 snippet: "Model 404, provider retries exhausted, silent Discord bot? Here is the diagnostic flow and exact commands to fix every Hermes Agent error."
 description: "Hermes Agent troubleshooting guide: fix model-not-found 404s, provider retry failures, credential pool issues, and gateway problems with exact commands."
 publishDate: "2026-07-31"
-lastModified: "2026-07-31"
+lastModified: "2026-08-06"
 image:
   src: "/blog/thumbnails/hermes-agent-troubleshooting.svg"
   alt: "Hermes Agent troubleshooting flow: diagnose, fix model, credentials, and gateway"
@@ -26,6 +26,8 @@ faq:
     answer: "A per-job model override set at creation time does not follow the profile default afterwards. If that model disappears from the catalog, the job keeps 404-ing. Fix it with 'hermes cron list' then 'hermes cron edit <job_id>' to update or clear the override."
   - question: "The Discord bot is silent — what is wrong?"
     answer: "Most often the Message Content Intent is disabled. Enable it under Bot → Privileged Gateway Intents in the Discord developer portal, then restart the gateway with 'hermes gateway restart'."
+  - question: "Why does Hermes say 'The model declined to respond' (safety refusal)?"
+    answer: "That is not a Hermes, network, or credential error — the upstream model ran and then refused to answer that specific prompt, often for policy reasons or a misfiring safety classifier. Hermes reports the refusal plus the model's own explanation directly in chat. Fix it by rephrasing the request, switching models with 'hermes model', or adding a fallback provider with 'hermes fallback add' so the next provider in the chain answers instead."
 ---
 
 Hermes Agent is provider-agnostic: it runs on OpenRouter, Anthropic, OpenAI,
@@ -136,6 +138,74 @@ For scheduled jobs, the model override is set at creation time and **does not**
 follow the profile default afterwards. A model that disappears from the catalog
 will keep 404-ing until you edit the job. Recreate or edit the job to use a model
 that still exists — and verify the slug on the provider's model page first.
+
+### The model declined to respond (safety refusal)
+
+This one is different from the two failures above. The request reaches the
+model, the model runs, and then **refuses to answer**. Hermes does not crash —
+it reports the refusal straight back into the chat with a clear label:
+
+> The model declined to respond to this request (safety refusal).
+> The model declined to respond to this request (safety refusal — not a Hermes/gateway failure).
+> Model's explanation: `<the model's own message>`
+
+This is **not** a credential, network, or gateway problem. No `hermes doctor`,
+no log crawl, no `hermes auth` command will fix it, because nothing on the
+Hermes side failed. The upstream model decided not to produce an answer for
+that specific prompt.
+
+What you are actually looking at:
+
+- **The "safety refusal" label** — the provider's moderation layer (or the
+  model's own system guidance) tripped on something in the prompt and stopped
+  generation.
+- **"not a Hermes/gateway failure"** — Hermes is explicitly telling you the
+  breakdown is upstream, so don't burn time on infrastructure diagnostics.
+- **"Model's explanation"** — the literal text the model returned instead of an
+  answer. It can be in any language the model uses; a Chinese refusal such as
+  "你好，我无法给到相关内容" ("Hello, I cannot provide the relevant content") is
+  common from some multilingual models. That text is the model's, not Hermes's.
+
+Why it happens:
+
+- The prompt touched a policy boundary the provider enforces — the model
+  decided the request fell into a refused category.
+- The model's safety classifier misfired on ambiguous phrasing, a quoted
+  snippet, or a mixed-language prompt.
+- A free/`*:free` tier model with tighter moderation than its paid equivalent.
+
+How to get a useful answer:
+
+1. **Rephrase.** Narrow the context, drop the exact wording that triggered the
+   refusal, or split the request into smaller steps. A literal "expand this into
+   an article" on certain inputs trips a refusal more often than the same task
+   framed concretely.
+2. **Switch models.** Another model in the catalog may not classify the prompt
+   the same way. Use `hermes model` to pick a different provider/model, or
+   smoke-test it first:
+   ```bash
+   hermes chat -m openrouter/<other-model>  # verify it answers before committing
+   ```
+3. **Add a fallback provider.** Hermes can automatically try the next provider
+   in a fallback chain when the primary refuses or errors. This is the exact fix
+   the bot itself recommends:
+   ```bash
+   hermes fallback add     # pick a provider + model, appended to the chain
+   hermes fallback list    # show the current chain
+   ```
+   With a fallback chain set, a safety refusal (or a rate-limit/overload error)
+   on the primary rolls over to the next entry instead of stopping dead.
+4. **For scheduled jobs**, set the fallback chain once. Unlike a per-job model
+   override, the global fallback chain applies to every run — so a job that hits
+   a refusal on one provider automatically retries on the next.
+
+```bash
+hermes fallback clear   # remove all fallback entries
+```
+
+Keep in mind: a fallback chain helps with provider-side refusals and transient
+errors, but it is not a guarantee. If every provider in the chain also refuses
+the same prompt, you still need to rephrase.
 
 ## Credentials and credential pools
 
@@ -281,3 +351,4 @@ When you have isolated the problem but still need help:
 | config change ignored | `/restart` or relaunch | new session / process |
 | aux vision/compression broken | `hermes config set auxiliary.*` | set provider or key |
 | Copilot 403 | `hermes model` → GitHub Copilot | use device-code OAuth, not `gh` token |
+| "The model declined to respond" (safety refusal) | `hermes fallback add` | rephrase, switch model, or set a fallback chain |

@@ -18,6 +18,37 @@
 #
 # To bypass in an emergency: `git commit --no-verify`.
 
+# Guard: reject any staged symlink whose target points outside this repo.
+# A machine-specific absolute symlink (e.g. node_modules -> /home/ubuntu/.../
+# node_modules) gets committed, restored as a dangling symlink on the CI runner,
+# and makes `pnpm install`/`pnpm build` fail with ENOTDIR (exit code 236). This
+# happened repeatedly (see 8acc40c1, c28aab5c, the run that prompted this hook).
+# Note: .gitignore uses the dir-only pattern `node_modules/`, so a *tracked file
+# or symlink* of that name is NOT ignored -- only an actual directory is.
+if ! command -v git >/dev/null 2>&1; then
+  echo "pre-commit: git not found; skipping symlink guard." >&2
+  exit 0
+fi
+
+# Iterate staged symlinks and reject any with an absolute target. We inspect the
+# target as recorded in the INDEX (git ls-files --stage) rather than the working
+# tree, so the guard still works on the CI runner where a dangling symlink's
+# working-tree read may fail. We exit inside the loop to avoid subshell flag loss.
+# shellcheck disable=SC2086
+for f in $(git diff --cached --diff-filter=ACMR --name-only); do
+  mode=$(git ls-files --stage -- "$f" | awk '{print $1}')
+  [ "$mode" = "120000" ] || continue
+  target=$(git cat-file -p ":$f")
+  case "$target" in
+    /*)
+      echo "pre-commit: refusing to commit machine-absolute symlink '$f' -> '$target'." >&2
+      echo "             This would break CI (pnpm install/build ENOTDIR). Use a real directory or a relative path." >&2
+      echo "             Bypass only if intentional: 'git commit --no-verify'." >&2
+      exit 1
+      ;;
+  esac
+done
+
 if ! command -v node >/dev/null 2>&1; then
   echo "pre-commit: node not found; skipping SEO validation." >&2
   exit 0

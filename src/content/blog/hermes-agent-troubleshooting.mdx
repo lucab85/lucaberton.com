@@ -5,7 +5,7 @@ seoTitle: "Hermes Agent Troubleshooting Guide"
 snippet: "Model 404, provider retries exhausted, silent Discord bot? Here is the diagnostic flow and exact commands to fix every Hermes Agent error."
 description: "Hermes Agent troubleshooting guide: fix model-not-found 404s, provider retry failures, credential pool issues, and gateway problems with exact commands."
 publishDate: "2026-07-31"
-lastModified: "2026-08-06"
+lastModified: "2026-08-10"
 image:
   src: "/blog/thumbnails/hermes-agent-troubleshooting.svg"
   alt: "Hermes Agent troubleshooting flow: diagnose, fix model, credentials, and gateway"
@@ -24,6 +24,8 @@ faq:
     answer: "The exact model string Hermes is configured to use is not in its model map or the provider catalog. This usually means the model was deprecated or renamed (common with free tiers), there is a typo, or the provider is set wrong. Run 'hermes model' to pick a currently valid model."
   - question: "My Hermes cron job fails with a model 404 — why?"
     answer: "A per-job model override set at creation time does not follow the profile default afterwards. If that model disappears from the catalog, the job keeps 404-ing. Fix it with 'hermes cron list' then 'hermes cron edit <job_id>' to update or clear the override."
+  - question: "My cron job failed with 'HTTP 502' or 'provider timeout' — is it broken?"
+    answer: "Usually not. A 'HTTP 502: Bad gateway' (Cloudflare-fronted provider) or 'provider timeout. Fallback chain was exhausted' is a transient upstream/gateway error that landed on that one tick — not a config problem. Re-run it with 'hermes cron run <job_id>'; the same job normally succeeds on the next run with no changes. If it fails on every run, the issue is no longer transient — check 'hermes auth list' / 'hermes model'. This differs from a model-404 cron failure, which is permanent until you edit the job's pinned model."
   - question: "The Discord bot is silent — what is wrong?"
     answer: "Most often the Message Content Intent is disabled. Enable it under Bot → Privileged Gateway Intents in the Discord developer portal, then restart the gateway with 'hermes gateway restart'."
   - question: "Why does Hermes say 'The model declined to respond' (safety refusal)?"
@@ -263,6 +265,70 @@ systemctl --user reset-failed hermes-gateway
 Control commands: `hermes gateway status`, `hermes gateway restart`,
 `hermes gateway setup`.
 
+## Scheduled cron jobs failing with transient upstream errors
+
+When a cron job fails with an error like `HTTP 502: Bad gateway` (from a
+Cloudflare-fronted provider) or `provider timeout. Fallback chain was
+exhausted or unavailable`, the job itself is usually healthy — the failure is
+a transient upstream or gateway error that happened to land during the
+scheduled run.
+
+This is different from the model-404 cron failure in the FAQ above:
+
+- **Model 404 cron failure** — a pinned model no longer exists in the catalog.
+  Permanent until you edit the job.
+- **HTTP 502 / provider timeout cron failure** — the upstream API (or the
+  Cloudflare edge in front of it) returned a transient 5xx or timed out during
+  that tick. The same job often succeeds on the next run with no changes.
+
+Common causes:
+
+- **Cloudflare 502 / 5xx at the edge** — the provider's API sits behind
+  Cloudflare and a single tick hit a degraded origin. Transient; not a Hermes
+  config problem.
+- **Provider timeout with fallback chain exhausted** — the primary provider
+  timed out and every entry in the fallback chain was also unavailable (rate
+  limited, exhausted, or offline) for the duration of that run.
+- **Schedule collision / cold start** — a job that fans out across many sites
+  (a multi-site batch, or a rotating one-site-per-night coverage pass) puts
+  more concurrent load on the provider. If the provider is already warmup
+  throttling, one tick fails while the next succeeds.
+
+How to read the failure:
+
+```bash
+hermes cron list                                  # confirm the job exists and is enabled
+# inspect the saved output for the failing tick:
+#   "failed: HTTP 502: ..."  → transient edge / gateway error
+#   "failed: provider timeout. Fallback chain was exhausted"
+#                            → all providers unavailable that tick
+```
+
+Fix it:
+
+1. **Re-run the job.** Transient failures are usually one-tick:
+
+   ```bash
+   hermes cron run <job_id>        # trigger a manual tick
+   ```
+
+2. **If it keeps failing on every run**, the problem is no longer transient —
+   treat it as a provider/credential issue (see Model and provider errors
+   above): `hermes auth list`, `hermes auth reset PROVIDER`, `hermes model`.
+
+3. **For batch pipelines, design each unit to be independent.** A real-world
+   setup runs a 03:00 batch across roughly ten sites (one site skipped because
+   it is out of scope), then a 04:00 rotating coverage pass that targets one
+   site per night. Because each site is a separate unit, a single transient
+   failure on one tick does not poison the whole pipeline — the next scheduled
+   run picks up where it left off, and the section that failed simply completes
+   cleanly on re-run.
+
+When the pipeline is stable, the proof is in the artifacts: a successful
+automatic run produces its expected outputs (for an SEO/content batch, that is
+one merged pull request per site). Verify the latest automatic run produced
+what you expect before declaring it done.
+
 ## Tools and skills not available
 
 A tool or skill you expect is missing from the running session.
@@ -345,6 +411,7 @@ When you have isolated the problem but still need help:
 | "model provider failed after retries" | `hermes auth list` | refresh/rotate key, or `hermes model` to switch |
 | "HTTP 404: Model 'X' not found" | `hermes model` | pick a model that exists in the catalog |
 | cron job fails on model 404 | `hermes cron edit <id>` | update the per-job model override |
+| cron job fails HTTP 502 / provider timeout | `hermes cron run <id>` | transient upstream error — re-run; if it persists, `hermes auth list` |
 | gateway silent on Discord | check Bot intents | enable Message Content Intent |
 | gateway dies after SSH logout | `loginctl enable-linger` | keep user service alive |
 | tool/skill missing | `hermes tools` / `/skill` | enable, then `/reset` |

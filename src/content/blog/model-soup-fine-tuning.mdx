@@ -1,0 +1,208 @@
+---
+title: "Model Soups: Better Fine-Tuning by Averaging Weights"
+seoTitle: "Model Soups: Weight-Averaging Fine-Tuning"
+snippet: "Model Soups average N fine-tuned checkpoints into one. No extra inference cost or latency, often beats the single best run. Recipe + PyTorch code inside."
+description: "Model Soups average N fine-tuned checkpoints into one. No extra inference cost or latency, often beats the single best run. Recipe + PyTorch code inside."
+publishDate: "2026-08-13"
+lastModified: "2026-08-13"
+image:
+  src: "/blog/thumbnails/fine-tuning-small-language-models-devops.jpg"
+  alt: "Model Soups: averaging fine-tuned model weights for better accuracy"
+tags:
+  - "fine-tuning"
+  - "model-soup"
+  - "ai"
+  - "llm"
+  - "weight-averaging"
+  - "training"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+You fine-tune a model. You pick a learning rate, a seed, a data ordering, and you hope the run you keep is a good one. But every fine-tune lands in a slightly different spot in the loss landscape, and the best single run is often just the luckiest. **Model Soups** flip that luck into a deliberate strategy: train several fine-tunes from the same checkpoint, then average their weights into a single model.
+
+The result is one checkpoint, one forward pass, no extra latency — and it usually outperforms the single best run you would have picked by hand.
+
+## What Is a Model Soup?
+
+A Model Soup is the element-wise average of the weights of several models that were fine-tuned independently from the **same** pretrained initialization.
+
+Given K fine-tuned checkpoints with weight tensors θ₁, θ₂, … θ_K, the soup weights are:
+
+```text
+θ_soup = (θ₁ + θ₂ + … + θ_K) / K
+```
+
+That is the whole trick. You do not average predictions at inference time; you average the parameters once, offline, and deploy the averaged model like any other.
+
+The technique was introduced by Wortsman et al. in *Model Soups: Averaging Weights of Multiple Fine-Tuned Models Improves Accuracy without Increasing Inference Time* (ICLR 2022). The headline result holds up in practice: averaging fine-tunes of a ViT or a ResNet, or of an LLM adapter, frequently beats both the average single-run accuracy and the best single run.
+
+## Why Averaging Weights Works
+
+Fine-tuning with different seeds, learning rates, or data shuffles pushes the model into different local minima. Some of those minima are **sharp** — good on the training distribution, fragile under shift. Others are **flat** — wider basins that generalize better and resist distribution shift.
+
+Averaging weights walks you toward the center of a flatter, wider basin:
+
+- **Better generalization.** The averaged point sits in a region where small perturbations do not blow up the loss.
+- **Robustness to distribution shift.** Flat minima tend to survive domain drift (new domains, perturbed inputs) far better than sharp ones.
+- **Free variance reduction.** Instead of betting on one stochastic run, you get the mean of several, which cancels out run-specific noise.
+
+This is closely related to **Stochastic Weight Averaging** (SWA, Izmailov et al. 2018), which averages weights collected along a single training run with a cycled learning rate. Model Soups instead average *separate* fine-tunes. Same intuition — flat minima — different sampling strategy.
+
+## Model Soup vs Ensemble
+
+This is the distinction that matters most in production. Both combine multiple models; only one of them costs you at inference time.
+
+| | Ensemble | Model Soup |
+|---|---|---|
+| What is combined | Predictions (logits) | Weights (parameters) |
+| Inference compute | K× a single model | 1× a single model |
+| Latency | K forward passes | 1 forward pass |
+| Memory at serve time | K checkpoints | 1 checkpoint |
+| Tuning effort | None (just run all) | Requires shared init + averaging step |
+| Typical accuracy | Often highest | Usually close to or above best single run |
+
+An ensemble is a strict upper bound on accuracy but you pay K times the compute and memory forever. A soup collapses K runs into one model, so you keep single-model latency and footprint while still capturing most of the ensemble's robustness gain. For serving cost-sensitive deployments, soup wins on the metric that actually shows up on the bill.
+
+## The Two Recipes: Uniform and Greedy Soup
+
+**Uniform Soup** averages every fine-tune you produced. Simple, deterministic, no validation set required.
+
+**Greedy Soup** is smarter. Start from an empty soup, then add fine-tunes one at a time, keeping a model only if it *improves validation accuracy* over the current soup. A single bad run cannot drag the average down, because it is simply never added.
+
+Greedy soup usually edges out uniform soup and is the version I reach for when I have a validation split handy.
+
+## Production Recipe
+
+### Step 1: Fine-tune N variants from the same checkpoint
+
+Train the same architecture starting from the identical pretrained weights, but vary the cheap knobs: random seed, learning rate, data shuffle order, maybe a light mix of hyperparameters. Keep every checkpoint.
+
+```bash
+# Example: three LoRA fine-tunes of the same base model
+for SEED in 1 2 3; do
+  python train.py \
+    --base_model meta-llama/Llama-3.1-8B \
+    --seed $SEED \
+    --lr 2e-4 \
+    --output run_$SEED
+done
+```
+
+The key constraint: **same architecture, same initialization.** You cannot average a ViT-B checkpoint with a ViT-L checkpoint, or a full fine-tune with a LoRA adapter unless you first merge the adapter into the base.
+
+### Step 2: Average the weights
+
+Load each state dict and average matching tensors. This works for full fine-tunes saved as safetensors or PyTorch binaries.
+
+```python
+import torch
+from safetensors.torch import load_file
+
+def load_state(path):
+    if path.endswith(".safetensors"):
+        return load_file(path)
+    return torch.load(path, map_location="cpu")
+
+def average_states(states):
+    keys = states[0].keys()
+    return {k: sum(s[k] for s in states) / len(states) for k in keys}
+
+variants = [
+    "run_1/pytorch_model.safetensors",
+    "run_2/pytorch_model.safetensors",
+    "run_3/pytorch_model.safetensors",
+]
+soup = average_states([load_state(p) for p in variants])
+torch.save(soup, "model_soup_uniform.pt")
+```
+
+### Step 3: Greedy soup on a validation set
+
+Add variants only when they help. `evaluate` returns a scalar accuracy for a given state dict on your held-out set.
+
+```python
+def greedy_soup(variants, evaluate):
+    best_score = float("-inf")
+    included, remaining = [], list(variants)
+    improved = True
+    while improved and remaining:
+        improved = False
+        for i, v in enumerate(remaining):
+            candidate = included + [v]
+            state = average_states([load_state(p) for p in candidate])
+            score = evaluate(state)
+            if score > best_score:
+                best_score, included = score, candidate
+                remaining.pop(i)
+                improved = True
+                break
+    return average_states([load_state(p) for p in included]), included, best_score
+```
+
+### Step 4: Averaging LoRA adapters (cheap version)
+
+If you fine-tune with LoRA/PEFT, you do not need the full base model in memory. LoRA merges as `B @ A` (with scaling), and that merge is linear in both `A` and `B`. Averaging the low-rank matrices separately preserves the merged behaviour, so you can soup adapters the same way:
+
+```python
+def average_lora(adapters):
+    out = {}
+    for k in adapters[0]:
+        if "lora_" in k:                       # lora_A.default.weight / lora_B.default.weight
+            out[k] = sum(a[k] for a in adapters) / len(adapters)
+        else:
+            out[k] = adapters[0][k]            # keep base weights untouched
+    return out
+```
+
+This is the practical sweet spot for LLMs: train several small LoRA adapters, average the `A` and `B` matrices, and you get one adapter that is often more robust than any single one — at the training cost of a few extra runs and almost no extra serving cost.
+
+## When Soup Helps — and When It Doesn't
+
+Soup is not magic. It works when the individual fine-tunes are *close* to each other in weight space and in quality.
+
+**It helps when:**
+- You start every run from the same pretrained checkpoint.
+- The fine-tunes land in nearby, similarly-good basins (modest learning rates, similar data).
+- You want ensemble-like robustness without ensemble serving cost.
+- You are using LoRA and can afford a handful of cheap adapter runs.
+
+**It hurts or does nothing when:**
+- The base runs are bad. Averaging bad models gives a differently-weighted bad model.
+- Fine-tuning uses a very large learning rate and the runs drift far apart in weight space — averaging then interpolates through high-loss terrain.
+- Architectures or tokenizers differ between runs.
+- You only have one run. Soup needs at least two.
+
+A good rule of thumb: if your best single fine-tune is already solid and your runs are consistent, soup is a near-free improvement. If your runs are all over the place, fix the training recipe before you soup.
+
+## What to Expect
+
+On vision and language fine-tuning, papers and production reports consistently show:
+- Uniform soup beats the *average* single run by a clear margin.
+- Greedy soup typically matches or beats the *best* single run.
+- Robustness under distribution shift improves more than in-distribution accuracy — the flat-minima effect shows up strongest exactly where models usually fail.
+
+You are not buying accuracy for free in every case, but for the cost of a few extra fine-tunes and a short averaging script, the risk-adjusted upside is excellent.
+
+## FAQ
+
+**Does Model Soup increase inference time?**
+No. The averaging happens once, offline. The deployed soup is a single checkpoint with the same forward pass as any individual fine-tune.
+
+**Can I soup different model architectures?**
+No. You can only average weights of models that share the same architecture and parameter layout. Same base model, same head, same tokenizer.
+
+**Is Model Soup the same as an ensemble?**
+No. An ensemble averages predictions at inference and costs K× compute. A soup averages weights once and costs 1× compute.
+
+**Does it work with LoRA / PEFT?**
+Yes. Average the low-rank `A` and `B` matrices across runs; the merged behaviour is preserved. This is the cheapest way to soup LLMs.
+
+**How many fine-tunes should I average?**
+Three to eight is the usual range. Greedy soup will drop the ones that do not help, so err on the side of including more candidates.
+
+**What if my runs are very different in quality?**
+Use greedy soup, not uniform. It only keeps a run when it improves validation accuracy, so a weak run will be excluded automatically.
+
+Model Soups are one of those rare techniques that are both theoretically motivated and trivially cheap to try. Next time you fine-tune, train a few variants instead of one, average the weights, and keep the soup. Your single best run is probably leaving accuracy on the table.

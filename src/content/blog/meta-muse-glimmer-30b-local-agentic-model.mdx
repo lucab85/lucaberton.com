@@ -1,0 +1,85 @@
+---
+draft: false
+title: "Meta Muse Glimmer: A 30B Agentic Model for Your GPU"
+seoTitle: "Meta Muse Glimmer: Local 30B Agentic Model"
+snippet: "Meta open-sourced Muse Glimmer, a 30B dense agentic model that runs under 20GB on a consumer GPU via 4-bit quantization and DFlash speculative decoding."
+description: "Meta open-sourced Muse Glimmer, a 30B dense agentic model that runs under 20GB on a consumer GPU via 4-bit quantization and DFlash speculative decoding."
+image:
+  src: "/blog/thumbnails/edge-ai-llm-private-assistants-offline.jpg"
+  alt: "Running LLMs at the edge: private AI offline — local agentic model thumbnail"
+publishDate: "2026-08-12"
+lastModified: "2026-08-12"
+category: "AI"
+author: "Luca Berton"
+tags:
+  - "open source"
+  - "local-llm"
+  - "agentic AI"
+  - "llm"
+  - "quantization"
+  - "vllm"
+  - "reasoning"
+faq:
+  - question: "What is Muse Glimmer and who released it?"
+    answer: "Muse Glimmer is a 30-billion-parameter dense language model from Meta Superintelligence Labs, open-sourced under an Apache 2.0 license. It is trained specifically for always-on local agent workflows and runs on a single consumer GPU or Apple Silicon Mac."
+  - question: "How does a 30B model fit on a consumer GPU with only 24GB of VRAM?"
+    answer: "At full precision a 30B model needs over 55GB of memory. Muse Glimmer ships in a roughly 4-bit quantized form that compresses the weights to under 20GB, leaving headroom for the KV cache, the perception encoder, and the speculative-decoding drafter inside a 24GB or 32GB envelope."
+  - question: "Which inference engines support Muse Glimmer?"
+    answer: "It runs through Ollama, LM Studio, llama.cpp, MLX, ExecuTorch, vLLM, and SGLang, with optimized integrations landing for the local edge frameworks in the days after release."
+---
+
+Most capable agentic models still live in the cloud. They need infrastructure, they need network access, and they bill you per token. That is a real problem if your agent is supposed to read your private files, draft your messages, and run quietly on your own machine — all day, with no round trip to a data center.
+
+Meta just changed that equation. Muse Glimmer is a 30-billion-parameter dense model from Meta Superintelligence Labs, released under an Apache 2.0 license with a 120K+ context window, and it is built for one job: always-on local agent workflows. Not chat. Not a demo. Actual long-horizon task completion that fits on a single consumer GPU.
+
+## Why local agentic matters
+
+An agent that manages your schedule and your filesystem has deep access to personal context. For that to be safe and practical, the inference has to stay on the device. No cloud call, no per-token cost, no copy of your documents leaving the machine.
+
+The open-source community has been showing for a while that smaller models, trained well, can approach frontier behavior on targeted tasks. Muse Glimmer is Meta's bet that agentic work specifically — not general chat — is the right thing to compress and run locally. The model is small enough to run on a Mac or a PC with one GPU, and capable enough to do useful agentic work once it is there.
+
+## How they got 30B onto consumer hardware
+
+At full precision, a 30B parameter model needs over **55GB** of memory. No consumer GPU offers that. Meta applied two optimizations that I think are the actual story here, because they are the difference between "neat research release" and "something you can actually deploy on your desk."
+
+### 1. Quantization to roughly 4-bit
+
+Muse Glimmer compresses its weights to approximately 4-bit precision, shrinking the language model to **under 20GB**. That leaves enough room for the KV cache, the perception encoder for images, and the speculative-decoding drafter to all run at once inside a 24GB or 32GB memory envelope. Meta reports minimal to no accuracy degradation on agentic tasks at that compression level. That is the claim worth testing yourself, but it is the right target: keep the model small, keep the working memory and the helpers alongside it.
+
+### 2. Speculative decoding with DFlash
+
+Normal generation is one token at a time, which feels slow exactly when an agent is mid-chain on a long reasoning pass or a multi-step tool call. Muse Glimmer ships with a lightweight drafter model based on **DFlash** — a small companion network that proposes entire blocks of tokens at once. The main model verifies those proposals in parallel, accepting the correct tokens and correcting the wrong ones. The output is identical in quality; it is just produced much faster.
+
+Measured on the 17GB quantized model with the quantized DFlash drafter:
+
+- **3.1× faster** on an RTX 5090
+- **1.8× faster** on an M5 Max
+- **1.5× faster** on an M4 Max
+
+That is the gap between an agent that feels responsive and one that makes you wait.
+
+## What it actually does
+
+This is not a chat model with tool-calling bolted on. The training and evaluation target the capabilities an agent needs working together:
+
+- **End-to-end agentic task completion** on full-task benchmarks including DeepSearch QA, MCP-Atlas, tau-Bench, and SWE-Bench — writing and debugging code, resolving multi-turn requests from start to finish.
+- **Reliable tool use** with precise schemas across extended workflows, not just a single function call.
+- **Multi-step reasoning** that stays coherent across long horizons instead of losing the plan halfway through.
+- **Failure recovery** — when a tool call fails or returns something unexpected, the model is trained to diagnose and retry rather than halt.
+- **Multimodal input** through a dedicated perception encoder that accepts interleaved text and images, so the agent can read screenshots, charts, and documents in the conversation.
+- **Controllable reasoning effort** to trade quality against speed when you need to.
+- **100+ languages** of training data.
+
+## How to run it
+
+The weights are on Hugging Face now. You can run it through Ollama, LM Studio, llama.cpp, MLX, ExecuTorch, vLLM, and SGLang. Meta is shipping optimized integrations for the local edge frameworks in the days after release, and working with hardware partners including AMD, Arm, Dell, Intel, and NVIDIA to tune performance across devices.
+
+This is also the part I would watch if you are building local agents: the model is designed to work with the scaffolds developers already use, including OpenClaw-style orchestration. A model that only works inside one vendor's harness is a dead end. One that drops into the tools you already run is the thing you can actually build on.
+
+## What I would reach for it for
+
+If you are running an agent against your own files, your own code, or your own credentials, a cloud model is a liability you keep paying for. Muse Glimmer is the first 30B-class agentic model I have seen that is plausibly a drop-in for that workload on hardware you already own — a 24GB or 32GB GPU, or a current Mac. The 4-bit quantization is the enabling trick, and the DFlash drafter is what makes it feel fast enough to use.
+
+The benchmark numbers are Meta's, and the right move is to test the agentic claims on your own tasks rather than trust the chart. But the shape of this release is the signal: agentic capability is moving to the device, and the optimization work that matters is quantization and speculative decoding, not just parameter count.
+
+If you want to try it, pull the weights from Hugging Face and start with Ollama or llama.cpp on whatever GPU you have. For anything private — local coding assistants, personal file agents, offline document workflows — this is now the model I would test first.

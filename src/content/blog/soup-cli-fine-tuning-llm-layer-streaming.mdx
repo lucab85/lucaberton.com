@@ -1,0 +1,134 @@
+---
+title: "Soup: Fine-Tune an 8B Model on a 4 GB GPU"
+seoTitle: "Soup CLI: LLM Fine-Tuning One YAML"
+snippet: "Soup is an open-source CLI that fine-tunes LLMs from one YAML and streams the base model layer-by-layer so an 8B model trains on a 4 GB GPU."
+description: "Soup is an open-source CLI that fine-tunes LLMs from one YAML and streams the base model layer-by-layer so an 8B model trains on a 4 GB GPU."
+publishDate: "2026-08-13"
+lastModified: "2026-08-13"
+image:
+  src: "/blog/thumbnails/gpu-cluster-architecture-training-inference.jpg"
+  alt: "Soup CLI: fine-tune LLMs from one YAML with layer streaming on low-VRAM GPUs"
+tags:
+  - "soup"
+  - "fine-tuning"
+  - "qlora"
+  - "low-vram"
+  - "llm"
+  - "lora"
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+Fine-tuning a modern LLM has a brutal entry barrier: the model itself does not fit in the memory of the hardware most people own. An 8B model in fp16 is ~16 GB, and you need headroom on top of that for activations, optimizer state, and gradients. The result is that "just fine-tune it" quietly means "buy a bigger GPU first."
+
+**Soup** is an open-source CLI that attacks that barrier directly. Its headline trick — **layer streaming** — trains an 8B model on a **4 GB laptop GPU** by never loading the frozen base weights into VRAM all at once. This post walks through what Soup is, how layer streaming works, and where it fits in a real fine-tuning workflow.
+
+## What Is Soup?
+
+Soup ([trysoup.dev](https://trysoup.dev/), [github.com/MakazhanAlpamys/Soup](https://github.com/MakazhanAlpamys/Soup)) is a free, Apache-2.0 fine-tuning CLI for Python 3.10–3.12. As of v0.73.0 it reports ~1.1k GitHub stars and 84k+ PyPI downloads. The design goal is to collapse the whole post-training stack — data prep, method selection, config generation, training, evaluation, shipping, and operation — into one command surface driven by a single YAML file.
+
+```bash
+pip install "soup-cli[train]"
+soup init        # writes soup.yaml
+soup train       # picks the method, writes the config, trains
+```
+
+That is the entire "hello world." Soup auto-detects the optimizer, scheduler, target modules, and batch size from rules rather than a search, derives evals from your own data, gates every save on a SHIP or DON'T-SHIP verdict, and self-corrects reward hacking mid-run instead of just halting.
+
+It covers **23 training methods** (SFT, DPO, ORPO, SimPO, KTO, GRPO, and more), **142 recipes**, and **17 quantization formats**. It integrates with the stack you already use — Hugging Face, Ollama, vLLM, DeepSpeed, Unsloth, ONNX, TensorRT, and W&B — and can migrate a config from LLaMA-Factory, Axolotl, or Unsloth in one command.
+
+## The Core Idea: Layer Streaming
+
+This is the part worth understanding, because it is a genuine memory-engineering trick rather than a marketing claim.
+
+Normally, fine-tuning LoRA means the **frozen base model** lives in VRAM for the whole run so the forward and backward passes can read it. Peak VRAM is bounded by the full model size — which is exactly why an 8B model needs far more than 4 GB.
+
+Soup's layer streaming changes the contract:
+
+- The frozen base is kept in **CPU RAM or on NVMe**, never fully materialized in VRAM.
+- On a dedicated CUDA stream, Soup copies the base into VRAM **one decoder layer at a time** as the forward/backward pass needs it.
+- Peak VRAM is therefore bounded by **one layer plus the trainable adapter**, not the whole model.
+- Optionally quantizing that streamed base to **NF4** shrinks the stored weights roughly fourfold.
+
+```yaml
+base: Qwen/Qwen2.5-3B
+task: dpo
+data:
+  train: ./prefs.jsonl
+  format: dpo
+  max_length: 512
+training:
+  stream_layers: true      # base streams from RAM; only the adapter trains
+  quantization: 4bit       # NF4: ~4x smaller store
+  stream_source: auto      # RAM when it fits, NVMe when it does not
+  batch_size: 1
+  lora: { r: 16, target_modules: [q_proj, v_proj] }
+```
+
+The published numbers: on a 4 GB RTX 3050 Laptop, **Llama-3.1-8B trained at 119.6 tok/s in 3.32 GB** with the GPU 100% busy, and Qwen2.5-3B at 264.2 tok/s in 1.76 GB. Preference losses stream too — for DPO, the reference model is the *same* streamed base with adapters disabled, so it costs no extra resident weights.
+
+Two honesty caveats from the project itself, and they matter: layer streaming is **BETA**, currently limited to transformers/text/plain-LoRA, and it is **slower in wall-clock time** than resident training (it re-reads each layer). You trade time for fit. The project also documents silent correctness bugs it found and fixed (a streamed adapter loading as a no-op, and wrong gradients on large NF4 runs) — which is a level of transparency you do not see from most tooling.
+
+## Beyond Streaming: The Full Loop
+
+Soup is not just a low-VRAM hack. The CLI is organized around five phases:
+
+- **Decide** — `soup advise` ranks PROMPT_ENG / RAG / SFT / DPO / GRPO for your data; `data doctor` runs chat-template checks (including the EOS bug that makes a model never stop generating); semantic dedup catches reworded duplicates MinHash misses.
+- **Train** — layer streaming, Spectrum (rank which layers are worth training), LISA (layer-wise sampled training), multi-GPU, and `soup shrink` for depth-pruning and distill-healing a model smaller.
+- **Ship** — `soup eval design` derives a SHA-pinned eval suite; `soup ship` refuses a model that wins the task but breaks general knowledge, with exit 0/2 and evidence you can commit next to the weights.
+- **Operate** — `soup diagnose` scores seven failure modes; adapter arithmetic lets you diff, merge (linear / TIES / DARE / SVD / CMA-ES), and bisect LoRA adapters like git for weights; `soup mcp serve` exposes 14 read-only + 2 plan-only tools to coding agents over stdio.
+- **Secure** — `soup init --template hipaa|soc2|eu-ai-act|sr-11-7` starts from a regulation-shaped config; `soup ci init` blocks the merge on DON'T-SHIP; `soup bom` and `soup attest` emit signed ML-BOMs and SLSA-3 provenance.
+
+## Why Layer Streaming Matters Beyond the Laptop
+
+The 4 GB laptop headline is a stunt, but the underlying capability is not. The same bounded-VRAM property helps whenever the model is bigger than the card:
+
+- **Edge and on-prem inference fleets** with no datacenter GPU.
+- **Cost control**: train adapters on cheap consumer cards instead of renting A100s.
+- **Multi-tenant GPU sharing**: smaller resident footprints leave more room for concurrent tenants.
+
+And because only the adapter trains, the artifact stays small and portable — you ship the LoRA, not an 8B checkpoint.
+
+## A Practical Quick Start
+
+```bash
+# 1. Install (training extras)
+pip install "soup-cli[train]"
+
+# 2. Scaffold config
+soup init
+# edits soup.yaml: set base, point at your data, pick task + lora
+
+# 3. Low-VRAM run on a consumer GPU
+soup train --config soup.yaml
+# pre-flight refuses a run that will not fit; streaming bounds the weights
+
+# 4. Gate the result before you trust it
+soup ship --config soup.yaml
+# exit 0 = SHIP, exit 2 = DON'T SHIP, evidence written next to the weights
+```
+
+The pre-flight is the part I would lean on hardest in production: it refuses a run that will not fit, and `soup ship` refuses a model that regresses general knowledge. Those two gates catch the two most common ways a fine-tune quietly becomes worse than the base.
+
+## FAQ
+
+**What is Soup?**
+An open-source (Apache-2.0) Python CLI for fine-tuning LLMs from a single YAML file, with built-in data tooling, method selection, evaluation gating, and adapter arithmetic.
+
+**How does it train an 8B model on 4 GB VRAM?**
+Layer streaming keeps the frozen base in RAM/NVMe and copies it into VRAM one decoder layer at a time on a dedicated CUDA stream, so peak VRAM is bounded by one layer plus the adapter. NF4 quantization shrinks the stored base about fourfold.
+
+**Is layer streaming production-ready?**
+It is labeled BETA: currently limited to transformers/text/plain-LoRA, slower in wall-clock time than resident training, and with stated limits. It is a fit-for-purpose tool, not a default for every workload.
+
+**Which methods does Soup support?**
+23 methods including SFT, DPO, ORPO, SimPO, KTO, and GRPO, across 142 recipes and 17 quantization formats, with MLX/Apple adapter support.
+
+**Can I migrate from LLaMA-Factory or Axolotl?**
+Yes — `soup migrate --from llamafactory|axolotl|unsloth <config>` converts an existing config to `soup.yaml` automatically.
+
+**Does Soup only work offline / locally?**
+It is offline-first and free; it integrates with Hugging Face, vLLM, Ollama, DeepSpeed, W&B, and others for serving and tracking.
+
+If you have been putting off fine-tuning because your GPU is "too small," Soup is worth a look. The 4 GB laptop result is the eye-catching part, but the real value is a single, honest CLI that walks the whole loop from data to a SHIP/DON'T-SHIP verdict — on hardware you already own.

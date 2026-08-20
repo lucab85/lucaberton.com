@@ -1,0 +1,124 @@
+---
+draft: false
+title: "Astro Responsive Images: 50% Smaller with AVIF, WebP"
+snippet: "Use Astro's Image component with formats [avif, webp] and a widths array for an automatic responsive srcset — about half the JPEG size."
+description: "Use Astro's Image component with formats [avif, webp] and a widths array for an automatic responsive srcset — about half the JPEG size."
+publishDate: "2026-08-20"
+lastModified: "2026-08-20"
+image:
+  src: "/blog/thumbnails/astro-responsive-images-optimization.jpg"
+  alt: "Astro responsive images — AVIF and WebP srcset pipeline"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - "astro"
+  - "image-optimization"
+  - "webp"
+  - "avif"
+  - "cdn"
+  - "static-site"
+  - "performance"
+---
+
+> **TL;DR** — Astro's `Image` component with `formats: [avif, webp]` plus a `widths` array generates a responsive `srcset` automatically and cuts payload roughly in half versus a plain JPEG. Let a CDN (Cloudinary, Bunny, imgix) transform on the fly when originals shouldn't live in git. Reach for Git LFS only if you genuinely must version the raws.
+
+## Why this matters
+
+Images are usually the heaviest thing you ship. A single 2400px JPEG hero can be 800 KB, and most visitors never see it at full resolution — they're on a phone. Serving one bloated file to everyone is the fastest way to blow your LCP budget.
+
+Two decisions remove most of that weight: pick a modern format (AVIF/WebP) and serve the right size per viewport. Astro does both for you if you let it.
+
+## Approach A — Astro's Image component with AVIF + WebP
+
+Import the `Image` component from `astro:assets` and tell it which formats to emit. Astro then generates an optimized variant for each format at each width and assembles the `srcset`:
+
+```astro
+---
+import { Image } from 'astro:assets';
+import hero from '../assets/hero.jpg';
+---
+
+<Image
+  src={hero}
+  alt="Conference stage at KubeCon"
+  formats={['avif', 'webp']}
+  widths={[240, 480, 768, 1024, 1920]}
+  sizes="(min-width: 1024px) 1024px, 100vw"
+/>
+```
+
+What you get in the rendered HTML:
+
+```html
+<img
+  src="/_astro/hero.avif?width=1920"
+  srcset="
+    /_astro/hero.avif?width=240   240w,
+    /_astro/hero.avif?width=480   480w,
+    /_astro/hero.avif?width=768   768w,
+    /_astro/hero.avif?width=1024 1024w,
+    /_astro/hero.avif?width=1920 1920w
+  "
+  type="image/avif"
+  sizes="(min-width: 1024px) 1024px, 100vw"
+  alt="Conference stage at KubeCon"
+  loading="lazy"
+  decoding="async"
+  width="1920" height="1080"
+/>
+```
+
+The browser picks the smallest format it supports (AVIF first, then WebP) at the width its viewport actually needs. In practice the payload lands around **50% smaller than the equivalent JPEG** at the same visual quality — AVIF is that good.
+
+A few production notes:
+
+- `widths` controls the breakpoints. Don't overdo it; three to five is plenty.
+- `sizes` is what tells the browser which `srcset` entry to choose — get it wrong and you serve the desktop size on mobile.
+- Astro runs these transforms at **build time**, so the work is free at runtime. That's also why very large image sets can push the build's memory on CI — keep your source originals modest (the next approach sidesteps this entirely).
+
+## Approach B — External CDN for on-the-fly transforms
+
+When the raw assets are large, frequently changing, or simply shouldn't live in your repository, push them to a dedicated image CDN and reference the URLs directly:
+
+```astro
+---
+// Originals never enter git — they live on the CDN.
+const hero = 'https://cdn.lucaberton.com/kubecon/hero.jpg';
+---
+
+<img
+  src={hero}
+  alt="Conference stage at KubeCon"
+  width="1920" height="1080"
+  loading="lazy"
+  decoding="async"
+/>
+```
+
+The CDN does the heavy lifting. Cloudinary, Bunny, and imgix all expose URL-based transforms, so the same original yields any format and size on demand:
+
+- **Cloudinary** — `f_auto,q_auto` lets it negotiate AVIF/WebP per client automatically.
+- **Bunny** — `?format=auto` plus `?width=` for resizing at the edge.
+- **imgix** — `fm=avif` / `fm=webp` and a full sizing API.
+
+This is the right call when you're dealing with user uploads, a large media library, or a team that updates assets outside the repo. Your git history stays small and your builds stay fast.
+
+## When to reach for Git LFS
+
+Git LFS is for one specific situation: **you must version-control the raw, unoptimized source files** as part of the repository. Think design source, compliance, or a pipeline that regenerates outputs from a canonical original.
+
+For a content site, LFS is usually the wrong tool — it adds a separate storage backend, clone-time fetching, and CI configuration for marginal benefit over just dropping the raws on a CDN. Default to the CDN unless versioning the originals is a hard requirement.
+
+## Which one should you pick?
+
+| Situation | Pick |
+| --- | --- |
+| Fixed set of assets bundled with the repo | Astro Image component + AVIF/WebP |
+| Large or frequently changing media, user uploads | External CDN (Cloudinary / Bunny / imgix) |
+| Must keep raws under version control | Git LFS (and only then) |
+
+My default: let Astro's `Image` handle everything committed to the repo, and move anything bulky or dynamic onto a CDN. That keeps the build fast, the repo lean, and the payload roughly half of what a JPEG-only setup would ship.
+
+## What I learned
+
+The win isn't the format alone — it's the format **and** the right width together. AVIF gets you most of the savings, but a 1920px AVIF served to a 360px phone is still a 1920px file. The `srcset` + `sizes` pair is what actually delivers the ~50% reduction to real visitors, so wire up both and verify with your browser's network panel rather than trusting the build output.

@@ -35,6 +35,13 @@ export default defineConfig({
     // (Previous 'noop' service silently skipped all encoding, leaving Picture
     // outputs as the source JPG/PNG only — major Lighthouse perf hit.)
     service: { entrypoint: "astro/assets/services/sharp" },
+    // Emit modern formats automatically for every <Image>/<Picture> and the
+    // blog's responsive gallery. AVIF first (best compression), WebP fallback,
+    // then the source format. ~50% smaller than shipping the raw JPEG.
+    formats: ["avif", "webp", "jpeg"],
+    // Allow CSS `aspect-ratio` + `width:100%` on generated images so they can
+    // fill responsive containers without layout shift.
+    responsiveStyles: true,
   },
   site: "https://lucaberton.com",
   base: "/",

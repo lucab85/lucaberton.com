@@ -2,10 +2,10 @@
 draft: false
 title: "Hermes Agent Troubleshooting: Fix Model, Provider, Gateway & Credential Errors"
 seoTitle: "Hermes Agent Troubleshooting Guide"
-snippet: "Model 404, provider authentication failed, Nous Portal not logged in, provider retries exhausted, silent Discord bot? Use this diagnostic flow and exact Hermes commands to fix them."
-description: "Hermes Agent troubleshooting guide: fix Nous Portal authentication failures, model-not-found 404s, provider retry failures, credential pool issues, gateway problems, and model-selection mistakes."
+snippet: "Model 404, provider authentication failed, Nous Portal credit paused, provider retries exhausted, silent Discord bot? Here is the diagnostic flow and exact Hermes commands to fix every Hermes Agent error."
+description: "Hermes Agent troubleshooting guide: fix model-not-found 404s, provider retry failures, empty responses, subscription credit pauses, provider authentication failures, credential pool issues, and gateway problems with exact commands."
 publishDate: "2026-07-31"
-lastModified: "2026-08-23"
+lastModified: "2026-08-24"
 image:
   src: "/blog/thumbnails/hermes-agent-troubleshooting.svg"
   alt: "Hermes Agent troubleshooting flow: diagnose, fix model, credentials, and gateway"
@@ -30,6 +30,12 @@ faq:
     answer: "Most often the Message Content Intent is disabled. Enable it under Bot → Privileged Gateway Intents in the Discord developer portal, then restart the gateway with 'hermes gateway restart'."
   - question: "Why does Hermes say 'The model declined to respond' (safety refusal)?"
     answer: "That is not a Hermes, network, or credential error — the upstream model ran and then refused to answer that specific prompt, often for policy reasons or a misfiring safety classifier. Hermes reports the refusal plus the model's own explanation directly in chat. Fix it by rephrasing the request, switching models with 'hermes model', or adding a fallback provider with 'hermes fallback add' so the next provider in the chain answers instead."
+  - question: "Why does Hermes say 'Model returned no content after all retries'?"
+    answer: "The request succeeded at the HTTP level but the model returned an empty completion. Hermes retried (you see 'Empty response from model — retrying') and, with no fallback chain configured, surfaced 'Model returned no content after all retries. No fallback providers configured.' Fix it by adding a fallback provider with 'hermes fallback add' so an empty primary response rolls to the next model, or switch models with 'hermes model' and smoke-test with 'hermes chat -m <provider>/<model>'."
+  - question: "What does 'Credit access paused — run /topup' mean?"
+    answer: "That is a Nous Portal billing state, not a model or credential error: your Portal credits are exhausted or paused, so inference is blocked before it reaches a model. Run 'hermes portal open' to open the subscription / top-up page (https://portal.nousresearch.com/manage-subscription). There is no 'hermes topup' or 'hermes credit' subcommand. After you top up, the next request picks up the restored credit automatically — no reinstall needed."
+  - question: "Why do I see 'Provider authentication failed'?"
+    answer: "The provider rejected your credential (usually HTTP 401/403 at auth), distinct from a transient 'provider failed after retries.' The raw provider auth error is in the gateway logs: grep -i 'auth|401|403|unauthorized' ~/.hermes/logs/gateway.log. Fix it with 'hermes auth list', 'hermes auth reset PROVIDER', and 'hermes auth add PROVIDER' to refresh or re-add the credential."
 ---
 
 Hermes Agent is provider-agnostic: it runs on OpenRouter, Anthropic, OpenAI,
@@ -411,6 +417,79 @@ hermes fallback clear   # remove all fallback entries
 A fallback chain helps with provider-side refusals and transient errors, but it
 is not a guarantee. If every provider refuses the same prompt, rephrase it.
 
+### "Model returned no content after all retries" (empty response)
+
+This is different from the two failures above. The request *succeeds* at the HTTP level — no thrown error, no refusal text — but the model comes back with an empty completion. Hermes retries (you will see "Empty response from model — retrying (1/3)" … "(3/3)"), and when every attempt returns nothing it surfaces:
+
+> Model returned no content after all retries. No fallback providers configured.
+
+The second half of that message is the actionable hint: because no fallback chain was configured, an empty primary response had nowhere to roll over to.
+
+How it differs from the other two:
+
+- vs **"provider failed after retries"** — that is a *thrown* error or non-200 from upstream. This is a *successful* call that returned an empty body.
+- vs **"model declined to respond"** — that is an explicit refusal *with* explanation text. This is empty: no answer and no refusal message.
+
+Common causes:
+
+- A free `:free` model occasionally emits an empty completion, especially on long or edge-case inputs.
+- An overloaded or degraded upstream returns a 200 with empty `choices`.
+- A local/proxy endpoint (`hermes proxy`) is misconfigured and returns no body.
+
+Fix it:
+
+1. **Add a fallback provider** so a future empty response rolls to the next model in the chain — exactly what the "No fallback providers configured" hint points at:
+   ```bash
+   hermes fallback add      # pick provider + model, appended to the chain
+   hermes fallback list     # show the current chain
+   hermes fallback clear    # remove all fallback entries
+   ```
+2. **Switch the primary model.** Use `hermes model`, or smoke-test first:
+   ```bash
+   hermes chat -m openrouter/<other-model>  # confirm it returns text
+   ```
+3. **If you run a local/proxy endpoint**, verify it returns valid completions (correct `base_url`, no empty `choices`), then retry.
+
+### "Credit access paused — run /topup" (subscription credits)
+
+This is a Nous Portal *billing* state, not a model or credential error. When your Portal credits are exhausted or paused, inference is blocked before it reaches a model and you see:
+
+> ✕ Credit access paused · run /topup to top up
+
+Fix it:
+
+```bash
+hermes portal open     # opens the subscription / top-up page in your browser
+hermes portal info     # confirm Portal auth + Tool Gateway routing
+hermes portal status   # quick billing/auth health check
+```
+
+`hermes portal open` lands on <https://portal.nousresearch.com/manage-subscription>. There is **no** `hermes topup`, `hermes credit`, or `hermes subscription` subcommand — the portal open command is the supported way to reach billing. After you top up, no reinstall or restart is required; the next request picks up the restored credit automatically.
+
+> Note: a credit-paused Portal can also surface through the empty-response / "No fallback providers configured" path above, because the gateway never receives a real completion. Top up first; if empty responses persist afterwards, move on to the fallback steps.
+
+### "Provider authentication failed"
+
+This is a *credential* rejection from the provider (typically HTTP 401/403 at auth), distinct from "provider failed after retries," which is about transient or 5xx errors. The message is explicit:
+
+> ⚠️ Provider authentication failed. Check the configured credentials; raw provider details are in the gateway logs.
+
+The raw provider auth error is deliberately kept out of chat for privacy — it is in the gateway logs:
+
+```bash
+grep -i "auth\|401\|403\|unauthorized" ~/.hermes/logs/gateway.log | tail -20
+```
+
+Fix it:
+
+```bash
+hermes auth list            # show pooled credentials + exhaustion state
+hermes auth reset PROVIDER  # clear an exhaustion/error flag
+hermes auth add PROVIDER    # re-add or refresh an OAuth / API-key credential
+```
+
+Common causes: an expired OAuth token, a revoked or rotated API key, or the wrong key slotted into a provider. For the **Copilot 403** gotcha, a `gh auth login` token does not work for the Copilot API — use the Copilot device-code OAuth flow via `hermes model` → GitHub Copilot.
+
 ## Credentials and credential pools
 
 Multiple credentials per provider form a **pool** that rotates automatically and
@@ -586,3 +665,6 @@ When you have isolated the problem but still need help:
 | aux vision/compression broken | `hermes config set auxiliary.*` | set provider or key |
 | Copilot 403 | `hermes model` → GitHub Copilot | use device-code OAuth, not `gh` token |
 | "The model declined to respond" (safety refusal) | `hermes fallback add` | rephrase, switch model, or set a fallback chain |
+| "Model returned no content after all retries" | `hermes fallback add` | add a fallback chain, or switch/smoke-test the model |
+| "Credit access paused — run /topup" | `hermes portal open` | top up at portal.nousresearch.com; credit restores automatically |
+| "Provider authentication failed" | `hermes auth list` | refresh/re-add credential; check gateway logs for raw error |

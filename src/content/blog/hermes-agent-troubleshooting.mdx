@@ -2,7 +2,7 @@
 draft: false
 title: "Hermes Agent Troubleshooting: Fix Model, Provider, Gateway & Credential Errors"
 seoTitle: "Hermes Agent Troubleshooting Guide"
-snippet: "Model 404, provider retries exhausted, silent Discord bot? Here is the diagnostic flow and exact commands to fix every Hermes Agent error."
+snippet: "Model 404, provider authentication failed, Nous Portal credit paused, provider retries exhausted, silent Discord bot? Here is the diagnostic flow and exact Hermes commands to fix every Hermes Agent error."
 description: "Hermes Agent troubleshooting guide: fix model-not-found 404s, provider retry failures, empty responses, subscription credit pauses, provider authentication failures, credential pool issues, and gateway problems with exact commands."
 publishDate: "2026-07-31"
 lastModified: "2026-08-24"
@@ -20,6 +20,8 @@ tags:
 faq:
   - question: "Why does Hermes say 'the model provider failed after retries'?"
     answer: "Hermes called the LLM, the call failed, and the built-in retry loop gave up. The raw provider error is kept out of chat for privacy and written to the gateway logs instead. Check the logs with 'grep -i error ~/.hermes/logs/gateway.log' and then inspect your credential pool with 'hermes auth list' or switch models with 'hermes model'."
+  - question: "Why does Hermes say 'Provider authentication failed' when provider is nous?"
+    answer: "The Nous inference provider can be selected correctly while the Nous Portal OAuth login is still missing. Run 'hermes portal info'. If it says 'Auth: not logged in' and 'Model: using Nous as inference provider', authenticate with 'hermes portal' or 'hermes auth add nous --type oauth', then restart the gateway process."
   - question: "Why do I get 'HTTP 404: Model not found'?"
     answer: "The exact model string Hermes is configured to use is not in its model map or the provider catalog. This usually means the model was deprecated or renamed (common with free tiers), there is a typo, or the provider is set wrong. Run 'hermes model' to pick a currently valid model."
   - question: "My Hermes cron job fails with a model 404 — why?"
@@ -37,26 +39,28 @@ faq:
 ---
 
 Hermes Agent is provider-agnostic: it runs on OpenRouter, Anthropic, OpenAI,
-Google, DeepSeek, local models, and 20+ others. That flexibility is its biggest
-strength — and the single most common source of errors. When something breaks,
-nine times out of ten it is the **model/provider boundary**: a credential
-expires, a model is renamed in the catalog, or a provider returns an error that
-Hermes retries and then surfaces to you.
+Google, DeepSeek, Nous Portal, local models, and many other backends. That
+flexibility is its biggest strength — and the single most common source of
+errors. When something breaks, nine times out of ten it is the
+**model/provider/authentication boundary**: a credential expires, OAuth was
+never completed on the machine that actually runs the gateway, a model is
+renamed in the catalog, or the provider returns an error that Hermes retries and
+then surfaces to you.
 
-This guide is the reference I wish I had when I first hit these errors. It walks
-through the real failure modes, the exact commands to diagnose them, and how to
-fix each one — with no private setup details, just the patterns that bite
-everyone.
+This guide walks through the real failure modes, the exact commands to diagnose
+them, and the quickest fixes. It also covers a subtle Nous Portal failure that
+looks like a model problem even though the model configuration is correct.
 
 ## The 30-second diagnostic checklist
 
-Run these in order. Most problems become obvious within the first three:
+Run these in order. Most problems become obvious within the first few commands:
 
 ```bash
 hermes doctor            # config + dependency health (use --fix to auto-repair)
 hermes status --all      # component status across the install
 hermes auth list         # show pooled credentials and exhaustion state
 hermes config check      # missing / outdated config keys
+hermes portal info       # crucial when model.provider is nous
 ```
 
 If the agent itself is misbehaving rather than the provider, read the logs:
@@ -76,9 +80,170 @@ The files you will care about most:
 | Session store (SQLite + FTS5) | `~/.hermes/state.db` |
 | Skills | `~/.hermes/skills/` |
 
+A key diagnostic principle: **configuration and authentication are separate**.
+A valid `config.yaml` can point at the correct provider while the credential
+store for that provider is empty.
+
 ## Model and provider errors
 
 These are the most frequent failures and the easiest to misread.
+
+### "Provider authentication failed" with `provider: nous`
+
+A common Discord/gateway error is:
+
+```text
+⚠️ Provider authentication failed. Check the configured credentials;
+raw provider details are in the gateway logs.
+```
+
+If your configuration looks like this:
+
+```yaml
+model:
+  default: stealth/ox-alpha
+  provider: nous
+  base_url: https://inference-api.nousresearch.com/v1
+```
+
+it is tempting to keep changing the model name or `base_url`. Do not start
+there. The provider can be configured correctly while the Nous Portal OAuth
+credential is missing.
+
+Check the Portal state first:
+
+```bash
+hermes portal info
+```
+
+The decisive failure pattern looks like this:
+
+```text
+Nous Portal
+───────────
+Auth:    not logged in
+Model:   ✓ using Nous as inference provider
+```
+
+That combination tells you exactly what is wrong:
+
+- `Model: ✓ using Nous as inference provider` means Hermes is routing inference
+  to Nous as intended.
+- `Auth: not logged in` means the OAuth refresh credential is not available to
+  the current Hermes user.
+- The `base_url` can therefore be perfectly valid and requests can still fail
+  authentication.
+
+Fix the login:
+
+```bash
+hermes portal
+```
+
+`hermes portal` is the human-friendly Nous Portal onboarding/login command. The
+equivalent explicit auth command is:
+
+```bash
+hermes auth add nous --type oauth
+```
+
+For a fresh or partially configured installation, you can run the complete
+Portal setup:
+
+```bash
+hermes setup --portal
+```
+
+Then verify:
+
+```bash
+hermes portal info
+```
+
+You want the summary to show:
+
+```text
+Auth:    ✓ logged in
+Model:   ✓ using Nous as inference provider
+```
+
+The Nous Portal refresh token is stored in `~/.hermes/auth.json`; it is not
+stored in `config.yaml`. Hermes uses that refresh credential to mint short-lived
+credentials for inference calls. That separation is why editing YAML alone does
+not solve a missing Portal login.
+
+Official reference: [Nous Portal — Hermes Agent](https://hermes-agent.nousresearch.com/docs/integrations/nous-portal).
+
+#### Remote Ubuntu/VPS gotcha: authenticate as the gateway user
+
+On a VPS, Oracle Cloud instance, EC2 VM, or any remote Ubuntu host, the shell
+user that runs `hermes portal` matters. Credentials land under that user's home
+directory.
+
+For example, if you authenticate as `ubuntu`:
+
+```text
+/home/ubuntu/.hermes/auth.json
+```
+
+but the gateway service runs as `root` or as a dedicated `hermes` user, that
+process will read a different credential store and can continue returning
+`Provider authentication failed`.
+
+Check which user owns the running service:
+
+```bash
+ps -eo user,pid,cmd | grep -i '[h]ermes'
+systemctl --user status hermes-gateway
+```
+
+If the gateway runs as another account, authenticate as that account and verify
+`hermes portal info` in that same environment. The Hermes OAuth troubleshooting
+documentation explicitly calls out tokens landing in the wrong `~/.hermes` as a
+remote-host failure mode.
+
+After authentication, restart the long-running gateway so it begins from a
+clean state:
+
+```bash
+hermes gateway restart
+```
+
+If you manage Hermes with your own `systemd`, Docker, `tmux`, or supervisor
+setup, restart that process instead.
+
+#### SSH and headless authentication
+
+Nous Portal authentication uses OAuth. On a remote machine, follow the flow
+printed by Hermes and open the authorization URL in your normal browser. Current
+Hermes documentation also supports the Nous device-code flow for remote hosts,
+so `hermes auth add nous --type oauth` is the best first choice on an SSH-only
+machine.
+
+See [OAuth over SSH / Remote Hosts](https://hermes-agent.nousresearch.com/docs/guides/oauth-over-ssh)
+for the current provider-specific behavior.
+
+#### Tool Gateway says "not configured" — is that the auth error?
+
+Not necessarily. `hermes portal info` can also show:
+
+```text
+Tool Gateway
+────────────
+Web tools          not configured
+Image generation   not configured
+Video generation   not configured
+OpenAI TTS         not configured
+Speech-to-text     not configured
+Browser automation not configured
+Modal execution    local
+```
+
+Those lines describe optional tool routing. They do **not** explain a failed LLM
+inference request when the important line above them says `Auth: not logged in`.
+Fix Portal authentication first. Configure Tool Gateway services separately if
+you want managed web search, image generation, TTS, browser automation, or other
+extras.
 
 ### "The model provider failed after retries"
 
@@ -90,44 +255,95 @@ instead.
 Look there first:
 
 ```bash
-grep -i "provider\|retry\|upstream\|timeout" ~/.hermes/logs/gateway.log | tail -40
+grep -i "provider\|retry\|upstream\|timeout\|auth" ~/.hermes/logs/gateway.log | tail -40
 ```
 
 The usual causes:
 
+- **Provider authentication failure** — especially `provider: nous` with Portal
+  not logged in.
 - **Provider outage or partial degradation** — the upstream API is returning 5xx.
 - **Rate limiting (HTTP 429)** — you are over quota. With credential pools this
   normally means every key in the pool is temporarily exhausted.
-- **Expired or exhausted API key** in the pool.
-- **Wrong `base_url`** for a custom endpoint (model section in `config.yaml`).
+- **Expired, revoked, or exhausted API key** in the pool.
+- **Wrong `base_url`** for a custom endpoint.
 - **Network or TLS** issues between the gateway and the provider.
 
 Fix it:
 
 ```bash
 hermes auth list            # confirm the pool looks healthy
+hermes portal info          # if provider is nous
 hermes auth reset PROVIDER  # clear an exhaustion flag on a provider
 hermes auth add PROVIDER    # add or refresh a credential
 hermes model                # switch to a different model or provider
 ```
 
 If the error is intermittent, move to a different provider and let the pool
-rotate. If it is constant, the key or `base_url` is the likely culprit.
+rotate. If it is constant, inspect auth first, then the model id and `base_url`.
+
+### Choosing a Nous Portal model without creating another failure
+
+Run:
+
+```bash
+hermes model
+```
+
+When you choose Nous Portal, Hermes presents its current model catalog. Treat
+that selector as the source of truth for what your installed version can select
+interactively; model availability, sale pricing, and free-tier entries can
+change over time.
+
+On **August 23, 2026**, the selector included these free models:
+
+| Free model | Cost shown by CLI |
+|------------|-------------------|
+| `stealth/ox-alpha` | free |
+| `upstage/solar-pro4:free` | free |
+| `meituan/longcat-2.0:free` | free |
+| `tencent/hy3:free` | free |
+| `poolside/laguna-s-2.1:free` | free |
+| `stepfun/step-3.7-flash:free` | free |
+| `poolside/laguna-xs-2.1:free` | free |
+
+The same selector also exposed paid models across Anthropic, OpenAI, Google,
+xAI, DeepSeek, Qwen, Moonshot AI, MiniMax, Z.ai, Xiaomi, Tencent, StepFun,
+NVIDIA, Sakana, and others. Examples in that snapshot included
+`anthropic/claude-sonnet-5`, `openai/gpt-5.6-sol`,
+`google/gemini-3.1-pro-preview`, `x-ai/grok-4.6`,
+`deepseek/deepseek-v4-pro`, and `qwen/qwen3.8-max`.
+
+The CLI marks promotional pricing with a star and shows input, output, and cache
+pricing per million tokens. Because those prices are commercial data and can
+change, copy them from the current `hermes model` screen rather than hardcoding
+an old number into automation.
+
+A practical troubleshooting rule for the free tier:
+
+1. Select a free model such as `stealth/ox-alpha`.
+2. Confirm `hermes portal info` says `Auth: ✓ logged in`.
+3. Smoke-test the model in the CLI.
+4. Only then restart or test the Discord gateway.
+
+This separates **catalog/model problems** from **Portal authentication problems**.
+If the same model works in the CLI but not in Discord, focus on the gateway
+process, environment, Linux user, and credential path rather than changing the
+model again.
 
 ### "HTTP 404: Model 'X' not found"
 
 This means the exact model string Hermes is configured to use is not present in
-its internal model map **or** in the provider's catalog. Hermes looked, did not
-find it, and refused to send a request that would never succeed.
+its internal model map **or** in the provider's current catalog. Hermes looked,
+did not find it, and refused to send a request that would never succeed.
 
 Common causes:
 
-- **The model was deprecated or renamed** by the provider. This is very common
-  with free tiers (anything ending in `:free`) that get rotated.
-- **A typo in the model id**, e.g. `tencent/hy3:free` versus the current
-  catalog slug.
-- **Provider mismatch** — the model only exists on OpenRouter, but `provider`
-  is set to something else (anthropic, openai, …).
+- **The model was deprecated or renamed** by the provider. This is especially
+  common with rotating free-tier models.
+- **A typo in the model id**, such as an old or malformed `:free` slug.
+- **Provider mismatch** — the model exists on one provider but `provider` is set
+  to another.
 - **A stale per-job model override** on a cron job pointing at a model that no
   longer exists.
 
@@ -135,21 +351,25 @@ Fix it:
 
 ```bash
 hermes model                       # pick a currently-valid model interactively
-hermes chat -m openrouter/<model>  # smoke-test a model before committing to it
+hermes chat -m openrouter/<model>  # smoke-test an OpenRouter model
 hermes cron list                   # find jobs with a pinned model
 hermes cron edit <job_id>          # update or clear the per-job model override
 ```
 
+For Nous Portal specifically, prefer selecting from the current `hermes model`
+menu before manually typing a slug. If a model disappeared from the free list,
+choose another currently listed entry rather than assuming yesterday's slug is
+still routable.
+
 For scheduled jobs, the model override is set at creation time and **does not**
 follow the profile default afterwards. A model that disappears from the catalog
-will keep 404-ing until you edit the job. Recreate or edit the job to use a model
-that still exists — and verify the slug on the provider's model page first.
+will keep 404-ing until you edit the job.
 
 ### The model declined to respond (safety refusal)
 
-This one is different from the two failures above. The request reaches the
-model, the model runs, and then **refuses to answer**. Hermes does not crash —
-it reports the refusal straight back into the chat with a clear label:
+This one is different from the failures above. The request reaches the model,
+the model runs, and then **refuses to answer**. Hermes does not crash — it
+reports the refusal straight back into the chat with a clear label:
 
 > The model declined to respond to this request (safety refusal).
 > The model declined to respond to this request (safety refusal — not a Hermes/gateway failure).
@@ -163,55 +383,39 @@ that specific prompt.
 What you are actually looking at:
 
 - **The "safety refusal" label** — the provider's moderation layer (or the
-  model's own system guidance) tripped on something in the prompt and stopped
-  generation.
-- **"not a Hermes/gateway failure"** — Hermes is explicitly telling you the
-  breakdown is upstream, so don't burn time on infrastructure diagnostics.
-- **"Model's explanation"** — the literal text the model returned instead of an
-  answer. It can be in any language the model uses; a Chinese refusal such as
-  "你好，我无法给到相关内容" ("Hello, I cannot provide the relevant content") is
-  common from some multilingual models. That text is the model's, not Hermes's.
+  model's own system guidance) stopped generation.
+- **"not a Hermes/gateway failure"** — Hermes is telling you the breakdown is
+  upstream, so do not burn time on infrastructure diagnostics.
+- **"Model's explanation"** — the text the model returned instead of an answer.
 
 Why it happens:
 
-- The prompt touched a policy boundary the provider enforces — the model
-  decided the request fell into a refused category.
-- The model's safety classifier misfired on ambiguous phrasing, a quoted
-  snippet, or a mixed-language prompt.
-- A free/`*:free` tier model with tighter moderation than its paid equivalent.
+- The prompt touched a policy boundary the provider enforces.
+- The model's safety classifier misfired on ambiguous phrasing, quoted text, or
+  a mixed-language prompt.
+- A free-tier model may have different moderation behavior than another model.
 
 How to get a useful answer:
 
-1. **Rephrase.** Narrow the context, drop the exact wording that triggered the
-   refusal, or split the request into smaller steps. A literal "expand this into
-   an article" on certain inputs trips a refusal more often than the same task
-   framed concretely.
-2. **Switch models.** Another model in the catalog may not classify the prompt
-   the same way. Use `hermes model` to pick a different provider/model, or
-   smoke-test it first:
+1. **Rephrase.** Narrow the context or split the request into smaller steps.
+2. **Switch models.** Another model may classify the prompt differently:
    ```bash
-   hermes chat -m openrouter/<other-model>  # verify it answers before committing
+   hermes model
    ```
-3. **Add a fallback provider.** Hermes can automatically try the next provider
-   in a fallback chain when the primary refuses or errors. This is the exact fix
-   the bot itself recommends:
+3. **Add a fallback provider:**
    ```bash
-   hermes fallback add     # pick a provider + model, appended to the chain
-   hermes fallback list    # show the current chain
+   hermes fallback add
+   hermes fallback list
    ```
-   With a fallback chain set, a safety refusal (or a rate-limit/overload error)
-   on the primary rolls over to the next entry instead of stopping dead.
-4. **For scheduled jobs**, set the fallback chain once. Unlike a per-job model
-   override, the global fallback chain applies to every run — so a job that hits
-   a refusal on one provider automatically retries on the next.
+4. **For scheduled jobs**, use the fallback chain so transient provider errors
+   do not stop every run.
 
 ```bash
 hermes fallback clear   # remove all fallback entries
 ```
 
-Keep in mind: a fallback chain helps with provider-side refusals and transient
-errors, but it is not a guarantee. If every provider in the chain also refuses
-the same prompt, you still need to rephrase.
+A fallback chain helps with provider-side refusals and transient errors, but it
+is not a guarantee. If every provider refuses the same prompt, rephrase it.
 
 ### "Model returned no content after all retries" (empty response)
 
@@ -297,13 +501,26 @@ hermes auth                 # interactive credential manager
 hermes auth list [PROVIDER] # list pooled credentials + state
 hermes auth reset PROVIDER  # clear exhaustion status
 hermes auth remove PROVIDER INDEX
-hermes auth add [PROVIDER]  # add an OAuth or API-key credential
+hermes auth add [PROVIDER]  # add or refresh a credential
 ```
 
-One important gotcha: a **Copilot 403**. A `gh auth login` token does **not**
-work for the Copilot API. You must authenticate through the Copilot-specific
-OAuth device flow: `hermes model` → GitHub Copilot, which opens the device-code
-prompt.
+For Nous Portal, remember that the OAuth state is visible with:
+
+```bash
+hermes portal info
+```
+
+and the login can be refreshed with:
+
+```bash
+hermes portal
+# or
+hermes auth add nous --type oauth
+```
+
+One other gotcha: a **Copilot 403**. A `gh auth login` token does **not** work
+for the Copilot API. Authenticate through the Copilot-specific OAuth device flow:
+`hermes model` → GitHub Copilot.
 
 ## Gateway (messaging platform) issues
 
@@ -313,8 +530,19 @@ more. Most gateway problems are environmental, not code.
 Read the logs first:
 
 ```bash
-grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
+grep -i "failed to send\|error\|auth" ~/.hermes/logs/gateway.log | tail -30
 ```
+
+**Gateway works in CLI but Discord says provider authentication failed:**
+
+```bash
+hermes portal info
+ps -eo user,pid,cmd | grep -i '[h]ermes'
+```
+
+If the CLI is authenticated but the gateway process belongs to a different
+Linux user, authenticate under the gateway account or fix the service user/home
+environment. This is one of the most useful checks on VPS deployments.
 
 **Gateway dies when you log out of SSH:**
 
@@ -366,6 +594,7 @@ prompt caching.
 | CLI config | exit and relaunch `hermes` |
 | Tools / skills | `/reset` (new session) |
 | Code changes | restart the CLI or gateway process |
+| Nous OAuth login | authenticate, then restart long-running gateway if needed |
 
 One exception worth flagging: `security.redact_secrets` is snapshotted at import
 time. Toggling it mid-session (even via an env var) will **not** take effect for
@@ -415,14 +644,19 @@ When you have isolated the problem but still need help:
   disappears, it is in your project context file, not Hermes.
 - **Upload a debug report:** `/debug` collects system info plus logs and returns
   shareable links.
-- **Docs:** [https://hermes-agent.nousresearch.com/docs/](https://hermes-agent.nousresearch.com/docs/)
+- **Nous Portal docs:** [https://hermes-agent.nousresearch.com/docs/integrations/nous-portal](https://hermes-agent.nousresearch.com/docs/integrations/nous-portal)
+- **OAuth/remote-host docs:** [https://hermes-agent.nousresearch.com/docs/guides/oauth-over-ssh](https://hermes-agent.nousresearch.com/docs/guides/oauth-over-ssh)
+- **General docs:** [https://hermes-agent.nousresearch.com/docs/](https://hermes-agent.nousresearch.com/docs/)
 
 ## Quick reference: error to action
 
 | Symptom | First command | Likely fix |
 |---------|---------------|------------|
-| "model provider failed after retries" | `hermes auth list` | refresh/rotate key, or `hermes model` to switch |
-| "HTTP 404: Model 'X' not found" | `hermes model` | pick a model that exists in the catalog |
+| `Provider authentication failed` + `provider: nous` | `hermes portal info` | if `Auth: not logged in`, run `hermes portal` |
+| Nous model configured, Discord still fails auth | check gateway Linux user | authenticate in that user's `~/.hermes` and restart gateway |
+| "model provider failed after retries" | `hermes auth list` / `hermes portal info` | refresh auth, rotate key, or switch model |
+| "HTTP 404: Model 'X' not found" | `hermes model` | pick a model that exists in the current catalog |
+| old free model stopped working | `hermes model` | select a currently listed `:free` model |
 | cron job fails on model 404 | `hermes cron edit <id>` | update the per-job model override |
 | gateway silent on Discord | check Bot intents | enable Message Content Intent |
 | gateway dies after SSH logout | `loginctl enable-linger` | keep user service alive |

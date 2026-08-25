@@ -19,68 +19,86 @@ tags:
   - networking
 ---
 
-If your Kubernetes nodes run as VMs on an NSX-backed segment and cross-node pod-to-pod traffic suddenly stops while same-node traffic and plain ICMP still work, you are almost certainly looking at a Layer 2 security policy silently dropping the overlay-encapsulated frames. This is documented VMware behavior, not a CNI bug, and the fix is a two-checkbox change in NSX Manager.
+If your Kubernetes nodes run as VMs on an NSX-backed segment and cross-node pod-to-pod traffic suddenly stops while same-node traffic and plain ICMP still work, you are almost certainly looking at a Layer 2 security policy silently dropping the overlay-encapsulated frames. This is documented VMware behavior, not a CNI bug, and the fix is a two-checkbox change in NSX Manager — not in vCenter.
 
-Here is the exact symptom, why it happens, and the step-by-step fix.
+I hit exactly this on a vSphere cluster where the worker nodes were attached to an NSX segment. The CNI's VXLAN overlay (UDP port 8472, the default for most VXLAN-based CNIs and the port that carries all inter-node container networking) was being dropped at the destination, and nothing in the CNI logs explained why. Here is the exact symptom, why it happens, why the obvious fix is blocked on NSX, and the step-by-step remediation.
 
 ## The Symptom: Cross-Node Pods Can't Talk
 
-The signature is very specific:
+The signature is very specific, and once you have seen it you can recognize it in minutes:
 
-- A pod on node A cannot reach a pod on node B, even though both are on the same Kubernetes Service and the network policy allows it.
+- A pod on node A cannot reach a pod on node B, even though both are part of the same Kubernetes Service and the relevant network policy allows the traffic.
 - Traffic between two pods **on the same node** works fine.
-- Plain ICMP between the nodes (the VM NICs) works fine.
-- Running `tcpdump` on both ends tells the whole story: the VXLAN packet leaves node A, arrives at node B's physical NIC, but **never reaches the target container** on node B.
+- Plain ICMP between the nodes (the VM NICs themselves) works fine.
+- Running `tcpdump` on both ends tells the whole story: the VXLAN packet leaves node A, arrives at node B's physical NIC, but **never reaches the target container** running on node B.
 
-That last point is the giveaway. The packet is not being routed wrongly and it is not being firewalled at L3/L4 — it is being accepted by the hypervisor's physical NIC and then discarded before delivery because the frame's source MAC does not match what the port-group security policy allows.
+That last point is the giveaway. The packet is not being misrouted, and it is not being filtered at L3/L4. It is accepted by the hypervisor's physical NIC and then discarded before delivery — because the frame's source MAC does not match what the port-group (or NSX segment) security policy allows.
+
+If you have ever chased a "CNI is broken" ghost, this pattern — overlay fails, everything else passes — is the fingerprint of a rejected forged or MAC-changed transmit.
 
 ## Why the Overlay Needs a Different Source MAC
 
-Most Kubernetes CNIs build a tunnel between nodes. Calico, Flannel, and Cilium all support a VXLAN (or Geneve) overlay that encapsulates pod traffic in UDP. The default CNI port for VXLAN is **UDP 8472**.
+Most Kubernetes CNIs build a tunnel between nodes so that pods on different hosts can talk without being exposed on the underlay network. Calico, Flannel, and Cilium all support a VXLAN (or Geneve) overlay that encapsulates pod traffic inside UDP. The default CNI port for VXLAN is **UDP 8472**.
 
 When node A sends a VXLAN frame to node B, the outer Ethernet frame carries:
 
-- a destination MAC of node B's VTEP (the node's own vNIC MAC), but
-- a source MAC that is the **VTEP interface's MAC on node A** — and that VTEP MAC is *not* the MAC that vCenter/NSX has recorded as "belonging" to the VM's vNIC.
+- a destination MAC equal to node B's VTEP (the node's own vNIC MAC), but
+- a source MAC that is the **VTEP interface's MAC on node A** — and that VTEP MAC is *not* the MAC that vCenter or NSX has recorded as "belonging" to the VM's vNIC.
 
-In other words, the VM sends traffic whose source MAC differs from its own vNIC. That is exactly what the port-group security policy is designed to block, which is why the frames are dropped at the destination.
+In other words, the VM sends traffic whose source MAC differs from its own vNIC. That is precisely what the port-group / segment security policy is designed to block, which is why the frames are dropped at the destination. From the hypervisor's point of view, a VM emitting frames from an address it was not assigned looks like a MAC spoofing attempt — and the policy drops it.
 
 ## Confirming the L2 Security Signature
 
-Capture the overlay traffic on the destination node's physical interface while you generate cross-node pod traffic:
+Before changing anything, capture the overlay traffic on the destination node's physical interface while you generate cross-node pod traffic:
 
 ```bash
 # On the destination node, watch VXLAN (UDP/8472) arrive
 sudo tcpdump -n -i eth0 udp port 8472
 ```
 
-In the broken state you will see the encapsulated frames hit the NIC but the inner packet never gets delivered to the pod. Compare with same-node traffic, which is fine, and a raw `ping` between node VMs, which is also fine. That contrast — overlay fails, everything else passes — is the fingerprint of a rejected forged/MAC-changed transmit, not a routing or CNI configuration problem.
+In the broken state you will see the encapsulated frames hit the NIC, but the inner packet never gets delivered to the pod. Compare that with same-node traffic, which is fine, and a raw `ping` between the node VMs, which is also fine. That contrast — overlay fails, everything else passes — is the fingerprint of a rejected forged/MAC-changed transmit, not a routing problem and not a CNI configuration problem.
+
+One more useful check: read the effective security policy straight from the vCenter API on the port group object:
+
+```text
+config.defaultPortConfig.securityPolicy:
+  allowPromiscuous: false
+  macChanges:      false
+  forgedTransmits: false
+```
+
+All three are `false` (Reject) by default. That is the smoking gun.
 
 ## vSphere's Default Port-Group Security Policy
 
-Every vSphere port group has a security policy with three elements:
+Every vSphere port group — whether on a standard switch or a distributed switch — carries a security policy with three controls:
 
 - **Promiscuous mode**
 - **MAC address changes**
 - **Forged transmits**
 
-By default all three are set to **Reject**. You can read the effective values through the vCenter API on the port group's `config.defaultPortConfig.securityPolicy`:
+By default all three are set to **Reject**. You can read the effective values through the vCenter API on the port group's `config.defaultPortConfig.securityPolicy`, as shown above.
+
+For a Kubernetes overlay you need `macChanges` and `forgedTransmits` set to **Accept**. Promiscuous mode can stay `false` — it is not required for CNI overlays. Broadcom KB 427110, "Forged transmits and MAC address changes on a port group," documents this: both `macChanges` and `forgedTransmits` default to Reject, and a **port-group-level** override is sufficient — you do not have to touch the whole distributed switch. The requested end state is:
 
 ```text
-allowPromiscuous: false
-macChanges:      false
-forgedTransmits: false
+config.defaultPortConfig.securityPolicy:
+  allowPromiscuous: false   # unchanged, Reject is fine
+  macChanges:      true    # Accept
+  forgedTransmits: true    # Accept
 ```
 
-For a Kubernetes overlay you need `macChanges` and `forgedTransmits` set to **Accept**. Promiscuous mode can stay `false` — it is not required. Broadcom KB 427110 ("Forged transmits and MAC address changes on a port group") documents this: both settings default to Reject, and a **port-group-level** override is sufficient — you do not have to change the whole distributed switch.
+On a classic vSphere port group that is the whole fix. On an NSX-backed segment it is only half the story, because you cannot apply it from vCenter at all.
 
 ## Why You Can't Fix It From vCenter on an NSX Segment
 
-Here is the catch. If the segment is NSX-managed, vCenter will refuse to apply the change. The vCenter API rejects it explicitly:
+Here is the catch that wastes an afternoon if you do not know it. When the segment is NSX-managed, vCenter refuses to apply the change. The vCenter API rejects it explicitly with a message such as:
 
 > Updating or removing an NSX port group from vCenter is not allowed.
 
-This is expected, and Broadcom KB 394260 ("Configuring L2 port security settings on an NSX backed portgroup") explains why: NSX-T applies L2 security through **segment profiles**, not the classic vCenter port-group policy. So the change has to be made in NSX Manager, not vCenter.
+This is expected behavior, not a permissions issue. Broadcom KB 394260, "Configuring L2 port security settings on an NSX backed portgroup," explains why: NSX-T applies L2 security through **segment profiles**, not the classic vCenter port-group policy. In an NSX environment the port group is a projection of the NSX segment, and vCenter is intentionally locked out of editing its security settings. So the change has to be made in **NSX Manager**, not in vCenter.
+
+If you try to script it through `govc` or the vCenter REST API you will burn time fighting an error that is by design. Go to the source of truth: the NSX segment profile.
 
 ## The Fix: NSX MAC Discovery Segment Profile
 
@@ -92,15 +110,15 @@ In NSX Manager, the relevant control is the **MAC Discovery Segment Profile**, w
 4. Attach (or create) a profile with **MAC Address Change** enabled.
 5. Also enable **MAC Learning** if it is not already on — several CNI setups rely on it, and it has no downside for this workload.
 
-The NSX field **MAC Address Change** is the equivalent of vCenter's Forged Transmits / MAC Address Changes. Turning it on lets the VM emit VXLAN frames whose source MAC differs from its vNIC MAC, and the destination node finally delivers the encapsulated pod traffic.
+The NSX field **MAC Address Change** is the equivalent of vCenter's Forged Transmits / MAC Address Changes. Turning it on lets the VM emit VXLAN frames whose source MAC differs from its vNIC MAC, and the destination node finally delivers the encapsulated pod traffic. You do not need to change the whole transport zone or any global NSX setting — a per-segment profile override is enough, which mirrors the "port-group-level override" guidance from KB 427110.
 
 ## Don't Trust the Default Profile
 
-One subtlety: the NSX **default** MAC Discovery profile actually ships with **MAC Address Change enabled**. So if your segment is silently dropping overlay traffic, a *custom* profile with it disabled is almost certainly bound to the segment. Before changing anything, check which MAC Discovery profile is attached to the segment — if it is a custom one, that is the object you need to edit.
+One subtlety that trips people up: the NSX **default** MAC Discovery profile actually ships with **MAC Address Change enabled**. So if your segment is silently dropping overlay traffic, a *custom* profile with it disabled is almost certainly bound to the segment. Before changing anything, check which MAC Discovery profile is attached to the segment — if it is a custom one, that is the object you need to edit. Do not assume "it is on the default profile, so it must already be allowed" — verify the binding, because the default being correct does not mean the segment is using the default.
 
 ## Verify the Fix
 
-After attaching the corrected profile, prove the overlay works end to end:
+After attaching the corrected profile, prove the overlay works end to end. You do not need to guess:
 
 ```bash
 # Confirm the target pod lives on a different node
@@ -118,7 +136,17 @@ The `tcpdump` session should now show the VXLAN frame arriving **and** the inner
 
 ## Why This Applies to Every CNI Overlay
 
-This is not Calico-specific, Flannel-specific, or Cilium-specific. Any CNI that uses a VXLAN or Geneve overlay — Calico (VXLAN mode), Flannel (default VXLAN backend), Cilium (VXLAN/Geneve encapsulation) — encapsulates pod traffic with a source MAC that is not the VM's vNIC MAC. The moment those VMs sit on an NSX segment whose MAC Discovery profile rejects MAC address changes, cross-node pod networking breaks in exactly this silent way. The remediation is the same everywhere: enable MAC Address Change on the segment's MAC Discovery profile.
+This is not Calico-specific, Flannel-specific, or Cilium-specific. Any CNI that uses a VXLAN or Geneve overlay — Calico in VXLAN mode, Flannel with its default VXLAN backend, Cilium with VXLAN/Geneve encapsulation — encapsulates pod traffic with a source MAC that is not the VM's vNIC MAC. The moment those VMs sit on an NSX segment whose MAC Discovery profile rejects MAC address changes, cross-node pod networking breaks in exactly this silent way.
+
+The remediation is the same everywhere: enable **MAC Address Change** on the segment's MAC Discovery profile. The only thing that varies is which CNI you are debugging — the L2 security root cause is identical, because the encapsulation behavior of the overlay is what the hypervisor is rejecting, not anything the CNI did wrong.
+
+## Key Takeaways
+
+- The symptom "cross-node pod traffic fails, same-node and ICMP work" is the classic signature of an L2 security policy dropping overlay-encapsulated frames.
+- The overlay needs to send frames with a source MAC different from the VM's vNIC, which the default `macChanges`/`forgedTransmits = Reject` policy blocks.
+- On an NSX-backed segment you cannot fix this from vCenter — vCenter is locked out of editing NSX port groups by design.
+- The fix lives in NSX Manager: attach a MAC Discovery Segment Profile with **MAC Address Change** enabled (and MAC Learning if needed) to the segment.
+- Verify with `tcpdump` on UDP 8472 plus a cross-node `curl` before declaring victory.
 
 ## Related Resources
 

@@ -1,0 +1,184 @@
+---
+draft: false
+title: "Securing Octane with OpenSCAP"
+snippet: "Use OpenSCAP to assess the RHEL base OS behind OpenText Software Delivery Management (ALM Octane) before you harden it — scan first, remediate later."
+description: "Use OpenSCAP to assess the RHEL base OS behind OpenText Software Delivery Management (ALM Octane) before you harden it — scan first, remediate later."
+publishDate: "2026-08-26"
+lastModified: "2026-08-26"
+category: "Linux"
+author: "Luca Berton"
+tags:
+  - openscap
+  - red-hat-enterprise-linux
+  - alm-octane
+  - software-delivery-management
+  - security-compliance
+  - scap
+  - security-hardening
+  - rhel
+image:
+  src: "/blog/thumbnails/securing-octane-openscap-base-os.jpg"
+  alt: "Securing Octane with OpenSCAP — validating the base operating system"
+---
+
+OpenText Software Delivery Management — the product most teams still call **ALM Octane** — sits at the center of many organizations' software delivery pipelines. Because it is a business-critical application, the way we protect it tends to focus on the application layer: authentication, TLS, secrets, backups. But Octane does not float above its host. Its security posture is tied directly to the operating system underneath it, and that base OS is exactly where a misconfiguration can quietly undermine everything running on top.
+
+That is where [OpenSCAP](https://www.open-scap.org/) earns its place. It is an open-source compliance framework built on the Security Content Automation Protocol (SCAP), and it gives you a repeatable, auditable way to measure a Linux system against recognized security baselines. If you run Octane on Red Hat Enterprise Linux, OpenSCAP plus the SCAP Security Guide is one of the most practical tools you can add to your hardening toolkit.
+
+## Why the base OS matters for Octane
+
+Octane depends on a healthy, correctly configured operating system. The controls that live at the OS level are the same controls attackers probe first:
+
+- User and group permissions
+- SSH configuration
+- Password and authentication policies
+- File and directory permissions
+- Logging and auditing
+- Network configuration
+- Running system services
+- Kernel security parameters
+- Package and patch levels
+- Cryptographic configuration
+
+A weak default at any of those layers is a weak link for the whole platform. Current OpenText Software Delivery Management releases support several server operating systems, including recent Red Hat Enterprise Linux versions. The exact list changes release to release, so before you touch anything on a production host, confirm the supported base OS against the support matrix for *your specific* Octane / SDM version.
+
+This step matters more than it sounds. The moment you introduce a security-hardening standard, a change that is good for Linux in general can collide with an application's technical requirements. A profile that locks down SSH, filesystem mounts, or cryptographic policy might also break Octane's database connectivity, its Elasticsearch or OpenSearch dependencies, a monitoring agent, or your backup jobs. Assessment has to come before remediation.
+
+## What OpenSCAP actually is
+
+OpenSCAP is a framework for automated configuration and vulnerability assessment. Its main command-line tool, `oscap`, evaluates a Linux system against machine-readable security content and produces detailed compliance reports.
+
+On RHEL, OpenSCAP is paired with the **SCAP Security Guide**, which ships predefined security profiles and hardening rules. Red Hat documents OpenSCAP as the tool for running configuration and vulnerability scans, validating compliance content, and generating reports from the results.
+
+Depending on the content you install, those profiles can map to well-known standards and frameworks:
+
+- CIS security benchmarks
+- PCI DSS
+- HIPAA
+- Operating System Protection Profile (OSPP) requirements
+- Government or organizational hardening standards
+- Custom enterprise security baselines
+
+The key mental model: OpenSCAP is primarily an **assessment and compliance-automation tool**, not just a vulnerability scanner. It answers the question "does this system conform to the chosen baseline?" — and it does so in a way you can re-run, export, and hand to an auditor.
+
+## Running OpenSCAP on an Octane server
+
+Before you scan anything, identify the operating system so you pick the right content stream:
+
+```bash
+cat /etc/os-release
+```
+
+Collect a bit more platform detail with:
+
+```bash
+uname -a
+```
+
+For a RHEL-based Octane host, install OpenSCAP and the SCAP Security Guide:
+
+```bash
+sudo dnf install openscap-scanner scap-security-guide
+```
+
+List the available SCAP content:
+
+```bash
+ls /usr/share/xml/scap/ssg/content/
+```
+
+For RHEL 9, the data stream is typically:
+
+```bash
+/usr/share/xml/scap/ssg/content/ssg-rhel9-ds.xml
+```
+
+Show the available profiles before you choose one:
+
+```bash
+oscap info /usr/share/xml/scap/ssg/content/ssg-rhel9-ds.xml
+```
+
+Red Hat documents exactly this workflow for discovering available compliance profiles before you run an assessment. Pick the profile that matches your obligation (CIS, OSPP, PCI DSS, and so on) rather than the first one in the list.
+
+## Run an assessment, not a remediation
+
+The safest first step is to evaluate the system **without changing anything**. The `xccdf eval` mode does exactly that:
+
+```bash
+sudo oscap xccdf eval \
+  --profile <PROFILE_ID> \
+  --results octane-os-results.xml \
+  --report octane-os-report.html \
+  /usr/share/xml/scap/ssg/content/ssg-rhel9-ds.xml
+```
+
+The HTML report is the artifact you want — it is far easier for administrators and security teams to read than the raw XML, and it lays out passed and failed controls side by side.
+
+Typical findings on a default RHEL build include:
+
+- SSH root login is permitted
+- Password policies fall short of the selected baseline
+- File permissions are too permissive
+- Unnecessary services are enabled
+- Audit rules are missing
+- Kernel parameters do not match the baseline
+- Logging configuration is incomplete
+
+Here is the most important nuance: **a failed rule does not automatically mean Octane is insecure or unsupported.** It means the host does not satisfy a particular rule in the selected profile. Some of those rules are appropriate for a generic hardened server and actively wrong for an Octane node. The report is a starting point for judgment, not a to-do list to apply blindly.
+
+## Do not auto-remediate a production Octane host
+
+OpenSCAP security content can include remediation instructions that change system settings automatically. That capability is genuinely useful in a lab. Applied directly to a production Octane server, it is a risk.
+
+A hardening profile can touch a surprisingly broad surface:
+
+```text
+SSH configuration
+filesystem mount options
+password settings
+SELinux configuration
+firewall rules
+system services
+cryptographic policies
+kernel parameters
+file permissions
+```
+
+Any one of those changes can ripple into Octane itself — its database connectivity, its search dependencies, monitoring agents, backup processes, integrations, or administrative access. The safer path is a deliberate workflow:
+
+1. Confirm the Octane version and its supported base OS.
+2. Run OpenSCAP in assessment mode only.
+3. Export and review the findings.
+4. Decide which failed rules actually apply to an Octane environment.
+5. Compare each proposed change with OpenText's installation and support requirements.
+6. Test the remediation in a non-production environment.
+7. Apply approved changes through normal change-management.
+8. Run OpenSCAP again to verify the resulting compliance state.
+
+That last step is the whole point: OpenSCAP is a feedback loop, not a one-shot fix. You scan, you harden, you scan again, and you keep the evidence.
+
+## Compliance is not application security
+
+OpenSCAP gives you real visibility into the operating system's security configuration, but it is one component of a broader Octane security strategy — not the strategy itself.
+
+Red Hat is explicit that running a configuration compliance scan does not by itself guarantee a compliant system. By the same token, passing an OpenSCAP profile does not guarantee a secure Octane environment. The application layer still needs its own controls:
+
+- Octane authentication and authorization
+- TLS certificates
+- Secrets and credential management
+- Database security
+- Network segmentation
+- Application patching
+- Backup protection
+- Audit logging
+- Integration security
+- Vulnerability management
+
+OpenSCAP answers one question well: **"Does the underlying operating system conform to the selected security configuration baseline?"** It does not replace application-specific security reviews, and it should not be the last word on Octane's posture.
+
+## Conclusion
+
+OpenSCAP gives you a repeatable, auditable method for checking the base operating system that supports an Octane environment. By measuring Linux configuration against standardized security profiles, you can spot hardening gaps, document justified exceptions, and demonstrate that security controls are actually in force.
+
+The discipline that makes it safe is simple: **separate assessment from remediation.** Scan first, understand what the findings mean for Octane, verify compatibility, test changes in a non-production environment, and only then apply approved hardening through change management. Used this way, OpenSCAP strengthens Octane security without introducing unnecessary operational risk — and it gives security, infrastructure, and application teams a shared, evidence-backed language for managing operating-system compliance.

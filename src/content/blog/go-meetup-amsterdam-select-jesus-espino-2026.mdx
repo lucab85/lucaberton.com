@@ -1,0 +1,87 @@
+---
+title: "Go Meetup Amsterdam: A Deep Dive into the select Statement"
+seoTitle: "Go select statement deep dive"
+snippet: "Notes from Jesús Espino's deep dive into Go's select statement at the Go Amsterdam meetup at JetBrains — how it multiplexes channels, avoids goroutine leaks, and common pitfalls."
+description: "Notes from Jesús Espino's deep dive into Go's select statement at the Go Amsterdam meetup at JetBrains — how it multiplexes channels, avoids goroutine leaks, and common pitfalls."
+publishDate: "2026-08-26"
+lastModified: "2026-08-26"
+image:
+  src: "/blog/thumbnails/go-meetup-amsterdam-select-jesus-espino-2026.jpg"
+  alt: "Jesús Espino presenting on the Go select statement at the Go Amsterdam meetup, JetBrains office"
+tags: ["Go", "Golang", "meetup", "Amsterdam", "JetBrains", "concurrency", "channels", "select", "goroutines"]
+category: "Programming"
+author: "Luca Berton"
+draft: true
+---
+
+import EventGallery from "../../components/EventGallery.astro";
+import { Image } from "astro:assets";
+import sel1 from "../../assets/blog/events/go-select-jesus-espino-2026/PXL_20260826_170841906.jpg";
+import sel2 from "../../assets/blog/events/go-select-jesus-espino-2026/PXL_20260826_171017456.jpg";
+import sel3 from "../../assets/blog/events/go-select-jesus-espino-2026/PXL_20260826_171043223.jpg";
+import sel4 from "../../assets/blog/events/go-select-jesus-espino-2026/PXL_20260826_171153984.jpg";
+import sel5 from "../../assets/blog/events/go-select-jesus-espino-2026/PXL_20260826_171232649.jpg";
+import sel6 from "../../assets/blog/events/go-select-jesus-espino-2026/PXL_20260826_171500070.jpg";
+import sel7 from "../../assets/blog/events/go-select-jesus-espino-2026/PXL_20260826_171546133.jpg";
+import sel8 from "../../assets/blog/events/go-select-jesus-espino-2026/PXL_20260826_171629671.jpg";
+import sel9 from "../../assets/blog/events/go-select-jesus-espino-2026/PXL_20260826_171707660.jpg";
+import sel10 from "../../assets/blog/events/go-select-jesus-espino-2026/PXL_20260826_171748721.jpg";
+
+Tonight I attended the **Go Amsterdam meetup** at the JetBrains office in Amsterdam, and one talk stood out for anyone who writes concurrent Go: **Jesús Espino's "Deep dive into the select statement."** The `select` statement is one of those features every Gopher uses but few dig into past the first example, and Jesús took it apart from the ground up.
+
+## Why select Matters
+
+At its core, `select` lets a goroutine wait on multiple channel operations at once. It is the concurrency primitive that turns Go's "share memory by communicating" philosophy into something you can actually build on — multiplexing events, fanning in streams, and building responsive servers.
+
+The shape is deliberately close to a `switch`:
+
+```go
+select {
+case v := <-ch1:
+    fmt.Println("from ch1:", v)
+case ch2 <- 42:
+    fmt.Println("sent to ch2")
+default:
+    fmt.Println("no channel ready")
+}
+```
+
+But the semantics are where the depth lives.
+
+## What Jesús Covered
+
+A few points from the talk that are easy to get wrong in production:
+
+- **Random fair selection.** When several cases are ready, Go picks one at random rather than top-to-bottom. That fairness is a feature — it prevents accidental priority starvation — but it also means you cannot rely on case order.
+- **The `default` case makes select non-blocking.** Without it, `select` blocks until at least one channel is ready. With it, the statement returns immediately if nothing is ready, which is the backbone of polling loops and timeouts.
+- **`time.After` inside a `select` can leak.** A common gotcha: `case <-time.After(...)` allocates a new timer on every iteration. In a long-lived loop that never fires, those timers pile up. Prefer a reusable `time.NewTimer` / `time.NewTicker` you reset or stop.
+- **`nil` channels disable a case.** Setting a channel variable to `nil` removes its case from consideration — a neat trick for dynamically enabling or disabling branches without restructuring the `select`.
+- **`context.Context` is the clean way to cancel.** `case <-ctx.Done():` is how you bail out of a `select` when the work is no longer needed, avoiding goroutine leaks.
+
+The recurring theme: `select` is simple to read and easy to misuse. Most "my goroutine is stuck / my memory is climbing" bugs in concurrent Go trace back to a `select` that never had a way out.
+
+## Takeaway
+
+If you write Go services, the `select` statement is where responsiveness and correctness meet. Treat every `select` as a small state machine: make sure every branch can exit, prefer `context` for cancellation, and watch timer allocations in hot loops. Jesús's deep dive was a good reminder that the language's most elegant concurrency primitive rewards actually understanding it.
+
+## Related Content
+
+- [The Go Programming Language: a practical guide](/blog/go-programming-language-guide-2026/)
+- [Go Meetup Amsterdam: The Curious Case of the Missing Memory](/blog/go-meetup-amsterdam-memory-mohammed-nafees-2026/)
+- [Go Meetup Amsterdam: Staying Passionate in Tech in the Age of AI](/blog/go-meetup-amsterdam-passion-ainsley-clark-2026/)
+- [Go Meetup Amsterdam: Event Recap](/blog/go-meetup-amsterdam-recap-2026/)
+
+<EventGallery
+  images={[
+    { src: sel1, alt: "Go Amsterdam meetup - Jesus Espino on the select statement (photo 1)" },
+    { src: sel2, alt: "Go Amsterdam meetup - Jesus Espino on the select statement (photo 2)" },
+    { src: sel3, alt: "Go Amsterdam meetup - Jesus Espino on the select statement (photo 3)" },
+    { src: sel4, alt: "Go Amsterdam meetup - Jesus Espino on the select statement (photo 4)" },
+    { src: sel5, alt: "Go Amsterdam meetup - Jesus Espino on the select statement (photo 5)" },
+    { src: sel6, alt: "Go Amsterdam meetup - Jesus Espino on the select statement (photo 6)" },
+    { src: sel7, alt: "Go Amsterdam meetup - Jesus Espino on the select statement (photo 7)" },
+    { src: sel8, alt: "Go Amsterdam meetup - Jesus Espino on the select statement (photo 8)" },
+    { src: sel9, alt: "Go Amsterdam meetup - Jesus Espino on the select statement (photo 9)" },
+    { src: sel10, alt: "Go Amsterdam meetup - Jesus Espino on the select statement (photo 10)" },
+  ]}
+/>

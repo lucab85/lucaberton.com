@@ -1,0 +1,85 @@
+---
+title: "Go Meetup Amsterdam: The Curious Case of the Missing Memory"
+seoTitle: "Go missing memory investigation"
+snippet: "Notes from Mohammed Nafees's talk on tracking down missing memory in Go at the Go Amsterdam meetup at JetBrains — garbage collection, retention, and where your bytes go."
+description: "Notes from Mohammed Nafees's talk on tracking down missing memory in Go at the Go Amsterdam meetup at JetBrains — garbage collection, retention, and where your bytes go."
+publishDate: "2026-08-26"
+lastModified: "2026-08-26"
+image:
+  src: "/blog/thumbnails/go-meetup-amsterdam-memory-mohammed-nafees-2026.jpg"
+  alt: "Mohammed Nafees presenting on missing memory in Go at the Go Amsterdam meetup, JetBrains office"
+tags: ["Go", "Golang", "meetup", "Amsterdam", "JetBrains", "memory", "garbage collection", "profiling", "pprof", "performance"]
+category: "Programming"
+author: "Luca Berton"
+draft: true
+---
+
+import EventGallery from "../../components/EventGallery.astro";
+
+import mem1 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_180313592.jpg";
+import mem2 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_180314672.jpg";
+import mem3 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_180321495.jpg";
+import mem4 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_180338313.jpg";
+import mem5 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_180422871.jpg";
+import mem6 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_180542797.jpg";
+import mem7 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_180741721.jpg";
+import mem8 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_180822288.jpg";
+import mem9 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_180947281.jpg";
+import mem10 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_181047314.jpg";
+import mem11 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_181231522.jpg";
+import mem12 from "../../assets/blog/events/go-memory-mohammed-nafees-2026/PXL_20260826_181502776.jpg";
+
+The second talk at the **Go Amsterdam meetup** at JetBrains was **Mohammed Nafees's "The Curious Case of the Missing Memory"** — a forensic look at why a Go process reports far more memory in use than your heap profile suggests. If you have ever stared at a pod OOMKilled while `pprof` swore the heap was tiny, this one was for you.
+
+## The Premise
+
+Go's garbage collector is excellent at reclaiming unreachable objects, but "memory my program uses" is not the same as "memory the GC tracks." The gap between the two is where the mystery lives. Mohammed walked through a real investigation: the process RSS kept climbing, the heap profile looked innocent, and the usual suspect (a leak in your structs) was a red herring.
+
+## Where Memory Actually Goes
+
+A few sources of "missing" memory that don't show up where you first look:
+
+- **The garbage collector's own overhead.** Go keeps a target heap size and lets the live heap grow to it before collecting aggressively. The runtime also retains memory it has freed back to the OS lazily, so RSS can stay high even after objects are collected.
+- **Retention you didn't intend.** A single long-lived slice, map, or channel holding a reference transitively keeps everything behind it alive. The classic case: appending to a slice that occasionally grows, leaving a huge backing array allocated even when most of it is unused.
+- **Cgo and off-heap allocations.** Memory allocated outside Go's managed heap (C libraries, certain syscalls) is invisible to the Go GC and to `pprof`'s heap view.
+- **Stacks and goroutines.** Each goroutine starts with a small stack that grows; a fleet of blocked goroutines adds up.
+- **Fragmentation and large allocations.** Objects over a certain size take a different allocation path, and fragmentation can leave memory unused but not returned.
+
+## The Investigation Toolkit
+
+Mohammed's method was the part worth stealing:
+
+1. Start from `/debug/pprof/heap` and `allocs` — but read them alongside `runtime.MemStats` and the `go tool pprof` `inuse_space` vs `inuse_objects` views.
+2. Compare **RSS** (what the OS sees) against the heap profile (what Go manages). A large gap points to GC overhead, retained-but-idle memory, or off-heap allocations.
+3. Use `GODEBUG=gctrace=1` to watch collection frequency and freed bytes.
+4. For goroutine leaks, `pprof/goroutine` plus a quick `runtime.NumGoroutine()` trend tells the story fast.
+
+The punchline: "missing memory" is rarely magic. It is usually retention, GC accounting, or something off the Go heap entirely — and the toolchain already gives you the evidence if you look at RSS and the heap together.
+
+## Takeaway
+
+Memory bugs in Go are less about the language and more about understanding the boundary between the runtime's view and the operating system's view. Mohammed's talk was a clear, practical case study in reading that boundary instead of guessing.
+
+## Related Content
+
+- [The Go Programming Language: a practical guide](/blog/go-programming-language-guide-2026/)
+- [Go Meetup Amsterdam: A Deep Dive into the select Statement](/blog/go-meetup-amsterdam-select-jesus-espino-2026/)
+- [Go Meetup Amsterdam: Staying Passionate in Tech in the Age of AI](/blog/go-meetup-amsterdam-passion-ainsley-clark-2026/)
+- [Go Meetup Amsterdam: Event Recap](/blog/go-meetup-amsterdam-recap-2026/)
+
+<EventGallery
+  images={[
+    { src: mem1, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 1)" },
+    { src: mem2, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 2)" },
+    { src: mem3, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 3)" },
+    { src: mem4, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 4)" },
+    { src: mem5, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 5)" },
+    { src: mem6, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 6)" },
+    { src: mem7, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 7)" },
+    { src: mem8, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 8)" },
+    { src: mem9, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 9)" },
+    { src: mem10, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 10)" },
+    { src: mem11, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 11)" },
+    { src: mem12, alt: "Go Amsterdam meetup - Mohammed Nafees on missing memory (photo 12)" },
+  ]}
+/>

@@ -1,0 +1,168 @@
+---
+draft: false
+title: "Kubernetes 1.37: What Platform Engineers Should Know"
+seoTitle: "Kubernetes 1.37: What Platform Engineers Should Know"
+snippet: "Kubernetes 1.37 (Garhwal) brings 67 enhancements — metrics API goes stable, HPA scales to zero, gang scheduling hits beta, and DRA matures."
+description: "Kubernetes 1.37 (Garhwal) brings 67 enhancements — metrics API goes stable, HPA scales to zero, gang scheduling hits beta, and DRA matures."
+publishDate: "2026-08-28"
+lastModified: "2026-08-28"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags:
+  - kubernetes
+  - platform-engineering
+  - cloud-native
+  - k8s
+  - "2026"
+  - garhwal
+image:
+  src: "/blog/thumbnails/kubernetes-1-37-garhwal.jpg"
+  alt: "Kubernetes 1.37 Garhwal release features for platform engineers"
+---
+
+## Kubernetes 1.37 (Garhwal): The Platform Engineer's Perspective
+
+Kubernetes v1.37, codenamed **Garhwal** (गढ़वाल) after the Himalayan region of Uttarakhand, India, shipped on August 26, 2026. This release delivers **67 enhancements**: 16 reached Stable, 23 graduated to Beta, 27 entered Alpha, and 1 is a deprecation/removal.
+
+For platform teams the headline isn't a single flagship feature — it's maturity across the board. The metrics API that has quietly powered `kubectl top` for nearly nine years is finally stable, the HorizontalPodAutoscaler can scale workloads all the way to zero, gang scheduling for AI/ML jobs is now beta, and Dynamic Resource Allocation (DRA) is substantially more complete. Here's what I'd actually plan around.
+
+## Stable: The Metrics API Reaches v1
+
+The `metrics.k8s.io` API has been in beta since Kubernetes 1.8. In v1.37 it formally graduates to `metrics.k8s.io/v1`. The API surface is identical to `v1beta1` — same `NodeMetrics` and `PodMetrics` types — so this is a version graduation, not a behavior change.
+
+It serves CPU and memory usage for nodes and pods, and it is the API behind `kubectl top` and resource-metrics-based autoscaling:
+
+```bash
+# Stable endpoint, available once your metrics implementation serves v1
+kubectl get --raw /apis/metrics.k8s.io/v1/nodes
+
+# Per-namespace pod metrics
+kubectl get --raw /apis/metrics.k8s.io/v1/namespaces/default/pods
+```
+
+`kubectl top` already prefers `v1` and falls back to `v1beta1` automatically, so day-to-day usage is unchanged. One caveat worth flagging: the HPA controller still speaks `v1beta1` in v1.37 — discovery-based selection between the two versions is planned but not in this release.
+
+**Why it matters**: the project has been steadily removing permanent beta APIs, and `metrics.k8s.io` was one of the longest-lived. If your monitoring or autoscaling tooling talks to the API directly, you can now adopt the stable version. Keep your implementation (for example [metrics-server](https://github.com/kubernetes-sigs/metrics-server)) serving both `v1` and `v1beta1` during the transition; `v1beta1` remains available in v1.37.
+
+## Stable: KYAML and SELinux-on-Mount
+
+Two more stable graduations that are low-risk but worth knowing:
+
+- **KYAML** reaches Stable. It's a safer, less ambiguous subset of YAML for Kubernetes — every KYAML file is valid YAML, so your existing tooling keeps working. `kubectl get -o kyaml` is now stable (KEP #5295).
+- **SELinuxMount and SELinuxChangePolicy** are Stable and on by default. Volumes now mount with `-o context=<label>` instead of being recursively relabeled, but only when the CSI driver opts in via `.spec.seLinuxMount: true`. Note that a mount carries a single SELinux context, so pods with different labels sharing one volume can now fail to start. Set `.spec.seLinuxChangePolicy: Recursive` on a pod to keep the old behavior. This isn't locked until v1.38, so you can still disable it cluster-wide for one more release.
+
+## Stable: Dynamic Resource Allocation Matures
+
+DRA picked up four Stable graduations in one release, which is a clear signal that specialized hardware (GPUs, accelerators, NICs) is now a first-class citizen:
+
+- **ResourceClaim `.status.devices`** (KEP #4817) lets drivers report per-device status — most importantly a standardized way to publish the IP address a network device received, so other components can wire up secondary network interfaces.
+- **DRA extended resource requests** (KEP #5004): a DRA driver can satisfy a classic extended resource like `abc.example/gpu: 3` without a separate device plugin or a hand-written `ResourceClaim`.
+- **Device taints and tolerations** (KEP #5055): drivers can taint devices (or admins can via a `DeviceTaintRule`), keeping specific hardware out of scheduling.
+- **Standard `numaNode` device attribute** (KEP #6072): `resource.kubernetes.io/numaNode` is now the shared name for NUMA placement, so different drivers' devices can be compared on the same node.
+
+**Why it matters**: if you run GPU or accelerator workloads, DRA is now the path of least resistance for topology-aware, status-aware allocation — and it no longer depends on a sprawl of device plugins.
+
+## Stable: Node Declared Features, Pod Certificates, Storage Version Migrator
+
+Three more stable items that reduce operational friction:
+
+- **Node declared features** (KEP #5328) add `.status.declaredFeatures` to nodes, so the control plane can correctly handle version skew when a cluster mixes node versions.
+- **Pod certificates and ClusterTrustBundles** (KEP #4317, #3257) are Stable: a signer controller watches `PodCertificateRequest` objects and a pod opts in via a `podCertificate` projected volume. This is first-class pod identity distribution.
+- **Storage Version Migrator** (`storagemigration.k8s.io/v1`, KEP #4192) is now built in. Create a declarative `StorageVersionMigration` object and the in-tree controller rewrites existing resources to the new storage version — no more manual `kubectl get`/`replace` scripts or the out-of-tree migrator component.
+
+Plus, **Resilient watch cache initialization** is fully locked on: the API server no longer spikes etcd with list/watch requests at startup, and it safely rejects excess requests with HTTP 429 instead of overloading the control plane.
+
+## Beta: HorizontalPodAutoscaler Scales to Zero
+
+This is the one I'd test first. HPA scale-to-zero (KEP #2021) graduates to Beta and is **enabled by default**. For workloads using *object* or *external* metrics, you can now set `spec.minReplicas: 0` and the workload scales down to zero pods when idle, then restores when demand returns:
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: queue-consumer
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: queue-consumer
+  minReplicas: 0          # scale all the way to zero when idle
+  maxReplicas: 10
+  metrics:
+  - type: External
+    external:
+      metric:
+        name: queue_messages_ready
+      target:
+        type: AverageValue
+        averageValue: "5"
+```
+
+Note the constraint: scaling to zero works for object/external metrics, **not** CPU or memory (those depend on running pods). While held at zero, the HPA records a `ScaledToZero` condition (`True`) so it can distinguish "I scaled this down" from "an admin manually set replicas to 0."
+
+**Why it matters**: real cost savings for queue consumers, batch jobs, and GPU workloads that sit idle between bursts. Design your clients to handle HTTP 429 with backoff regardless — the resilient watch cache work above makes that the expected contract.
+
+## Beta: Gang Scheduling for AI/ML Workloads
+
+Gang scheduling (KEP #4671) graduates to Beta through the Workload API and the `PodGroup` concept. Instead of scheduling pods one at a time — which can deadlock when some pods get placed and others stay pending — it applies an all-or-nothing strategy: the whole group is scheduled only when the cluster has enough capacity.
+
+```yaml
+apiVersion: workload.resource.k8s.io/v1beta1
+kind: PodGroup
+metadata:
+  name: train-job-group
+spec:
+  minMember: 8        # schedule all 8, or none
+```
+
+This release also adds workload-aware preemption (KEP #5710) and `PodGroup` queueing, and it addresses livelock where competing workloads repeatedly preempt each other without progress.
+
+**Why it matters**: if you run training jobs, HPC simulations, or Ray/JobSet/LWS workloads, gang scheduling plus DRA ResourceClaim support for workloads (KEP #5729) means a multi-pod job gets treated as a unit — fewer partial-scheduling deadlocks, better bin-packing.
+
+## Beta: Reliability and Efficiency Plumbing
+
+Several beta graduations are the kind of thing that just makes the control plane healthier:
+
+- **Memory QoS with cgroups v2** (KEP #2570) is on by default, using `memory.min`/`memory.low`/`memory.high` to protect requested memory and throttle above limits. Defaults avoid surprising throttling on upgrade.
+- **Native histogram support** (KEP #5808) for Prometheus metrics — dynamic exponential buckets, exposed alongside classic histograms when the scrape protocol supports it. Better storage and query performance with no dashboard breakage.
+- **Concurrent watch object decode** (KEP #6178) is flipped on by default — up to 10 worker goroutines decode watch events, cutting cache initialization by ~40% (and ~55% combined with etcd RangeStream).
+- **etcd RangeStream** (KEP #5966) streams list results in chunks instead of buffering one large blob — gentler on apiserver and etcd memory at scale (needs etcd 3.7+).
+- **Stale controller mitigation** (KEP #5647) extends to the HPA controller, giving a read-your-writes guarantee so a controller won't reconcile against a stale informer cache.
+- **Manifest-based admission control** (KEP #5793) lets admission webhooks and CEL policies load from disk via `staticManifestsDir`, enforced from API server startup and resilient to etcd being down.
+- **cAdvisor-less, CRI-full stats** (KEP #2371) moves container/pod stats to a single source of truth from the runtime — Beta but off by default behind `PodAndContainerStatsFromCRI`.
+- **Watch-based route controller reconciliation**, **storage capacity scoring**, and **CSI-aware Cluster Autoscaler** integrations all graduate to Beta (off by default where noted).
+- **PVC "last used" tracking** (KEP #5541) adds a `Unused` condition so you can find orphaned PVCs — handy for reclamation.
+
+## Alpha: What to Watch
+
+Alpha is where the next cycle's shape appears. Highlights:
+
+- **StatefulSet Recreate strategy** (KEP #3541) — deletes all pods before recreating, like Deployments. Behind `StatefulSetRecreateStrategy`.
+- **DRA node allocatable resource request**, **derived attributes** (CEL virtual attributes for co-locating GPUs + NICs), and **device compatibility groups** (prevent incompatible MIG/vGPU combos from being allocated together).
+- **Scheduler preemption for in-place pod resize** (KEP #5836) — frees capacity so a deferred in-place resize of a critical pod can succeed.
+- **Dynamic resize of memory-backed volumes** (KEP #6030) — adjust a `medium: Memory` emptyDir `sizeLimit` live, no restart.
+- **CompositePodGroup API** (KEP #6012) for multi-level gang scheduling, plus **Workload Aware Scheduling Controller APIs** (KEP #6089) and a `spec.scheduling` field on `batch/v1` Jobs.
+- **Specialized Node lifecycle conditions** (`DrainInProgress`, `Drained`, `MaintenancePlanned`, etc.) and a **localhost NodePort userspace proxy for nftables**.
+
+## Deprecations and Removals to Plan Around
+
+These are the items that should land on your upgrade checklist:
+
+- **kube-dns** is deprecated. CoreDNS has been the default since 1.13; no new kube-dns packages are expected after v1.40. Migrate now if you're still on it.
+- **kube-proxy ipvs mode** is deprecated. It now logs a startup warning; expect it disabled by default in v1.40 and removed in v1.43. Check your mode with:
+  ```bash
+  kubectl -n kube-system get configmap kube-proxy -o jsonpath='{.data.config\.conf}' | grep 'mode:'
+  ```
+- **`kubectl run --filename/-f`** is deprecated (the pod is built from CLI args).
+- **Static Pods can no longer reference Secrets or ConfigMaps** (the `PreventStaticPodAPIReferences` gate is gone). If you relied on that bug, move those references into the kubelet's static config or a real API-sourced workload.
+- **cgroup v1 support is being phased out.** `failCgroupV1` has defaulted to `true` since v1.35, so the kubelet refuses to start on cgroup v1 nodes unless you override. Memory QoS and in-place memory-backed volume resize *only* work on cgroup v2. Treat the override as short-term.
+
+Two smaller fixes: `maxUnavailable` for StatefulSets is back on by default (a v1.36 bug that could wedge a pod in CrashLoopBackOff is resolved), and kube-proxy's nftables backend now uses netlink directly for better rule-management performance.
+
+## Wrap-Up
+
+v1.37 is a "hardening and maturity" release more than a "big new feature" one. The metrics API going stable closes a nine-year beta chapter, HPA-to-zero and gang scheduling are the most directly useful betas for cost and AI/ML workloads, and the DRA stable-set makes specialized hardware real. The deprecation list — especially ipvs and cgroup v1 — is the part to act on before you upgrade.
+
+As always, validate against your own clusters: enable the betas you want behind their feature gates, test HPA-to-zero on a non-critical workload first, and confirm your kube-proxy mode and cgroup version before bumping the control plane.
+
+The v1.37 release webinar is on September 23, 2026 — a good place to dig into the details with the release team.

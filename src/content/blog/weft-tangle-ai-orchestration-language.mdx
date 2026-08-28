@@ -1,0 +1,111 @@
+---
+draft: false
+title: "Weft + Tangle: Build AI Orchestrations, Not Agents"
+snippet: "Weft is an open-source language for AI orchestration; Tangle is the AI that writes it. Structured graphs you can read, audit, and run at native speed."
+description: "Weft is an open-source language for AI orchestration; Tangle is the AI that writes it. Structured graphs you can read, audit, and run at native speed."
+image: { src: "/blog/thumbnails/weft-tangle-ai-orchestration-language.jpg", alt: "Weft and Tangle: building AI orchestrations instead of one big agent" }
+publishDate: "2026-08-28"
+lastModified: "2026-08-28"
+category: "AI"
+author: "Luca Berton"
+tags: ["weft", "tangle", "AI orchestration", "agents", "restate", "rust", "weavemind"]
+---
+
+I keep seeing the same shape of failure in production AI work. Someone takes a real business process — triage support email, qualify leads, route approvals — and crams the whole thing into a single agent that improvises its way through, holding the entire job, every tool, and all the history in one context. It usually works in the demo and falls apart the moment the task needs to be reliable, auditable, or resumable after a crash.
+
+[Weft](https://github.com/WeaveMindAI/weft) takes the opposite bet. It is an open-source language where LLMs, humans, APIs, and infrastructure are base ingredients, not libraries you bolt on. You describe the shape of the work, the compiler checks the architecture, and you get a graph you can actually read. And the part that makes it usable for non-language-nerds: an AI builder called **Tangle** writes the Weft for you from plain language.
+
+{/* I wrote earlier about Weft's internals — Rust core, Restate durable execution, the type system. This post is about the newer story: Tangle, and why the project argues orchestration beats one big agent. */}
+
+## What Weft Actually Is
+
+In 2026, real software calls LLMs, waits for humans, hits a database, browses the web, and coordinates other agents. Weft makes those things language-level primitives — the way Python has `for` and Rust has `async`. Instead of importing a framework and writing plumbing, you wire nodes together and the compiler validates every connection and type before anything runs.
+
+The same program has two views that stay in sync: dense code for the AI builder (Tangle), and a visual graph for everyone else. Edit either, the other updates.
+
+## Tangle: The AI That Writes the Graph
+
+This is the piece the older Weft posts did not have. **Tangle** is the AI builder that takes a plain-language description and produces a Weft program. You do not learn the syntax to get started — you describe "classify incoming support email, route critical issues to a human, then post to the right Slack channel," and Tangle lays out the nodes and edges.
+
+The framing on the project site is blunt about it: *Tangle wrote the code, the graph is for you.* The AI generates; you read and steer a structure you can see, rather than a blob of generated Python you then have to debug.
+
+## The Core Thesis: Orchestration Beats the Agent
+
+WeaveMind's central argument is that an agent makes one model do the whole job in one context, while orchestration breaks the work into scoped steps with the right computation at each one. They claim four wins:
+
+- **Safer** — a fixed structure runs to a plan set before it starts, so you know what it will do. An open-ended agent can go anywhere.
+- **Smarter** — each step is scoped to its job, so the model is not distracted by the entire task's history and edge cases.
+- **Faster** — the pieces run side by side instead of one worker doing everything in turn.
+- **Cheaper** — you are not re-reading the whole conversation every time the model acts; each piece pays once.
+
+They publish their own benchmark: the same prompt and model, built with Tangle + Weft versus Claude Code writing Python, reportedly finishes in roughly 24 seconds and ~9k tokens against ~90 seconds and ~47k tokens. Treat those as the project's marketing numbers, not independently verified — but the structural point holds regardless of the exact figures: a graph you can see is easier to trust than an agent improvising.
+
+The nuance I like: orchestration does not ban agents. A step can be as open-ended as you want. The difference is you decide the *degree of freedom per step*, like a contract. A bare agent is just one extreme — a single step with the dial maxed and no rules.
+
+## A Concrete Example
+
+The lead-qualification flow from their playground is eight lines of Weft:
+
+```yaml
+leads   = PostgresQuery { sql: "SELECT * FROM leads" }
+qualify = LlmInference (lead: String) { prompt: @file("qualify.md") }
+review  = HumanQuery
+send    = EmailSend
+
+qualify.lead = leads.rows
+review.draft  = qualify.response
+send.body    = review.approved
+```
+
+Pull leads, let the model qualify each one, pause for a human to approve the draft, then send the email — and the compiler reasons about the orchestration, so a broken system is caught before it runs.
+
+The same system in Python is around 90 lines: database imports, a cursor, retry loops on rate limits, JSON-repair fallbacks, and a decision step that has to poll or webhook a reviewer. The Weft version is not just shorter; the AI writes it in a fraction of the tokens, so it builds faster and gets more right.
+
+## How It Runs
+
+Weft compiles the high-level graph to native **Rust**, so it executes at full speed rather than crawling through an interpreter like older visual tools. You run it with one command:
+
+```bash
+weft run outreach.wft
+```
+
+The build does type-checking, compiles to native Rust, provisions any infrastructure the nodes need, and starts listening for triggers.
+
+Two technical decisions are worth calling out:
+
+- **Durable execution via [Restate](https://restate.dev).** A human approval that takes three days uses the same code as one that takes three seconds. The program pauses, persists its state, and resumes exactly where it left off — across crashes and restarts. No webhooks, no polling, no state management you write yourself.
+- **Infrastructure as nodes.** Drop in a Matrix server node and Weft stands up the chat server; drop in a local-LLM node and it brings the GPU model server. Jobs that take experts days happen on their own, and tear down when done. No YAML, no DevOps — one expert wraps the hard thing once, everyone else drops in the node.
+
+## Where It Stands (Be Honest)
+
+Weft is **early and open about it**. The README calls it a proof of concept and says to treat it as a foundation to build on, not a finished product. Breaking changes are expected. The maintainer is rebuilding the engine in an `mvp` branch with a planned release around August 2026, and is building in public.
+
+What is real today:
+
+- The language, type system, and durable executor are the stable parts.
+- The node catalog is small but covers LLM, code, communication (Discord, Slack, Telegram, WhatsApp, Email, X), storage (Postgres), enrichment (web search, Apollo), flow (gate, human query), and triggers (cron, webhooks).
+- It is open source under the **O'Saasy license** — MIT with a SaaS restriction: you can use, modify, and self-host freely, but you cannot offer it as a competing hosted service.
+- The repo has about **1.9k stars** and is actively developed.
+
+What gives me pause:
+
+- New-language adoption is brutally hard; ecosystems, not syntax, decide survival.
+- The catalog is too small for serious production use — you will hit walls quickly.
+- The O'Saasy restriction may limit enterprise adoption compared to pure MIT or Apache.
+- It is entirely possible that Restate + your existing language (TypeScript, Python) already delivers most of this without learning a new syntax.
+
+## My Take
+
+If you are building AI agent workflows with human-in-the-loop steps and durability constraints, Weft is worth watching — especially now that Tangle lowers the entry bar from "learn a new language" to "describe what you want." The orchestration-over-agent thesis is the right instinct: structure you can see beats an agent improvising.
+
+For everyone else, the library-based approaches in the language you already use are probably the pragmatic choice, at least until Weft's ecosystem and MVP mature. But the direction is correct, and the team is shipping in the open.
+
+---
+
+**Related Resources:**
+
+- [Weft on GitHub](https://github.com/WeaveMindAI/weft)
+- [Weft Documentation](https://weavemind.ai/docs)
+- [Restate — Durable Execution](https://restate.dev)
+- [Weft: The Language Where LLMs and Agents Are Primitives](/blog/weft-programming-language-ai-agents-durable-execution/)
+- [Agentic AI in Enterprise: Patterns, Pitfalls, and Production Readiness](/blog/agentic-ai-enterprise-kubernetes/)

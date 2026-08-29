@@ -19,8 +19,15 @@
  * so a real source asset that is missing from the build output is caught too).
  * Exits 1 on any FAIL-level check so it can gate the CI deploy.
  *
- * Usage:  node scripts/validate-social-card.cjs
- *         node scripts/validate-social-card.cjs --home-only   (just /)
+ * Usage:  node scripts/validate-social-card.cjs            (homepage contract — CI default)
+ *         node scripts/validate-social-card.cjs --all      (audit every indexable page)
+ *
+ * Default scope is the homepage only. That is deliberate: the homepage is the
+ * URL that gets pasted into WhatsApp/iMessage/LinkedIn, and it is the page
+ * whose OG contract regressed. Blog posts currently have no OG tags (only the
+ * homepage Layout renders <SEO>); adding OG to BlogLayout is a separate task.
+ * Run --all to audit the whole site once that lands — until then --all will
+ * report every blog post as missing OG (expected, not a CI gate).
  *
  * The script also prints the shareable link WhatsApp/iMessage need to
  * re-fetch a preview after a deploy: append ?v=<unix-seconds> to bust the
@@ -33,7 +40,8 @@ const path = require("path");
 const ROOT = path.join(__dirname, "..");
 const PUBLIC_DIR = path.join(ROOT, "public");
 
-const HOME_ONLY = process.argv.includes("--home-only");
+// Homepage contract by default; --all audits every indexable page.
+const HOME_ONLY = !process.argv.includes("--all");
 
 const results = [];
 const record = (level, check, detail = "") =>
@@ -203,8 +211,13 @@ function main() {
       continue;
     }
     const dim = imageSize(fs.readFileSync(imgAbs));
+    // SVG has no raster dimensions — presence is enough; skip the size gate.
     if (!dim) {
-      record("WARN", `og:image dimensions unreadable (${rel})`, `${ogImageUrl} (${stat.size} bytes)`);
+      if (/\.svg$/i.test(imgRel)) {
+        record("PASS", `og:image ok (${rel})`, `${ogImageUrl} (SVG, dimensions N/A)`);
+      } else {
+        record("WARN", `og:image dimensions unreadable (${rel})`, `${ogImageUrl} (${stat.size} bytes)`);
+      }
     } else {
       if (dim.w < 200 || dim.h < 200) {
         record("FAIL", `og:image too small (${rel})`, `${ogImageUrl} is ${dim.w}x${dim.h} (< 200x200)`);

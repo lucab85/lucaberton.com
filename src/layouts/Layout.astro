@@ -7,6 +7,9 @@ import AnnouncementBanner from "@components/AnnouncementBanner.astro";
 import WebVitals from "@components/WebVitals.astro";
 import InteractionTracker from "@components/InteractionTracker.astro";
 import StickyCta from "@components/StickyCta.astro";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import "../styles/global.css";
 
 export interface Props {
@@ -66,9 +69,19 @@ if (!canonicalURL.endsWith('/')) {
 const resolvedImageWithDomain = new URL("/opengraph.jpg", siteOrigin).toString();
 const { title, description: customDescription, image: customImage, noindex, minimalChrome = false } = Astro.props;
 
-// Use custom image if provided (e.g. blog post hero), otherwise default
-const ogImage = customImage 
-  ? (customImage.startsWith('http') ? customImage : new URL(customImage, siteOrigin).toString())
+// Use custom image if provided (e.g. blog post hero), otherwise default.
+// Guard: a custom image that does NOT exist in the build output (a missing
+// static/ asset) would make the OG image 404 and link previews (WhatsApp /
+// iMessage / LinkedIn) render as a bare link. Fall back to the global
+// branded opengraph.jpg in that case so every shared URL gets a valid card.
+const STATIC_DIR = fileURLToPath(new URL("../../static/", import.meta.url));
+const customImageResolves =
+  !!customImage &&
+  (customImage.startsWith("http") ||
+    customImage.startsWith("/_astro/") ||
+    existsSync(join(STATIC_DIR, customImage)));
+const ogImage = customImageResolves
+  ? (customImage.startsWith("http") ? customImage : new URL(customImage, siteOrigin).toString())
   : resolvedImageWithDomain;
 
 // Smart title: use short suffix to keep under 60 chars, or no suffix if still too long

@@ -1,0 +1,108 @@
+---
+draft: false
+title: "PostgreSQL Is More Than Relational: ldap-pg"
+seoTitle: "PostgreSQL Beyond Relational: ldap-pg"
+snippet: "PostgreSQL is more than a relational database. The ldap-pg project runs an LDAP directory on a PostgreSQL backend using JSONB and JSONPATH — here is how."
+description: "PostgreSQL is more than a relational database. The ldap-pg project runs an LDAP directory on a PostgreSQL backend using JSONB and JSONPATH — here is how."
+image: { src: "/blog/thumbnails/postgresql-beyond-relational-ldap-pg.jpg", alt: "PostgreSQL beyond relational: running LDAP on a JSONB backend with ldap-pg" }
+publishDate: "2026-08-29"
+lastModified: "2026-08-29"
+category: "database"
+author: "Luca Berton"
+tags: ["postgresql", "database", "ldap", "jsonb", "open-source"]
+---
+
+## PostgreSQL Is More Than a Relational Database
+
+We still introduce PostgreSQL as "the open-source relational database." That sentence is true and it is also underselling the platform by a wide margin. Inside one PostgreSQL instance you can already run a cache, a vector store, a full-text search engine, a geospatial database, a job scheduler, and a document store — without leaving the database you already operate, back up, and monitor.
+
+The proof is not theoretical. A project called [ldap-pg](https://github.com/openstandia/ldap-pg) implements a full LDAP server whose entire backend is PostgreSQL. It stores directory entries as JSONB and answers LDAP search filters with PostgreSQL JSONPATH queries. If PostgreSQL can back an LDAP directory, the "it is just SQL tables" label has well and truly expired.
+
+## Six Jobs PostgreSQL Already Does
+
+The short version of what the platform ships with today:
+
+- **Caches** — `UNLOGGED` tables give you fast, write-light storage that skips the WAL when you do not need durability.
+- **Vector databases** — `pgvector` adds embedding types and nearest-neighbour search for retrieval-augmented workloads.
+- **Full-text search** — `tsvector` and `tsquery` deliver ranked search without standing up a second system.
+- **Geospatial** — PostGIS turns PostgreSQL into a full spatial database with indexes and functions.
+- **Cron and scheduling** — `pg_cron` runs jobs inside the database, on the database clock.
+- **NoSQL** — `JSONB` is a native binary JSON type with GIN indexes and a JSONPATH query language.
+
+Slide six is the one people argue with, so it deserves the deepest look. PostgreSQL has been a competent document store since `JSONB` landed in 9.4, and the JSONPATH engine added in 12 made it a real query language rather than a string match.
+
+## ldap-pg: An LDAP Server on a PostgreSQL Backend
+
+[ldap-pg](https://github.com/openstandia/ldap-pg) is an LDAP server implementation that uses PostgreSQL as its storage engine. It speaks the LDAP protocol on the wire and persists every entry into a PostgreSQL schema it creates and indexes automatically on first run. The project is written in Go and licensed under GPL-2.0.
+
+What it supports today:
+
+- Bind with `PLAIN`, `SSHA`, `SSHA256`, `SSHA512`, and pass-through authentication using the `{SASL}user@domain` format.
+- Search scopes `base`, `one`, `sub`, and `children`, plus `Add`, `Modify`, `Delete`, and `ModifyDN`.
+- The `memberOf` association, the way OpenLDAP's memberOf overlay works, returned as an operational attribute and usable directly in search filters.
+- A simple ACL for authorization and an account-lock password policy.
+- Automatic table and index creation in PostgreSQL on startup.
+
+It requires **PostgreSQL 12 or later**, which matters for the next section: JSONPATH, the feature that makes the storage model clean, arrived in exactly that release.
+
+## How ldap-pg Stores a Directory
+
+The clever part is the storage model. ldap-pg uses a hybrid design: a generic table holds each entry, and the entry's attributes live in a single `JSONB` column. A separate association table maintains relationships such as `member` and `memberOf`.
+
+Because the attributes are JSONB, every LDAP entry — whatever its object classes and however many attributes it carries — fits the same table. There is no schema migration every time you add a custom attribute. The directory schema is data, not DDL.
+
+## Querying LDAP Filters with JSONPATH
+
+When an LDAP client issues a search, ldap-pg translates the filter into a JSONPATH predicate against that `JSONB` column. The technique looks like this:
+
+```sql
+-- ldap-pg answers an LDAP search filter by querying the JSONB column
+SELECT id, data
+FROM ldap_entries
+WHERE data @? '$.objectClass[*] ? (@ == "person")'
+  AND data @? '$.cn ? (@ like_regex "luca" flag "i")';
+```
+
+The `@?` operator tests a JSONPATH predicate and returns a boolean. `like_regex` is a JSONPATH filter expression, so a substring or case-insensitive match becomes a single indexed predicate instead of a text scan. That is the "NoSQL" capability of PostgreSQL doing real work: a document-shaped query answered by a relational engine, on indexed JSON.
+
+## Quick Start
+
+Start PostgreSQL, then point ldap-pg at it. The server creates its own tables and indexes on first launch.
+
+```bash
+docker run --rm -d \
+  -e POSTGRES_DB=testdb \
+  -e POSTGRES_USER=testuser \
+  -e POSTGRES_PASSWORD=testpass \
+  -p 35432:5432 \
+  postgres:13-alpine \
+  -c log_destination=stderr \
+  -c log_statement=all \
+  -c log_connections=on \
+  -c log_disconnections=on \
+  -c jit=off
+```
+
+```bash
+ldap-pg -h localhost -u testuser -w testpass -d testdb -s public \
+  -suffix dc=example,dc=com -root-dn cn=Manager,dc=example,dc=com -root-pw secret \
+  -log-level info
+```
+
+ldap-pg listens on `127.0.0.1:8389` by default. You can import a standard LDIF with ordinary LDAP tooling:
+
+```bash
+ldapadd -H ldap://localhost:8389 -x -D cn=manager,dc=example,dc=com -w secret -f base.ldif
+```
+
+## Production Reality Check
+
+Be honest about maturity. The README states the project is heavily under development, and several capabilities are still unchecked: `Compare`, `Extended` operations, the Sort control, more schema processing, table auto-migration, and **SSL/StartTLS** are not done yet. For an internet-facing directory without transport encryption, that is a hard stop.
+
+Where it fits today: internal tooling, homelab identity stores, migration experiments, and learning how a directory maps onto a relational backend. It is a clean demonstration of the point, not a drop-in replacement for a hardened OpenLDAP or FreeIPA deployment.
+
+## Conclusion
+
+PostgreSQL stopped being "just a relational database" years ago. The six capabilities on that slide — caches, vectors, search, geospatial, scheduling, and document storage — are all native, production-grade features of the engine you already run. ldap-pg is the most striking example: an LDAP directory, completely backed by PostgreSQL, with JSONB and JSONPATH doing the heavy lifting on slide six.
+
+The next time someone says "we need a separate datastore for that," check the PostgreSQL feature list first. The answer is very often already installed.

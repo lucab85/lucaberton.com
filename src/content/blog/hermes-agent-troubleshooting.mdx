@@ -2,10 +2,10 @@
 draft: false
 title: "Hermes Agent Troubleshooting: Fix Model, Provider, Gateway & Credential Errors"
 seoTitle: "Hermes Agent Troubleshooting Guide"
-snippet: "Model 404, auth failed, credit paused, retries exhausted, silent Discord bot? Diagnostic flow and exact Hermes commands to fix every Hermes Agent error."
-description: "Hermes Agent troubleshooting guide: fix model-not-found 404s, provider retry failures, empty responses, subscription credit pauses, provider authentication failures, credential pool issues, and gateway problems with exact commands."
+snippet: "Model 404, auth failed, credit paused, rate-limited, gateway shutting down, retries exhausted, silent Discord bot? Diagnostic flow and exact Hermes commands to fix every Hermes Agent error."
+description: "Hermes Agent troubleshooting guide: fix model-not-found 404s, provider retry failures, empty responses, rate-limit (HTTP 429) blocks, subscription credit pauses, provider authentication failures, credential pool issues, and gateway problems with exact commands."
 publishDate: "2026-07-31"
-lastModified: "2026-08-24"
+lastModified: "2026-09-01"
 image:
   src: "/blog/thumbnails/hermes-agent-troubleshooting.svg"
   alt: "Hermes Agent troubleshooting flow: diagnose, fix model, credentials, and gateway"
@@ -18,6 +18,8 @@ tags:
   - "AI Agents"
   - "Discord"
 faq:
+  - question: "Why does Hermes say 'The model provider is rate-limiting requests'?"
+    answer: "The provider returned an HTTP 429 Too Many Requests response. Hermes surfaces this directly instead of retrying silently. It means your requests are exceeding the provider's quota/rate window. Inspect the gateway log for the rate-limit detail: grep -i '429\\|rate' ~/.hermes/logs/gateway.log. With credential pools, exhaustion on every key in the pool produces this too. Clear an exhaustion flag with 'hermes auth reset PROVIDER', then switch models with 'hermes model' or pause and retry once the rate window resets."
   - question: "Why does Hermes say 'the model provider failed after retries'?"
     answer: "Hermes called the LLM, the call failed, and the built-in retry loop gave up. The raw provider error is kept out of chat for privacy and written to the gateway logs instead. Check the logs with 'grep -i error ~/.hermes/logs/gateway.log' and then inspect your credential pool with 'hermes auth list' or switch models with 'hermes model'."
   - question: "Why does Hermes say 'Provider authentication failed' when provider is nous?"
@@ -25,7 +27,7 @@ faq:
   - question: "Why do I get 'HTTP 404: Model not found'?"
     answer: "The exact model string Hermes is configured to use is not in its model map or the provider catalog. This usually means the model was deprecated or renamed (common with free tiers), there is a typo, or the provider is set wrong. Run 'hermes model' to pick a currently valid model."
   - question: "My Hermes cron job fails with a model 404 — why?"
-    answer: "A per-job model override set at creation time does not follow the profile default afterwards. If that model disappears from the catalog, the job keeps 404-ing. Fix it with 'hermes cron list' then 'hermes cron edit <job_id>' to update or clear the override."
+    answer: "A per-job model override set at creation time does not follow the profile default afterwards. If that model disappears from the catalog — including when a free-tier model's free period ends (HTTP 404: This model's free period has ended) — the job keeps 404-ing. Fix it with 'hermes cron list' then 'hermes cron edit <job_id>' to update or clear the override."
   - question: "The Discord bot is silent — what is wrong?"
     answer: "Most often the Message Content Intent is disabled. Enable it under Bot → Privileged Gateway Intents in the Discord developer portal, then restart the gateway with 'hermes gateway restart'."
   - question: "Why does Hermes say 'The model declined to respond' (safety refusal)?"
@@ -71,14 +73,14 @@ grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
 
 The files you will care about most:
 
-| What | Location |
-|------|----------|
-| Main config | `~/.hermes/config.yaml` |
-| Secrets / API keys | `~/.hermes/.env` |
-| Gateway + error logs | `~/.hermes/logs/` |
-| Credential pools (OAuth + keys) | `~/.hermes/auth.json` |
-| Session store (SQLite + FTS5) | `~/.hermes/state.db` |
-| Skills | `~/.hermes/skills/` |
+| What                            | Location                |
+| ------------------------------- | ----------------------- |
+| Main config                     | `~/.hermes/config.yaml` |
+| Secrets / API keys              | `~/.hermes/.env`        |
+| Gateway + error logs            | `~/.hermes/logs/`       |
+| Credential pools (OAuth + keys) | `~/.hermes/auth.json`   |
+| Session store (SQLite + FTS5)   | `~/.hermes/state.db`    |
+| Skills                          | `~/.hermes/skills/`     |
 
 A key diagnostic principle: **configuration and authentication are separate**.
 A valid `config.yaml` can point at the correct provider while the credential
@@ -282,6 +284,57 @@ hermes model                # switch to a different model or provider
 If the error is intermittent, move to a different provider and let the pool
 rotate. If it is constant, inspect auth first, then the model id and `base_url`.
 
+### "The model provider is rate-limiting requests" (HTTP 429)
+
+This is a **rate-limit** response, not a retry-exhaustion or auth failure.
+The provider returned HTTP 429 Too Many Requests — your request volume has
+exceeded the provider's quota or rate window for the selected model/key:
+
+> ⏱️ The model provider is rate-limiting requests. Please wait a moment and
+> try again.
+
+It is surfaced directly rather than retried silently, because retrying a
+429 against the same credential only extends the block.
+
+Diagnose it:
+
+```bash
+grep -i "429\|rate" ~/.hermes/logs/gateway.log | tail -20
+hermes auth list        # look for "rate-limited" or "exhausted" on a pool member
+```
+
+With credential pools, this message frequently appears when _every_ key in the
+pool is simultaneously rate-limited or exhausted. The usual causes:
+
+- **Burst overage** — sent more requests in a short window than the provider allows.
+- **Exhausted pool** — all pooled keys share the same rate limit and are locked out together.
+- **Free-tier rate caps** — free models often have stricter per-window limits than paid tiers.
+
+Fixes, in order of preference:
+
+1. **Wait for the rate window to reset**, then retry.
+2. **Clear a stale exhaustion flag** on the pool member:
+   ```bash
+   hermes auth reset PROVIDER
+   ```
+3. **Rotate to a fresh key** or add one (pools rotate automatically when a
+   member is marked exhausted):
+   ```bash
+   hermes auth add PROVIDER
+   ```
+4. **Switch models** to one with a higher rate ceiling:
+   ```bash
+   hermes model      # pick a currently-listed model
+   ```
+5. **Switch providers entirely** for the session:
+   ```bash
+   hermes model      # choose a different provider
+   ```
+
+A practical rule: a single 429 is a timing signal (back off and retry later).
+Repeated 429s point to a credential-pool problem — add a fresh key or move
+providers rather than hammering the same exhausted endpoint.
+
 ### Choosing a Nous Portal model without creating another failure
 
 Run:
@@ -297,15 +350,15 @@ change over time.
 
 On **August 23, 2026**, the selector included these free models:
 
-| Free model | Cost shown by CLI |
-|------------|-------------------|
-| `stealth/ox-alpha` | free |
-| `upstage/solar-pro4:free` | free |
-| `meituan/longcat-2.0:free` | free |
-| `tencent/hy3:free` | free |
-| `poolside/laguna-s-2.1:free` | free |
-| `stepfun/step-3.7-flash:free` | free |
-| `poolside/laguna-xs-2.1:free` | free |
+| Free model                    | Cost shown by CLI |
+| ----------------------------- | ----------------- |
+| `stealth/ox-alpha`            | free              |
+| `upstage/solar-pro4:free`     | free              |
+| `meituan/longcat-2.0:free`    | free              |
+| `tencent/hy3:free`            | free              |
+| `poolside/laguna-s-2.1:free`  | free              |
+| `stepfun/step-3.7-flash:free` | free              |
+| `poolside/laguna-xs-2.1:free` | free              |
 
 The same selector also exposed paid models across Anthropic, OpenAI, Google,
 xAI, DeepSeek, Qwen, Moonshot AI, MiniMax, Z.ai, Xiaomi, Tencent, StepFun,
@@ -365,6 +418,43 @@ For scheduled jobs, the model override is set at creation time and **does not**
 follow the profile default afterwards. A model that disappears from the catalog
 will keep 404-ing until you edit the job.
 
+#### Cron failure: "This model's free period has ended"
+
+A cron job that targets a **free-tier model** can fail with a provider-specific
+404 whose body reads:
+
+> ⚠️ Cron 'Daily SEO agent batch (all 11 sites)' failed: HTTP 404: This model's
+> free period has ended. Please select a different model to continue!
+
+The model slug was valid when the job was created, but the provider rotated it
+out of the free tier (or ended its free period) while the job kept the old
+pinned model. Because per-job overrides don't follow profile defaults, the
+job continues pointing at the now-gone free model.
+
+Fix it:
+
+```bash
+hermes cron list                          # find the failing job
+hermes cron edit <job_id>                 # update the model, or clear the override
+hermes cron edit <job_id> --model ""      # clear override -> falls back to profile default
+```
+
+When re-editing, pick from the **current** `hermes model` menu rather than
+re-typing an old slug, then smoke-test in the CLI before trusting it in the
+scheduler:
+
+```bash
+hermes model                              # pick a currently-listed model
+```
+
+A robust preventative pattern: give free-tier cron jobs a fallback chain so a
+rotated model rolls to a paid or alternate provider instead of hard-failing:
+
+```bash
+hermes fallback add   # append a provider + model to the chain
+hermes fallback list  # inspect the chain
+```
+
 ### The model declined to respond (safety refusal)
 
 This one is different from the failures above. The request reaches the model,
@@ -419,7 +509,7 @@ is not a guarantee. If every provider refuses the same prompt, rephrase it.
 
 ### "Model returned no content after all retries" (empty response)
 
-This is different from the two failures above. The request *succeeds* at the HTTP level — no thrown error, no refusal text — but the model comes back with an empty completion. Hermes retries (you will see "Empty response from model — retrying (1/3)" … "(3/3)"), and when every attempt returns nothing it surfaces:
+This is different from the two failures above. The request _succeeds_ at the HTTP level — no thrown error, no refusal text — but the model comes back with an empty completion. Hermes retries (you will see "Empty response from model — retrying (1/3)" … "(3/3)"), and when every attempt returns nothing it surfaces:
 
 > Model returned no content after all retries. No fallback providers configured.
 
@@ -427,8 +517,8 @@ The second half of that message is the actionable hint: because no fallback chai
 
 How it differs from the other two:
 
-- vs **"provider failed after retries"** — that is a *thrown* error or non-200 from upstream. This is a *successful* call that returned an empty body.
-- vs **"model declined to respond"** — that is an explicit refusal *with* explanation text. This is empty: no answer and no refusal message.
+- vs **"provider failed after retries"** — that is a _thrown_ error or non-200 from upstream. This is a _successful_ call that returned an empty body.
+- vs **"model declined to respond"** — that is an explicit refusal _with_ explanation text. This is empty: no answer and no refusal message.
 
 Common causes:
 
@@ -452,7 +542,7 @@ Fix it:
 
 ### "Credit access paused — run /topup" (subscription credits)
 
-This is a Nous Portal *billing* state, not a model or credential error. When your Portal credits are exhausted or paused, inference is blocked before it reaches a model and you see:
+This is a Nous Portal _billing_ state, not a model or credential error. When your Portal credits are exhausted or paused, inference is blocked before it reaches a model and you see:
 
 > ✕ Credit access paused · run /topup to top up
 
@@ -470,7 +560,7 @@ hermes portal status   # quick billing/auth health check
 
 ### "Provider authentication failed"
 
-This is a *credential* rejection from the provider (typically HTTP 401/403 at auth), distinct from "provider failed after retries," which is about transient or 5xx errors. The message is explicit:
+This is a _credential_ rejection from the provider (typically HTTP 401/403 at auth), distinct from "provider failed after retries," which is about transient or 5xx errors. The message is explicit:
 
 > ⚠️ Provider authentication failed. Check the configured credentials; raw provider details are in the gateway logs.
 
@@ -570,6 +660,44 @@ systemctl --user reset-failed hermes-gateway
 Control commands: `hermes gateway status`, `hermes gateway restart`,
 `hermes gateway setup`.
 
+**Gateway shutting down mid-task:**
+
+```text
+⚠️ Gateway shutting down — Your current task will be interrupted.
+```
+
+This is **not** a crash. The gateway received a stop/shutdown signal (for
+example a `hermes gateway restart`, a service-manager stop, or a host-level
+event such as OOM-killer, a restart of the host, or a systemd unit restart)
+while a request was in flight. The in-progress task is cancelled so the
+process can exit cleanly.
+
+Diagnose it:
+
+```bash
+systemctl --user status hermes-gateway   # was it stopped / is it restarting?
+journalctl --user -u hermes-gateway --since "5 min ago" | grep -i "stop\|shutdown"
+grep -i "shutting" ~/.hermes/logs/gateway.log | tail -10
+```
+
+Fixes:
+
+- If the gateway is simply restarting, wait for it to come back, then resend
+  the request — long-running work is not automatically resumed; you must
+  restart it in the new session.
+- If a memory limit is killing the process, raise it:
+  ```bash
+  # for a systemd user service, override the memory ceiling
+  systemctl --user edit hermes-gateway
+  # then add:
+  # [Service]
+  # MemoryMax=2G
+  systemctl --user restart hermes-gateway
+  ```
+- Schedule restarts during quiet windows (use `/restart` or
+  `hermes gateway restart`) rather than letting the OS decide, so in-flight
+  tasks are not lost unexpectedly.
+
 ## Tools and skills not available
 
 A tool or skill you expect is missing from the running session.
@@ -588,12 +716,12 @@ prompt caching.
 
 ## Config changes not taking effect
 
-| Change type | Action |
-|-------------|--------|
-| Gateway config | `/restart` (slash command) |
-| CLI config | exit and relaunch `hermes` |
-| Tools / skills | `/reset` (new session) |
-| Code changes | restart the CLI or gateway process |
+| Change type      | Action                                                    |
+| ---------------- | --------------------------------------------------------- |
+| Gateway config   | `/restart` (slash command)                                |
+| CLI config       | exit and relaunch `hermes`                                |
+| Tools / skills   | `/reset` (new session)                                    |
+| Code changes     | restart the CLI or gateway process                        |
 | Nous OAuth login | authenticate, then restart long-running gateway if needed |
 
 One exception worth flagging: `security.redact_secrets` is snapshotted at import
@@ -602,7 +730,7 @@ the running process. Change it in `config.yaml` and start a new session.
 
 ## Auxiliary models (vision, compression, session_search)
 
-If vision analysis, context compression, or session search fail *silently*, the
+If vision analysis, context compression, or session search fail _silently_, the
 `auto` provider cannot find a backend. Fix it by providing a key or pinning each
 auxiliary task explicitly:
 
@@ -623,7 +751,7 @@ hermes config set auxiliary.vision.model <model_name>
 # config.yaml
 stt:
   enabled: true
-  provider: local     # local | groq | openai | mistral
+  provider: local # local | groq | openai | mistral
 ```
 
 `local` needs `pip install faster-whisper` (free, no key). Otherwise set the
@@ -650,21 +778,24 @@ When you have isolated the problem but still need help:
 
 ## Quick reference: error to action
 
-| Symptom | First command | Likely fix |
-|---------|---------------|------------|
-| `Provider authentication failed` + `provider: nous` | `hermes portal info` | if `Auth: not logged in`, run `hermes portal` |
-| Nous model configured, Discord still fails auth | check gateway Linux user | authenticate in that user's `~/.hermes` and restart gateway |
-| "model provider failed after retries" | `hermes auth list` / `hermes portal info` | refresh auth, rotate key, or switch model |
-| "HTTP 404: Model 'X' not found" | `hermes model` | pick a model that exists in the current catalog |
-| old free model stopped working | `hermes model` | select a currently listed `:free` model |
-| cron job fails on model 404 | `hermes cron edit <id>` | update the per-job model override |
-| gateway silent on Discord | check Bot intents | enable Message Content Intent |
-| gateway dies after SSH logout | `loginctl enable-linger` | keep user service alive |
-| tool/skill missing | `hermes tools` / `/skill` | enable, then `/reset` |
-| config change ignored | `/restart` or relaunch | new session / process |
-| aux vision/compression broken | `hermes config set auxiliary.*` | set provider or key |
-| Copilot 403 | `hermes model` → GitHub Copilot | use device-code OAuth, not `gh` token |
-| "The model declined to respond" (safety refusal) | `hermes fallback add` | rephrase, switch model, or set a fallback chain |
-| "Model returned no content after all retries" | `hermes fallback add` | add a fallback chain, or switch/smoke-test the model |
-| "Credit access paused — run /topup" | `hermes portal open` | top up at portal.nousresearch.com; credit restores automatically |
-| "Provider authentication failed" | `hermes auth list` | refresh/re-add credential; check gateway logs for raw error |
+| Symptom                                             | First command                             | Likely fix                                                       |
+| --------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------- |
+| `Provider authentication failed` + `provider: nous` | `hermes portal info`                      | if `Auth: not logged in`, run `hermes portal`                    |
+| Nous model configured, Discord still fails auth     | check gateway Linux user                  | authenticate in that user's `~/.hermes` and restart gateway      |
+| "model provider failed after retries"               | `hermes auth list` / `hermes portal info` | refresh auth, rotate key, or switch model                        |
+| "The model provider is rate-limiting requests"      | `grep -i 429 ~/.hermes/logs/gateway.log`  | wait for window reset, `hermes auth reset`, switch models        |
+| "Gateway shutting down — task interrupted"          | `systemctl --user status hermes-gateway`  | wait for restart, resend; raise MemoryMax if OOM                 |
+| "HTTP 404: Model 'X' not found"                     | `hermes model`                            | pick a model that exists in the current catalog                  |
+| old free model stopped working                      | `hermes model`                            | select a currently listed `:free` model                          |
+| cron job fails on model 404                         | `hermes cron edit <id>`                   | update the per-job model override                                |
+| cron "free period has ended"                        | `hermes cron edit <id>`                   | update pinned model + add a fallback chain                       |
+| gateway silent on Discord                           | check Bot intents                         | enable Message Content Intent                                    |
+| gateway dies after SSH logout                       | `loginctl enable-linger`                  | keep user service alive                                          |
+| tool/skill missing                                  | `hermes tools` / `/skill`                 | enable, then `/reset`                                            |
+| config change ignored                               | `/restart` or relaunch                    | new session / process                                            |
+| aux vision/compression broken                       | `hermes config set auxiliary.*`           | set provider or key                                              |
+| Copilot 403                                         | `hermes model` → GitHub Copilot           | use device-code OAuth, not `gh` token                            |
+| "The model declined to respond" (safety refusal)    | `hermes fallback add`                     | rephrase, switch model, or set a fallback chain                  |
+| "Model returned no content after all retries"       | `hermes fallback add`                     | add a fallback chain, or switch/smoke-test the model             |
+| "Credit access paused — run /topup"                 | `hermes portal open`                      | top up at portal.nousresearch.com; credit restores automatically |
+| "Provider authentication failed"                    | `hermes auth list`                        | refresh/re-add credential; check gateway logs for raw error      |

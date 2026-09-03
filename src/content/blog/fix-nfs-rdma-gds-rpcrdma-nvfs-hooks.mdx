@@ -1,0 +1,190 @@
+---
+draft: false
+title: "Fix NFS over RDMA: When libcufile_rdma.so Is Not Your Problem"
+seoTitle: "Fix NFS over RDMA: libcufile_rdma.so vs rpcrdma.ko GDS Hooks"
+snippet: "Mounting NFS via kernel? libcufile_rdma.so is user-space GDS and irrelevant. The real issue is rpcrdma.ko built without nvfs DMA hooks."
+description: "NFS over RDMA + GDS: libcufile_rdma.so is user-space and doesn't affect kernel mounts. Check rpcrdma.ko for nvfs DMA hooks (rpcrdma_register_nvfs_dma_ops)."
+publishDate: "2026-09-01"
+lastModified: "2026-09-01"
+category: "AI"
+author: "Luca Berton"
+tags: ["nvidia", "gds", "nfs", "rdma", "troubleshooting", "gpudirect-storage", "storage"]
+image:
+  src: "/blog/thumbnails/nvidia-gpu-operator-gds-gpudirect-storage.jpg"
+  alt: "Fix NFS over RDMA GDS rpcrdma nvfs hooks troubleshooting"
+faq:
+  - question: 'Why is libcufile_rdma.so irrelevant when mounting NFS via kernel?'
+    answer: 'libcufile_rdma.so is a user-space library for GPUDirect Storage (GDS). Kernel-space NFS mounts do not use it. The kernel NFS client relies on rpcrdma.ko instead.'
+  - question: 'What are the two kernel modules GDS + NFS over RDMA need?'
+    answer: 'nvidia-fs.ko (the GDS driver, from GPU Operator or NVIDIA driver) and rpcrdma.ko (the NFS client RDMA transport, from DOCA/OFED compiled with GDS support).'
+  - question: 'What do missing nvfs hooks mean?'
+    answer: 'If rpcrdma.ko lacks rpcrdma_register_nvfs_dma_ops and rpcrdma_unregister_nvfs_dma_ops, it was built without GDS integration. GDS paths will silently fall back to CPU bounce buffers.'
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+## The Problem
+
+A common source of confusion when setting up **GPUDirect Storage (GDS)** with **NFS over RDMA** is this question:
+
+> *"The `libcufile_rdma.so` is used for user space RDMA. If the goal is to mount NFS via the Linux kernel, should this library be a concern?"*
+
+The short answer: **no, it should not be a concern** — but only if you understand the split between user-space and kernel-space data paths. The real issue is almost always in the kernel modules, not the user-space library.
+
+## User Space vs. Kernel Space: Two Different Paths
+
+| Layer | Component | Purpose | Used when mounting NFS via kernel? |
+|---|---|---|---|
+| User space | `libcufile_rdma.so` | cuFile API for GDS in applications (PyTorch, DALI) | No |
+| Kernel space | `rpcrdma.ko` | Kernel NFS client RDMA transport | Yes |
+| Kernel space | `nvidia-fs.ko` | GDS driver from GPU Operator | Yes (for GPU direct path) |
+
+When you mount NFS directly through the Linux kernel (`mount -t nfs -o rdma`), the data path is:
+
+```
+NFS Server → Kernel NFS client (rpcrdma.ko) → Kernel GDS (nvidia-fs.ko) → GPU memory
+```
+
+The `libcufile_rdma.so` library is only involved when applications use the **cuFile API** (e.g., `kvikio.CuFile()` in Python, or DALI with GDS integration). It is the user-space entry point that talks to the kernel nvidia-fs module via ioctls.
+
+## The Real Culprit: rpcrdma.ko Without GDS Support
+
+Even with a perfectly good `libcufile_rdma.so`, your NFS over RDMA + GDS setup can fail silently if `rpcrdma.ko` is missing the **nvfs DMA hooks**:
+
+```text
+rpcrdma_register_nvfs_dma_ops
+rpcrdma_unregister_nvfs_dma_ops
+```
+
+These symbols allow the kernel RDMA transport to register DMA operations that integrate with `nvidia-fs.ko`. If they are absent:
+
+- The module **loads successfully** — no error at `modprobe` time
+- GDS **appears to work** — `lsmod` shows `nvidia_fs` loaded
+- But **all I/O silently falls back to CPU bounce buffers** — GDS is effectively disabled
+
+This is exactly what happens when `rpcrdma.ko` is built from a DOCA/OFED package that was **not compiled with GDS support**.
+
+## How to Diagnose
+
+### Step 1: Check which kernel modules are loaded
+
+```bash
+# Check for the GDS driver (nvidia-fs)
+lsmod | grep nvidia_fs
+# Expected: nvidia_fs <size> <count>
+
+# Check for the RDMA NFS client transport
+lsmod | grep rpcrdma
+# Expected: rpcrdma <size> <count>
+```
+
+### Step 2: Verify nvfs hooks exist in rpcrdma.ko
+
+```bash
+# Check if the module contains the nvfs registration symbols
+modinfo rpcrdma | grep -i nvfs
+# OR examine the module binary directly:
+readelf -Ws /lib/modules/$(uname -r)/kernel/net/sunrpc/xprtrdma/rpcrdma.ko | grep nvfs_dma
+```
+
+If the `grep` returns **nothing**, your `rpcrdma.ko` was built without GDS integration. The hooks `rpcrdma_register_nvfs_dma_ops` and `rpcrdma_unregister_nvfs_dma_ops` are missing.
+
+### Step 3: Check dmesg for GDS fallback
+
+```bash
+dmesg | grep -i "nvfs\|nvidia.fs\|bounce buffer\|compat"
+```
+
+Look for messages like `GDS enabled` or, conversely, fallback indicators. Absence of success messages combined with good throughput in application benchmarks is a sign GDS is not actually being used.
+
+## The Fix
+
+### Rebuild rpcrdma.ko with GDS Support
+
+The fix is to ensure your **DOCA/OFED** package is built with GDS support before generating `rpcrdma.ko`. This is not something you can patch at runtime — the hooks must be compiled in.
+
+```bash
+# 1. Install DOCA with GDS-enabled kernel modules
+# The install.pl script from NVIDIA's GPU Operator or DOCA
+# needs to be run with GDS compilation flags
+
+# Check your current OFED version and GDS status
+ofed_info -s    # Shows MLNX_OFED version
+modinfo rpcrdma # Check for nvfs symbols (see Step 2 above)
+
+# 2. If missing, reinstall MOFED/OFED with GDS support:
+#    - Use NVIDIA's GPU Operator with driver.rdma.enabled=true
+#    - Ensure the DOCA package includes nvfs support
+#    - Set kernelModuleType: open in ClusterPolicy for best compatibility
+```
+
+### ClusterPolicy Configuration (Kubernetes)
+
+```yaml
+apiVersion: nvidia.com/v1
+kind: ClusterPolicy
+metadata:
+  name: gpu-cluster-policy
+spec:
+  driver:
+    kernelModuleType: open     # Required for GDS with open modules
+    rdma:
+      enabled: true
+      useHostMofed: true         # Use Network Operator's MOFED
+  gds:
+    enabled: true                # Enable GPUDirect Storage
+```
+
+### Reboot and Verify
+
+After rebuilding and loading the corrected modules:
+
+```bash
+# Reboot to clear stale modules
+sudo reboot
+
+# After reboot, verify both modules are loaded with symbols
+lsmod | grep -E "nvidia_fs|rpcrdma"
+readelf -Ws /lib/modules/$(uname -r)/kernel/net/sunrpc/xprtrdma/rpcrdma.ko | grep nvfs_dma
+
+# Mount NFS with RDMA
+mount -t nfs4 -o rdma,port=20049,vers=4.2 <server_ip>:/<export> /mnt/rdma_nfs
+
+# Verify RDMA transport is active (not TCP)
+grep -A5 "<server_ip>" /proc/self/mountstats | grep xprt
+# Should show: xprt: rdma (not tcp)
+
+# Benchmark GDS throughput
+gdsio -f /mnt/rdma_nfs/testfile -d 0 -w 4 -s 1G -x 0 -I 1
+# GDS-enabled: should see 20+ GB/s (vs ~6 GB/s fallback)
+```
+
+## When libcufile_rdma.so Does Matter
+
+There is one scenario where `libcufile_rdma.so` is relevant even with kernel NFS mounts: when applications use the **cuFile API** for direct I/O. The library must be present and compatible with your application's CUDA version.
+
+But if you are simply mounting NFS via `kubectl` PersistentVolumes or manually with `mount -t nfs -o rdma`, and wondering whether `libcufile_rdma.so` is blocking your setup — **it is not**. Check `rpcrdma.ko` and its nvfs hooks first.
+
+## Quick Decision Tree
+
+1. **Are you mounting NFS via the kernel?** → `libcufile_rdma.so` is irrelevant
+2. **Is `nvidia-fs.ko` loaded but `rpcrdma.ko` missing nvfs hooks?** → Rebuild DOCA/OFED with GDS support
+3. **Are both modules loaded with hooks present?** → Verify mount options: `-o rdma,port=20049`
+4. **Is throughput still low?** → Check `/proc/self/mountstats` for `xprt: rdma` vs `xprt: tcp`
+
+## Related Articles
+
+- [GPUDirect Storage with the NVIDIA GPU Operator](/blog/nvidia-gpu-operator-gds-gpudirect-storage/)
+- [Enable PFC on Mellanox ConnectX NICs](/blog/mellanox-priority-flow-control-pfc-rdma/)
+- [NVIDIA Network Operator: RDMA on Kubernetes](/blog/nvidia-network-operator-kubernetes-rdma/)
+- [NVIDIA DOCA Perftest: RDMA Benchmarking Guide](/blog/nvidia-doca-perftest-rdma-benchmarking-guide/)
+
+<BlogPromoCard />
+
+## Key Takeaways
+
+- **`libcufile_rdma.so` is a user-space cuFile library** — it does not affect kernel NFS mounts
+- **`rpcrdma.ko` must be built with GDS support** — check for `rpcrdma_register_nvfs_dma_ops` and `rpcrdma_unregister_nvfs_dma_ops`
+- **Missing nvfs hooks cause silent GDS fallback** — the module loads but I/O goes through CPU bounce buffers
+- **Always verify with `/proc/self/mountstats`** — confirm `xprt: rdma` not `xprt: tcp`
+- **Use the GPU Operator with `gds.enabled: true` and `driver.kernelModuleType: open`** for best GDS compatibility

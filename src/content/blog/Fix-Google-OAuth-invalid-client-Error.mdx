@@ -1,0 +1,230 @@
+---
+draft: false
+title: "Fix Google OAuth invalid_client Error"
+seoTitle: "Fix Google OAuth invalid_client Error (Error 401)"
+snippet: "Google OAuth Error 401 invalid_client: the OAuth client was not found. Fix redirect URIs, client IDs, consent screen publishing status, and API enablement."
+description: "Google OAuth returns Error 401 invalid_client. The OAuth client was not found. Diagnose redirect URIs, client IDs, consent-screen publishing status, and Google APIs activation."
+image:
+  src: "/blog/thumbnails/fix-google-oauth-invalid-client-error.jpg"
+  alt: "Fix Google OAuth invalid_client Error 401"
+publishDate: "2026-09-03"
+lastModified: "2026-09-03"
+author: "Luca Berton"
+category: "DevOps"
+tags:
+  - "Google"
+  - "OAuth"
+  - "Authentication"
+  - "Troubleshooting"
+  - "Error Fix"
+  - "Security"
+  - "GCP"
+faq:
+  - question: "What does 'Error 401: invalid_client' mean in Google OAuth?"
+    answer: "Google returns invalid_client when the OAuth client ID you sent in the authorization or token request cannot be matched to a live, enabled OAuth client in the Google Cloud project. The client ID is either wrong, the client has been deleted, or the client is not published for external use."
+  - question: "Why does Google say 'The OAuth client was not found'?"
+    answer: "The phrase 'The OAuth client was not found' is Google's human-readable label for the same underlying condition: the client_id you are passing does not resolve to an existing OAuth client in the Google Cloud project you are targeting. Check that the client ID is correct, belongs to the right project, and that the OAuth consent screen is published."
+  - question: "Can I fix this by enabling the Google Identity Services API?"
+    answer: "Not on its own. The Google Identity Services API (or the older Google+ API) must be enabled, but invalid_client is a client-lookup failure, not a scope or API-permission problem. You must fix the client ID or consent-screen state first."
+  - question: "Does this error mean my Google Cloud project is suspended?"
+    answer: "No. A suspended or deleted project returns a different error. invalid_client points at the OAuth client record itself, not at project billing or suspension state."
+---
+
+You are looking at a browser window during Google OAuth and you see:
+
+```text
+Loading
+
+Sign in with Google
+Access blocked: Authorization Error
+
+mr.evolution85@gmail.com
+The OAuth client was not found.
+If you are a developer of this app, see error details.
+Error 401: invalid_client
+English (United States)
+Help
+Privacy
+Terms
+```
+
+You are **not** the end user — you are the developer who built the app, and the OAuth flow that worked last week now refuses every sign-in. Here is how to track down the exact cause and fix it.
+
+## Root Causes — in Order of Frequency
+
+`invalid_client` is Google's catch-all for "the client ID you gave me does not resolve to a usable OAuth client." The underlying reasons are narrower than they look. Check them in this order.
+
+### 1. The client ID is wrong or belongs to the wrong project
+
+Copy the OAuth client ID from the Google Cloud Console and compare it exactly against the value in your environment variables.
+
+```bash
+# Print your configured client ID
+echo "$GOOGLE_CLIENT_ID"
+# Compare against the Google Cloud Console value
+```
+
+**Two common mistakes:**
+
+| Mistake | What happens |
+|---|---|
+| **Trailing whitespace** in `.env` or a config file | The client ID has a hidden space; OAuth silently fails. |
+| **Client ID from a different project** | You created a Google Cloud project for production and a separate one for staging — and pasted the staging client ID into the production app. |
+
+Google OAuth client IDs look like `123456789012-abc123def456.apps.googleusercontent.com`. If the string you pasted does not match exactly, you get `invalid_client`.
+
+### 2. The OAuth consent screen is not published
+
+This is the single most common real-world cause. In the Google Cloud Console:
+
+1. Go to **APIs & Services > OAuth consent screen**.
+2. Check the **Publishing status**.
+
+If the screen is in **Testing** or **In production (unpublished)** state, external users (anyone outside the Google Cloud project's organization) receive `invalid_client` — not a "domain not allowed" message, not a "consent required" screen, but `invalid_client` with "The OAuth client was not found."
+
+**Fix:**
+
+- For **production apps**: set the publishing status to **Published**. This makes the OAuth client visible to any Google user. You will need to complete the verification form (brand, support email, scopes used) — Google may take days to weeks for sensitive-scope apps.
+- For **internal tools**: set the publishing status to **Published** and restrict the app to your Google Workspace domain under **Audience**. External users will still see `invalid_client`.
+
+> **Pitfall:** An app in Testing status only works for users explicitly added as test users. Everyone else — including you, if you are signed in with your personal Gmail instead of the test account — gets `invalid_client`.
+
+### 3. The redirect URI does not match exactly
+
+Even if the client ID is correct, Google rejects the request with `invalid_client` when the redirect URI you send in the authorization request does not match an **Authorized redirect URI** registered in the OAuth client.
+
+1. Go to **APIs & Services > OAuth consent screen** → no, go to **APIs & Services > Credentials**.
+2. Click on your OAuth client ID.
+3. Under **Authorized redirect URIs**, verify the URI matches **exactly** — including `http://` vs `https://`, trailing slashes, and port numbers.
+
+| Common mismatch | Registered value | Sent value | Result |
+|---|---|---|---|
+| Missing trailing slash | `https://app.example.com/auth/callback` | `https://app.example.com/auth/callback/` | `invalid_client` |
+| Wrong port (dev) | `http://localhost:8080/auth/callback` | `http://localhost:3000/auth/callback` | `invalid_client` |
+| HTTPS vs HTTP | `https://app.example.com/auth/callback` | `http://app.example.com/auth/callback` | `invalid_client` |
+
+**Development note:** Use `http://localhost:3000/auth/callback` (or whatever port your dev server runs on) for local development. Do not use `localhost:3000` as a shorthand — Google requires the full path.
+
+### 4. The OAuth client was deleted or never created
+
+If you (or someone on your team) deleted the OAuth client from the console, or if the `GOOGLE_CLIENT_ID` environment variable was rotated to a client ID that was never actually created in that project, Google returns `invalid_client`.
+
+**Fix:**
+
+1. Go to **APIs & Services > Credentials**.
+2. Click **Create credentials > OAuth client ID**.
+3. Select the application type (Web application is most common for server-side apps).
+4. Give it a name, add the authorized redirect URIs, and click **Create**.
+5. Copy the new **Client ID** and paste it into your `.env` file.
+
+### 5. The Google Identity Services API is not enabled
+
+Less common, but worth checking: the **Google Identity Services API** (or the legacy Google+ API) must be enabled in the same project where you created the OAuth client.
+
+1. Go to **APIs & Services > Library**.
+2. Search for "Google Identity Services API".
+3. Click **Enable**.
+
+If the API is disabled, the OAuth client exists but cannot be used — and Google may surface this as `invalid_client` rather than a clear "API not enabled" message.
+
+## Step-by-Step Fix
+
+Follow these steps in order. Most cases resolve at step 2.
+
+### Step 1: Verify environment variables
+
+```bash
+# Print your config (redact secrets, never echo the secret)
+echo "Client ID: $GOOGLE_CLIENT_ID"
+echo "Redirect URI: $GOOGLE_OAUTH_REDIRECT_URI"
+echo "Project ID: $GOOGLE_CLOUD_PROJECT"
+```
+
+- Confirm the client ID matches the Google Cloud Console exactly.
+- Confirm the redirect URI matches what you registered.
+- Check for trailing whitespace — use `cat -A .env` to reveal hidden characters.
+
+### Step 2: Publish the OAuth consent screen
+
+Open the [Google Cloud Console — OAuth consent screen](https://console.cloud.google.com/apis/credentials/oauth_consent_screen) and verify:
+
+1. **Publishing status** is set to **Published** (not Testing or In production unpublished).
+2. **User type** is set to **External** (if you want non-domain users to sign in) or **Internal** (for Google Workspace-only).
+3. **Scopes for Google APIs** only lists scopes you actually need (e.g., `openid`, `email`, `profile`).
+4. Click **Publish App** if the button is available.
+
+> Google enforces a 100-test-user limit while the app is in Testing status. Move to Published to remove that cap.
+
+### Step 3: Fix the redirect URI
+
+Open the [Google Cloud Console — OAuth consent screen](https://console.cloud.google.com/apis/credentials/oauth_consent_screen) → no, go to **Credentials**, click your OAuth client, and verify the **Authorized redirect URIs** list.
+
+| Your stack | Typical redirect URI |
+|---|---|
+| NextAuth.js (credentials provider) | `https://yourdomain.com/api/auth/callback/google` |
+| Auth.js | `https://yourdomain.com/auth/callback` |
+| Express + Passport | `http://localhost:3000/auth/google/callback` (dev) → `https://yourdomain.com/auth/google/callback` (prod) |
+| Firebase | `https://yourdomain.com/__/auth/handler` |
+| Django Allauth | `https://yourdomain.com/accounts/google/login/callback/` |
+
+For local development, always use `http://localhost:<port>/auth/callback`. HTTPS is **not** required for `localhost`.
+
+### Step 4: Enable Google Identity Services API
+
+Go to the [Google Cloud Console — APIs & Services Library](https://console.cloud.google.com/apis/library) and search for **Google Identity Services API**. Click **Enable**.
+
+In some setups you may need the legacy **Google+ API** enabled instead — but Google Identity Services API is the current recommended one.
+
+### Step 5: Re-create the OAuth client (if deleted)
+
+If any step above checks out and you still see `invalid_client`, the OAuth client record itself may be corrupted or deleted.
+
+1. **Credentials** → **Create credentials** → **OAuth client ID**.
+2. Application type: **Web application**.
+3. Name: `webapp (production)` or similar.
+4. **Authorized redirect URIs**: paste the exact URIs from your app.
+5. Click **Create**.
+6. Copy the new **Client ID** (and **Client secret** if your app uses it) into your `.env` file.
+7. **Restart your application** to pick up the new environment variables.
+
+## Verify the Fix
+
+After making changes, test the OAuth flow:
+
+```bash
+# Clear your browser cookies for the domain, then:
+# 1. Visit your app's login page.
+# 2. Click "Sign in with Google."
+# 3. You should see Google's consent screen (not the invalid_client error).
+# 4. After consenting, you should be redirected back to your app.
+```
+
+If you are running locally, you can also verify the authorization URL directly:
+
+```bash
+# Construct the authorization URL manually
+echo "https://accounts.google.com/o/oauth2/v2/auth?\
+client_id=$GOOGLE_CLIENT_ID\
+&redirect_uri=$(python3 -c 'import urllib.parse; print(urllib.parse.quote("$GOOGLE_OAUTH_REDIRECT_URI"))')\
+&response_type=code\
+&scope=openid%20email%20profile\
+&access_type=offline"
+```
+
+Open that URL in an incognito window. If the client ID or consent screen is broken, you will still see `invalid_client`.
+
+## Prevention
+
+- **Pin the client ID in code review.** Require a PR comment confirming the client ID matches the Google Cloud Console before any deploy.
+- **Alert on staging/production drift.** A simple uptime check that walks the OAuth redirect URL and asserts it lands on Google's consent screen (not the error page) catches misconfiguration before users do.
+- **Document the redirect URI** in your `README.md` so new engineers don't register a different path.
+- **Never share the client secret across environments.** Dev, staging, and production should each have their own OAuth client.
+
+## Related Guides
+
+- [Fix Docker: Unauthorized Authentication Required](/blog/fix-docker-unauthorized-authentication-required/)
+- [Fix Kubernetes: Failed Create Pod Sandbox (CNI)](/blog/fix-kubernetes-failed-create-pod-sandbox/)
+
+---
+
+_Having trouble with your authentication stack? [Book a consultation](https://calendly.com/lucaberton/) with Luca Berton — Docker Captain and Production AI expert — to debug and optimize your production OAuth and identity infrastructure._

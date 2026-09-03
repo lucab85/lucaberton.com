@@ -1,0 +1,201 @@
+---
+draft: false
+title: "Fix cAdvisor + Docker 29 containerd-snapshotter Errors"
+seoTitle: "Fix cAdvisor Docker 29 mount-id Errors"
+snippet: "cAdvisor's Docker factory is broken against Docker 29's containerd-snapshotter layout. Fix by removing cAdvisor and using docker stats."
+description: "cAdvisor's Docker factory is incompatible with Docker 29's containerd-snapshotter storage layout. Remove cAdvisor or use docker stats instead."
+image:
+  src: "/blog/thumbnails/fix-docker-containerd-failed-to-create-existing-container.jpg"
+  alt: "Fix cAdvisor containerd-snapshotter incompatibility — mount-id no such file or directory"
+publishDate: "2026-09-03"
+lastModified: "2026-09-03"
+author: "Luca Berton"
+category: "DevOps"
+tags:
+  - "Docker"
+  - "containerd"
+  - "Kubernetes"
+  - "cAdvisor"
+  - "Troubleshooting"
+  - "Error Fix"
+  - "DevOps"
+  - "overlayfs"
+faq:
+  - question: "What causes 'Failed to create existing container' with mount-id errors?"
+    answer: "cAdvisor starts with its Docker factory, which takes priority over the containerd factory. But against Docker 29's new containerd-snapshotter storage layout, that Docker factory is fundamentally broken — it walks the legacy overlayfs layerdb (where /mount-id no longer exists), fails, and emits a flood of 'Failed to create existing container' errors. It is a genuine upstream compatibility gap, not a config mistake, and there is no clean flag to disable only the Docker factory at runtime."
+  - question: "Are these errors harmful to my containers?"
+    answer: "No — your running containers are unaffected. cAdvisor is a metrics collector; it simply can no longer read the layer metadata it expects, so it logs errors instead. The containers themselves (Docker, containerd, or Kubernetes) keep running normally."
+  - question: "Will deleting the layerdb mount-id files fix it?"
+    answer: "No. The files don't exist because Docker 29's containerd-snapshotter layout does not use that path anymore. Patching or recreating layerdb entries is a dead end — cAdvisor's Docker factory is querying a storage layout that has moved on."
+  - question: "How do I fix or work around it?"
+    answer: "Either remove cAdvisor entirely (it produces zero useful data in this state and only pollutes logs/Loki), or switch to a cAdvisor version that supports the containerd-snapshotter layout. The simplest production-ready fix is to remove cAdvisor and rely on Docker's native stats + containerd's metrics endpoint instead."
+  - question: "Is there a flag to disable just the Docker factory?"
+    answer: "No — cAdvisor always probes the Docker socket first when it is reachable, and the Docker factory always wins the 'which factory owns this container' decision. There is no runtime flag to force it to prefer the containerd factory. Removing cAdvisor or taking the Docker socket away from it is the only reliable way to stop the errors."
+---
+
+## The Error
+
+You are looking at logs from a host running **Docker 29** (with its new
+`containerd-snapshotter` storage driver) and **cAdvisor** as a metrics
+collector. Every minute — sometimes every few seconds — you see a flood of:
+
+```text
+E0903 12:53:54.608044       1 manager.go:1116] Failed to create existing container:
+  /system.slice/docker-f99d12ec59d70c79169fb8fa9802bd7c8ab5e25c5adc096acfa0d43dfca345d7.scope:
+  failed to identify the read-write layer ID for container
+  "f99d12ec59d70c79169fb8fa9802bd7c8ab5e25c5adc096acfa0d43dfca345d7".
+  - open /rootfs/var/lib/docker/image/overlayfs/layerdb/mounts/f99d12ec59d70c79169fb8fa9802bd7c8ab5e25c5adc096acfa0d43dfca345d7/mount-id:
+  no such file or directory
+```
+
+The same container IDs repeat across timestamps — `12:53:54`, then `12:54:54`,
+then `12:55:54` — producing identical errors. Your monitoring stack (Loki,
+etc.) fills up with noise.
+
+## Root Cause
+
+This is **not** a corrupted `layerdb` or a crashed daemon. The `mount-id` file
+doesn't exist because **Docker 29 no longer stores container layers at that
+path**. Here is the actual chain of events:
+
+### 1. cAdvisor chooses the Docker factory
+
+When cAdvisor starts and finds a Docker socket at `/var/run/docker.sock`, it
+prefers the **Docker factory** over its native `containerd` factory. This is
+the intended priority order in cAdvisor's `manager.go` — Docker gets first
+claim on any container it can see.
+
+### 2. Docker 29 uses containerd-snapshotter
+
+Docker 29 introduced the `containerd-snapshotter` storage layout as part of
+its migration to a fully containerd-backed engine. Under this layout, the
+classic overlayfs layer store that cAdvisor's Docker factory expects:
+
+```
+/var/lib/docker/image/overlayfs/layerdb/mounts/<id>/mount-id
+```
+
+…**no longer exists**. Docker has moved to a containerd-native snapshot
+store, and the `mount-id` files that the legacy Docker image driver created
+are gone.
+
+### 3. The Docker factory is fundamentally broken against the new layout
+
+cAdvisor's Docker factory walks the legacy `layerdb` directory to map a
+container ID to its read-write overlayfs mount. When it hits the
+containerd-snapshotter layout and finds no `mount-id` file, it returns the
+"failed to identify the read-write layer ID" error. The same container IDs
+are re-checked on every reconciliation cycle (every ~1 minute), so the
+errors repeat indefinitely.
+
+### 4. There is no clean flag to disable the Docker factory
+
+This is the key gotcha: cAdvisor has no runtime flag to tell it "prefer the
+containerd factory even though the Docker socket is visible." The Docker
+factory always wins. You can't flip a config switch and keep cAdvisor running
+against Docker 29.
+
+> **This is a genuine upstream compatibility gap, not a configuration mistake.**
+> cAdvisor's Docker factory has not caught up to Docker 29's
+> containerd-snapshotter storage layout.
+
+## Why the Obvious Fixes Don't Work
+
+| What you might try                            | Why it doesn't work                                                                                                                  |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| **Delete stale `mount-id` files**             | They don't exist — Docker 29 doesn't create them anymore. There is nothing stale to clean.                                           |
+| **Restart Docker / containerd**               | The containerd-snapshotter layout is the _correct_ current state. Restarting just makes cAdvisor re-discover the same missing files. |
+| **`docker system prune`**                     | Doesn't recreate the legacy `layerdb` tree. Pruning clears dangling layers, not the factory incompatibility.                         |
+| **Set `containerd.runtime`** or factory flags | cAdvisor does not expose a flag to deprioritize the Docker factory in favor of the containerd factory.                               |
+| **Volume-mount the containerd snapshot dir**  | cAdvisor's Docker factory doesn't read containerd's snapshot store — it looks exclusively at the old Docker `layerdb` path.          |
+
+## The Fix
+
+Since cAdvisor produces **zero useful data** in this state (its Docker
+factory can't read layers, and there is no flag to make it use the containerd
+factory instead), the cleanest production fix is to **remove cAdvisor**:
+
+### Option A: Remove cAdvisor (recommended)
+
+```bash
+# If running as a systemd service:
+sudo systemctl stop cadvisor
+sudo systemctl disable cadvisor
+sudo rm /etc/systemd/system/cadvisor.service
+sudo rm /usr/local/bin/cadvisor  # or wherever it was installed
+sudo systemctl daemon-reload
+
+# If running as a Docker container:
+docker rm -f cadvisor
+docker rmi gcr.io/cadvisor/cadvisor:latest
+
+# If running as a Kubernetes Deployment:
+kubectl delete deployment cadvisor
+kubectl delete service cadvisor
+kubectl delete daemonset cadvisor  # if deployed as DaemonSet
+```
+
+### Option B: Switch to native Docker stats (if you need container metrics)
+
+Use Docker's built-in stats endpoint instead — it is containerd-aware:
+
+```bash
+# Real-time stats for all containers
+docker stats --no-stream
+
+# Or via the Docker API for programmatic use
+curl --unix-socket /var/run/docker.sock \
+  http://localhost/containers/json?stats=1
+```
+
+### Option C: Upgrade cAdvisor (if a compatible version exists)
+
+Check whether a cAdvisor release supports Docker 29's containerd-snapshotter
+layout. Until one does, Options A or B are your safe paths.
+
+```bash
+# Check your versions
+docker version    # should show 29.x
+cadvisor --version
+
+# Track releases: https://github.com/google/cadvisor/releases
+```
+
+## Verify the Errors Are Gone
+
+```bash
+# Wait 2–3 minutes for cAdvisor's next reconciliation cycle
+sudo journalctl -u cadvisor -f --since "3 min ago" | grep -i "mount-id"
+grep -i "mount-id" /var/log/containers/cadvisor*.log 2>/dev/null
+```
+
+No new lines means the flood has stopped. Confirm your containers are still
+healthy:
+
+```bash
+docker ps          # or: kubectl get pods -A
+```
+
+## Prevention
+
+- **Before upgrading to Docker 29**, check whether your metrics stack
+  (cAdvisor, Prometheus Docker exporter, etc.) is compatible with the
+  `containerd-snapshotter` storage driver. Many tools that introspect the
+  legacy `layerdb` path break silently — they just stop collecting data and
+  start spamming error logs.
+- **Prefer containerd-native metrics** going forward: the containerd metrics
+  endpoint and `ctr` / `crictl` commands are stable across layout changes.
+- **Use the Docker stats API** for container-level metrics on Docker 29 — it
+  abstracts the storage driver so you don't depend on the on-disk layout.
+
+## Related Guides
+
+- [Install containerd on Ubuntu (Kubernetes Runtime)](/blog/install-containerd-ubuntu/)
+- [Fix Docker Error: Overlay2 Driver Not Supported](/blog/Fix-Docker-Overlay2-Driver-Not-Supported/)
+- [Fix Docker Error: containerd Not Running](/blog/Fix-Docker-containerd-Not-Running/)
+- [Fix Kubernetes Failed Create Pod Sandbox: CNI](/blog/fix-kubernetes-failed-create-pod-sandbox/)
+- [Docker Cheat Sheet 2026](/blog/docker-cheat-sheet-2026/)
+
+---
+
+_Having trouble with your container infrastructure? [Book a consultation](https://calendly.com/lucaberton/) with Luca Berton — Docker Captain and Production AI expert — to debug and optimize your production environment._

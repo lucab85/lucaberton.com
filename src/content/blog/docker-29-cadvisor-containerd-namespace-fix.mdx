@@ -1,0 +1,141 @@
+---
+draft: false
+title: "Fix cAdvisor Containerd Namespace Mismatch with Docker 29"
+snippet: "Fix cAdvisor not seeing Docker 29 containers. Set --containerd-namespace=moby to match Docker's containerd namespace instead of the k8s.io default."
+description: "Fix cAdvisor containerd namespace mismatch with Docker 29. cAdvisor defaults to k8s.io namespace but Docker uses moby — configure the correct namespace for container metrics."
+image:
+  src: "/blog/thumbnails/docker-error-storage-driver-overlay2.jpg"
+  alt: "Fix cAdvisor Containerd Namespace Mismatch with Docker 29"
+publishDate: "2026-09-03"
+lastModified: "2026-09-03"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["Docker", "containerd", "cAdvisor", "Monitoring", "Troubleshooting", "DevOps"]
+---
+
+If you upgraded to Docker 29 and your cAdvisor container metrics stopped showing up, the issue is a containerd namespace mismatch — not a storage driver problem.
+
+## The Problem
+
+Docker 29 defaults to the **containerd image store**, which replaces the legacy graphdriver (overlay2) layerdb layout with containerd's native image management. When cAdvisor runs in containerd mode, it defaults to the `k8s.io` containerd namespace — but Docker creates containers under the `moby` namespace. The result: cAdvisor sees zero containers.
+
+## Quick Fix
+
+```bash
+# Run cAdvisor pointing at the moby namespace
+docker run -d \
+  --name=cadvisor \
+  --volume=/:/rootfs:ro \
+  --volume=/var/run/docker.sock:/var/run/docker.sock:ro \
+  --volume=/sys:/sys:ro \
+  --volume=/var/lib/docker/:/var/lib/docker:ro \
+  --volume=/run/containerd/containerd.sock:/run/containerd/containerd.sock:ro \
+  --network=host \
+  gcr.io/cadvisor/cadvisor:latest \
+  --containerd \
+  --containerd-namespace=moby
+```
+
+The key flags are:
+
+- `--containerd-namespace=moby` — tells cAdvisor to read the `moby` namespace, not `k8s.io`
+- `--containerd` — enables containerd mode instead of the legacy Docker socket mode
+- `--volume=/run/containerd/containerd.sock:/run/containerd/containerd.sock:ro` — mounts the containerd socket
+
+## How to Verify the Correct Namespace
+
+If `moby` doesn't work, check what namespace your Docker daemon is using:
+
+```bash
+# List all containerd namespaces
+ctr --address /run/containerd/containerd.sock ns ls
+
+# List containers in the moby namespace
+ctr --address /run/containerd/containerd.sock -n moby containers ls
+
+# List images in the moby namespace
+ctr --address /run/containerd/containerd.sock -n moby images ls
+```
+
+You should see Docker containers listed under the `moby` namespace. If your Docker daemon uses a different namespace, adjust accordingly.
+
+## Docker Compose Version
+
+For Docker Compose, add the namespace and containerd flags as command arguments:
+
+```yaml
+services:
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    volumes:
+      - /:/rootfs:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+    network_mode: host
+    command:
+      - '--containerd'
+      - '--containerd-namespace=moby'
+    privileged: true
+```
+
+## Root Cause: Why This Happens
+
+### Docker 29's New Image Store
+
+Docker 29 (both Docker Engine and Docker Desktop) ships with the containerd image store **enabled by default**. This replaces:
+
+| Legacy (Docker < 29) | New (Docker 29+) |
+|---|---|
+| Graphdriver: `overlay2` | Containerd native image store |
+| LayerDB at `/var/lib/docker/image/overlay2/layerdb` | Containerd image store in `/var/lib/docker/image/` |
+| Containers created via Docker API | Containers created via containerd snapshots in `moby` namespace |
+
+### cAdvisor's Default Namespace
+
+cAdvisor's containerd integration defaults to the `k8s.io` namespace — the namespace used by Kubernetes when it embeds containerd. When you run cAdvisor next to Docker (not Kubernetes), that default is wrong. You must explicitly set `--containerd-namespace=moby`.
+
+## Alternative: Docker Socket Mode
+
+If you want to avoid the containerd namespace issue entirely, run cAdvisor in **Docker socket mode** instead of containerd mode:
+
+```bash
+docker run -d \
+  --name=cadvisor \
+  --volume=/:/rootfs:ro \
+  --volume=/var/run/docker.sock:/var/run/docker.sock:ro \
+  --volume=/sys:/sys:ro \
+  --volume=/var/lib/docker/:/var/lib/docker:ro \
+  --network=host \
+  --privileged \
+  gcr.io/cadvisor/cadvisor:latest
+```
+
+Without the `--containerd` flag, cAdvisor falls back to reading the Docker socket, which abstracts away the containerd namespace detail. The trade-off: you get Docker-level container visibility but lose the granular containerd image and snapshot metrics.
+
+## Environment Variables (Alternative)
+
+You can also set the namespace via environment variable if your cAdvisor setup supports it:
+
+```bash
+export CONTAINERD_NAMESPACE=moby
+```
+
+Or in Docker Compose:
+
+```yaml
+environment:
+  - CONTAINERD_NAMESPACE=moby
+```
+
+## Related Resources
+
+- [Docker Cheat Sheet](/blog/docker-cheat-sheet-2026/)
+- [Docker Storage Driver Troubleshooting](/blog/docker-error-layer-does-not-exist/)
+- [Docker Security Best Practices](/blog/docker-security-best-practices-2026/)
+- [Docker vs Kubernetes](/blog/docker-vs-kubernetes-when-you-need-which-2026/)
+
+## About the Author
+
+I am Luca Berton, AI and Cloud Advisor. I help teams debug and optimize their container infrastructure. [Book a consultation](https://calendly.com/lucaberton/) to fix your Docker issues.

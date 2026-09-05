@@ -1,0 +1,243 @@
+---
+title: "The PostgreSQL Monitoring Gap: Why Default Prometheus Exporters Miss Per-Query Duration"
+seoTitle: "PostgreSQL Monitoring Gap: Per-Query Duration Visibility"
+snippet: "Default postgres_exporter shows connection counts and long-transaction totals but not which query is slow. Here is what is missing and how to close the gap."
+description: "Default postgres_exporter shows connection counts and long-transaction totals but not which query is slow. Here is what is missing and how to close the gap."
+image:
+  src: "/blog/thumbnails/postgresql-monitoring-observability-gap.jpg"
+  alt: "PostgreSQL monitoring observability gap — default exporter misses per-query duration"
+publishDate: "2026-09-05"
+lastModified: "2026-09-05"
+author: "Luca Berton"
+category: "Database"
+tags: ["postgresql", "monitoring", "prometheus", "postgres_exporter", "pg_stat_statements", "observability"]
+faq:
+  - question: "Why does postgres_exporter not show per-query duration by default?"
+    answer: "postgres_exporter ships two relevant collectors, but neither answers the 'which query is slow right now' question. The pg_stat_activity collector exports connection counts and max transaction duration grouped by state, while pg_long_running_transactions (added in PR #1379, threshold defaults to one minute) exports only a count and the oldest transaction's age. Neither exposes the query text or per-query latency of currently-running statements."
+  - question: "Do I need pg_stat_statements for slow query visibility?"
+    answer: "pg_stat_statements gives you historical aggregated query statistics (mean, total, and max execution time per query fingerprint), but it cannot tell you which query is running *right now* in this instant. For real-time per-query duration you need a custom query against pg_stat_activity. pg_stat_statements is still required for identifying the queries that are slow on average over time."
+  - question: "Is this a problem if I use CloudNativePG?"
+    answer: "CloudNativePG bundles postgres_exporter and enables the default collectors, but it does not ship custom per-query-duration queries out of the box unless you configure a customQueriesConfigMap. The same gap applies — you get aggregate metrics but not per-query latency visibility without extra configuration."
+---
+
+## The Gap in One Sentence
+
+Your default postgres_exporter installation tells you *that* something is wrong — connection counts spiking, a long running transaction aging past one minute — but not *what* is wrong. You do not get per-query duration. You do not get query text. You do not get the real-time view of which statement is currently burning CPU or holding a lock.
+
+This is the PostgreSQL observability blind spot I keep seeing in production: teams install the exporter, wire up dashboards, and then discover that when their database slows down, the metrics point at the symptom but not the cause.
+
+## What postgres_exporter Actually Ships
+
+The `prometheus-community/postgres_exporter` bundles a set of collectors, each mapping to a PostgreSQL system view. The two collectors relevant to query performance are:
+
+### 1. `pg_stat_activity` — connection states, not query latency
+
+This collector exports `pg_stat_activity_count` (number of connections in each state: `active`, `idle`, `idle in transaction`, etc.) and `pg_stat_activity_max_tx_duration` (the longest any transaction has been running, grouped by state).
+
+What it does **not** export per-connection:
+
+- The query text currently executing
+- How long that specific query has been running
+- Which `pid` is involved
+
+The raw source backs this up — the collector query joins against `pg_database` with a `VALUES` cross-join over state labels, then aggregates counts and max transaction durations. It intentionally drops per-row detail to keep the time series cardinality manageable.
+
+### 2. `pg_long_running_transactions` — a count, not a diagnosis
+
+Added in PR #1379 (merged late, August 2026), this collector runs the following query:
+
+```sql
+SELECT
+    COUNT(*) as transactions,
+    MAX(EXTRACT(EPOCH FROM clock_timestamp() - pg_stat_activity.xact_start)) AS oldest_timestamp_seconds
+FROM pg_catalog.pg_stat_activity
+WHERE state IS DISTINCT FROM 'idle'
+AND (now() - pg_stat_activity.xact_start) > make_interval(secs => $1)
+AND query NOT LIKE 'autovacuum:%'
+AND pg_stat_activity.xact_start IS NOT NULL
+AND pid <> pg_backend_pid();
+```
+
+The result is two metrics:
+
+- `pg_long_running_transactions` — total count of transactions running past the threshold (default: **one minute**)
+- `pg_stat_activity_long_running_transactions_oldest_timestamp_seconds` — the age of the oldest transaction
+
+This is useful for alerting ("a transaction has been running too long") but useless for answering "what is that transaction doing?"
+
+### 3. `pg_stat_statements` — disabled by default
+
+The `pg_stat_statements` collector exists and exports `pg_stat_statements_calls_total`, `pg_stat_statements_mean_time_seconds`, and similar aggregates — but it is **disabled by default**. The code comment is explicit:
+
+> Disabled by default because this set of metrics can be quite expensive on a busy server. Every unique query will cause a new timeseries to be created.
+
+Even when enabled, it exports **historical aggregates**, not real-time per-query data. And by default, `include_queries` is `false`, so the query text is not even attached to the metrics.
+
+## The Real-World Consequences
+
+Here is what happens in practice:
+
+| What You Want to Know | What the Default Exporter Tells You |
+|---|---|
+| "Which query is currently slow?" | Nothing. You get connection counts only. |
+| "How long has query X been running?" | Nothing — no per-pid duration metric. |
+| "Is this a lock wait or CPU-bound?" | No wait event breakdown per query. |
+| "What is the query text so I can kill it?" | Nothing. No query text in any metric. |
+| "Is this transaction blocking others?" | You can alert that a long-running transaction exists, but not which one or what it is doing. |
+
+The gap is most painful during an incident. You see `pg_long_running_transactions` spike on your dashboard, page the on-call engineer, and the first question in the war room is: "What is the query?" The default exporter cannot answer.
+
+## The Two-Part Fix
+
+Closing this gap requires **two separate investments**:
+
+### Part 1: Real-time per-query duration (`pg_stat_activity` custom query)
+
+You need a custom query that exposes the currently-running query, its `pid`, its duration, and its state. The exporter supports custom queries via a `queries.yaml` file (loaded with `--extend.query-path`) or, in newer versions, via the collector configuration. Despite the GitHub repo now marking `queries.yaml` as deprecated, the custom collector config (`config.yaml`) supports the same pattern:
+
+```yaml
+# postgres_exporter custom queries
+# Exposes per-running-query duration and query text
+pg_stat_statements_activity:
+  metrics:
+    pg_running_query_duration_seconds:
+      type: gauge
+      help: "Duration in seconds of the currently running query"
+      values:
+        - query_start
+        - state
+        - pid
+        - usename
+        - datname
+        - application_name
+        - query
+        - state
+        - wait_event_type
+        - wait_event
+    pg_running_query_age_seconds:
+      type: gauge
+      help: "Age in seconds of the current running query"
+```
+
+The underlying SQL query, executed on each scrape:
+
+```sql
+SELECT
+  pid,
+  datname,
+  usename,
+  application_name,
+  state,
+  wait_event_type,
+  wait_event,
+  EXTRACT(EPOCH FROM (now() - query_start)) AS query_duration_seconds,
+  LEFT(query, 2000) AS query
+FROM pg_catalog.pg_stat_activity
+WHERE state = 'active'
+  AND pid <> pg_backend_pid()
+  AND query_start IS NOT NULL;
+```
+
+This gives you a `pid`-labeled gauge of how long each currently-running query has been going, plus the query text (truncated to 2000 characters to avoid excessive series cardinality).
+
+### Part 2: Historical query performance (`pg_stat_statements`)
+
+Enable the extension on the database:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+```
+
+Then enable the collector in the exporter config (or pass `--collector.stat_statements` on the command line), or define a custom query that reads from `pg_stat_statements`:
+
+```sql
+SELECT
+  userid::regrole::text AS username,
+  dbid::regclass::text AS datname,
+  query,
+  calls,
+  total_exec_time,
+  mean_exec_time,
+  max_exec_time,
+  rows,
+  shared_blks_hit,
+  shared_blks_read,
+  shared_blks_written
+FROM pg_stat_statements
+WHERE calls > 0
+ORDER BY total_exec_time DESC
+LIMIT 20;
+```
+
+This gives you the queries that are slow **on average**, which is a different but equally critical signal.
+
+## Alert Rules That Actually Help
+
+With the custom query in place, your alerting moves from "something is slow" to "this specific query is slow":
+
+```yaml
+groups:
+  - name: postgresql
+    rules:
+      # Real-time: a single query has been running for too long
+      - alert: PostgreSQLQueryRunningTooLong
+        expr: pg_running_query_duration_seconds > 60
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Query running over 60s on {{ $labels.datname }}"
+          description: "{{ $labels.usename }} in {{ $labels.application_name }} has been running for {{ $value }}s"
+
+      # Long-running transaction: could cause bloat or blocking
+      - alert: PostgreSQLLongTransaction
+        expr: pg_long_running_transactions_oldest_timestamp_seconds > 300
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Long-running transaction on {{ $labels.datname }}"
+          description: "Oldest transaction running for {{ $value | humanizeDuration }}s"
+
+      # Slow queries by historical average
+      - alert: PostgreSQLHighMeanQueryTime
+        expr: pg_stat_statements_mean_time_seconds > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow average query on {{ $labels.datname }}"
+          description: "Query {{ $labels.query }} averaging {{ $value }}s"
+```
+
+## The CloudNativePG Caveat
+
+If you deploy PostgreSQL on Kubernetes with CloudNativePG, the operator bundles postgres_exporter and enables the default collectors — including `pg_stat_activity` and `pg_long_running_transactions` — but it does **not** ship custom per-query-duration queries out of the box unless you configure a `customQueriesConfigMap`.
+
+The pattern is the same: you create a ConfigMap with your custom SQL queries, mount it into the exporter, and point the exporter at it. But this step is not automatic, and most installations skip it.
+
+## Why Teams Skip It
+
+Three reasons, in my experience:
+
+1. **It works without it.** Connections look healthy, the long-running-transaction counter stays at zero, and you ship features. The gap only becomes visible when something breaks at 2 AM.
+
+2. **Custom query management feels like operational debt.** Maintaining a `queries.yaml` (or the newer collector config) file alongside your exporter deployment adds a surface area that nobody wants to own until it is too late.
+
+3. **The documentation is fragmented.** The postgres_exporter README mentions `--extend.query-path` but the file is marked deprecated. The newer config-based approach is documented in the collector source code, not the README, and most tutorials still show the old `queries.yaml` pattern.
+
+## The Bottom Line
+
+Default metrics are insufficient for PostgreSQL production observability. You know *that* a problem exists, but not *what* the problem is.
+
+The fix is not complex — add a custom query against `pg_stat_activity` for real-time visibility, and enable `pg_stat_statements` for historical analysis. But it requires deliberate configuration that no out-of-the-box setup provides. Most teams discover the gap only after their first slow-query incident where the dashboard says "something is wrong" but cannot say what.
+
+For the teams running CloudNativePG or self-managed postgres_exporter on Kubernetes, the investment pays for itself the first time a long-running transaction or runaway query is identified and terminated before it takes down a production replica.
+
+## Related Content
+
+- [CloudNativePG: Production PostgreSQL on Kubernetes](/blog/cloudnativepg-postgresql-kubernetes-operator/)
+- [PostgreSQL Beyond Relational: ldap-pg](/blog/postgresql-beyond-relational-ldap-pg/)
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+<BlogPromoCard />

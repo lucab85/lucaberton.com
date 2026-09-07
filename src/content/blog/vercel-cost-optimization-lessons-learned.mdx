@@ -1,0 +1,117 @@
+---
+title: "Vercel Cost Optimization: Lessons from a Real Audit"
+seoTitle: "Vercel Cost Optimization Audit Lessons"
+snippet: "Optimizing infrastructure on Vercel won't drop your bill below the Pro plan price. Here is what actually moves the needle and how to act."
+description: "A Vercel cost audit showed cache-first, middleware trimming, and build discipline beat infrastructure cuts. Lessons and concrete steps from the audit."
+publishDate: "2026-09-07"
+lastModified: "2026-09-07"
+image:
+  src: "/blog/thumbnails/vercel-cost-optimization-audit.jpg"
+  alt: "Vercel cost optimization audit checklist with cache and build reduction"
+tags:
+  - "vercel"
+  - "cost-optimization"
+  - "frontend"
+  - "cicd"
+  - "monitoring"
+category: "Platform Engineering"
+author: "Luca Berton"
+draft: false
+---
+
+When you land on a Vercel bill that says you have used **62 percent** of your included credit and still have **zero** on-demand charges, the instinct is to start deleting infrastructure. That instinct is wrong.
+
+Here is the counterintuitive finding from a recent audit: on any Vercel plan that includes usage credits, the plan price is a **fixed floor**. Optimizing infrastructure can push you further inside that floor, but it will not take the bill below it until you also adjust your seat count and project portfolio. The technical levers and the organizational levers live on different tracks, and confusing them costs you both time and money.
+
+## The Two Levers on the Vercel Bill
+
+Every Vercel invoice has two independent dimensions:
+
+1. **Usage** — the metered items: origin transfer, ISR reads, function invocations, edge requests, build minutes. This is what shows up as "$12.47 of $20.00 used" inside the dashboard.
+2. **Seat and project overhead** — Developer seats ($20/month each), paused-but-present projects that keep 503s alive, and preview deployments on repos that nobody visits.
+
+The audit showed a typical usage profile where the top three lines consumed roughly two thirds of the credit:
+
+| Item                  | Share | Action priority |
+| --------------------- | ----- | --------------- |
+| Fast origin transfer  | ~29%  | Highest         |
+| ISR reads             | ~23%  | Highest         |
+| Edge / function CPU   | ~15%  | High            |
+
+The single biggest insight: **fast origin transfer and edge CPU both respond to one change — keeping more responses in cache.** Cache hits do not travel from origin to edge, do not invoke functions, and do not consume edge CPU. In other words, three separate line items shrink from one architectural decision.
+
+## The Three High-Impact Moves
+
+### 1. Cache-first, invalidate on demand
+
+Short revalidation windows look safe. `revalidate=60` feels like "fresh enough," and a 60-second `s-maxage` makes everyone nod in agreement. But 60 seconds means your cache hit rate is whatever the traffic distribution looks like over a single minute, which is usually low.
+
+The fix has two halves:
+
+- **Raise the floor.** Where content allows, push HTTP-level cache from one minute to five to fifteen minutes. A product catalog that changes a few times per day does not need sub-minute freshness for every visitor.
+- **Add targeted invalidation.** Instead of waiting for a long `revalidate` to expire, call the on-demand revalidation API when a product is updated. You get long cache life *and* immediate correctness on write.
+
+This is not "make everything static forever." It is "make the read path cheap and make the write path push the refresh." The result is that the same traffic that used to generate dozens of origin fetches per hour now generates a handful.
+
+### 2. Trim middleware to its true scope
+
+A common anti-pattern is wrapping an entire proxy layer in an auth middleware with a near-catch-all matcher. Every request — including public pages, API health checks, and SEO redirects — walks through the auth evaluation path. That is invisible at low traffic and becomes a direct contributor to edge CPU cost as volume grows.
+
+The remedy is precise scoping:
+
+- Restrict auth middleware to the routes that genuinely require it.
+- Keep lightweight redirects and 410 handlers outside the auth layer, where they can be served from the edge with minimal cost.
+- Verify that authenticated routes still resolve their Clerk context correctly, because breaking auth to save a few cents is the wrong trade.
+
+This is not a one-line change. It requires mapping every route to its trust boundary, which is why it is the second move — high impact, moderate risk, needs testing.
+
+### 3. Stop building what did not change
+
+The audit dashboard lit up with preview deployments on repos that only received documentation commits. On a monorepo, a `README.md` change in package A should not trigger a build of package B. Yet by default, Vercel builds the whole linked project.
+
+Two settings fix most of this:
+
+- **"Skip deployment"** on projects whose source folders did not change. Vercel can detect that the path filter found nothing and bail before a build minute is charged.
+- **Ignored build step** for docs-only changes. If your diff touches only markdown, short-circuit the build and return zero.
+
+Additionally, confirm whether you need Enhanced (Turbo) build machines. On the Pro tier, enhanced builds are always billed, even when the project is over-provisioned for the work. Standard builds cost only when you trigger on-demand concurrent builds. For most projects, the standard machine is the correct default.
+
+## The Organizational Half
+
+Cache tuning and middleware scoping will get you from $12.47 to maybe $8–9 per cycle. That is a meaningful safety margin — you are now using roughly 40 percent of your included credit instead of 62 percent. But the bill still says $20 because **the Pro plan is $20**, and $20 of credit is included whether you use it or not.
+
+The only lever that actually reduces the fixed floor is the project and seat portfolio:
+
+- **Pause dormant projects.** A paused project stops consuming metered resources but returns a 503. Confirm nobody needs it first, and confirm the 503 is acceptable for the routes it serves.
+- **Audit team seats.** Viewer seats are free. Developer seats cost $20/month each. Every non-essential Developer seat is a direct line-item increase that optimization work cannot offset.
+- **Set spend alerts, not hard pauses.** Configure spend management with a low on-demand threshold and start with notification-only alerts. A hard pause across commercial sites is too aggressive as a first incident-response step; it turns cost control into an outage.
+
+## The Real Risk/Reward
+
+The change with the best risk-to-reward ratio is also the simplest to measure: extend cache windows and verify the hit rate in the dashboard. If origin transfer drops and ISR reads drop in the same proportion, the cache layer is doing its job.
+
+The middleware rewrite has higher reward but higher risk, because auth context is implicit in many routes. It pays to ship this branch-by-branch and confirm authenticated flows still resolve before widening the matcher change.
+
+The build-step fixes are low risk and reversible, but their impact only shows up on the next audit that breaks down spending per project — which is exactly what Vercel recommends before you start moving code.
+
+## Lesson Learned
+
+Cost optimization on serverless platforms is seductive because the surface area of the problem looks technical. But on Vercel specifically, the technical levers and the organizational levers have a hard boundary between them, and the boundary is the plan price.
+
+If your current cycle usage is comfortably below the included credit, the right move is to stop optimizing and start monitoring. Set up spend alerts with a low on-demand threshold, confirm that your cache-first strategy is holding, and redirect engineering time to the work that grows the business rather than trimming cents off a bill that is fixed by policy.
+
+A lesson worth keeping: the bill that stays flat while everything else improves is often the sign that you are measuring the wrong variable.
+
+## Action Summary
+
+1. **Raise HTTP cache windows** for read-heavy routes, preferring invalidate-on-demand over long expires.
+2. **Scope middleware matchers** to authenticated routes only; keep public redirects and 410s outside the auth layer.
+3. **Enable skip-deployment** and ignored build steps for docs-only and unchanged-path diffs in monorepos.
+4. **Audit Developer seats and paused projects** — these move the fixed floor, not the usage lines.
+5. **Configure spend management** with notification-only alerts at a low on-demand threshold until you confirm which projects drive ISR and origin transfer.
+
+## Related Articles
+
+- [OpenTelemetry on Kubernetes: The 2026 Observability Stack](/blog/opentelemetry-kubernetes-observability-2026/)
+- [The Recipe Mindset: From Dev Patterns to Strategy](/blog/kubernetes-recipes-mindset-cto-platform-strategy/)
+- [Zero Trust for Kubernetes: Service Mesh, mTLS, and OPA](/blog/zero-trust-kubernetes-service-mesh-opa/)

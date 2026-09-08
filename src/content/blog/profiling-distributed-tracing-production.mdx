@@ -1,0 +1,225 @@
+---
+draft: false
+title: "Production Profiling Without the Overhead"
+seoTitle: "Production Profiling Without the Overhead"
+snippet: "Tie profiling to distributed tracing: use traces to find hotspots, then sample profiles only where needed. Cut profiling overhead from always-on to targeted."
+description: "Tie profiling to distributed tracing: use traces to find hotspots, then sample profiles only where needed. Cut profiling overhead from always-on to targeted."
+publishDate: "2026-09-08"
+lastModified: "2026-09-08"
+image: { src: "/blog/thumbnails/profiling-distributed-tracing-production.jpg", alt: "Distributed tracing spans overlaid on a flame graph" }
+category: "AI"
+author: "Luca Berton"
+tags: ["profiling", "distributed tracing", "observability", "opentelemetry", "performance", "production"]
+---
+
+## TL;DR
+
+- **What**: Profiling in production is expensive when always-on. The fix: use distributed tracing as a coarse filter to find hotspots, then enable sample-based profiling only on those spans.
+- **Why**: Always-on profilers (py-spy, pprof, eBPF) cost 2–15% CPU overhead. Targeted profiling on just the top 1% of slow traces drops that to near zero.
+- **How**: Correlate trace span IDs with profiler samples. Enable profiling dynamically when a span's latency or error rate crosses a threshold.
+- **Who**: Any team running Python, Go, Rust, or Node services in Kubernetes with OpenTelemetry already in place.
+
+---
+
+## The Profiling Cost Problem
+
+You want profiling in production. It's the only way to know whether those p99 spikes are GC pressure, a slow regex, a mutex deadlock, or a cold-cache query. But turning on `pprof` for Go, `py-spy` for Python, or `perf` for Rust? The overhead immediately shows up on your latency SLOs.
+
+Always-on profiling is the enemy of production reliability. You end up sampling at 1 in 1000 just to keep overhead under 2%, and you miss the 99.9th-percentile outliers that matter most.
+
+This is not theoretical for me. Earlier this year I was debugging a latency spike on an AI inference service — the kind of problem that only manifests under production load. Turning on `py-spy` full-time would have cost us the latency budget. We needed a smarter approach.
+
+## Tracing First, Profiling Second
+
+Distributed tracing gives you a **coarse-grained view** across every service, every hop, every external call. A single trace shows you the full path: API gateway → auth → model routing → LLM provider → result aggregation → cache write. Each span carries duration, status, and tags. That's enough to find the problem area without deep instrumentation.
+
+The insight is simple: **traces tell you where to look, profilers tell you what's happening inside.**
+
+Here's the workflow:
+
+1. **Tracing is always on** — low overhead (~1%), samples a percentage of requests.
+2. **Analyze traces for outliers** — spans exceeding latency or error thresholds.
+3. **Enable profiling dynamically** — only for the service/endpoint/operation identified as a hotspot.
+4. **Correlate** — match the trace span ID to profiler samples to zoom in on the exact line of code.
+
+This drops profiling overhead from 100% coverage at 2–15% per service, to maybe 1–2% of traces getting deep profiles. The total system overhead goes from "we can't ship this" to "negligible."
+
+## The Correlation Mechanism
+
+The key technical piece is **span ID injection**. When a profiler starts, it needs to know which trace/span it's profiling. This is where OpenTelemetry's context propagation pays off.
+
+### In Python with OpenTelemetry
+
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+import py_spy
+
+tracer = trace.get_tracer("production-profiling")
+
+async def handle_request(request):
+    ctx = trace.set_span_in_context(tracer.start_span("http.request"))
+    span = trace.get_current_span(ctx)
+
+    # Check if this trace should get a profiler attached
+    if is_hotspot(trace_id=span.get_span_context().trace_id):
+        # Start py-spy, tagging its output with the trace/span ID
+        profiler = py_spy.Profiler(
+            pid=os.getpid(),
+            output=f"/tmp/profiles/{span.get_span_context().span_id}.prof",
+            duration=10,
+            format="raw"
+        )
+        profiler.start()
+
+    try:
+        result = await process_logic(request)
+        span.set_attribute("duration_ms", get_duration_ms())
+        return result
+    finally:
+        if profiler.is_running():
+            profiler.stop()
+            # The profile file is now tagged with the span ID
+            upload_profile(span.get_span_context().span_id)
+        span.end()
+```
+
+### In Go with pprof
+
+```go
+//go:build go1.16+
+
+import (
+    "context"
+    "net/http/pprof"
+    "runtime"
+    "time"
+
+    "go.opentelemetry.io/otel/attribute"
+    "go.opentelemetry.io/otel/trace"
+)
+
+func profilingMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        ctx := trace.SpanFromContext(r.Context())
+        span := ctx.Span()
+
+        if shouldProfile(ctx) {
+            // Enable pprof sampling for this request only
+            // pprof is built into the Go toolchain
+            runtime.SetCPUProfileRate(100) // 100 samples/sec
+
+            // Tag the profile with the trace ID for correlation
+            traceID := span.SpanContext().TraceID().String()
+            http.SetFinalizer(span, func(s interface{}) {
+                pprof.WriteHeapProfile(openFile(
+                    fmt.Sprintf("/tmp/pprof_%s.prof", traceID),
+                ))
+                runtime.SetCPUProfileRate(0) // turn it off
+            })
+        }
+
+        next.ServeHTTP(w, r)
+    })
+}
+```
+
+The trace ID becomes your join key. When you see a trace in Jaeger or Tempo with `llm.generate` taking 8.2s, you look for `pprof_<trace_id>` in your profile store.
+
+## Dynamic Enablement in Kubernetes
+
+For production, you don't want profilers running in-process for every request — the code complexity is too high and the risk of a profiler bug taking down a hot path is real. Instead, **attach an external profiler** when the tracing system flags a hotspot.
+
+### The sidecar pattern
+
+Run a profiling sidecar (using something like [py-spy](https://github.com/benfred/py-spy) in a sidecar container, or [Parca](https://www.parca.dev/) / [Pyroscope](https://pyroscope.io/) for continuous profiling) that polls the tracing backend for traces exceeding a threshold:
+
+```yaml
+# Deployment snippet
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-service
+spec:
+  template:
+    spec:
+      containers:
+      - name: app
+        image: ai-service:latest
+        env:
+        - name: OTEL_EXPORTER_OTLP_ENDPOINT
+          value: http://otel-collector:4317
+      - name: profiler-agent
+        image: pyroscope/pyroscope:latest
+        env:
+        - name: PYROSCOPE_SERVER_ADDRESS
+          value: http://pyroscope:4040
+        args:
+        - "--enable-tracing-correlation"
+        - "--sampling.threshold=latency_ms:2000"
+```
+
+The profiler agent watches for spans where `duration_ms > 2000` (your p99 threshold), then attaches `py-spy` or `perf` to that specific process for the duration of the request, tagging the output with the trace ID.
+
+### The sampling selector
+
+You don't need every slow trace profiled. Apply a sampling policy:
+
+```
+sampling_policy = {
+    "latency_threshold_ms": 2000,     # profile p99+ spans
+    "error_rate_threshold": 0.01,     # profile 1% of erroring spans
+    "sample_rate": 0.10,              # then sample 10% of those
+    "max_profiles_per_minute": 5,     # safety cap
+}
+```
+
+This is the "coarse-grained" to "fine-grained" handoff. Tracing surfaces the anomaly; profiling explains it. Most production traffic gets tracing-level observability (cheap); only the interesting outliers get the full profiler treatment.
+
+## Real-World Example: The Slow LLM Path
+
+Let me walk through what this caught in practice. We had a multi-agent AI pipeline where users submit a query, the system routes through three reasoning agents, each making LLM calls, then aggregates results. Latency was usually 1.2–1.8s, but p99 was 12s.
+
+The traces told us: the `rag.retrieve` span was spiking — but only when the query contained certain Italian legal terms (a client was filing in Vicenza). The trace showed 3 retries, each taking ~3s, each returning a different error.
+
+But the trace didn't tell us **why** the retriever was retrying. We needed the profile.
+
+The dynamic profiling system tagged the slow spans, and within a few hours we had a py-spy profile for a trace ID. The flame graph showed 90% of CPU time in `unicodedata.normalize()` — a Unicode normalization function being called on every token because a recent update to the Italian stopword list introduced accented characters that hit a slow path in our tokenizer. The fix was a 3-line change: pre-normalize the stopword list at load time.
+
+Without the tracing-first → profiling-second workflow, we'd have been guessing. Full-time profiling would have either been too expensive to run, or too noisy to read.
+
+## Tooling Stack
+
+Here's what I actually use in production:
+
+| Layer | Tool | Purpose |
+|-------|------|---------|
+| Trace collection | **OpenTelemetry Collector** + Tempo/Jaeger | 1% sampling, span correlation |
+| Profile storage | **Pyroscope** or **Parca** | Continuous profiling with trace ID linkage |
+| Profiler agent | **py-spy** (Python), **pprof** (Go), **perf** (Rust) | Actual CPU/memory samples |
+| Alert trigger | Custom exporter on OTel metrics | Fires when p95 latency > threshold |
+| Storage backend | S3-compatible (local MinIO works) | Profile archives keyed by trace ID |
+
+Pyroscope and Parca both support **costless profiling** — they attach to the process via eBPF or ptrace without code changes, and they natively understand OpenTelemetry trace IDs. That's the enterprise-grade version of what I showed above with inline code.
+
+## The Cost-Benefit Reality
+
+Here's the math that makes this worthwhile:
+
+- **Without targeted profiling**: 10 services, always-on profiling at 5% overhead each = 50% systemic overhead. Not acceptable. Or you skip profiling entirely and chase ghosts.
+- **With tracing-first profiling**: 10 services, tracing at 1% always-on = 10% total. Profiler attaches to 1% of traces on 2 services at any given time = ~2% burst overhead. Total: ~12%, and only during incidents.
+
+But here's the hidden win: **MTTR drops from hours to minutes**. Instead of correlating logs across services, then guessing at code, you go trace → trace ID → profile flame graph → exact bottleneck. I've seen teams cut debugging time by 80%.
+
+## Getting Started (Your Checklist)
+
+1. **If you don't have tracing yet**: Ship OpenTelemetry to your services first. Start with just HTTP/gRPC spans + latency metrics. This alone is 80% of the value.
+2. **Pick a continuous profiler**: Pyroscope (open source, self-host) or Parca (eBPF-based, lower overhead). Grafana Cloud and Datadog both offer hosted options if you prefer SaaS.
+3. **Set your threshold**: Start with 2x your p95 latency. Tune down as confidence grows.
+4. **Correlate a trace ID**: Pick one service, instrument it to tag profiler output with the trace ID, and verify you can jump from a slow trace to its flame graph.
+5. **Automate the alert**: Once the manual flow works, wire your threshold breach to automatically attach a profiler for the next matching trace.
+
+---
+
+The promise of production profiling has always been: *you can't optimize what you can't measure*. But the corollary for production is: *you can't measure everything all the time*. Distributed tracing gives you the map; targeted profiling gives you the microscope. Use both in sequence.

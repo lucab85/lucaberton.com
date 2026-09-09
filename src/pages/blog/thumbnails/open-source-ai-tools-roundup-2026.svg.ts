@@ -1,0 +1,75 @@
+export const prerender = true;
+
+const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Six open-source AI tools replacing paid software: video, finance, trading, ads, browsers</title>
+  <desc id="desc">A clean editorial thumbnail showing six open-source AI tools replacing paid SaaS: Hyperframes (video), Fincept Terminal (finance), Open-Gen-Al (models), Vibe Trading (quant), Claude Ads (marketing), Camofox Browser (web automation).</desc>
+  <rect width="1200" height="630" fill="#f7f8fb"/>
+  <rect x="48" y="48" width="1104" height="534" rx="18" fill="#ffffff" stroke="#d8dee9" stroke-width="2"/>
+  <text x="86" y="122" font-family="Arial, Helvetica, sans-serif" font-size="44" font-weight="700" fill="#111827">Open-Source AI Tools</text>
+  <text x="88" y="160" font-family="Arial, Helvetica, sans-serif" font-size="21" fill="#4b5563">6 projects replacing paid SaaS — video, finance, ads, trading</text>
+
+  <g transform="translate(86 210)">
+    <rect width="230" height="140" rx="14" fill="#eef2fb" stroke="#c7d3ea" stroke-width="1.5"/>
+    <circle cx="40" cy="38" r="22" fill="#8bb7df"/>
+    <text x="40" y="44" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" fill="#ffffff">H</text>
+    <text x="115" y="38" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" fill="#111827">Hyperframes</text>
+    <text x="115" y="60" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#4b5563">Video from code</text>
+    <text x="115" y="80" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#6b7280">HeyGen, Apache 2.0</text>
+  </g>
+
+  <g transform="translate(356 210)">
+    <rect width="230" height="140" rx="14" fill="#f6efe3" stroke="#e6d6b8" stroke-width="1.5"/>
+    <circle cx="40" cy="38" r="22" fill="#caa13c"/>
+    <text x="40" y="44" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" fill="#ffffff">F</text>
+    <text x="115" y="38" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" fill="#111827">Fincept Terminal</text>
+    <text x="115" y="60" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#4b5563">Free Bloomberg alt</text>
+    <text x="115" y="80" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#6b7280">100+ data sources</text>
+  </g>
+
+  <g transform="translate(626 210)">
+    <rect width="230" height="140" rx="14" fill="#e9f3ec" stroke="#c3ddc9" stroke-width="1.5"/>
+    <circle cx="40" cy="38" r="22" fill="#5fa876"/>
+    <text x="40" y="44" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" fill="#ffffff">O</text>
+    <text x="115" y="38" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" fill="#111827">Open-Gen-Al</text>
+    <text x="115" y="60" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#4b5563">200+ local models</text>
+    <text x="115" y="80" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#6b7280">Images, video, voice, code</text>
+  </g>
+
+  <g transform="translate(896 210)">
+    <rect width="230" height="140" rx="14" fill="#f3e9ef" stroke="#ddc3d3" stroke-width="1.5"/>
+    <circle cx="40" cy="38" r="22" fill="#b06a91"/>
+    <text x="40" y="44" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" fill="#ffffff">V</text>
+    <text x="115" y="38" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" fill="#111827">Vibe Trading</text>
+    <text x="115" y="60" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#4b5563">AI trading agents</text>
+    <text x="115" y="80" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#6b7280">Backtests + swarms</text>
+  </g>
+
+  <g transform="translate(86 380)">
+    <rect width="230" height="140" rx="14" fill="#e0f0fe" stroke="#a3c6f0" stroke-width="1.5"/>
+    <circle cx="40" cy="38" r="22" fill="#2563eb"/>
+    <text x="40" y="44" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" fill="#ffffff">C</text>
+    <text x="115" y="38" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" fill="#111827">Claude Ads</text>
+    <text x="115" y="60" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#4b5563">Marketing agency in code</text>
+    <text x="115" y="80" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#6b7280">250+ audit checks</text>
+  </g>
+
+  <g transform="translate(356 380)">
+    <rect width="230" height="140" rx="14" fill="#fef3e6" stroke="#fed5a3" stroke-width="1.5"/>
+    <circle cx="40" cy="38" r="22" fill="#f59e0b"/>
+    <text x="40" y="44" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="700" fill="#ffffff">C</text>
+    <text x="115" y="38" font-family="Arial, Helvetica, sans-serif" font-size="16" font-weight="700" fill="#111827">Camofox Browser</text>
+    <text x="115" y="60" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#4b5563">Anti-detection browser</text>
+    <text x="115" y="80" font-family="Arial, Helvetica, sans-serif" font-size="11" fill="#6b7280">Firefox fork for agents</text>
+  </g>
+
+  <text x="86" y="560" font-family="Arial, Helvetica, sans-serif" font-size="15" fill="#6b7280">Hyperframes, Fincept, Open-Gen-Al, Vibe Trading, Claude Ads, Camofox — all open source, all free</text>
+</svg>`;
+
+export function GET() {
+  return new Response(svg, {
+    headers: {
+      "Content-Type": "image/svg+xml; charset=utf-8",
+      "Cache-Control": "public, max-age=31536000, immutable",
+    },
+  });
+}

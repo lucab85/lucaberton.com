@@ -5,7 +5,7 @@ seoTitle: "Hermes Agent Troubleshooting Guide"
 snippet: "Model 404, auth failed, credit paused, rate-limited, gateway shutting down? Diagnostic flow and exact Hermes commands to fix every error."
 description: "Hermes Agent troubleshooting guide: fix model-not-found 404s, provider retry failures, empty responses, rate-limit (HTTP 429) blocks, subscription credit pauses, provider authentication failures, credential pool issues, and gateway problems with exact commands."
 publishDate: "2026-07-31"
-lastModified: "2026-09-01"
+lastModified: "2026-09-10"
 image:
   src: "/blog/thumbnails/hermes-agent-troubleshooting.svg"
   alt: "Hermes Agent troubleshooting flow: diagnose, fix model, credentials, and gateway"
@@ -27,7 +27,7 @@ faq:
   - question: "Why do I get 'HTTP 404: Model not found'?"
     answer: "The exact model string Hermes is configured to use is not in its model map or the provider catalog. This usually means the model was deprecated or renamed (common with free tiers), there is a typo, or the provider is set wrong. Run 'hermes model' to pick a currently valid model."
   - question: "My Hermes cron job fails with a model 404 — why?"
-    answer: "A per-job model override set at creation time does not follow the profile default afterwards. If that model disappears from the catalog — including when a free-tier model's free period ends (HTTP 404: This model's free period has ended) — the job keeps 404-ing. Fix it with 'hermes cron list' then 'hermes cron edit <job_id>' to update or clear the override."
+    answer: "A per-job model override set at creation time does not follow the profile default afterwards. If that model disappears from the catalog — including when a free-tier model's free period ends (HTTP 404: This model's free period has ended) — the job keeps 404-ing. Fix it with 'hermes cron list' then 'hermes cron edit <job_id>' to update or clear the override, and run 'hermes model' to pick from currently-listed entries without retyping an old slug."
   - question: "The Discord bot is silent — what is wrong?"
     answer: "Most often the Message Content Intent is disabled. Enable it under Bot → Privileged Gateway Intents in the Discord developer portal, then restart the gateway with 'hermes gateway restart'."
   - question: "Why does Hermes say 'The model declined to respond' (safety refusal)?"
@@ -348,7 +348,7 @@ that selector as the source of truth for what your installed version can select
 interactively; model availability, sale pricing, and free-tier entries can
 change over time.
 
-On **August 23, 2026**, the selector included these free models:
+On **September 10, 2026**, the selector included these free models:
 
 | Free model                    | Cost shown by CLI |
 | ----------------------------- | ----------------- |
@@ -363,14 +363,20 @@ On **August 23, 2026**, the selector included these free models:
 The same selector also exposed paid models across Anthropic, OpenAI, Google,
 xAI, DeepSeek, Qwen, Moonshot AI, MiniMax, Z.ai, Xiaomi, Tencent, StepFun,
 NVIDIA, Sakana, and others. Examples in that snapshot included
-`anthropic/claude-sonnet-5`, `openai/gpt-5.6-sol`,
-`google/gemini-3.1-pro-preview`, `x-ai/grok-4.6`,
+`anthropic/claude-sonnet-5`, `anthropic/claude-opus-4.8`,
+`anthropic/claude-haiku-4.5`, `openai/gpt-5.6-sol`,
+`openai/gpt-5.6-luna`, `google/gemini-3.1-pro-preview`,
+`google/gemini-3.7-flash`, `x-ai/grok-4.6`,
 `deepseek/deepseek-v4-pro`, and `qwen/qwen3.8-max`.
 
-The CLI marks promotional pricing with a star and shows input, output, and cache
-pricing per million tokens. Because those prices are commercial data and can
-change, copy them from the current `hermes model` screen rather than hardcoding
-an old number into automation.
+The CLI marks promotional pricing with a star (★) and shows input, output, and
+cache pricing per million tokens. The September 2026 snapshot showed a wide
+range of per-million-token prices — from $0.05 input for
+`deepseek/deepseek-v4-flash` up to $24.00 input for
+`openai/gpt-5.5-pro` — so treat the selector as the source of truth for current
+commercial pricing rather than any hardcoded value. Because those prices can
+change, copy them from the current `hermes model` screen rather than
+hardcoding an old number into automation.
 
 A practical troubleshooting rule for the free tier:
 
@@ -778,24 +784,24 @@ When you have isolated the problem but still need help:
 
 ## Quick reference: error to action
 
-| Symptom                                             | First command                             | Likely fix                                                       |
-| --------------------------------------------------- | ----------------------------------------- | ---------------------------------------------------------------- |
-| `Provider authentication failed` + `provider: nous` | `hermes portal info`                      | if `Auth: not logged in`, run `hermes portal`                    |
-| Nous model configured, Discord still fails auth     | check gateway Linux user                  | authenticate in that user's `~/.hermes` and restart gateway      |
-| "model provider failed after retries"               | `hermes auth list` / `hermes portal info` | refresh auth, rotate key, or switch model                        |
-| "The model provider is rate-limiting requests"      | `grep -i 429 ~/.hermes/logs/gateway.log`  | wait for window reset, `hermes auth reset`, switch models        |
-| "Gateway shutting down — task interrupted"          | `systemctl --user status hermes-gateway`  | wait for restart, resend; raise MemoryMax if OOM                 |
-| "HTTP 404: Model 'X' not found"                     | `hermes model`                            | pick a model that exists in the current catalog                  |
-| old free model stopped working                      | `hermes model`                            | select a currently listed `:free` model                          |
-| cron job fails on model 404                         | `hermes cron edit <id>`                   | update the per-job model override                                |
-| cron "free period has ended"                        | `hermes cron edit <id>`                   | update pinned model + add a fallback chain                       |
-| gateway silent on Discord                           | check Bot intents                         | enable Message Content Intent                                    |
-| gateway dies after SSH logout                       | `loginctl enable-linger`                  | keep user service alive                                          |
-| tool/skill missing                                  | `hermes tools` / `/skill`                 | enable, then `/reset`                                            |
-| config change ignored                               | `/restart` or relaunch                    | new session / process                                            |
-| aux vision/compression broken                       | `hermes config set auxiliary.*`           | set provider or key                                              |
-| Copilot 403                                         | `hermes model` → GitHub Copilot           | use device-code OAuth, not `gh` token                            |
-| "The model declined to respond" (safety refusal)    | `hermes fallback add`                     | rephrase, switch model, or set a fallback chain                  |
-| "Model returned no content after all retries"       | `hermes fallback add`                     | add a fallback chain, or switch/smoke-test the model             |
-| "Credit access paused — run /topup"                 | `hermes portal open`                      | top up at portal.nousresearch.com; credit restores automatically |
-| "Provider authentication failed"                    | `hermes auth list`                        | refresh/re-add credential; check gateway logs for raw error      |
+| Symptom                                             | First command                             | Likely fix                                                                          |
+| --------------------------------------------------- | ----------------------------------------- | ----------------------------------------------------------------------------------- |
+| `Provider authentication failed` + `provider: nous` | `hermes portal info`                      | if `Auth: not logged in`, run `hermes portal`                                       |
+| Nous model configured, Discord still fails auth     | check gateway Linux user                  | authenticate in that user's `~/.hermes` and restart gateway                         |
+| "model provider failed after retries"               | `hermes auth list` / `hermes portal info` | refresh auth, rotate key, or switch model                                           |
+| "The model provider is rate-limiting requests"      | `grep -i 429 ~/.hermes/logs/gateway.log`  | wait for window reset, `hermes auth reset`, switch models                           |
+| "Gateway shutting down — task interrupted"          | `systemctl --user status hermes-gateway`  | wait for restart, resend; raise MemoryMax if OOM                                    |
+| "HTTP 404: Model 'X' not found"                     | `hermes model`                            | pick a model that exists in the current catalog                                     |
+| old free model stopped working                      | `hermes model`                            | select a currently listed `:free` model; run `hermes update` to refresh the catalog |
+| cron job fails on model 404                         | `hermes cron edit <id>`                   | update the per-job model override                                                   |
+| cron "free period has ended"                        | `hermes cron edit <id>`                   | update pinned model + add a fallback chain                                          |
+| gateway silent on Discord                           | check Bot intents                         | enable Message Content Intent                                                       |
+| gateway dies after SSH logout                       | `loginctl enable-linger`                  | keep user service alive                                                             |
+| tool/skill missing                                  | `hermes tools` / `/skill`                 | enable, then `/reset`                                                               |
+| config change ignored                               | `/restart` or relaunch                    | new session / process                                                               |
+| aux vision/compression broken                       | `hermes config set auxiliary.*`           | set provider or key                                                                 |
+| Copilot 403                                         | `hermes model` → GitHub Copilot           | use device-code OAuth, not `gh` token                                               |
+| "The model declined to respond" (safety refusal)    | `hermes fallback add`                     | rephrase, switch model, or set a fallback chain                                     |
+| "Model returned no content after all retries"       | `hermes fallback add`                     | add a fallback chain, or switch/smoke-test the model                                |
+| "Credit access paused — run /topup"                 | `hermes portal open`                      | top up at portal.nousresearch.com; credit restores automatically                    |
+| "Provider authentication failed"                    | `hermes auth list`                        | refresh/re-add credential; check gateway logs for raw error                         |

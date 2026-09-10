@@ -1,9 +1,9 @@
 ---
 draft: false
 title: "Fix Minikube Kubernetes 1.37 cgroup v1 Error on macOS"
-seoTitle: "Minikube Kubernetes 1.37 cgroup v1 Error: Fix qemu on macOS"
-snippet: "Minikube 1.39 can fail to start Kubernetes 1.37 when an old QEMU profile still boots a cgroup v1 VM. Here's how to diagnose the stale image and rebuild cleanly."
-description: "Fix Minikube Kubernetes 1.37 startup failures on macOS caused by a stale QEMU VM and cgroup v1. Diagnose the kubeadm error and choose the right driver."
+seoTitle: "Minikube Kubernetes 1.37 cgroup v1 Error: Docker Driver Fix on macOS"
+snippet: "Minikube 1.39 failed to start Kubernetes 1.37 because an old QEMU profile still used cgroup v1. The clean fix was deleting the stale cluster and recreating it with the Docker driver."
+description: "Fix Minikube Kubernetes 1.37 startup failures on macOS caused by a stale QEMU VM and cgroup v1. See the real error, the Docker driver fix, ingress verification, and host-access caveats."
 publishDate: "2026-09-11"
 lastModified: "2026-09-11"
 category: "Platform Engineering"
@@ -12,31 +12,35 @@ tags:
   - kubernetes
   - minikube
   - macos
+  - docker
   - qemu
   - cgroups
+  - ingress
   - troubleshooting
   - platform-engineering
 image:
   src: "/blog/thumbnails/kind-vs-minikube-2026.jpg"
-  alt: "Kind vs Minikube local Kubernetes development"
+  alt: "Minikube Kubernetes troubleshooting on macOS"
 faq:
-  - question: "Why does Kubernetes 1.37 fail on cgroup v1 in Minikube?"
-    answer: "The kubelet failCgroupV1 setting defaults to true in Kubernetes 1.35 and later. A node still using cgroup v1 therefore fails initialization unless you use a temporary override or, preferably, move the node to cgroup v2."
-  - question: "Do I need to reinstall Minikube to fix a stale VM image?"
-    answer: "Usually no. Delete the old Minikube profile and recreate it so the current Minikube binary can provision a fresh VM image. Remember that minikube delete removes workloads and data stored inside that local cluster."
-  - question: "Should I use QEMU, Docker, or VFKit for Minikube on macOS?"
-    answer: "Use the driver that fits your workstation. Docker is convenient when Docker is already running, VFKit is a preferred macOS VM driver in current Minikube documentation, and QEMU remains supported when you need that workflow."
+  - question: "Why did Kubernetes 1.37 fail in my old Minikube QEMU cluster?"
+    answer: "The existing Minikube VM had been built for Minikube 1.32.0 and was still using cgroup v1. Kubernetes 1.35 and newer default failCgroupV1 to true, so Kubernetes 1.37 failed its kubeadm system verification in that stale guest environment."
+  - question: "What fixed the Minikube cgroup v1 error on macOS?"
+    answer: "On this machine Docker was already working, so the clean fix was to delete the old QEMU-backed Minikube cluster and recreate it with the Docker driver and Kubernetes 1.37.0. The new cluster started successfully, the node became Ready, and the ingress controller ran normally."
+  - question: "How do I reach Minikube Ingress with the Docker driver on macOS?"
+    answer: "The Minikube node IP is not directly reachable from the macOS host when using the Docker driver. For the standard Ingress workflow, run minikube tunnel in another terminal and access the Ingress through 127.0.0.1. For NodePort services, minikube service SERVICE --url can create a host-accessible tunnel."
 ---
 
-A local Kubernetes cluster that has survived several Minikube upgrades can hide a surprising amount of history.
+A local Kubernetes cluster can carry a lot more history than the `minikube` binary on your laptop suggests.
 
-I hit exactly that while starting **Minikube v1.39.0 on Apple Silicon macOS**. The existing profile came up with Kubernetes v1.28.3, but upgrading the cluster to **Kubernetes v1.37.0** failed during `kubeadm init`.
+I hit exactly that while starting **Minikube v1.39.0 on Apple Silicon macOS**. An existing QEMU-backed profile still came up with Kubernetes v1.28.3, but trying to move it to **Kubernetes v1.37.0** failed during `kubeadm init`.
 
-The interesting part was that the Kubernetes version was not really the first problem. The profile itself was stale.
+The final fix was simple once the logs were read in the right order: **delete the stale QEMU cluster and recreate Minikube with the Docker driver**.
 
-## The Symptom: New Minikube Binary, Old VM
+Here is the full troubleshooting path and why that worked.
 
-The first start looked mostly healthy:
+## The First Clue: New Minikube Binary, Old VM
+
+The original cluster could still start:
 
 ```text
 minikube v1.39.0 on Darwin arm64
@@ -50,41 +54,49 @@ Preparing Kubernetes v1.28.3 on Docker 24.0.7
 Done! kubectl is now configured to use "minikube" cluster
 ```
 
-That warning is easy to ignore because the cluster still starts.
+That warning is easy to dismiss because Minikube continues starting.
 
-`kubectl get nodes` confirmed that the old environment was alive:
+The node even looked healthy:
 
 ```text
 NAME       STATUS   ROLES           VERSION
 minikube   Ready    control-plane   v1.28.3
 ```
 
-But the VM underneath that cluster had originally been built for **Minikube v1.32.0**. Updating the `minikube` executable did not magically rebuild the guest VM.
+But the important detail was this:
 
-That distinction matters.
+```text
+Expected minikube version: v1.32.0 -> Actual minikube version: v1.39.0
+```
 
-## What Happened When I Forced Kubernetes 1.37
+The executable on macOS was current. The VM behind the profile was not.
 
-I stopped the old cluster and tried the newer Kubernetes release explicitly:
+Updating Minikube does not automatically rebuild an existing VM profile, so the cluster was still carrying an older guest kernel, container runtime, and cgroup setup.
+
+## Forcing Kubernetes 1.37 Exposed the Real Problem
+
+I stopped the old cluster and explicitly requested Kubernetes 1.37:
 
 ```bash
 minikube stop
 minikube start --kubernetes-version=v1.37.0
 ```
 
-Minikube downloaded the Kubernetes v1.37.0 preload and attempted to reinitialize the control plane. Then `kubeadm` stopped at system verification:
+Minikube downloaded the new preload and tried to initialize the control plane, but `kubeadm` failed its preflight checks.
+
+The guest reported:
 
 ```text
-[ERROR SystemVerification]: cgroups v1 support is deprecated and will be removed in a future release.
-Please migrate to cgroups v2.
-
-To explicitly enable cgroups v1 support for kubelet v1.35 or newer,
-you must set the kubelet configuration option 'FailCgroupV1' to 'false'.
+CONFIG_OVERLAY_FS: enabled (as module)
+CONFIG_AUFS_FS: not set - Required for aufs.
+CONFIG_BLK_DEV_DM: enabled (as module)
+CONFIG_CFS_BANDWIDTH: enabled
+CONFIG_SECCOMP: enabled
+CONFIG_SECCOMP_FILTER: enabled
+OS: Linux
 ```
 
-That is the real failure.
-
-The guest reported a Linux 5.10.57 kernel and the familiar cgroup v1 controllers:
+The cgroup controllers were also clearly the cgroup v1 layout:
 
 ```text
 CGROUPS_CPU: enabled
@@ -94,30 +106,32 @@ CGROUPS_DEVICES: enabled
 CGROUPS_FREEZER: enabled
 CGROUPS_MEMORY: enabled
 CGROUPS_PIDS: enabled
+CGROUPS_HUGETLB: enabled
 CGROUPS_BLKIO: enabled
 ```
 
-Kubernetes changed the rules around this transition. Since Kubernetes 1.35, the kubelet's `failCgroupV1` setting defaults to `true`, so nodes still running cgroup v1 fail to initialize unless you explicitly override the check. Kubernetes 1.37 still offers that override, but the project describes it as temporary and recommends migrating to cgroup v2 instead.
+Then came the fatal line:
+
+```text
+[ERROR SystemVerification]: cgroups v1 support is deprecated and will be removed in a future release.
+Please migrate to cgroups v2.
+
+To explicitly enable cgroups v1 support for kubelet v1.35 or newer,
+you must set the kubelet configuration option 'FailCgroupV1' to 'false'.
+You must also explicitly skip this validation.
+```
+
+That was the actual blocker.
+
+Kubernetes has been moving away from cgroup v1, and the kubelet's `failCgroupV1` setting defaults to `true` for Kubernetes 1.35 and newer. Kubernetes 1.37 therefore refuses to initialize on this old cgroup v1 guest unless you deliberately override the protection.
+
+For a disposable development cluster, carrying that override forward was not the direction I wanted.
 
 See the official [Kubernetes 1.37 release notes](https://kubernetes.io/blog/2026/08/26/kubernetes-v1-37-release/) for the current cgroup v1 guidance.
 
-## Root Cause: Three Layers of Version Skew
+## The CRI RuntimeConfig Warning Was Not the Fatal Error
 
-There were really three layers interacting here:
-
-1. **Minikube was current**: the host had Minikube v1.39.0.
-2. **The Minikube VM was old**: the existing QEMU profile had been built for Minikube v1.32.0.
-3. **Kubernetes was new enough to reject cgroup v1**: Kubernetes v1.37.0 failed the kubeadm preflight check in that old guest environment.
-
-This is why simply adding `--kubernetes-version=v1.37.0` was not enough. I was trying to place a current Kubernetes control plane inside an environment carrying assumptions from a much older Minikube VM.
-
-One nuance: this is **not** evidence that QEMU itself can only use cgroup v1. Current Minikube releases include VM-driver work for cgroup v2. The problem is the stale VM profile you are reusing.
-
-Minikube's changelog documents the newer VM/cgroup work, including cgroup v2 handling and Kubernetes 1.35+ `failCgroupV1` behavior: [Minikube changelog](https://github.com/kubernetes/minikube/blob/master/CHANGELOG.md).
-
-## The Container Runtime Warning Is Not the Fatal Error
-
-The same startup also printed this warning:
+The same failed startup included another warning:
 
 ```text
 RuntimeConfig from runtime service failed
@@ -125,19 +139,44 @@ rpc error: code = Unimplemented desc = unknown method RuntimeConfig
 for service runtime.v1.RuntimeService
 ```
 
-And then:
+Followed by:
 
 ```text
 You must update your container runtime to a version that supports the CRI method RuntimeConfig.
+Falling back to using cgroupDriver from kubelet config will be removed in 1.38.
 ```
 
-That warning deserves attention, especially for future Kubernetes compatibility, but it is **not the fatal line in this run**. The hard stop is the `SystemVerification` error for cgroup v1.
+There was also:
 
-When troubleshooting long startup logs, separating warnings from the first fatal preflight error saves a lot of time.
+```text
+[WARNING Service-kubelet]: kubelet service is not enabled
+```
 
-## Before Picking the Fix, Check What Is Available
+Those warnings matter, but neither was the line that stopped this run.
 
-On macOS I would not choose a Minikube driver blindly. First check which local container or VM stack is actually usable:
+The first fatal preflight error was the cgroup v1 `SystemVerification` failure.
+
+That distinction is useful when a Minikube start produces hundreds of lines: **find the first fatal kubeadm error before chasing every warning**.
+
+## Root Cause: A Stale Cluster Environment
+
+The failure was really a version-skew problem across several layers:
+
+1. The host was running **Minikube v1.39.0**.
+2. The existing QEMU VM had been created for **Minikube v1.32.0**.
+3. That guest was still using **cgroup v1**.
+4. Kubernetes **v1.37.0** rejected that cgroup configuration during `kubeadm init`.
+5. The old container runtime also lacked the newer CRI `RuntimeConfig` method expected by current Kubernetes tooling.
+
+This is why repeatedly adding `--kubernetes-version=v1.37.0` could not solve the real problem. The control plane version was only one piece of the environment.
+
+One nuance is worth making explicit: **QEMU itself is not inherently limited to cgroup v1**. The problem here was the old Minikube VM being reused.
+
+## Check the Host Before Choosing a Replacement Driver
+
+Before deleting the cluster, I checked which container or VM backends were actually available on the Mac.
+
+A simple probe is enough:
 
 ```bash
 echo "--- docker ---"
@@ -155,124 +194,127 @@ echo "--- vfkit ---"
 command -v vfkit >/dev/null && echo "vfkit installed" || echo "no vfkit"
 ```
 
-The result tells you whether the cleanest path is to rebuild QEMU or switch drivers.
+On this machine, **Docker was already working**.
 
-## Fix 1: Recreate the QEMU Profile
+That made the cleanest fix obvious: stop trying to repair the stale QEMU guest and recreate the local cluster using the Docker driver.
 
-If you want to stay on QEMU, the important operation is not `stop`. It is **delete and recreate**.
+## The Fix That Worked: Delete QEMU and Recreate with Docker
 
-> `minikube delete` removes the local cluster and its workloads. Back up anything you need first.
+Because this was a disposable lab cluster, I removed the old profile completely:
 
-```bash
-minikube delete
-minikube start \
-  --driver=qemu \
-  --kubernetes-version=v1.37.0
-```
-
-This forces Minikube to provision a fresh VM instead of reviving the old v1.32-era profile.
-
-On macOS, Minikube documents `socket_vmnet` as the full-featured QEMU networking option:
-
-```bash
-brew install socket_vmnet
-HOMEBREW=$(which brew) && sudo ${HOMEBREW} services start socket_vmnet
-
-minikube start \
-  --driver=qemu \
-  --network=socket_vmnet \
-  --kubernetes-version=v1.37.0
-```
-
-That networking choice is also useful if the built-in QEMU network cannot reach `registry.k8s.io`, which was another warning in my original startup.
-
-See the official [Minikube QEMU driver documentation](https://minikube.sigs.k8s.io/docs/drivers/qemu/).
-
-## Fix 2: Use the Docker Driver If Docker Is Already Healthy
-
-If `docker info` succeeds, the Docker driver is often the shortest route to a clean local cluster:
+> `minikube delete` destroys the local cluster and workloads stored inside it. Back up anything you need first.
 
 ```bash
 minikube delete
+```
+
+Then I created a fresh Kubernetes 1.37 cluster using Docker:
+
+```bash
 minikube start \
   --driver=docker \
   --kubernetes-version=v1.37.0
 ```
 
-You can make it the default afterward:
+This time the cluster came up cleanly.
+
+The important difference is that Minikube was no longer trying to boot the stale VM image built for v1.32.0. It created the cluster against the currently working Docker environment instead.
+
+If Docker is going to be the default Minikube backend on the workstation, you can persist that choice:
 
 ```bash
 minikube config set driver docker
 ```
 
-The advantage here is not that Docker somehow bypasses Kubernetes requirements. It is that you stop carrying forward the stale QEMU VM state and let Minikube build the cluster against your current container environment.
+See the official [Minikube Docker driver documentation](https://minikube.sigs.k8s.io/docs/drivers/docker/).
 
-See the [Minikube Docker driver documentation](https://minikube.sigs.k8s.io/docs/drivers/docker/).
+## Verify the Node Before Reinstalling Addons
 
-## Fix 3: Consider VFKit on Modern macOS
-
-Current Minikube documentation lists **VFKit as a preferred VM-based driver on macOS**. It requires macOS 14+ and Minikube 1.36+.
-
-If VFKit fits your workstation, a fresh cluster is straightforward:
+After recreating the cluster, I verified the node first:
 
 ```bash
-brew install vfkit
-minikube delete
-minikube start \
-  --driver=vfkit \
-  --kubernetes-version=v1.37.0
+kubectl get nodes
 ```
 
-The default NAT network is enough for a basic single-node cluster. More advanced networking can use `vmnet-shared` with `vmnet-helper`.
+The node reported **Ready**.
 
-See the [Minikube VFKit driver documentation](https://minikube.sigs.k8s.io/docs/drivers/vfkit/).
-
-## Verify the New Cluster Is Really Using cgroup v2
-
-Do not stop at "Minikube started successfully." Verify the environment you created.
-
-First check Kubernetes:
+I also checked Minikube itself:
 
 ```bash
-kubectl get nodes -o wide
-kubectl version
+minikube status
 ```
 
-Then inspect cgroups inside the node:
+For deeper verification, inspect the cgroup filesystem inside the new node:
 
 ```bash
 minikube ssh -- 'stat -fc %T /sys/fs/cgroup'
 ```
 
-For cgroup v2 you should see:
+A cgroup v2 environment reports:
 
 ```text
 cgroup2fs
 ```
 
-You can also inspect the mounted hierarchy:
+You can also inspect the mounts directly:
 
 ```bash
 minikube ssh -- 'mount | grep cgroup'
 ```
 
-And verify the cluster health:
+This is a better validation than treating a successful `minikube start` as proof that every compatibility issue is gone.
 
-```bash
-kubectl get pods -A
-minikube status
-```
+## Re-enable Ingress
 
-Only after that would I enable extras such as ingress:
+With the new cluster healthy, I restored the ingress addon:
 
 ```bash
 minikube addons enable ingress
+```
+
+Then checked the controller:
+
+```bash
 kubectl get pods -n ingress-nginx
 ```
 
-## What About Setting `failCgroupV1: false`?
+The ingress controller pod reached **Running**. It was still completing its startup probe at first, which is normal immediately after enabling the addon.
 
-Kubernetes 1.37 still permits a temporary override:
+At this point the local cluster was fixed and ready for the `hello-ingress.yaml` workload from the ingress lab.
+
+## Important: Docker Driver Networking on macOS
+
+Switching from a VM driver to Docker changes how the host reaches the cluster.
+
+With the Docker driver on macOS, the Minikube node IP is not directly reachable from the host in the same way as a traditional VM-backed Minikube node.
+
+For the standard Ingress workflow on Docker Desktop, run this in another terminal:
+
+```bash
+minikube tunnel
+```
+
+Then access the Ingress through `127.0.0.1` rather than assuming `minikube ip` is directly routable from macOS.
+
+The current Minikube getting-started documentation explicitly calls this out for Docker Desktop users: [Minikube start / Ingress example](https://minikube.sigs.k8s.io/docs/start/).
+
+For a service exposed as `NodePort`, Minikube also provides:
+
+```bash
+minikube service <service-name> --url
+```
+
+That command creates a host-accessible tunnel and prints the URL. See [Accessing apps in Minikube](https://minikube.sigs.k8s.io/docs/handbook/accessing/).
+
+So the mental model after switching drivers is:
+
+- **Ingress on Docker Desktop/macOS**: use `minikube tunnel` and typically `127.0.0.1`.
+- **NodePort service**: use `minikube service <service-name> --url` when you want a convenient host URL.
+- Do not assume the Docker driver's `minikube ip` behaves like the old VM driver's IP from the macOS host.
+
+## What About `failCgroupV1: false`?
+
+Kubernetes 1.37 still allows an explicit temporary override:
 
 ```yaml
 apiVersion: kubelet.config.k8s.io/v1beta1
@@ -280,31 +322,63 @@ kind: KubeletConfiguration
 failCgroupV1: false
 ```
 
-I would not use that as the default fix for a disposable local Minikube cluster.
+I did not use it.
 
-If the cluster can be recreated, rebuilding on cgroup v2 removes the compatibility debt instead of extending it. The override is more appropriate when you have a migration constraint and need a short-lived bridge.
+For a local Minikube cluster that can be destroyed and recreated, rebuilding on a current environment is cleaner than extending the life of cgroup v1.
 
-It also matters because newer resource-management capabilities increasingly assume cgroup v2. Kubernetes specifically calls out features such as Memory QoS as cgroup v2-only.
+The override makes more sense when you have a real migration constraint and need a short-lived bridge. It is not a great default for a development cluster whose underlying VM is already stale.
+
+## The Complete Recovery Sequence
+
+The successful path on this Mac boiled down to:
+
+```bash
+# Confirm Docker is healthy
+docker info
+
+# Remove the stale qemu2-backed profile
+minikube delete
+
+# Recreate Kubernetes 1.37 using Docker
+minikube start \
+  --driver=docker \
+  --kubernetes-version=v1.37.0
+
+# Verify the node
+kubectl get nodes
+minikube status
+
+# Restore ingress
+minikube addons enable ingress
+kubectl get pods -n ingress-nginx
+
+# Keep this running in another terminal for Ingress access on macOS
+minikube tunnel
+```
+
+That removed the stale VM image, avoided the old cgroup v1 guest, and restored a working Kubernetes 1.37 local environment.
 
 ## The Practical Lesson
 
-The most useful line in the whole log was not the final Minikube failure banner. It was the earlier warning:
+The most valuable line in the original log was not the final Minikube failure banner. It was this earlier warning:
 
 ```text
 Image was not built for the current minikube version.
 Expected minikube version: v1.32.0 -> Actual minikube version: v1.39.0
 ```
 
-A local development cluster is still infrastructure. Its VM image, kernel, cgroup hierarchy, container runtime, kubelet, kubeadm, and Kubernetes version all have a compatibility relationship.
+A local Kubernetes cluster is still infrastructure. Its VM image, kernel, cgroup hierarchy, container runtime, kubelet, kubeadm, and Kubernetes version all have a compatibility relationship.
 
-When a profile is years old, upgrading only the CLI can create a misleading state: the command on your Mac is current, but the machine it controls is not.
+When a profile has lived through years of upgrades, updating only the host CLI can leave you in a misleading state: the command on your Mac is current, but the environment it controls is not.
 
-For this kind of failure, my troubleshooting order is now:
+My troubleshooting order for this class of failure is now:
 
-1. Read the **first fatal kubeadm error**, not just the last Minikube banner.
-2. Check whether the profile/VM was built by an older Minikube release.
-3. Verify the cgroup version inside the node.
-4. Check which current driver is actually available on the host.
-5. Recreate the local cluster rather than forcing new Kubernetes versions into a stale VM.
+1. Read the **first fatal kubeadm error**.
+2. Look for warnings that the Minikube profile or VM was created by an older release.
+3. Check the node's cgroup version.
+4. Separate fatal errors from secondary runtime warnings.
+5. Check which current Minikube driver actually works on the host.
+6. For a disposable cluster, recreate it instead of forcing a new Kubernetes version into stale infrastructure.
+7. After switching drivers, re-check how services and Ingress are reached from the host.
 
-That is usually faster than fighting a compatibility override in a cluster that is disposable by design.
+In this case, Docker was already healthy, so deleting the old QEMU cluster and starting fresh with `--driver=docker` was the shortest route from a broken Kubernetes 1.37 upgrade to a Ready node and a running ingress controller.

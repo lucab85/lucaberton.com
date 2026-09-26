@@ -378,6 +378,23 @@ if (ctaConfigSrc) {
     fields++;
     validateParam(keyMap[m[1]], m[2] ?? m[3], `${configRel}:${lineOf(ctaConfigSrc, m.index)}`);
   }
+  // Internal destinations must be real routes (site-audit only scans .astro/.mdx, not this .ts).
+  const routeExists = (href) => {
+    const clean = href.split(/[?#]/)[0].replace(/^\/+|\/+$/g, "");
+    if (!clean) return fs.existsSync(path.join(SRC, "pages/index.astro"));
+    const page = ["astro", "md", "mdx"].some((ext) =>
+      fs.existsSync(path.join(SRC, `pages/${clean}.${ext}`)) || fs.existsSync(path.join(SRC, `pages/${clean}/index.${ext}`)));
+    if (page) return true;
+    const post = clean.match(/^blog\/([^/]+)$/);
+    return !!post && ["mdx", "md"].some((ext) => fs.existsSync(path.join(SRC, `content/blog/${post[1]}.${ext}`)));
+  };
+  for (const m of ctaConfigSrc.matchAll(/\b(ctaHref|secondaryHref)\s*:\s*(?:"([^"]*)"|'([^']*)')/g)) {
+    const href = m[2] ?? m[3];
+    const where = `${configRel}:${lineOf(ctaConfigSrc, m.index)}`;
+    if (/^https?:\/\//.test(href)) continue;
+    if (!routeExists(href)) record("FAIL", "cta destination", `${where}: ${m[1]} '${href}' is not a page on this site`);
+    else if (!href.endsWith("/") && !/[?#]/.test(href)) record("WARN", "cta destination", `${where}: ${m[1]} '${href}' should end with '/' (site convention, avoids a redirect)`);
+  }
   for (const [slug, idx] of CTA_KEYS) {
     const where = `${configRel}:${lineOf(ctaConfigSrc, idx)}`;
     const exists = fs.existsSync(path.join(SRC, "content/blog", `${slug}.mdx`)) || fs.existsSync(path.join(SRC, "content/blog", `${slug}.md`));

@@ -6,6 +6,13 @@ export interface BlogConsultingOffer {
   targetOffer: string;
   ctaVariant: string;
   benefits?: string[];
+  /**
+   * Quiet secondary link. Without it the card falls back to the
+   * serviceMatches.ts service, which is "AI Integration & GPU Platforms" for
+   * most AI posts — off-topic for Claude Code / agent readers.
+   */
+  secondaryLabel?: string;
+  secondaryHref?: string;
 }
 
 /**
@@ -24,6 +31,8 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     targetOffer: 'ai_developer_platform_assessment',
     ctaVariant: 'corporate_network_problem',
     benefits: ['Network', 'Identity', 'Security', 'Developer access'],
+    secondaryLabel: 'See AI & cloud advisory services',
+    secondaryHref: '/services/',
   },
 
   'fix-claude-code-subscription-disabled-copilot-credit-limit': {
@@ -35,6 +44,8 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     targetOffer: 'ai_readiness_assessment',
     ctaVariant: 'team_tooling_governance',
     benefits: ['Licensing', 'Access', 'Governance', 'Cost'],
+    secondaryLabel: 'Explore enterprise services',
+    secondaryHref: '/services/',
   },
 
   'hermes-agent-troubleshooting': {
@@ -46,6 +57,8 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     targetOffer: 'agent_platform_assessment',
     ctaVariant: 'agent_reliability_problem',
     benefits: ['Reliability', 'Secrets', 'Observability', 'Failover'],
+    secondaryLabel: 'See AI platform services',
+    secondaryHref: '/services/',
   },
 
   'hermes-agent-oracle-cloud-free-tier-deployment': {
@@ -57,6 +70,8 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     targetOffer: 'agent_platform_assessment',
     ctaVariant: 'prototype_to_production',
     benefits: ['Architecture', 'Security', 'Monitoring', 'Resilience'],
+    secondaryLabel: 'See production AI services',
+    secondaryHref: '/services/',
   },
 
   'karpathy-claude-md-llm-coding-principles-2026': {
@@ -68,6 +83,8 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     targetOffer: 'ai_developer_governance',
     ctaVariant: 'repo_to_org_governance',
     benefits: ['Policy', 'MCP access', 'Security', 'Review gates'],
+    secondaryLabel: 'Explore advisory services',
+    secondaryHref: '/services/',
   },
 
   'claude-code-remote-control-enable-2026': {
@@ -79,6 +96,8 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     targetOffer: 'enterprise_claude_code_review',
     ctaVariant: 'managed_device_rollout',
     benefits: ['Identity', 'MDM', 'Network', 'Governance'],
+    secondaryLabel: 'See enterprise AI services',
+    secondaryHref: '/services/',
   },
 
   'agntcon-mcpcon-europe-2026-media-partner': {
@@ -90,6 +109,8 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     targetOffer: 'agent_platform_readiness',
     ctaVariant: 'europe_agent_readiness',
     benefits: ['MCP', 'Identity', 'Observability', 'Governance'],
+    secondaryLabel: 'See AI platform advisory services',
+    secondaryHref: '/services/',
   },
 
   'claude-code-uiux-pro-max-website-builder': {
@@ -101,6 +122,8 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     targetOffer: 'ai_software_delivery_assessment',
     ctaVariant: 'developer_to_team_scale',
     benefits: ['Standards', 'Security', 'Review', 'Delivery'],
+    secondaryLabel: 'Explore AI engineering services',
+    secondaryHref: '/services/',
   },
 
   'connecting-hermes-agent-to-discord': {
@@ -112,6 +135,8 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     targetOffer: 'agent_identity_governance_review',
     ctaVariant: 'agent_permissions_boundary',
     benefits: ['Identity', 'Permissions', 'Secrets', 'Trust boundaries'],
+    secondaryLabel: 'See AI governance services',
+    secondaryHref: '/services/',
   },
 
   'install-aws-cli-mac-homebrew-2026': {
@@ -123,6 +148,8 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     targetOffer: 'cloud_platform_assessment',
     ctaVariant: 'aws_access_standardization',
     benefits: ['SSO', 'IAM', 'Roles', 'Developer access'],
+    secondaryLabel: 'Explore cloud infrastructure services',
+    secondaryHref: '/services/cloud-infrastructure/',
   },
 };
 

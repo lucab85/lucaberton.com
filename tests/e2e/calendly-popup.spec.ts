@@ -284,6 +284,16 @@ test.describe('Contextual consulting CTA (blogConsultingCtas.ts)', () => {
     await expect(page.locator(CTA)).toHaveCount(0);
   });
 
+  test('card secondary link stays on topic and the GPU service cards are dropped', async ({ page }) => {
+    await page.goto(CONFIGURED_POST, { waitUntil: 'domcontentloaded' });
+    const secondary = page.locator('a[data-tp-cta-variant="prototype_to_production_service_detail"]');
+    await expect(secondary).toHaveCount(1);
+    await expect(secondary).toHaveAttribute('href', '/services/');
+    await expect(secondary).toHaveText('See production AI services');
+    await expect(secondary).toHaveAttribute('data-tp-target-offer', 'services');
+    await expect(page.locator('#main-content a[href="/services/ai-integration/"]')).toHaveCount(0);
+  });
+
   test('card headings stay out of the table of contents', async ({ page }) => {
     await page.goto(CONFIGURED_POST, { waitUntil: 'load' });
     const toc = page.locator('#toc-list');

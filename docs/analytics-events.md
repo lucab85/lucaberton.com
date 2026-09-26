@@ -80,10 +80,16 @@ CTA (`target_offer=ai_platform_assessment`, `cta_variant=schedule_free_assessmen
 Calendly popup).
 
 Both links on the card emit `consulting_cta_click` (secondary:
-`<cta_variant>_service_detail`); `topic_cluster` always comes from the page.
+`<cta_variant>_service_detail`, `target_offer` = the destination slugified,
+e.g. `services`). The secondary link comes from the offer's
+`secondaryLabel` / `secondaryHref`; without them it falls back to the
+`serviceMatches.ts` service, which is "AI Integration & GPU Platforms" for
+most AI posts — so set them. Configured posts also skip the generic
+`RelatedServices` cards. `topic_cluster` always comes from the page.
 The card is an `<aside>`, so its heading is excluded from the table of
 contents. The validator fails on offers or variants in that file that are not
-in the taxonomy, and on keys that are not real post slugs.
+in the taxonomy, on keys that are not real post slugs, and on `ctaHref` /
+`secondaryHref` values that are not pages on this site.
 
 ## Calendly booking flow
 

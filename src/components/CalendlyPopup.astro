@@ -10,13 +10,24 @@
  * passed as UTM params so the booking itself carries it inside Calendly too.
  *
  * Behaviour:
- *   - plain left-click on a scheduling link → popup (assets lazy-loaded on
- *     first click; nothing is fetched on page load)
- *   - modifier/middle clicks, data-calendly-native links, and no-JS visitors
+ *   - nothing is fetched on page load; the connection is warmed on hover/focus
+ *     of a scheduling link and the widget assets load on the first click
+ *   - widget.js AND widget.css must both be ready (tracked separately, so a
+ *     retry never opens an unstyled overlay) within 6 s, otherwise the click
+ *     falls back to native navigation
+ *   - one scheduler at a time: re-clicks while loading, open, or navigating
+ *     via the fallback are ignored; the clicked link shows aria-busy meanwhile
+ *   - modifier/middle clicks, data-calendly-native links and no-JS visitors
  *     keep the native link
- *   - if the widget fails to load, fall back to native navigation
+ *   - Calendly's overlay has no dialog semantics, so this makes the whole
+ *     overlay a modal dialog: role=dialog, focusable close control,
+ *     Escape-to-close, the rest of the page inert while open, focus restore
+ *   - Calendly's own consent banner is only hidden when the visitor accepted
+ *     analytics in this site's cookie banner (read at open time, after the
+ *     lazily-loaded consent library has had the widget load to initialise)
  *   - fires booking_start when the scheduler opens and booked_call when
- *     Calendly confirms the booking (via window.lucaTrack from ConversionTracker)
+ *     Calendly confirms the booking (via window.lucaTrack), both carrying the
+ *     CTA's target_offer / cta_position / cta_variant / booking_type
  */
 ---
 
@@ -26,11 +37,22 @@
     window.__lucaCalendlyPopupLoaded = true;
 
     var CALENDLY_ORIGIN = 'https://calendly.com';
+    var ASSETS_ORIGIN = 'https://assets.calendly.com';
     var SCHEDULING_PATH = '/lucaberton';
-    var ASSET_JS = 'https://assets.calendly.com/assets/external/widget.js';
-    var ASSET_CSS = 'https://assets.calendly.com/assets/external/widget.css';
+    var ASSET_JS = ASSETS_ORIGIN + '/assets/external/widget.js';
+    var ASSET_CSS = ASSETS_ORIGIN + '/assets/external/widget.css';
+    var LOAD_TIMEOUT_MS = 6000;
+    // A cancelled fallback navigation (Stop / Esc) leaves the page alive; re-arm then.
+    var NAVIGATION_REARM_MS = 10000;
+
     var loading = null;
-    var activeBookingType = 'discovery_call';
+    var cssReady = false;
+    var opening = false;
+    var busyLink = null;
+    var preconnected = false;
+    var activeCta = null;     // context of the link that opened the scheduler
+    var openOverlay = null;   // Calendly overlay element while a popup is open
+    var seenInvitees = {};    // in-memory dedupe of repeated event_scheduled messages
 
     function track(eventName, params) {
       if (typeof window.lucaTrack === 'function') window.lucaTrack(eventName, params);
@@ -60,10 +82,19 @@
       return (el && el.getAttribute('data-topic-cluster')) || 'general';
     }
 
+    function analyticsConsented() {
+      try {
+        var cc = window.CookieConsent;
+        return !!(cc && typeof cc.acceptedCategory === 'function' && cc.acceptedCategory('analytics'));
+      } catch (_) {
+        return false;
+      }
+    }
+
     function bookingUrl(href) {
       var u = new URL(href, window.location.href);
       var a = attribution();
-      u.searchParams.set('hide_gdpr_banner', '1');
+      if (analyticsConsented()) u.searchParams.set('hide_gdpr_banner', '1');
       u.searchParams.set('utm_source', 'lucaberton.com');
       u.searchParams.set('utm_medium', 'site');
       u.searchParams.set('utm_campaign', a.original_topic_cluster || topicCluster());
@@ -71,28 +102,190 @@
       return u.toString();
     }
 
+    function ctaContext(link) {
+      var inArticle = !!link.closest('[data-page-context]');
+      return {
+        booking_type: link.getAttribute('data-tp-booking-type') || 'discovery_call',
+        target_offer: link.getAttribute('data-tp-target-offer') || 'discovery_call',
+        cta_position: link.getAttribute('data-tp-cta-position') || (inArticle ? 'inline' : 'unlabeled'),
+        cta_variant: link.getAttribute('data-tp-cta-variant') || (inArticle ? 'inline_calendly_link' : 'unlabeled_calendly_link')
+      };
+    }
+
+    function eventParams(extra) {
+      return Object.assign({}, activeCta || {}, extra);
+    }
+
+    // Zero bytes at page load; opens the TCP/TLS connections as soon as the
+    // visitor shows intent so the first click is not a cold start.
+    function preconnect() {
+      if (preconnected) return;
+      preconnected = true;
+      [ASSETS_ORIGIN, CALENDLY_ORIGIN].forEach(function (origin) {
+        var link = document.createElement('link');
+        link.rel = 'preconnect';
+        link.href = origin;
+        document.head.appendChild(link);
+      });
+    }
+
+    function jsReady() {
+      return !!(window.Calendly && typeof window.Calendly.initPopupWidget === 'function');
+    }
+
     function loadWidget() {
-      if (window.Calendly && typeof window.Calendly.initPopupWidget === 'function') return Promise.resolve();
+      if (jsReady() && cssReady) return Promise.resolve();
       if (loading) return loading;
       loading = new Promise(function (resolve, reject) {
-        var css = document.createElement('link');
-        css.rel = 'stylesheet';
-        css.href = ASSET_CSS;
-        document.head.appendChild(css);
+        var pending = 0;
+        var settled = false;
+        var timer = setTimeout(function () { fail(new Error('Calendly widget load timed out')); }, LOAD_TIMEOUT_MS);
 
-        var script = document.createElement('script');
-        script.src = ASSET_JS;
-        script.async = true;
-        script.onload = function () {
-          if (window.Calendly && typeof window.Calendly.initPopupWidget === 'function') resolve();
-          else reject(new Error('Calendly widget missing after load'));
-        };
-        script.onerror = function () { reject(new Error('Calendly widget failed to load')); };
-        document.head.appendChild(script);
+        function fail(err) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(err);
+        }
+        function loaded() {
+          if (settled || --pending > 0) return;
+          settled = true;
+          clearTimeout(timer);
+          if (jsReady() && cssReady) resolve();
+          else reject(new Error('Calendly widget incomplete after load'));
+        }
+
+        // The overlay's layout, close controls and scroll-lock recovery all
+        // live in widget.css, so the stylesheet is gated exactly like the
+        // script — and re-requested on a retry if it never arrived.
+        if (!cssReady) {
+          pending++;
+          var css = document.createElement('link');
+          css.rel = 'stylesheet';
+          css.href = ASSET_CSS;
+          css.onload = function () { cssReady = true; loaded(); };
+          css.onerror = function () { fail(new Error('Calendly stylesheet failed to load')); };
+          document.head.appendChild(css);
+        }
+
+        if (!jsReady()) {
+          pending++;
+          var script = document.createElement('script');
+          script.src = ASSET_JS;
+          script.async = true;
+          script.onload = loaded;
+          script.onerror = function () { fail(new Error('Calendly widget failed to load')); };
+          document.head.appendChild(script);
+        }
       });
       loading.catch(function () { loading = null; }); // allow a retry on the next click
       return loading;
     }
+
+    function closePopup(overlay) {
+      if (window.Calendly && typeof window.Calendly.closePopupWidget === 'function') window.Calendly.closePopupWidget();
+      else if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+    }
+
+    // Calendly's overlay is plain divs with onclick handlers: no dialog role,
+    // no keyboard close, nothing focusable, and the page behind stays
+    // reachable. Layer modal-dialog semantics on top of the real DOM:
+    // .calendly-overlay > [.calendly-close-overlay, .calendly-popup > … > iframe, .calendly-popup-close]
+    function enhanceOverlay(trigger) {
+      var overlay = document.querySelector('.calendly-overlay');
+      if (!overlay) return;
+      openOverlay = overlay;
+
+      // The close control is a sibling of .calendly-popup, so the dialog is the overlay.
+      overlay.setAttribute('role', 'dialog');
+      overlay.setAttribute('aria-modal', 'true');
+      overlay.setAttribute('aria-label', 'Schedule a call with Luca Berton');
+      overlay.setAttribute('tabindex', '-1');
+
+      var close = overlay.querySelector('.calendly-popup-close');
+      if (close) {
+        close.setAttribute('role', 'button');
+        close.setAttribute('tabindex', '0');
+        close.setAttribute('aria-label', 'Close scheduling dialog');
+        close.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); close.click(); }
+        });
+      }
+
+      // Everything else on the page is inert while the dialog is open.
+      var madeInert = [];
+      Array.prototype.forEach.call(document.body.children, function (el) {
+        if (el === overlay || el.tagName === 'SCRIPT' || el.hasAttribute('inert')) return;
+        el.setAttribute('inert', '');
+        madeInert.push(el);
+      });
+
+      // Fallback containment for browsers without `inert`.
+      function onFocusIn(e) {
+        if (overlay.contains(e.target)) return;
+        var iframe = overlay.querySelector('iframe');
+        (iframe || close || overlay).focus();
+      }
+      function onKeydown(e) {
+        if (e.key === 'Escape') { e.preventDefault(); closePopup(overlay); }
+      }
+      document.addEventListener('focusin', onFocusIn, true);
+      document.addEventListener('keydown', onKeydown, true);
+
+      (close || overlay).focus();
+
+      // Calendly removes the overlay from <body> on close (after unlocking
+      // scroll); that is the moment to restore the page and focus. While it
+      // is open, anything appended later (e.g. the lazily loaded cookie
+      // banner) is made inert too.
+      var observer = new MutationObserver(function (mutations) {
+        if (document.body.contains(overlay)) {
+          mutations.forEach(function (m) {
+            Array.prototype.forEach.call(m.addedNodes, function (el) {
+              if (el.nodeType !== 1 || el === overlay || el.tagName === 'SCRIPT' || el.hasAttribute('inert')) return;
+              el.setAttribute('inert', '');
+              madeInert.push(el);
+            });
+          });
+          return;
+        }
+        observer.disconnect();
+        document.removeEventListener('focusin', onFocusIn, true);
+        document.removeEventListener('keydown', onKeydown, true);
+        madeInert.forEach(function (el) { el.removeAttribute('inert'); });
+        openOverlay = null;
+        if (trigger && document.body.contains(trigger) && typeof trigger.focus === 'function') trigger.focus();
+      });
+      observer.observe(document.body, { childList: true });
+    }
+
+    function setBusy(link, busy) {
+      if (busy) {
+        busyLink = link;
+        link.setAttribute('aria-busy', 'true');
+        link.style.cursor = 'progress';
+      } else {
+        link.removeAttribute('aria-busy');
+        link.style.cursor = '';
+      }
+    }
+
+    function rearm() {
+      opening = false;
+      if (busyLink) setBusy(busyLink, false);
+      busyLink = null;
+    }
+
+    // Back from calendly.com via the bfcache restores this exact JS state.
+    window.addEventListener('pageshow', function (e) { if (e.persisted) rearm(); });
+
+    ['pointerover', 'touchstart', 'focusin'].forEach(function (type) {
+      document.addEventListener(type, function (event) {
+        if (preconnected) return;
+        var link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+        if (link && isSchedulingLink(link.getAttribute('href'))) preconnect();
+      }, { capture: true, passive: true });
+    });
 
     // Bubble phase: ConversionTracker's capture-phase listener has already
     // recorded the consulting_cta_click for this same click.
@@ -105,33 +298,42 @@
       if (!isSchedulingLink(href)) return;
 
       event.preventDefault();
-      activeBookingType = link.getAttribute('data-tp-booking-type') || 'discovery_call';
-      var url = bookingUrl(href);
+      if (opening || openOverlay) return; // one scheduler at a time
+      opening = true;
+      activeCta = ctaContext(link);
+      setBusy(link, true);
 
       loadWidget().then(function () {
-        window.Calendly.initPopupWidget({ url: url });
-        track('booking_start', { booking_type: activeBookingType, booking_source: 'calendly_popup' });
+        window.Calendly.initPopupWidget({ url: bookingUrl(href) });
+        enhanceOverlay(link);
+        track('booking_start', eventParams({ booking_source: 'calendly_popup' }));
+        rearm();
       }).catch(function () {
-        track('booking_start', { booking_type: activeBookingType, booking_source: 'calendly_native_fallback' });
-        window.location.href = url;
+        track('booking_start', eventParams({ booking_source: 'calendly_native_fallback' }));
+        // Keep the guard while the navigation is pending so a re-click cannot
+        // open a half-loaded popup; re-arm only if the navigation was cancelled.
+        window.location.href = bookingUrl(href);
+        setTimeout(rearm, NAVIGATION_REARM_MS);
       });
     }, false);
 
     window.addEventListener('message', function (event) {
       if (event.origin !== CALENDLY_ORIGIN) return;
       var data = event.data;
-      if (!data || typeof data.event !== 'string' || data.event.indexOf('calendly.') !== 0) return;
-      if (data.event !== 'calendly.event_scheduled') return;
+      if (!data || data.event !== 'calendly.event_scheduled') return;
 
-      // Calendly may deliver the message more than once; the invitee URI is an
-      // opaque id used only locally for dedupe and never sent to analytics.
+      // Calendly may deliver the message more than once. The invitee URI is an
+      // identifier, so it is kept in memory only and never stored or sent.
       var inviteeUri = (data.payload && data.payload.invitee && data.payload.invitee.uri) || '';
-      try {
-        if (inviteeUri && sessionStorage.getItem('luca_booked_' + inviteeUri)) return;
-        if (inviteeUri) sessionStorage.setItem('luca_booked_' + inviteeUri, '1');
-      } catch (_) {}
+      if (inviteeUri) {
+        if (seenInvitees[inviteeUri]) return;
+        seenInvitees[inviteeUri] = true;
+      }
 
-      track('booked_call', { booking_type: activeBookingType, booking_source: 'calendly_popup' });
+      track('booked_call', eventParams({ booking_source: 'calendly_popup' }));
+      // A paid-plan confirmation redirect to /call-booked/ in this tab must
+      // not count the same booking again (ConversionTracker's pageview once-key).
+      try { sessionStorage.setItem('luca_pv_booked_call_/call-booked/', '1'); } catch (_) {}
     });
   })();
 </script>

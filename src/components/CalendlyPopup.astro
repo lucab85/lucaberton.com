@@ -1,0 +1,137 @@
+---
+/**
+ * Opens every calendly.com/lucaberton link as a Calendly popup on the page
+ * instead of navigating away, so the booking confirmation can be observed.
+ *
+ * Why: Calendly's confirmation-page redirect and webhooks are paid-plan
+ * features. The embed's parent-window postMessage (`calendly.event_scheduled`)
+ * works on every plan, so this is the only way to get a real `booked_call`
+ * on the free plan. Attribution (topic cluster + original landing page) is
+ * passed as UTM params so the booking itself carries it inside Calendly too.
+ *
+ * Behaviour:
+ *   - plain left-click on a scheduling link → popup (assets lazy-loaded on
+ *     first click; nothing is fetched on page load)
+ *   - modifier/middle clicks, data-calendly-native links, and no-JS visitors
+ *     keep the native link
+ *   - if the widget fails to load, fall back to native navigation
+ *   - fires booking_start when the scheduler opens and booked_call when
+ *     Calendly confirms the booking (via window.lucaTrack from ConversionTracker)
+ */
+---
+
+<script is:inline>
+  (function () {
+    if (window.__lucaCalendlyPopupLoaded) return;
+    window.__lucaCalendlyPopupLoaded = true;
+
+    var CALENDLY_ORIGIN = 'https://calendly.com';
+    var SCHEDULING_PATH = '/lucaberton';
+    var ASSET_JS = 'https://assets.calendly.com/assets/external/widget.js';
+    var ASSET_CSS = 'https://assets.calendly.com/assets/external/widget.css';
+    var loading = null;
+    var activeBookingType = 'discovery_call';
+
+    function track(eventName, params) {
+      if (typeof window.lucaTrack === 'function') window.lucaTrack(eventName, params);
+    }
+
+    function isSchedulingLink(href) {
+      try {
+        var u = new URL(href, window.location.href);
+        return u.origin === CALENDLY_ORIGIN && u.pathname.indexOf(SCHEDULING_PATH) === 0;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    // Same storage contract as ConversionTracker.astro (localStorage, {v, exp}).
+    function attribution() {
+      try {
+        var wrapped = JSON.parse(localStorage.getItem('luca_attribution') || 'null');
+        return wrapped && wrapped.v && (!wrapped.exp || Date.now() < wrapped.exp) ? wrapped.v : {};
+      } catch (_) {
+        return {};
+      }
+    }
+
+    function topicCluster() {
+      var el = document.querySelector('[data-page-context]');
+      return (el && el.getAttribute('data-topic-cluster')) || 'general';
+    }
+
+    function bookingUrl(href) {
+      var u = new URL(href, window.location.href);
+      var a = attribution();
+      u.searchParams.set('hide_gdpr_banner', '1');
+      u.searchParams.set('utm_source', 'lucaberton.com');
+      u.searchParams.set('utm_medium', 'site');
+      u.searchParams.set('utm_campaign', a.original_topic_cluster || topicCluster());
+      u.searchParams.set('utm_content', a.original_landing_page || window.location.pathname);
+      return u.toString();
+    }
+
+    function loadWidget() {
+      if (window.Calendly && typeof window.Calendly.initPopupWidget === 'function') return Promise.resolve();
+      if (loading) return loading;
+      loading = new Promise(function (resolve, reject) {
+        var css = document.createElement('link');
+        css.rel = 'stylesheet';
+        css.href = ASSET_CSS;
+        document.head.appendChild(css);
+
+        var script = document.createElement('script');
+        script.src = ASSET_JS;
+        script.async = true;
+        script.onload = function () {
+          if (window.Calendly && typeof window.Calendly.initPopupWidget === 'function') resolve();
+          else reject(new Error('Calendly widget missing after load'));
+        };
+        script.onerror = function () { reject(new Error('Calendly widget failed to load')); };
+        document.head.appendChild(script);
+      });
+      loading.catch(function () { loading = null; }); // allow a retry on the next click
+      return loading;
+    }
+
+    // Bubble phase: ConversionTracker's capture-phase listener has already
+    // recorded the consulting_cta_click for this same click.
+    document.addEventListener('click', function (event) {
+      if (event.defaultPrevented || event.button !== 0) return;
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      var link = event.target && event.target.closest ? event.target.closest('a[href]') : null;
+      if (!link || link.hasAttribute('data-calendly-native')) return;
+      var href = link.getAttribute('href');
+      if (!isSchedulingLink(href)) return;
+
+      event.preventDefault();
+      activeBookingType = link.getAttribute('data-tp-booking-type') || 'discovery_call';
+      var url = bookingUrl(href);
+
+      loadWidget().then(function () {
+        window.Calendly.initPopupWidget({ url: url });
+        track('booking_start', { booking_type: activeBookingType, booking_source: 'calendly_popup' });
+      }).catch(function () {
+        track('booking_start', { booking_type: activeBookingType, booking_source: 'calendly_native_fallback' });
+        window.location.href = url;
+      });
+    }, false);
+
+    window.addEventListener('message', function (event) {
+      if (event.origin !== CALENDLY_ORIGIN) return;
+      var data = event.data;
+      if (!data || typeof data.event !== 'string' || data.event.indexOf('calendly.') !== 0) return;
+      if (data.event !== 'calendly.event_scheduled') return;
+
+      // Calendly may deliver the message more than once; the invitee URI is an
+      // opaque id used only locally for dedupe and never sent to analytics.
+      var inviteeUri = (data.payload && data.payload.invitee && data.payload.invitee.uri) || '';
+      try {
+        if (inviteeUri && sessionStorage.getItem('luca_booked_' + inviteeUri)) return;
+        if (inviteeUri) sessionStorage.setItem('luca_booked_' + inviteeUri, '1');
+      } catch (_) {}
+
+      track('booked_call', { booking_type: activeBookingType, booking_source: 'calendly_popup' });
+    });
+  })();
+</script>

@@ -23,9 +23,9 @@ visitor.
 
 | Event | Fires when | Key params | GA4 role |
 |---|---|---|---|
-| `consulting_cta_click` | CTA toward services/assessment/Calendly clicked | `target_offer`, `cta_position`, `cta_variant` | micro-conversion |
-| `booking_start` | Calendly link clicked (auto on un-annotated links) | `booking_type` | micro-conversion |
-| `booked_call` | `/call-booked/` viewed (Calendly success redirect) | `booking_type` | **key event** |
+| `consulting_cta_click` | CTA toward services/assessment/Calendly clicked (un-annotated Calendly links count too: `cta_variant=inline_calendly_link`) | `target_offer`, `cta_position`, `cta_variant` | micro-conversion |
+| `booking_start` | Calendly scheduler actually opened — popup init, or native-navigation fallback (`booking_source`) | `booking_type`, `booking_source` | micro-conversion |
+| `booked_call` | Calendly confirmed the booking: `calendly.event_scheduled` postMessage from the popup (`src/components/CalendlyPopup.astro`, works on the free plan) — or `/call-booked/` viewed via the paid-plan success redirect | `booking_type`, `booking_source` | **key event** |
 | `assessment_submit` | reserved — fire when an on-site assessment form ships | `target_offer` | **key event** (future) |
 | `email_signup_start` | newsletter CTA/form opened | `form_id` | micro-conversion |
 | `email_signup` | `/newsletter-thank-you/` viewed (Kit success redirect) | `form_id` | **key event** |
@@ -50,8 +50,17 @@ as "conversions".
   reports which article created it. No PII is ever sent.
 
 `cta_position` controlled set: `top_banner`, `hero`, `inline_25`, `inline_50`,
-`inline_75`, `post_solution`, `post_conclusion`, `sidebar`, `sticky_bar`,
-`related_offer`.
+`inline_75`, `inline` (depth unknown — auto-tracked links in post bodies),
+`post_solution`, `post_conclusion`, `sidebar`, `sticky_bar`, `related_offer`.
+
+## Calendly booking flow
+
+Every `calendly.com/lucaberton` link on the site opens as a Calendly popup
+(assets lazy-loaded on first click). The popup URL carries attribution as UTM
+params (`utm_campaign` = original topic cluster, `utm_content` = original
+landing page) so the booking record inside Calendly shows which article
+created it. Add `data-calendly-native` to a link to opt out of the popup;
+modifier-clicks and no-JS visitors always get the native link.
 
 ## Adding a tracked CTA
 
@@ -74,9 +83,11 @@ element (deduped per session against refreshes).
 
 - **Kit**: set each form's success redirect to
   `https://lucaberton.com/newsletter-thank-you/`.
-- **Calendly**: set each event type's confirmation redirect to
-  `https://lucaberton.com/call-booked/` (optionally
-  `?booking_type=<slug>`).
+- **Calendly**: nothing required on the free plan — `booked_call` comes from
+  the popup. On a paid plan you may additionally set each event type's
+  confirmation redirect to `https://lucaberton.com/call-booked/`
+  (optionally `?booking_type=<slug>`); the two paths never double-count
+  because the redirect replaces the popup's page.
 - **GA4 admin**: mark the four key events above as key events; register custom
   dimensions `topic_cluster`, `cta_position`, `cta_variant`, `target_offer`,
   `company`, `offer_id`, `page_type`, `original_landing_page`,

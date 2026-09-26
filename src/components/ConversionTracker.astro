@@ -12,6 +12,10 @@
  *   bootcamp_apply_submit — application form submitted
  *   consulting_cta_click  — CTA toward services/assessment/discovery call (target_offer)
  *   booking_start         — scheduler (Calendly) opened
+ *   email_signup          — Kit confirmation redirect page viewed (true conversion)
+ *   booked_call           — Calendly confirmation redirect page viewed (true conversion)
+ *
+ * Full schema + GA4 admin checklist: docs/analytics-events.md
  *
  * Usage: set data-track-event="<name>" on the clickable element, plus
  * data-tp-<param>="<value>" for extra parameters (kebab-case → snake_case).
@@ -32,6 +36,9 @@
     window.__lucaConversionTrackerLoaded = true;
 
     var ATTR_KEY = 'luca_attribution';
+    // First-touch attribution outlives the tab: a buyer can read an article
+    // on Monday and book on Thursday. 30 days, then a new first touch wins.
+    var ATTR_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
     function pageContext() {
       var el = document.querySelector('[data-page-context]');
@@ -44,8 +51,11 @@
 
     function readAttribution() {
       try {
-        var raw = sessionStorage.getItem(ATTR_KEY);
-        return raw ? JSON.parse(raw) : null;
+        var raw = localStorage.getItem(ATTR_KEY);
+        if (!raw) return null;
+        var wrapped = JSON.parse(raw);
+        if (!wrapped || !wrapped.v || (wrapped.exp && Date.now() > wrapped.exp)) return null;
+        return wrapped.v;
       } catch (_) {
         return null;
       }
@@ -53,7 +63,7 @@
 
     function writeAttribution(data) {
       try {
-        sessionStorage.setItem(ATTR_KEY, JSON.stringify(data));
+        localStorage.setItem(ATTR_KEY, JSON.stringify({ v: data, exp: Date.now() + ATTR_TTL_MS }));
       } catch (_) { /* storage unavailable — events still fire without attribution */ }
     }
 
@@ -108,13 +118,29 @@
       window.dataLayer = window.dataLayer || [];
       window.dataLayer.push(Object.assign({ event: eventName }, payload));
       if (typeof window.gtag === 'function') {
-        window.gtag('event', eventName, payload);
+        // beacon: outbound-link clicks must survive page unload
+        window.gtag('event', eventName, Object.assign({ transport_type: 'beacon' }, payload));
       }
     }
 
     // Exposed for success handlers that fire after async work (e.g. the
     // bootcamp application form), so those events carry attribution too.
     window.lucaTrack = send;
+
+    // Confirmation pages (Kit/Calendly redirect targets) declare their
+    // completion event on the page-context element, e.g.
+    // data-track-pageview-event="email_signup" | "booked_call".
+    (function () {
+      var el = document.querySelector('[data-page-context][data-track-pageview-event]');
+      if (!el) return;
+      var eventName = el.getAttribute('data-track-pageview-event');
+      var onceKey = 'luca_pv_' + eventName + '_' + window.location.pathname;
+      try {
+        if (sessionStorage.getItem(onceKey)) return; // refresh, not a new conversion
+        sessionStorage.setItem(onceKey, '1');
+      } catch (_) {}
+      send(eventName, paramsFrom(el));
+    })();
 
     function isCalendly(href) {
       return (href || '').indexOf('calendly.com') !== -1;

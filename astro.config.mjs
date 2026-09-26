@@ -66,6 +66,9 @@ export default defineConfig({
         // Skip team page (it's empty/placeholder)
         if (page.includes('/team')) return false;
         if (page.includes('partytown')) return false;
+        // Noindex conversion-confirmation redirect targets (Kit/Calendly)
+        if (page.includes('/newsletter-thank-you')) return false;
+        if (page.includes('/call-booked')) return false;
         if (page.includes('?ref=')) return false;
         if (page.includes('?utm_')) return false;
 

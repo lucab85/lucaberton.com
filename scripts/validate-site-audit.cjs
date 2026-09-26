@@ -151,8 +151,11 @@ function checkBrokenLinks() {
 
 function checkOrphanPages() {
   // Top-level standalone pages only — index/utility/system/dynamic routes excluded.
+  // newsletter-thank-you and call-booked are conversion-confirmation redirect
+  // targets (Kit/Calendly success URLs): deliberately unlinked, noindex.
   const excluded = new Set([
     'index', '404', 'rss.xml', 'video-sitemap.xml', 'blog', 'blog-old',
+    'newsletter-thank-you', 'call-booked',
   ]);
 
   // Redirect/vanity stubs (QR-code landing pages, retired-page 301s) are

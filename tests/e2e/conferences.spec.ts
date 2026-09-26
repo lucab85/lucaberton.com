@@ -6,8 +6,11 @@ import { test, expect, type Page } from '@playwright/test';
  * real date, and the list is ordered newest first.
  */
 
+// Timeline cards only (bg-white/5); the featured-talk cards above the timeline
+// also contain event names but intentionally carry no role badge.
+const TIMELINE_CARD = 'div.group[class~="bg-white/5"]';
 const card = (page: Page, name: string) =>
-  page.locator('div.group').filter({ has: page.getByText(name, { exact: true }) }).first();
+  page.locator(TIMELINE_CARD).filter({ has: page.getByText(name, { exact: true }) }).first();
 
 test.describe('conferences timeline', () => {
   test('confirmed talks carry their role badge', async ({ page }) => {
@@ -31,7 +34,7 @@ test.describe('conferences timeline', () => {
 
   test('timeline is ordered newest first', async ({ page }) => {
     await page.goto('/conferences/', { waitUntil: 'domcontentloaded' });
-    const dates = await page.locator('div.group .bg-white\\/10.text-cyan-400').allTextContents();
+    const dates = await page.locator(`${TIMELINE_CARD} .bg-white\\/10.text-cyan-400`).allTextContents();
     const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
     const keys = dates.map((d) => d.trim()).filter((d) => /^[A-Z][a-z]{2} \d{4}$/.test(d)).map((d) => {
       const [m, y] = d.split(' ');

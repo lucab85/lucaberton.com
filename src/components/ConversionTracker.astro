@@ -1,0 +1,173 @@
+---
+/**
+ * Canonical conversion events for GA4, layered on top of the generic
+ * InteractionTracker. One event name per monetization path, differentiated
+ * by parameters — never per-partner event names.
+ *
+ * Events:
+ *   affiliate_click       — outbound affiliate/partner CTA (company, offer_id)
+ *   email_signup_start    — newsletter form/CTA opened
+ *   bootcamp_click        — CTA toward /ai-platform-engineer-bootcamp/
+ *   bootcamp_apply_start  — first focus inside the application form
+ *   bootcamp_apply_submit — application form submitted
+ *   consulting_cta_click  — CTA toward services/assessment/discovery call (target_offer)
+ *   booking_start         — scheduler (Calendly) opened
+ *
+ * Usage: set data-track-event="<name>" on the clickable element, plus
+ * data-tp-<param>="<value>" for extra parameters (kebab-case → snake_case).
+ * Forms: data-track-start-event / data-track-submit-event.
+ * Un-annotated calendly.com links auto-fire booking_start; un-annotated
+ * internal bootcamp links auto-fire bootcamp_click.
+ *
+ * Shared context on every event: page_path, page_type, topic_cluster (from
+ * the [data-page-context] element) and first-touch attribution persisted in
+ * sessionStorage (original landing page/cluster/referrer/UTMs), so a booking
+ * on /contact/ still reports which article created it. No PII is sent.
+ */
+---
+
+<script is:inline>
+  (function () {
+    if (window.__lucaConversionTrackerLoaded) return;
+    window.__lucaConversionTrackerLoaded = true;
+
+    var ATTR_KEY = 'luca_attribution';
+
+    function pageContext() {
+      var el = document.querySelector('[data-page-context]');
+      return {
+        page_path: window.location.pathname,
+        page_type: (el && el.getAttribute('data-page-type')) || 'page',
+        topic_cluster: (el && el.getAttribute('data-topic-cluster')) || 'general'
+      };
+    }
+
+    function readAttribution() {
+      try {
+        var raw = sessionStorage.getItem(ATTR_KEY);
+        return raw ? JSON.parse(raw) : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function writeAttribution(data) {
+      try {
+        sessionStorage.setItem(ATTR_KEY, JSON.stringify(data));
+      } catch (_) { /* storage unavailable — events still fire without attribution */ }
+    }
+
+    function initAttribution() {
+      var existing = readAttribution();
+      if (existing) return existing;
+      var ctx = pageContext();
+      var params = new URLSearchParams(window.location.search);
+      var attribution = {
+        original_landing_page: ctx.page_path,
+        original_topic_cluster: ctx.topic_cluster,
+        original_referrer: document.referrer ? document.referrer.slice(0, 200) : '(direct)',
+        utm_source: params.get('utm_source') || undefined,
+        utm_medium: params.get('utm_medium') || undefined,
+        utm_campaign: params.get('utm_campaign') || undefined,
+        first_consulting_cta: undefined
+      };
+      writeAttribution(attribution);
+      return attribution;
+    }
+
+    var attribution = initAttribution();
+
+    function paramsFrom(element) {
+      var out = {};
+      for (var i = 0; i < element.attributes.length; i++) {
+        var attr = element.attributes[i];
+        if (attr.name.indexOf('data-tp-') === 0) {
+          out[attr.name.slice(8).replace(/-/g, '_')] = attr.value;
+        }
+      }
+      return out;
+    }
+
+    function send(eventName, params) {
+      var ctx = pageContext();
+      var payload = Object.assign({}, ctx, {
+        original_landing_page: attribution.original_landing_page,
+        original_topic_cluster: attribution.original_topic_cluster,
+        original_referrer: attribution.original_referrer
+      }, params || {});
+      if (attribution.utm_source) payload.utm_source = attribution.utm_source;
+      if (attribution.utm_medium) payload.utm_medium = attribution.utm_medium;
+      if (attribution.utm_campaign) payload.utm_campaign = attribution.utm_campaign;
+      if (attribution.first_consulting_cta) payload.first_consulting_cta = attribution.first_consulting_cta;
+
+      if (eventName === 'consulting_cta_click' && !attribution.first_consulting_cta) {
+        attribution.first_consulting_cta = payload.target_offer || ctx.page_path;
+        writeAttribution(attribution);
+      }
+
+      window.dataLayer = window.dataLayer || [];
+      window.dataLayer.push(Object.assign({ event: eventName }, payload));
+      if (typeof window.gtag === 'function') {
+        window.gtag('event', eventName, payload);
+      }
+    }
+
+    // Exposed for success handlers that fire after async work (e.g. the
+    // bootcamp application form), so those events carry attribution too.
+    window.lucaTrack = send;
+
+    function isCalendly(href) {
+      return (href || '').indexOf('calendly.com') !== -1;
+    }
+
+    function internalPath(href) {
+      try {
+        var parsed = new URL(href, window.location.href);
+        return parsed.hostname === window.location.hostname ? parsed.pathname : '';
+      } catch (_) {
+        return '';
+      }
+    }
+
+    document.addEventListener('click', function (event) {
+      var target = event.target && event.target.closest
+        ? event.target.closest('[data-track-event], a')
+        : null;
+      if (!target) return;
+
+      var explicit = target.getAttribute && target.getAttribute('data-track-event');
+      var href = (target.getAttribute && target.getAttribute('href')) || '';
+
+      if (explicit) {
+        var params = paramsFrom(target);
+        if (href) params.destination_url = href;
+        send(explicit, params);
+        return;
+      }
+
+      if (isCalendly(href)) {
+        send('booking_start', { booking_type: 'discovery_call', destination_url: href });
+        return;
+      }
+
+      if (internalPath(href).indexOf('/ai-platform-engineer-bootcamp') === 0) {
+        send('bootcamp_click', { cta_variant: 'auto_link', destination_url: href });
+      }
+    }, true);
+
+    document.addEventListener('focusin', function (event) {
+      var form = event.target && event.target.closest ? event.target.closest('form[data-track-start-event]') : null;
+      if (!form || form.__lucaStartFired) return;
+      form.__lucaStartFired = true;
+      send(form.getAttribute('data-track-start-event'), paramsFrom(form));
+    }, true);
+
+    document.addEventListener('submit', function (event) {
+      var form = event.target;
+      if (!form || !form.getAttribute) return;
+      var eventName = form.getAttribute('data-track-submit-event');
+      if (!eventName) return;
+      send(eventName, paramsFrom(form));
+    }, true);
+  })();
+</script>

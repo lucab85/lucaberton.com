@@ -6,6 +6,17 @@ lucaberton.com. Implementation: `src/components/ConversionTracker.astro`
 `G-M9Q5F672JT`). Do not invent new event names — differentiate with
 parameters (`company`, `offer_id`, `target_offer`).
 
+**Enforced:** the controlled vocabularies live in
+`src/config/analytics-taxonomy.json` and `scripts/validate-analytics.cjs`
+checks every tracked element against them in the pre-commit hook (`--staged`)
+and CI (`pnpm validate:analytics`). Topic clusters come from
+`src/utils/topicCluster.ts`; target offers are the taxonomy list plus the
+service/pillar URLs in `src/utils/serviceMatches.ts` slugified
+(`/services/kubernetes-workshops/` → `services_kubernetes_workshops`). To use a
+new value, add it there first — the validator rejects anything else, including
+spec-style attribute names (`data-target-offer`) that the tracker cannot read,
+un-annotated Calendly links, and unknown `<BlogPromoCard variant>` names.
+
 ## Monetization priority
 
 1. Qualified consulting leads from organic (north star)
@@ -51,7 +62,28 @@ as "conversions".
 
 `cta_position` controlled set: `top_banner`, `hero`, `inline_25`, `inline_50`,
 `inline_75`, `inline` (depth unknown — auto-tracked links in post bodies),
-`post_solution`, `post_conclusion`, `sidebar`, `sticky_bar`, `related_offer`.
+`post_solution`, `post_conclusion`, `sidebar`, `sticky_bar`, `related_offer`,
+`unlabeled` (auto-tracked Calendly link outside an article body — annotate it).
+
+## Consulting CTAs on high-traffic posts
+
+`src/utils/blogConsultingCtas.ts` holds one offer per post (keyed by slug):
+headline, body, benefit chips, `ctaLabel` / `ctaHref` (the assessment or
+readiness page), `targetOffer` and `ctaVariant` (the copy experiment name —
+never a layout word like `dark`). For a configured post,
+`src/pages/blog/[slug].astro` renders `BlogConsultationCta` with that offer
+and injects it mid-article (after the H2 at ~45% of the post's H2 count) with
+`cta_position=inline_50`; the post-conclusion consultation CTA and the
+bootcamp CTA are suppressed there so the page has one primary consulting
+action. Every other post keeps the generic, `serviceMatches.ts`-driven closing
+CTA (`target_offer=ai_platform_assessment`, `cta_variant=schedule_free_assessment`,
+Calendly popup).
+
+Both links on the card emit `consulting_cta_click` (secondary:
+`<cta_variant>_service_detail`); `topic_cluster` always comes from the page.
+The card is an `<aside>`, so its heading is excluded from the table of
+contents. The validator fails on offers or variants in that file that are not
+in the taxonomy, and on keys that are not real post slugs.
 
 ## Calendly booking flow
 
@@ -86,11 +118,13 @@ element (deduped per session against refreshes).
 - **Calendly**: nothing required on the free plan — `booked_call` comes from
   the popup. On a paid plan you may additionally set each event type's
   confirmation redirect to `https://lucaberton.com/call-booked/`
-  (optionally `?booking_type=<slug>`); the two paths never double-count
-  because the redirect replaces the popup's page.
+  (optionally `?booking_type=<slug>`). The popup marks the `/call-booked/`
+  pageview as already counted for the session, so a redirect in the same tab
+  does not double-count; a redirect opened in a *new* tab still would.
 - **GA4 admin**: mark the four key events above as key events; register custom
   dimensions `topic_cluster`, `cta_position`, `cta_variant`, `target_offer`,
   `company`, `offer_id`, `page_type`, `original_landing_page`,
-  `original_topic_cluster`, `booking_type`, `form_id`.
+  `original_topic_cluster`, `booking_type`, `booking_source`,
+  `first_consulting_cta`, `form_id`.
 - Baseline 28–60 days before setting targets; then fix funnel leakage (CTA
   CTR, form completion) before chasing more traffic.

@@ -38,6 +38,14 @@ visitor.
   Google Ads campaigns. Current tracked launch offer:
   `offer_id=pocket_launch`, `company=pocket`.
 
+- **Flatpay:** PartnerStack explicitly permits the personal referral link on
+  the site, in content, and in newsletters. Current tracked offer:
+  `offer_id=flatpay_partner_referral`, `company=flatpay`,
+  destination `https://try.flatpay.com/lmd1w8x5omhj`. The partner terms in
+  the Feb 2026 welcome email use country-specific lead/demo payouts, so do not
+  hard-code commission amounts into public site copy; keep them in the partner
+  registry/outreach notes and re-confirm before quoting externally.
+
 ## Events
 
 | Event | Fires when | Key params | GA4 role |

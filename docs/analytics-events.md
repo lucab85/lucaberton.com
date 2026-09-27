@@ -46,6 +46,13 @@ visitor.
   hard-code commission amounts into public site copy; keep them in the partner
   registry/outreach notes and re-confirm before quoting externally.
 
+- **Linux Foundation:** evergreen Awin tracking uses advertiser ID `85919`
+  with publisher ID `1937397`. Current tracked offer:
+  `offer_id=linux_foundation_training`, `company=linux_foundation`.
+  Use the supplied Awin creative/link for evergreen Linux/Kubernetes training
+  placements. Do not reuse expired campaign codes (for example the September
+  2026 promo codes) unless a current partner email explicitly reactivates them.
+
 ## Events
 
 | Event | Fires when | Key params | GA4 role |

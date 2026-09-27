@@ -16,6 +16,7 @@ test.describe('contextual affiliate cards', () => {
     { post: '/blog/proteinlens-vibe-coding-on-azure/', company: 'atoms', offerId: 'atoms_luca10' },
     { post: '/blog/underrated-ai-tools-wispr-flow-alternatives-2026/', company: 'pocket', offerId: 'pocket_launch' },
     { post: '/blog/aws-summit-amsterdam-2026-startup-theatre-anthropic/', company: 'flatpay', offerId: 'flatpay_partner_referral' },
+    { post: '/blog/devops-roadmap-2026-skills-tools-career/', company: 'linux_foundation', offerId: 'linux_foundation_training' },
   ];
   for (const { post, company, offerId } of placements) {
     test(`${company} card on ${post}`, async ({ page }) => {

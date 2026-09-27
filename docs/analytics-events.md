@@ -30,6 +30,29 @@ An enterprise-intent article (GPU/OpenShift AI/MLOps governance) shows an
 assessment CTA first, even when an affiliate offer could monetize the same
 visitor.
 
+### Partner channel restrictions
+
+- **Pocket:** the affiliate programme does **not** allow referrals from Google Ads.
+  Use Pocket affiliate links only in organic/editorial placements (site content,
+  newsletter, social/editorial traffic as permitted by the programme), never in
+  Google Ads campaigns. Current tracked launch offer:
+  `offer_id=pocket_launch`, `company=pocket`.
+
+- **Flatpay:** PartnerStack explicitly permits the personal referral link on
+  the site, in content, and in newsletters. Current tracked offer:
+  `offer_id=flatpay_partner_referral`, `company=flatpay`,
+  destination `https://try.flatpay.com/lmd1w8x5omhj`. The partner terms in
+  the Feb 2026 welcome email use country-specific lead/demo payouts, so do not
+  hard-code commission amounts into public site copy; keep them in the partner
+  registry/outreach notes and re-confirm before quoting externally.
+
+- **Linux Foundation:** evergreen Awin tracking uses advertiser ID `85919`
+  with publisher ID `1937397`. Current tracked offer:
+  `offer_id=linux_foundation_training`, `company=linux_foundation`.
+  Use the supplied Awin creative/link for evergreen Linux/Kubernetes training
+  placements. Do not reuse expired campaign codes (for example the September
+  2026 promo codes) unless a current partner email explicitly reactivates them.
+
 ## Events
 
 | Event | Fires when | Key params | GA4 role |
@@ -37,7 +60,8 @@ visitor.
 | `consulting_cta_click` | CTA toward services/assessment/Calendly clicked (un-annotated Calendly links count too: `cta_variant=inline_calendly_link`) | `target_offer`, `cta_position`, `cta_variant` | micro-conversion |
 | `booking_start` | Calendly scheduler actually opened — popup init, or native-navigation fallback (`booking_source`) | `booking_type`, `booking_source` | micro-conversion |
 | `booked_call` | Calendly confirmed the booking: `calendly.event_scheduled` postMessage from the popup (`src/components/CalendlyPopup.astro`, works on the free plan) — or `/call-booked/` viewed via the paid-plan success redirect | `booking_type`, `booking_source` | **key event** |
-| `assessment_submit` | reserved — fire when an on-site assessment form ships | `target_offer` | **key event** (future) |
+| `contact_form_submit` | contact form on `/contact/` accepted by Web3Forms (`data.success`) — a direct consulting inquiry | `form_id` | **key event** |
+| `assessment_submit` | Production AI Readiness Check on `/production-ai-assessment/` (`src/components/react/ProductionReadinessCheck.tsx`) — email submitted to unlock the category gap map | `target_offer` | **key event** |
 | `email_signup_start` | newsletter CTA/form opened | `form_id` | micro-conversion |
 | `email_signup` | `/newsletter-thank-you/` viewed (Kit success redirect) | `form_id` | **key event** |
 | `bootcamp_click` | link toward `/ai-platform-engineer-bootcamp/` (auto) | `cta_variant` | micro-conversion |
@@ -45,9 +69,9 @@ visitor.
 | `bootcamp_application_submitted` | application POST succeeded (name kept for data continuity; add a separate purchase event only if paid enrollment moves on-site) | — | **key event** |
 | `affiliate_click` | outbound affiliate/partner CTA clicked — one event for ALL partners | `company`, `offer_id`, `offer_type`, `cta_position`, `cta_variant`, `destination_url` | key event (lowest priority) |
 
-CTA clicks are operational metrics; `booked_call`, `assessment_submit`,
-`email_signup`, and `bootcamp_application_submitted` are the numbers to quote
-as "conversions".
+CTA clicks are operational metrics; `booked_call`, `contact_form_submit`,
+`assessment_submit`, `email_signup`, and `bootcamp_application_submitted` are
+the numbers to quote as "conversions".
 
 ## Shared parameters (every event)
 
@@ -64,6 +88,27 @@ as "conversions".
 `inline_75`, `inline` (depth unknown — auto-tracked links in post bodies),
 `post_solution`, `post_conclusion`, `sidebar`, `sticky_bar`, `related_offer`,
 `unlabeled` (auto-tracked Calendly link outside an article body — annotate it).
+
+## Production AI Readiness Check
+
+`/production-ai-assessment/` embeds a free, 8-question self-serve check
+(`src/components/react/ProductionReadinessCheck.tsx`, one question per
+diagnostic area already on the page) as the middle step between "read the
+page" and "book a call": the score and tier are free, the category gap map
+and top-3 actions are gated behind an email (submitted to Web3Forms).
+`assessment_submit` (`target_offer=production_ai_assessment`) fires ONLY on
+a confirmed Web3Forms success — a rejected or failed submission keeps the
+user on the email step with a retry and two honest fallbacks (a tracked
+"book a call directly" link, and "Continue without confirmation" to see the
+report without counting it as a captured lead). The report's CTA into
+Calendly is a normal `consulting_cta_click`.
+
+Programmatic events fired from JS/TSX (no HTML element to scan) use the same
+declarative names via `window.lucaTrack(name, params)` — the validator checks
+`lucaTrack(...)` call sites the same way it checks `data-track-event`, but
+deliberately does not scan bare `gtag()` calls: several older landing pages
+call gtag directly with their own page-local event names that predate and
+sit outside this taxonomy.
 
 ## Consulting CTAs on high-traffic posts
 
@@ -127,7 +172,8 @@ element (deduped per session against refreshes).
   (optionally `?booking_type=<slug>`). The popup marks the `/call-booked/`
   pageview as already counted for the session, so a redirect in the same tab
   does not double-count; a redirect opened in a *new* tab still would.
-- **GA4 admin**: mark the four key events above as key events; register custom
+- **GA4 admin**: mark the key events above as key events (`contact_form_submit`
+  was added 2026-09-27 — create it by name like the others); register custom
   dimensions `topic_cluster`, `cta_position`, `cta_variant`, `target_offer`,
   `company`, `offer_id`, `page_type`, `original_landing_page`,
   `original_topic_cluster`, `booking_type`, `booking_source`,

@@ -293,6 +293,33 @@ for (const file of scanFiles) {
     validateParam(m[2].replace(/-/g, "_"), m[4], `${rel(file)}:${lineOf(raw, m.index)}`);
   }
 
+  // Programmatic conversions fired from JS/TSX via the site's declarative
+  // convention (no HTML element to scan), e.g. React islands:
+  // window.lucaTrack("assessment_submit", { target_offer: "…" }). Deliberately
+  // scoped to lucaTrack, not bare gtag() — several pre-existing pages call
+  // gtag directly with their own bespoke, page-local event names (scroll
+  // depth, section views, …) that predate and sit outside this taxonomy.
+  for (const m of raw.matchAll(/\blucaTrack\(\s*(['"])([a-zA-Z_]+)\1/g)) {
+    const eventName = m[2];
+    const where = `${rel(file)}:${lineOf(raw, m.index)}`;
+    if (!isEvent(eventName)) {
+      record("FAIL", "event name", `${where}: '${eventName}' is not a canonical event (${Object.keys(EVENTS).join(", ")})`);
+      continue;
+    }
+    // The params object, if any, must immediately follow the event-name arg
+    // (e.g. `lucaTrack("event", { … })`) — not just the next '{' anywhere later.
+    const afterCall = raw.slice(m.index + m[0].length);
+    const objOpen = afterCall.match(/^\s*,\s*\{/);
+    if (!objOpen) continue;
+    const braceStart = m.index + m[0].length + objOpen[0].length - 1;
+    const braceEnd = matchBrace(raw, braceStart);
+    if (braceEnd < 0) continue;
+    for (const pm of raw.slice(braceStart + 1, braceEnd).matchAll(/(['"]?)([a-zA-Z_][a-zA-Z0-9_]*)\1\s*:\s*(?:"([^"]*)"|'([^']*)')/g)) {
+      const val = pm[3] ?? pm[4];
+      validateParam(pm[2], val, where);
+    }
+  }
+
   if (!MARKUP_EXT.has(ext)) continue;
   const src = stripForMarkup(raw, file);
 

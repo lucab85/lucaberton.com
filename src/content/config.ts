@@ -7,6 +7,9 @@ const blogCollection = defineCollection({
     draft: z.boolean(),
     title: z.string(),
     seoTitle: z.string().optional(),
+    // Absolute URL of the primary version when this topic is owned by another
+    // site (e.g. openempower.com). Emitted as the page's rel=canonical.
+    canonical: z.string().url().optional(),
     snippet: z.string(),
     image: z.object({
       src: z.string(),

@@ -60,7 +60,7 @@ visitor.
 | `consulting_cta_click` | CTA toward services/assessment/Calendly clicked (un-annotated Calendly links count too: `cta_variant=inline_calendly_link`) | `target_offer`, `cta_position`, `cta_variant` | micro-conversion |
 | `booking_start` | Calendly scheduler actually opened — popup init, or native-navigation fallback (`booking_source`) | `booking_type`, `booking_source` | micro-conversion |
 | `booked_call` | Calendly confirmed the booking: `calendly.event_scheduled` postMessage from the popup (`src/components/CalendlyPopup.astro`, works on the free plan) — or `/call-booked/` viewed via the paid-plan success redirect | `booking_type`, `booking_source` | **key event** |
-| `contact_form_submit` | contact form on `/contact/` accepted by Web3Forms (`data.success`) — a direct consulting inquiry | `form_id` | **key event** |
+| `contact_form_submit` | business inquiry form accepted by Web3Forms (`data.success`) — `form_id=contact` on `/contact/`, `form_id=partnership` on `/partner-with-luca/` | `form_id` | **key event** |
 | `assessment_submit` | Production AI Readiness Check on `/production-ai-assessment/` (`src/components/react/ProductionReadinessCheck.tsx`) — email submitted to unlock the category gap map | `target_offer` | **key event** |
 | `email_signup_start` | newsletter CTA/form opened | `form_id` | micro-conversion |
 | `email_signup` | `/newsletter-thank-you/` viewed (Kit success redirect) | `form_id` | **key event** |

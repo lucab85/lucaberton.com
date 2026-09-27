@@ -30,6 +30,14 @@ An enterprise-intent article (GPU/OpenShift AI/MLOps governance) shows an
 assessment CTA first, even when an affiliate offer could monetize the same
 visitor.
 
+### Partner channel restrictions
+
+- **Pocket:** the affiliate programme does **not** allow referrals from Google Ads.
+  Use Pocket affiliate links only in organic/editorial placements (site content,
+  newsletter, social/editorial traffic as permitted by the programme), never in
+  Google Ads campaigns. Current tracked launch offer:
+  `offer_id=pocket_launch`, `company=pocket`.
+
 ## Events
 
 | Event | Fires when | Key params | GA4 role |

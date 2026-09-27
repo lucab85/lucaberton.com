@@ -38,7 +38,7 @@ visitor.
 | `booking_start` | Calendly scheduler actually opened — popup init, or native-navigation fallback (`booking_source`) | `booking_type`, `booking_source` | micro-conversion |
 | `booked_call` | Calendly confirmed the booking: `calendly.event_scheduled` postMessage from the popup (`src/components/CalendlyPopup.astro`, works on the free plan) — or `/call-booked/` viewed via the paid-plan success redirect | `booking_type`, `booking_source` | **key event** |
 | `contact_form_submit` | contact form on `/contact/` accepted by Web3Forms (`data.success`) — a direct consulting inquiry | `form_id` | **key event** |
-| `assessment_submit` | reserved — fire when an on-site assessment form ships | `target_offer` | **key event** (future) |
+| `assessment_submit` | Production AI Readiness Check on `/production-ai-assessment/` (`src/components/react/ProductionReadinessCheck.tsx`) — email submitted to unlock the category gap map | `target_offer` | **key event** |
 | `email_signup_start` | newsletter CTA/form opened | `form_id` | micro-conversion |
 | `email_signup` | `/newsletter-thank-you/` viewed (Kit success redirect) | `form_id` | **key event** |
 | `bootcamp_click` | link toward `/ai-platform-engineer-bootcamp/` (auto) | `cta_variant` | micro-conversion |
@@ -65,6 +65,27 @@ the numbers to quote as "conversions".
 `inline_75`, `inline` (depth unknown — auto-tracked links in post bodies),
 `post_solution`, `post_conclusion`, `sidebar`, `sticky_bar`, `related_offer`,
 `unlabeled` (auto-tracked Calendly link outside an article body — annotate it).
+
+## Production AI Readiness Check
+
+`/production-ai-assessment/` embeds a free, 8-question self-serve check
+(`src/components/react/ProductionReadinessCheck.tsx`, one question per
+diagnostic area already on the page) as the middle step between "read the
+page" and "book a call": the score and tier are free, the category gap map
+and top-3 actions are gated behind an email (submitted to Web3Forms).
+`assessment_submit` (`target_offer=production_ai_assessment`) fires ONLY on
+a confirmed Web3Forms success — a rejected or failed submission keeps the
+user on the email step with a retry and two honest fallbacks (a tracked
+"book a call directly" link, and "Continue without confirmation" to see the
+report without counting it as a captured lead). The report's CTA into
+Calendly is a normal `consulting_cta_click`.
+
+Programmatic events fired from JS/TSX (no HTML element to scan) use the same
+declarative names via `window.lucaTrack(name, params)` — the validator checks
+`lucaTrack(...)` call sites the same way it checks `data-track-event`, but
+deliberately does not scan bare `gtag()` calls: several older landing pages
+call gtag directly with their own page-local event names that predate and
+sit outside this taxonomy.
 
 ## Consulting CTAs on high-traffic posts
 

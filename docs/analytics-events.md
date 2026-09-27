@@ -37,6 +37,7 @@ visitor.
 | `consulting_cta_click` | CTA toward services/assessment/Calendly clicked (un-annotated Calendly links count too: `cta_variant=inline_calendly_link`) | `target_offer`, `cta_position`, `cta_variant` | micro-conversion |
 | `booking_start` | Calendly scheduler actually opened — popup init, or native-navigation fallback (`booking_source`) | `booking_type`, `booking_source` | micro-conversion |
 | `booked_call` | Calendly confirmed the booking: `calendly.event_scheduled` postMessage from the popup (`src/components/CalendlyPopup.astro`, works on the free plan) — or `/call-booked/` viewed via the paid-plan success redirect | `booking_type`, `booking_source` | **key event** |
+| `contact_form_submit` | contact form on `/contact/` accepted by Web3Forms (`data.success`) — a direct consulting inquiry | `form_id` | **key event** |
 | `assessment_submit` | reserved — fire when an on-site assessment form ships | `target_offer` | **key event** (future) |
 | `email_signup_start` | newsletter CTA/form opened | `form_id` | micro-conversion |
 | `email_signup` | `/newsletter-thank-you/` viewed (Kit success redirect) | `form_id` | **key event** |
@@ -45,9 +46,9 @@ visitor.
 | `bootcamp_application_submitted` | application POST succeeded (name kept for data continuity; add a separate purchase event only if paid enrollment moves on-site) | — | **key event** |
 | `affiliate_click` | outbound affiliate/partner CTA clicked — one event for ALL partners | `company`, `offer_id`, `offer_type`, `cta_position`, `cta_variant`, `destination_url` | key event (lowest priority) |
 
-CTA clicks are operational metrics; `booked_call`, `assessment_submit`,
-`email_signup`, and `bootcamp_application_submitted` are the numbers to quote
-as "conversions".
+CTA clicks are operational metrics; `booked_call`, `contact_form_submit`,
+`assessment_submit`, `email_signup`, and `bootcamp_application_submitted` are
+the numbers to quote as "conversions".
 
 ## Shared parameters (every event)
 
@@ -127,7 +128,8 @@ element (deduped per session against refreshes).
   (optionally `?booking_type=<slug>`). The popup marks the `/call-booked/`
   pageview as already counted for the session, so a redirect in the same tab
   does not double-count; a redirect opened in a *new* tab still would.
-- **GA4 admin**: mark the four key events above as key events; register custom
+- **GA4 admin**: mark the key events above as key events (`contact_form_submit`
+  was added 2026-09-27 — create it by name like the others); register custom
   dimensions `topic_cluster`, `cta_position`, `cta_variant`, `target_offer`,
   `company`, `offer_id`, `page_type`, `original_landing_page`,
   `original_topic_cluster`, `booking_type`, `booking_source`,

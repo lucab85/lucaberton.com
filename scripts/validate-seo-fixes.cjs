@@ -40,6 +40,9 @@
  *      with < 2 incoming links are warned                        (built HTML) [Ahrefs: only one dofollow incoming link]
  *  23. Every published article renders >= 3 related articles
  *      (BlogRelatedPosts simulation + manual section links)      (source)
+ *  24. No top-level '# ' Markdown heading in a blog post's MDX
+ *      body (the layout's <h1> already renders frontmatter
+ *      `title`; a body '# ' duplicates it)                       (source)  [OpenSEO audit 2026-09-28: Multiple H1 headings, 13 posts]
  *
  * Source-only checks always run. HTML checks run when ./public exists
  * (run `pnpm build` first). Exits 1 if any FAIL-level check fails.
@@ -406,6 +409,56 @@ function checkSourceFrontmatterLength() {
   }
   record(descLong ? "FAIL" : "PASS", "source snippet <= 160", `${descLong} blog post(s) over 160 chars`);
   record(titleLong ? "FAIL" : "PASS", "source title <= 60", `${titleLong} blog post(s) over 60 chars`);
+}
+
+// Stricter fenced-code stripper than stripNonContent(): a fence delimiter only
+// counts when it opens/closes its OWN line (CommonMark's actual rule), with the
+// closing fence required to share the opening's indentation. stripNonContent's
+// `` ```[\s\S]*?``` `` instead treats ANY literal "```" as a toggle, so a post
+// that prints a literal ``` inside a fenced example (e.g. a JSON blob whose
+// string value contains an escaped "\n```yaml\n...\n```" sample, or a Python
+// line asserting `"```" in text`) shifts its open/close pairing by one and
+// leaves a real code comment line like "# Validate all samples" unstripped —
+// which then reads exactly like a Markdown H1. Only checkNoBodyH1 needs this
+// (its false positives are the only ones shaped like a heading); other checks
+// keep using stripNonContent.
+function stripFencedCodeStrict(src) {
+  return src.replace(/^([ \t]*)```[^\n]*\n[\s\S]*?^\1```[ \t]*$/gm, (m) => " ".repeat(m.length));
+}
+
+// 24. No top-level '# ' Markdown heading in a blog post's MDX body. The blog
+// layout (src/pages/blog/[slug].astro) already renders a single <h1> from
+// frontmatter `title`; a body-level '# Heading' compiles to a second <h1>,
+// which OpenSEO's site audit flags as "Multiple H1 headings". Caught 13
+// AGNTCon/MCPCon posts with this exact pattern on 2026-09-28 (each opened
+// with '# <same as frontmatter title>' right after the imports). Scans the
+// body only (frontmatter stripped) and ignores fenced/inline code and HTML
+// comments, so a tutorial that shows example Markdown in a code block is
+// never a false positive.
+function checkNoBodyH1() {
+  const files = walk(BLOG_DIR, (p) => p.endsWith(".mdx") || p.endsWith(".md"));
+  let bad = 0;
+  for (const fp of files) {
+    const raw = read(fp);
+    const fmMatch = raw.match(/^---\n[\s\S]*?\n---/);
+    const body = fmMatch ? raw.slice(fmMatch[0].length) : raw;
+    const clean = stripFencedCodeStrict(body)
+      .replace(/`[^`\n]*`/g, (m) => " ".repeat(m.length))
+      .replace(/<!--[\s\S]*?-->/g, (m) => " ".repeat(m.length));
+    const rel = "blog/" + slugOf(fp);
+    // A single '#' followed by space/tab is an ATX H1; '##...' has a
+    // non-space character right after the first '#' so it never matches.
+    const headings = clean.match(/^#[ \t].*$/gm) || [];
+    if (headings.length) {
+      bad++;
+      record(
+        "FAIL",
+        "H1 in post body",
+        `${rel}: ${headings.length} top-level '# ' heading(s) in body (e.g. "${headings[0].slice(0, 60)}") — remove it or demote to '##', the layout already renders the <h1>`
+      );
+    }
+  }
+  record(bad ? "FAIL" : "PASS", "no H1 in post body", `${bad} post(s) with a body-level H1`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,6 +1087,7 @@ checkCategoryIntegrity();
 checkPostSlugRedirectConflict();
 checkAiReadiness();
 checkRelatedArticles();
+checkNoBodyH1();
 if (!SOURCE_ONLY) {
   checkBuiltHtml();
   checkCategoryWordCount();

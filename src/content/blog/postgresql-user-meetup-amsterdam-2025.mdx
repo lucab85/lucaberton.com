@@ -1,0 +1,116 @@
+---
+title: "PostgreSQL Meetup Amsterdam 2025: Mastodon, CNPG, Indexes"
+seoTitle: "PostgreSQL Meetup Amsterdam 2025: Mastodon & CloudNativePG"
+snippet: "Three PostgreSQL talks in Amsterdam: scaling mastodon.world with Sidekiq and PgBouncer, CloudNativePG at the Dutch police, and partial and hash indexes."
+description: "My recap of a PostgreSQL user meetup in Amsterdam, February 2025: Mastodon at scale, the Politie SDS Store platform on CloudNativePG, and index tuning."
+publishDate: "2026-10-02"
+lastModified: "2026-10-02"
+image:
+  src: "/blog/thumbnails/postgresql-user-meetup-amsterdam-2025.jpg"
+  alt: "Audience at a PostgreSQL user meetup in Amsterdam watching a Technology stack slide for the Politie SDS Store platform"
+category: "Conferences"
+author: "Luca Berton"
+tags: ["PostgreSQL", "CloudNativePG", "Kubernetes", "Mastodon", "PgBouncer", "Query Optimization", "Meetup", "Amsterdam"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+On Thursday 13 February 2025 I spent the evening at a PostgreSQL user meetup in Amsterdam. There were three talks, and between them they covered most of the PostgreSQL stack. One was about a social network that grew faster than its database could cope with. One was about a government platform team running PostgreSQL on Kubernetes. The last was about a single query that ran hundreds of millions of times a year.
+
+There were also JetBrains cards going around, offering a free three-month JetBrains AI Pro plan.
+
+## Mastodon and PostgreSQL, or: "…and then November happened!"
+
+The first talk was **Ruud Schilders**' "Mastodon and PostgreSQL", with the subtitle *"or: .. and then November happened!"*. His "Who am I" slide said he has been a database admin since 1998 (Oracle, PostgreSQL and others), plays pool, collects music and loves self-hosting.
+
+![Title slide of the Mastodon and PostgreSQL talk, subtitled and then November happened, at a PostgreSQL user meetup in Amsterdam](/blog/events/postgresql-user-meetup-amsterdam-2025/mastodon-postgresql-title.jpg)
+
+*The opening slide: the Mastodon mascot next to the PostgreSQL elephant.*
+
+His history with Mastodon started in 2017, when he registered mastodon.nu and installed it on YunoHost, then abandoned it after a few months. In August 2021 he registered **mastodon.world** and installed it with Docker on a dedicated server at Hetzner. Then November came. By the end of one working day the server had 3,500 users. In the evening it grew even faster, with 1,000 new users in 30 minutes, until things started breaking and he closed registrations.
+
+![Ruud Schilders pointing at a server users graph: 1000 new users in 30 minutes, then issues started and registrations closed](/blog/events/postgresql-user-meetup-amsterdam-2025/mastodon-evening-growth.jpg)
+
+*"In the evening it even went faster.. 1000 new users in 30 minutes."*
+
+The rest of the talk was a list of bottlenecks and how he got past each one:
+
+- **Sidekiq.** It handles all of Mastodon's background tasks, and the default is one process with five threads. The queue went past 350,000. Raising the thread count to 200 brought it down quickly.
+- **6 November, another spike.** He added extra Sidekiq processes as containers, reaching 800 threads in total. That moved the problem to `max_connections` in Postgres, and the emergency fix was setting `max_connections` to 800. It worked, and then e-mail started failing, so mail moved to Mailgun.
+- **18 November, the next spike.** The slide called it "Elon-caused" (the Twitter layoffs). The server went from 30k to 62k users in 12 hours, with up to 4,000 new users an hour. He closed registrations again, added Sidekiq threads and hit new database connection issues. The fix was **PgBouncer** in Docker with `max_client_conn=2000` and `default_pool_size=500`.
+
+![Sidekiq dashboard slide showing 44 processes and 1,100 threads, with PgBouncer max_client_conn set to 10000](/blog/events/postgresql-user-meetup-amsterdam-2025/sidekiq-44-processes.jpg)
+
+*Today's setup: 44 Sidekiq processes, 1,100 threads, and `max_client_conn=10000` to absorb peaks.*
+
+The "2023 and onwards" slide covered what happened next. He set up backups with borgbackup and Barman. Growth slowed: from 150k to 181k users in 2023, then 181k to 188k in 2024. The causes on the slide were mastodon.social, loss of interest, limiting sign-ups because of spam, and later Bluesky. The result was fewer active users, fewer donations and fewer volunteers. The first big spam wave was solved with hCaptcha. For the second, he limited sign-ups and installed a CSAM scanner.
+
+Then it all happened again. Lemmy, which the slide described as "the Fediverse version of Reddit (Yes, also uses Postgres)", became his next project. He installed lemmy.world on 1 June 2023, just as a post about Reddit's API pricing went viral. Lots of users went looking for a general-purpose Lemmy server, there weren't many, and most were having performance problems. The next slide was titled "History repeats again..". He also covered the **Fedihosting Foundation**, registered as a foundation (*stichting*) "for continuity, accountability, share knowledge / resources", and the other instances he runs, including photofed.world, sharkey.world and bookwyrm.world.
+
+My take: almost every fix here was about connections and concurrency, not query speed. Once you scale the workers, the database connection limit is the next thing to break. PgBouncer is the fix I'd reach for first, and it's good to see that order of events confirmed in production.
+
+## SDS Store: PostgreSQL as a service at the Dutch police
+
+The second talk had **POLITIE** branding on every slide. It showed an internal platform called **SDS Store**. The "Technology stack" slide showed GitLab and ArgoCD deploying onto Kubernetes (with Cilium). The platform offers five products: Elasticsearch, Kafka (Strimzi), OpenSearch, PostgreSQL ("Cloudnative-pg, Kubernetes hosted Postgresql database") and S3 buckets.
+
+![Politie speaker pointing at the SDS Store technology stack: GitLab, ArgoCD and Kubernetes with Elasticsearch, Kafka Strimzi, OpenSearch, PostgreSQL and S3](/blog/events/postgresql-user-meetup-amsterdam-2025/politie-sds-store-stack.jpg)
+
+*The SDS Store stack, with CloudNativePG as the PostgreSQL offering.*
+
+The talk followed the platform's story slide by slide:
+
+- **Microsegmentation.** Network segmentation is configured per application through the platform.
+- **"Our problems".** A monthly stacked bar chart from November 2023 to November 2024, split by product (Kafka, Elasticsearch and others). The total climbs from below 100 to around 450.
+- **Patching.** A central application config listing each product's supported versions with `upgradeTo` targets, so teams get upgrades declaratively. It also had feature toggles such as enabling pgAdmin.
+- **SDS reStore.** A restore flow. The Java code validates the PostgreSQL create request ("S3 backup application cannot be empty"), and a *Herstel applicatie* (restore application) form lets users pick the source application, a name for the new cluster, and either the latest backup or a specific backup file.
+- **The future.** A growth projection chart.
+- **CNPG Manifest.** Argo CD showing a live CloudNativePG `Cluster` manifest (`postgresql.cnpg.io/v1`) with pod anti-affinity, node affinity and a `barmanObjectStore` backup to S3 with gzip compression and AES256 encryption.
+
+![Expanding CloudnativePG slide with CloudNativePG at the centre surrounded by PostGIS, TimescaleDB, system_stats and character sets](/blog/events/postgresql-user-meetup-amsterdam-2025/expanding-cloudnativepg.jpg)
+
+*"Expanding CloudnativePG": PostGIS, TimescaleDB, system_stats and character sets around the operator.*
+
+My take: this is what a good internal database platform looks like. GitOps does the deployment, the operator handles day-2 work, and restore is a form instead of a ticket. Making restore self-service is the part most teams skip, and it's the part that matters when something goes wrong. I wrote more about the operator itself in [CloudNativePG: Production PostgreSQL on Kubernetes](/blog/cloudnativepg-postgresql-kubernetes-operator/).
+
+## Database Academy: Working with PostgreSQL for coders
+
+The last talk was **Ellert van Koperen**'s "Database Academy: Working with PostgreSQL for coders". It opened with an "Anonymous Quote": *"Query optimization is not rocket science. When you flunk out of query optimization, we make you go build rockets."*
+
+![Ellert van Koperen at the lectern with the Database Academy Working with PostgreSQL for coders title slide](/blog/events/postgresql-user-meetup-amsterdam-2025/database-academy-title.jpg)
+
+*Database Academy: one query, three indexing strategies.*
+
+The case study was a single statement against a `PARAMETERINFO` table:
+
+- According to `pg_stat_statements`, it averaged about **8.656 ms** per execution.
+- The table was small (about 13,000 rows), but the query ran **359,513,795 times in one year** and caused a considerable share of the system's load.
+- **The query could not be changed.**
+
+The original plan was a sequential scan that removed 13,029 rows to return none, with an execution time of 7.337 ms. He first rewrote the `OR` as an equivalent `UNION` to make it readable, then worked through three indexing strategies:
+
+1. **Functional or expression indexes**: one B-tree index on `NAME` and one on `LOWER(NAME)`, then `ANALYZE`.
+2. **Partial indexes**: the same two indexes, but with `WHERE (FLAGS & x'20'::int4) > 0` (and the `x'80'` flag for the lower-case variant), so they only cover the rows the query can match.
+3. **Hash indexes**: `USING hash(NAME)` and `USING hash(LOWER(NAME))`, with the same partial predicates.
+
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 my-6">
+
+![First index slide: create index concurrently on PARAMETERINFO on NAME and on LOWER of NAME, next to the UNION form of the query](/blog/events/postgresql-user-meetup-amsterdam-2025/first-index-expression.jpg)
+
+![Performance slide showing a BitmapOr over two index scans, execution time 0.035 ms versus the original 7.337 ms](/blog/events/postgresql-user-meetup-amsterdam-2025/performance-query-plan.jpg)
+
+</div>
+
+*From expression indexes to the final plan: a `BitmapOr` over two index scans.*
+
+The "Performance" slide showed a bitmap heap scan with a `BitmapOr` over `parameterinfo_name_idx` and `parameterinfo_lower_idx1`. Planning took 0.101 ms and execution took **0.035 ms**, against the original 7.337 ms.
+
+My take: this was the most useful talk of the evening for application developers. When you can't touch the SQL, because it's generated by an ORM or a vendor product, the index is your only lever. A partial index that matches the query's fixed predicates is often the cheapest win available. Multiply a few milliseconds by 360 million calls a year and it's no longer a small number.
+
+## Related
+
+- [CloudNativePG: Production PostgreSQL on Kubernetes](/blog/cloudnativepg-postgresql-kubernetes-operator/)
+- [The PostgreSQL Monitoring Gap: Why Default Prometheus Exporters Miss Per-Query Duration](/blog/postgresql-monitoring-per-query-duration-gap/)
+- [Argo CD: GitOps Continuous Deployment for Kubernetes](/blog/argo-cd-gitops-kubernetes-deployment-2026/)
+
+<BlogPromoCard />

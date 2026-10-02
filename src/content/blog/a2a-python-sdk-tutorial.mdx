@@ -1,0 +1,527 @@
+---
+title: "A2A Python SDK Tutorial: Server, Client and Streaming"
+seoTitle: "A2A Python SDK Tutorial: Build an A2A Agent and Client"
+snippet: "A2A Python SDK tutorial with a2a-sdk 1.2: AgentExecutor, Agent Card, Starlette server, client, tasks, streaming, input-required, cancel and an MCP tool."
+description: "Hands-on A2A Python SDK tutorial, tested on a2a-sdk 1.2.1: build an A2A agent server and client, stream task updates, handle follow-ups and call MCP."
+publishDate: "2026-10-03"
+lastModified: "2026-10-03"
+image:
+  src: "/blog/events/a2a-python-sdk-tutorial/a2a-documentation-slide.jpg"
+  alt: "The A2A Documentation slide with a QR code on screen during the Agent2Agent talk at the AICamp meetup at ML6 in Amsterdam"
+category: "AI"
+author: "Luca Berton"
+tags: ["A2A", "Agent2Agent", "A2A Python SDK", "a2a-sdk", "AI Agents", "MCP", "Python", "Multi-Agent Systems"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+This **A2A Python SDK tutorial** builds a working Agent2Agent (A2A) server and client with the official `a2a-sdk` package, without a framework on top: an `AgentExecutor`, an Agent Card, a Starlette app, a client that streams task updates, a multi-turn follow-up, cancellation, and an MCP tool behind the agent. Everything below ran on my machine, and the outputs are copied from the terminal.
+
+![A full room at ML6 in Amsterdam watching the A2A talk, with the DeepLearning.AI Intro to A2A short course slide on screen](/blog/events/a2a-python-sdk-tutorial/a2a-talk-room.jpg)
+
+*The room at ML6 as the A2A talk at the AICamp meetup started.*
+
+The hook is the [AICamp meetup I moderated at ML6 in Amsterdam](/blog/aicamp-a2a-protocol-deep-search-amsterdam/). In the A2A talk, Holt Skinner from Google wrapped an insurance-policy agent as an A2A server with the Python SDK, live. He called the `AgentExecutor` subclass the "secret sauce" of the SDK: you implement `execute` and `cancel`, read the user's input from the request context, call your agent, and put the reply on an event queue for the client. I wanted to rebuild that flow on the current SDK and go a step further into tasks and streaming. The code here is mine, not his.
+
+**Versions tested** (3 October 2026, macOS, Python 3.12.13, uv 0.12.19): `a2a-sdk` 1.2.1 (A2A specification 1.0), `starlette` 1.7.0, `sse-starlette` 3.5.0, `uvicorn` 0.54.0, `httpx` 0.28.1, `protobuf` 7.36.2 and `mcp` 2.3.0. No model calls: the agent is a rule-based lookup, so every result is reproducible.
+
+## What this tutorial covers that the others don't
+
+My [Google ADK SRE agent](/blog/google-adk-sre-agent-mcp-a2a/) post exposes an ADK agent with `to_a2a()`, which generates the card and needs no executor of your own; Holt showed the same shortcut for one of the agents in his demo. This post is the layer under it: the plain `a2a-sdk`, which you need when your agent isn't an ADK agent (a LangGraph graph, a rules engine, an existing service) or when you want control over task states. For the protocol's governance news, see [A2A joining the Agentic AI Foundation](/blog/a2a-aaif-2026/).
+
+## Install the A2A Python SDK
+
+![The A2A Documentation slide with a QR code to a2a-protocol.org during the Agent2Agent talk in Amsterdam](/blog/events/a2a-python-sdk-tutorial/a2a-documentation-slide.jpg)
+
+*The A2A Documentation slide from the talk, pointing to a2a-protocol.org.*
+
+The core package doesn't include a web server. The `http-server` extra pulls in Starlette and `sse-starlette` (for streaming). Add uvicorn to run it:
+
+```bash
+mkdir a2a-policy && cd a2a-policy
+uv venv --python 3.12
+uv pip install "a2a-sdk[http-server]==1.2.1" uvicorn
+```
+
+Other extras: `fastapi`, `grpc`, `telemetry`, and `postgresql` / `mysql` / `sqlite` for a persistent task store. Python 3.10 or newer is required.
+
+## The agent: a deterministic stand-in
+
+The talk's agent answered coverage questions from a policy document with an LLM. Mine answers from a table, which is enough to exercise the protocol. The numbers are invented:
+
+```python
+# policy_agent.py
+COVERAGE = {
+    "physiotherapy": {"in": 10, "out": 40},
+    "mental health": {"in": 0, "out": 20},
+    "dental": {"in": 20, "out": 50},
+}
+
+
+class PolicyAgent:
+    def find_service(self, question: str) -> str | None:
+        q = question.lower()
+        return next((s for s in COVERAGE if s in q), None)
+
+    def find_network(self, question: str) -> str | None:
+        q = question.lower()
+        if "out-of-network" in q or "out of network" in q:
+            return "out"
+        if "in-network" in q or "in network" in q:
+            return "in"
+        return None
+
+    def answer(self, service: str, network: str) -> str:
+        share = COVERAGE[service][network]
+        label = "in-network" if network == "in" else "out-of-network"
+        return f"{service.capitalize()} with an {label} provider: you pay {share}% of the cost."
+```
+
+## The AgentExecutor: one question, one Message
+
+The simplest executor does what the live demo did: read the input, answer, enqueue one `Message`.
+
+```python
+# executors.py (first version)
+from a2a.helpers import new_text_message
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+
+from policy_agent import PolicyAgent
+
+
+class MessageExecutor(AgentExecutor):
+    def __init__(self) -> None:
+        self.agent = PolicyAgent()
+
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        question = context.get_user_input()
+        service = self.agent.find_service(question) or "physiotherapy"
+        network = self.agent.find_network(question) or "in"
+        await event_queue.enqueue_event(new_text_message(self.agent.answer(service, network)))
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        raise NotImplementedError("nothing to cancel in message mode")
+```
+
+- **`context.get_user_input()`** joins the text parts of the incoming message.
+- **`new_text_message()`** is one of the v1.0 helpers in `a2a.helpers`. Its role defaults to `ROLE_AGENT`.
+- **`cancel`** is abstract, so you must define it even if you don't support cancellation, as the speaker pointed out when he skipped it in the demo.
+
+In message mode the server returns that single `Message` and no task exists. That's fine for quick, stateless answers.
+
+## The Agent Card
+
+The Agent Card is the JSON document other agents fetch to learn what yours does and where to reach it. In SDK 1.x the types are protobuf classes:
+
+```python
+# server.py (card part)
+import os
+
+from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+
+HOST = os.getenv("HOST", "127.0.0.1")
+PORT = int(os.getenv("PORT", "9999"))
+
+skill = AgentSkill(
+    id="coverage_lookup",
+    name="Coverage lookup",
+    description="Answers what share of the cost you pay for physiotherapy, "
+    "mental health or dental care, in-network or out-of-network.",
+    tags=["insurance", "coverage"],
+    examples=["How much do I pay for physiotherapy out-of-network?"],
+)
+
+agent_card = AgentCard(
+    name="Insurance Policy Coverage Agent",
+    description="Answers questions about what a (fictional) health policy covers.",
+    version="1.0.0",
+    supported_interfaces=[
+        AgentInterface(protocol_binding="JSONRPC", protocol_version="1.0", url=f"http://{HOST}:{PORT}/")
+    ],
+    capabilities=AgentCapabilities(streaming=True, push_notifications=False),
+    default_input_modes=["text/plain"],
+    default_output_modes=["text/plain"],
+    skills=[skill],
+)
+```
+
+- **`supported_interfaces`** replaced the old top-level `url`. Each `AgentInterface` is one endpoint: `protocol_binding` is `JSONRPC`, `HTTP+JSON` or `GRPC`. The URL must be the address clients can actually reach.
+- **`capabilities.streaming=True`** tells clients they can use `SendStreamingMessage`.
+- **`AgentSkill`** is a capability you advertise. In the talk, Holt pointed out that an A2A agent skill isn't the same thing as Anthropic's Agent Skills: A2A was first, he thought, but both use the same term and now everyone is confused. An A2A skill is just an entry in the card.
+
+He also stressed that the `description` matters when an LLM orchestrator decides which agent to call: it needs enough detail to route correctly. Write card descriptions for a model to read, not for marketing.
+
+## Serve it with Starlette and uvicorn
+
+SDK 1.0 removed the `A2AStarletteApplication` wrapper. You build routes and mount them on Starlette or FastAPI yourself:
+
+```python
+# server.py (continued)
+import uvicorn
+from starlette.applications import Starlette
+
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.routes import create_agent_card_routes, create_jsonrpc_routes
+from a2a.server.tasks import InMemoryTaskStore
+
+from executors import MessageExecutor
+
+request_handler = DefaultRequestHandler(
+    agent_executor=MessageExecutor(),
+    task_store=InMemoryTaskStore(),
+    agent_card=agent_card,
+)
+
+app = Starlette(routes=[
+    *create_agent_card_routes(agent_card),
+    *create_jsonrpc_routes(request_handler, rpc_url="/"),
+])
+
+if __name__ == "__main__":
+    uvicorn.run(app, host=HOST, port=PORT)
+```
+
+`DefaultRequestHandler` now takes `agent_card` as a required argument. `create_agent_card_routes` serves the card at `/.well-known/agent-card.json` by default. Run it and fetch the card (output trimmed):
+
+```bash
+uv run python server.py
+curl -s http://127.0.0.1:9999/.well-known/agent-card.json
+```
+
+```json
+{
+  "name": "Insurance Policy Coverage Agent",
+  "supportedInterfaces": [
+    { "url": "http://127.0.0.1:9999/", "protocolBinding": "JSONRPC", "protocolVersion": "1.0" }
+  ],
+  "version": "1.0.0",
+  "capabilities": { "streaming": true, "pushNotifications": false },
+  "skills": [{ "id": "coverage_lookup", "name": "Coverage lookup", "tags": ["insurance", "coverage"] }]
+}
+```
+
+Note the camelCase on the wire: the SDK serialises protobuf with ProtoJSON.
+
+## Call it with the A2A Python client
+
+The client resolves the card, picks a transport from `supported_interfaces`, and sends messages. In v1.0 every response is a `StreamResponse` holding exactly one of `message`, `task`, `status_update` or `artifact_update`:
+
+```python
+# client.py
+import asyncio
+import sys
+import uuid
+
+import httpx
+
+from a2a.client import A2ACardResolver, ClientConfig, create_client
+from a2a.helpers import get_artifact_text, get_message_text
+from a2a.types import Message, Part, Role, SendMessageRequest, TaskState
+
+BASE_URL = "http://127.0.0.1:9999"
+
+
+def user_message(text, task_id=None, context_id=None) -> Message:
+    return Message(role=Role.ROLE_USER, message_id=str(uuid.uuid4()),
+                   parts=[Part(text=text)], task_id=task_id, context_id=context_id)
+
+
+async def send(client, message):
+    task_id = context_id = state = None
+    async for event in client.send_message(SendMessageRequest(message=message)):
+        if event.HasField("message"):
+            print("  message:", get_message_text(event.message))
+        elif event.HasField("task"):
+            task_id, context_id = event.task.id, event.task.context_id
+            state = TaskState.Name(event.task.status.state)
+            print("  task:", task_id[:8], state)
+            for artifact in event.task.artifacts:  # filled in when not streaming
+                print(f"  artifact[{artifact.name}]:", get_artifact_text(artifact))
+            if event.task.status.HasField("message"):
+                print("  status message:", get_message_text(event.task.status.message))
+        elif event.HasField("status_update"):
+            status = event.status_update.status
+            state = TaskState.Name(status.state)
+            note = get_message_text(status.message) if status.HasField("message") else ""
+            print("  status:", state, note)
+        elif event.HasField("artifact_update"):
+            artifact = event.artifact_update.artifact
+            print(f"  artifact[{artifact.name}]:", get_artifact_text(artifact))
+    return task_id, context_id, state
+
+
+async def main(streaming: bool) -> None:
+    async with httpx.AsyncClient() as http:
+        card = await A2ACardResolver(http, BASE_URL).get_agent_card()
+    print("agent:", card.name, "| streaming:", card.capabilities.streaming)
+
+    client = await create_client(card, client_config=ClientConfig(streaming=streaming))
+    try:
+        print("Q1: one-shot question")
+        await send(client, user_message("How much do I pay for dental care out-of-network?"))
+
+        print("Q2: missing detail, then a follow-up on the same task")
+        task_id, context_id, state = await send(client, user_message("What about physiotherapy?"))
+        if state == "TASK_STATE_INPUT_REQUIRED":
+            await send(client, user_message("In-network.", task_id, context_id))
+    finally:
+        await client.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main(streaming="--no-stream" not in sys.argv))
+```
+
+Against the message-mode server, each question gets one message back:
+
+```text
+agent: Insurance Policy Coverage Agent | streaming: True
+Q1: one-shot question
+  message: Dental with an out-of-network provider: you pay 50% of the cost.
+Q2: missing detail, then a follow-up on the same task
+  message: Physiotherapy with an in-network provider: you pay 10% of the cost.
+```
+
+The second answer is a guess: my message executor falls back to "in-network" because a single message can't ask a question back. Tasks fix that.
+
+## Tasks and streaming
+
+A task gives the work an ID, a state machine and artifacts. The A2A 1.0 states are `TASK_STATE_SUBMITTED`, `WORKING`, `INPUT_REQUIRED`, `AUTH_REQUIRED`, and the terminal `COMPLETED`, `FAILED`, `CANCELED` and `REJECTED` (all with the `TASK_STATE_` prefix). `TaskUpdater` emits the transitions for you:
+
+```python
+# executors.py (task version)
+import asyncio
+
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.tasks import TaskUpdater
+from a2a.types import Part, Role, Task, TaskState, TaskStatus
+
+from policy_agent import COVERAGE, PolicyAgent
+
+
+class TaskExecutor(AgentExecutor):
+    def __init__(self) -> None:
+        self.agent = PolicyAgent()
+
+    async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
+        updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+
+        if context.current_task is None:
+            # New task: the Task object must be the first event.
+            await event_queue.enqueue_event(Task(
+                id=context.task_id,
+                context_id=context.context_id,
+                status=TaskStatus(state=TaskState.TASK_STATE_SUBMITTED),
+                history=[context.message],
+            ))
+
+        # On a follow-up, earlier user turns live in the task history.
+        history = context.current_task.history if context.current_task else []
+        texts = [p.text for m in history if m.role == Role.ROLE_USER for p in m.parts if p.text]
+        texts.append(context.get_user_input())
+        question = " ".join(texts)
+
+        await updater.start_work(updater.new_agent_message([Part(text="Looking up your policy...")]))
+        await asyncio.sleep(0.5)  # pretend to do real work
+
+        service = self.agent.find_service(question)
+        if service is None:
+            await updater.reject(updater.new_agent_message(
+                [Part(text=f"I only know about: {', '.join(COVERAGE)}.")]))
+            return
+
+        network = self.agent.find_network(question)
+        if network is None:
+            await updater.requires_input(updater.new_agent_message(
+                [Part(text="Is the provider in-network or out-of-network?")]))
+            return
+
+        await updater.add_artifact([Part(text=await self.lookup(service, network))], name="coverage")
+        await updater.complete()
+
+    async def lookup(self, service: str, network: str) -> str:
+        return self.agent.answer(service, network)
+
+    async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
+        await TaskUpdater(event_queue, context.task_id, context.context_id).cancel()
+```
+
+Swap `MessageExecutor()` for `TaskExecutor()` in `server.py` and run the same client. With streaming (the default, sent as `SendStreamingMessage` over server-sent events):
+
+```text
+Q1: one-shot question
+  task: a5a54403 TASK_STATE_SUBMITTED
+  status: TASK_STATE_WORKING Looking up your policy...
+  artifact[coverage]: Dental with an out-of-network provider: you pay 50% of the cost.
+  status: TASK_STATE_COMPLETED
+Q2: missing detail, then a follow-up on the same task
+  task: d4315635 TASK_STATE_SUBMITTED
+  status: TASK_STATE_WORKING Looking up your policy...
+  status: TASK_STATE_INPUT_REQUIRED Is the provider in-network or out-of-network?
+  status: TASK_STATE_WORKING Looking up your policy...
+  artifact[coverage]: Physiotherapy with an in-network provider: you pay 10% of the cost.
+  status: TASK_STATE_COMPLETED
+```
+
+The client streams only when both `ClientConfig.streaming` and the card's `capabilities.streaming` are true. With `python client.py --no-stream` it uses `SendMessage` and gets only the final `Task` of each call, with the artifacts attached:
+
+```text
+Q1: one-shot question
+  task: ba8d5a27 TASK_STATE_COMPLETED
+  artifact[coverage]: Dental with an out-of-network provider: you pay 50% of the cost.
+Q2: missing detail, then a follow-up on the same task
+  task: 21c1b1be TASK_STATE_INPUT_REQUIRED
+  status message: Is the provider in-network or out-of-network?
+  task: 21c1b1be TASK_STATE_COMPLETED
+  artifact[coverage]: Physiotherapy with an in-network provider: you pay 10% of the cost.
+```
+
+The follow-up works because the client sends the same `task_id` and `context_id`. The server calls `execute` again with `context.current_task` set.
+
+### Get and cancel a task
+
+```python
+from a2a.types import CancelTaskRequest, GetTaskRequest
+
+task = await client.get_task(GetTaskRequest(id=task_id))
+task = await client.cancel_task(CancelTaskRequest(id=task_id))
+```
+
+On a task waiting for input, I got `get_task: TASK_STATE_INPUT_REQUIRED`, then `cancel_task: TASK_STATE_CANCELED`. Cancelling it a second time raised `TaskNotCancelableError: Task cannot be canceled`, because a terminal task can't change state. `create_client()` also accepts a plain URL string instead of a card.
+
+## What goes over the wire
+
+The SDK hides JSON-RPC, but curl shows it. A2A 1.0 method names are PascalCase (`SendMessage`, `SendStreamingMessage`, `GetTask`, `CancelTask`, `ListTasks`, `SubscribeToTask`), and the version travels in the `A2A-Version` header:
+
+```bash
+curl -s http://127.0.0.1:9999/ \
+  -H 'Content-Type: application/json' -H 'A2A-Version: 1.0' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":{"role":"ROLE_USER","messageId":"m-2","parts":[{"text":"Dental in-network?"}]}}}'
+```
+
+The result is the completed task, trimmed:
+
+```json
+{"result": {"task": {
+  "id": "45e22b0b-...", "contextId": "0093e9ad-...",
+  "status": {"state": "TASK_STATE_COMPLETED"},
+  "artifacts": [{"name": "coverage", "parts": [{"text": "Dental with an in-network provider: you pay 20% of the cost."}]}]
+}}, "id": 1, "jsonrpc": "2.0"}
+```
+
+With `"method":"SendStreamingMessage"` the same request returns four `data:` events: `task` (submitted), `statusUpdate` (working), `artifactUpdate` and `statusUpdate` (completed). Two errors worth recognising:
+
+- **No `A2A-Version` header**: the spec says an empty value means 0.3, so this server answered `-32009`, "A2A version '0.3' is not supported by this handler. Expected version '1.0'."
+- **Old method name** `message/send`: `-32601 Method not found`.
+
+If you still have 0.3 clients, add a `protocol_version="0.3"` interface to the card and pass `enable_v0_3_compat=True` to `create_jsonrpc_routes`. I didn't test compat mode.
+
+## A2A and MCP: MCP inside, A2A outside
+
+![The A2A loves MCP, Complementary Not Competing slide comparing Model Context Protocol and Agent2Agent Protocol at the AICamp meetup](/blog/events/a2a-python-sdk-tutorial/a2a-mcp-slide.jpg)
+
+*The "A2A ❤ MCP: Complementary, Not Competing" slide: MCP connects an agent to tools, APIs and resources; A2A lets agents communicate as peers.*
+
+The [A2A docs](https://a2a-protocol.org/latest/topics/a2a-and-mcp/) put it this way: an agentic application uses A2A to talk to other agents, and inside, each agent uses MCP for its own tools. In code, that's a tool call inside `execute`. Here the coverage table moves behind an MCP server:
+
+```python
+# coverage_mcp.py
+from mcp.server import MCPServer
+
+from policy_agent import COVERAGE
+
+mcp = MCPServer("coverage")
+
+
+@mcp.tool()
+def get_coverage(service: str, network: str) -> int:
+    """Percentage of the cost the member pays. network is 'in' or 'out'."""
+    return COVERAGE[service][network]
+
+
+if __name__ == "__main__":
+    mcp.run()  # stdio
+```
+
+The executor only overrides `lookup`. The A2A side (task states, card, client) doesn't change:
+
+```python
+import sys
+
+from mcp import Client, StdioServerParameters
+
+
+class McpTaskExecutor(TaskExecutor):
+    async def lookup(self, service: str, network: str) -> str:
+        server = StdioServerParameters(command=sys.executable, args=["coverage_mcp.py"])
+        async with Client(server) as mcp:
+            result = await mcp.call_tool("get_coverage", {"service": service, "network": network})
+        share = result.structured_content["result"]
+        label = "in-network" if network == "in" else "out-of-network"
+        return f"{service.capitalize()} with an {label} provider: you pay {share}% (via MCP)."
+```
+
+Install it with `uv pip install mcp`. The client output is the same apart from the end of the sentence: `Dental with an out-of-network provider: you pay 50% (via MCP).` In production I'd keep one MCP session open instead of starting a stdio process per task.
+
+My take: if a capability is a stateless function with typed inputs, expose it over MCP. Use A2A when the other side needs to keep state, ask a follow-up question or run for minutes. That's what the input-required follow-up above shows.
+
+## Swapping in an LLM (untested)
+
+To get closer to the demo, replace the rule-based `lookup` with a model call. **I didn't run this**: no API key, no paid calls. The calls follow the `google-genai` 2.28 README:
+
+```python
+from google import genai
+
+client = genai.Client()  # reads GEMINI_API_KEY
+
+
+async def ask_policy(policy_text: str, question: str) -> str:
+    response = await client.aio.models.generate_content(
+        model="gemini-flash-latest",
+        contents=f"Answer only from this policy:\n{policy_text}\n\nQuestion: {question}",
+    )
+    return response.text
+```
+
+Expect variation. Towards the end of the talk, Holt said large language models aren't consistent and need trial and error, and that the same demo hadn't fully worked at an event in London a few days earlier. Keep the A2A layer deterministic and test it like the code above. Then the model is the only thing that varies.
+
+## Coming from a 0.3 tutorial
+
+Many walkthroughs written before v1.0 no longer run. The renames I hit, all listed in the [SDK's v0.3 to v1.0 migration guide](https://github.com/a2aproject/a2a-python/blob/main/docs/migrations/v1_0/README.md):
+
+| v0.3 | v1.0 |
+|---|---|
+| `A2AStarletteApplication(...).build()` | `create_agent_card_routes()` + `create_jsonrpc_routes()` on Starlette |
+| `ClientFactory().create_client(url)` | `await create_client(url_or_card)` |
+| `AgentCard(url=...)` | `supported_interfaces=[AgentInterface(...)]` |
+| `Part(TextPart(text=...))` | `Part(text=...)` |
+| `TaskState.completed`, `Role.user` | `TaskState.TASK_STATE_COMPLETED`, `Role.ROLE_USER` |
+| Pydantic models | protobuf messages (`HasField()`, `MessageToDict()`) |
+| JSON-RPC `message/send` | `SendMessage` |
+
+## Pitfalls
+
+- **Mixing messages and task events is now an error.** Each `execute` call must emit either exactly one `Message`, or a `Task` first and then updates. I tried a `Message` followed by `complete()`: the client got `-32006` "Received TaskStatusUpdateEvent in message mode".
+- **Agent messages are in the task history.** On a follow-up, `current_task.history` contains the agent's own turns. My first version read all of them, so the agent's "in-network or out-of-network?" question was parsed as the user's answer. Filter on `Role.ROLE_USER`.
+- **The card URL must be reachable.** Behind a proxy or in a container, `127.0.0.1` in `AgentInterface.url` sends clients to the wrong place.
+- **Protobuf objects aren't dicts.** No arbitrary attributes. Check optional fields with `HasField()` before reading them, as the client does for `status.message`.
+- **The in-memory task store is lost on restart.** Use the SQL extras for anything that has to survive a deploy.
+- **This server has no authentication.** The card can declare `security_schemes`, and because you own the Starlette app, you can add your own authentication middleware in front of the A2A routes.
+
+![Attendees photographing the Walkthrough Get code slide at the end of the A2A talk at ML6 Amsterdam](/blog/events/a2a-python-sdk-tutorial/a2a-walkthrough-room.jpg)
+
+*The talk ended with a "Walkthrough / Get code" slide, and phones went up to scan it.*
+
+The talk's own code is behind the [walkthrough link](https://goo.gle/a2a-walkthrough) from its last slide. The official [a2a-samples](https://github.com/a2aproject/a2a-samples) repository and the [A2A specification](https://a2a-protocol.org/latest/specification/) cover gRPC, REST, push notifications and signed cards, which I left out here.
+
+## Related
+
+- [AICamp Amsterdam: A2A Protocol and Deep Search](/blog/aicamp-a2a-protocol-deep-search-amsterdam/)
+- [Google ADK SRE Agent: Tools, MCP and A2A in Python](/blog/google-adk-sre-agent-mcp-a2a/)
+- [A2A Joins the Agentic AI Foundation's Open Agentic Stack](/blog/a2a-aaif-2026/)
+- [MCP Adoption: Claude Code 95%, Hugging Face 100%](/blog/mcp-adoption-by-client-2026/)
+
+<BlogPromoCard />

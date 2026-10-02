@@ -1,0 +1,259 @@
+---
+title: "tox-ansible: Test Ansible Collections Across Versions"
+seoTitle: "tox-ansible Tutorial: Test Ansible Collections in CI"
+snippet: "Use tox-ansible to run sanity and unit tests for an Ansible collection across ansible-core and Python versions, locally and as a GitHub Actions matrix."
+description: "tox-ansible step by step: install it, configure skip lists, list and run sanity and unit environments, generate a GitHub Actions matrix and fix common failures."
+publishDate: "2026-10-02"
+lastModified: "2026-10-02"
+image:
+  src: "/blog/events/cfgmgmtcamp-ghent-2025-talks/tox-ansible-ci-matrix.jpg"
+  alt: "A speaker presenting tox-ansible as a way to generate GitHub test matrix jobs at CfgMgmtCamp 2025 in Ghent"
+category: "Automation"
+author: "Luca Berton"
+tags: ["Ansible", "tox-ansible", "tox", "ansible-test", "Ansible Collections", "GitHub Actions", "Testing", "CI/CD"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+**tox-ansible** is a tox plugin that turns one Ansible collection into a test matrix: sanity, unit and (when present) integration and Molecule tests, each run against several ansible-core and Python combinations in its own virtual environment. You run the same environments on your laptop and in CI, and the plugin can print that list as a GitHub Actions matrix, so your workflow file stops hard-coding versions. This tutorial builds the setup from a fresh collection skeleton, runs it, and covers the failures I hit along the way.
+
+The tox-ansible talk at CfgMgmtCamp 2025 in Ghent got me thinking about this. Under the heading "Taking CI/CD testing to the next level (Option 3)", the speaker made the point that tox-ansible isn't only for local testing: it can generate the GitHub test matrix jobs too, so you control the matrix locally and no longer edit workflows for each new Ansible or Python release. I summarised the talk in my [CfgMgmtCamp 2025 talks recap](/blog/cfgmgmtcamp-ghent-2025-talks/). This post is the hands-on version.
+
+Versions: everything below was run with **tox-ansible 26.9.0** (September 2026), tox 4.64.7, ansible-dev-environment 26.9.0 and ansible-core 2.21.4, and checked against the [tox-ansible README](https://github.com/ansible/tox-ansible), its [documentation](https://ansible.readthedocs.io/projects/tox-ansible/) and the [ansible-test sanity docs](https://docs.ansible.com/projects/ansible/latest/dev_guide/testing_sanity.html). tox-ansible uses CalVer (`YY.MM.MICRO`), and the matrix changes between releases, so check yours with `tox list --ansible`.
+
+## What tox-ansible does
+
+For every environment, tox-ansible creates a virtualenv under `.tox/`, then uses **ansible-dev-environment** (`ade install`) to install the requested ansible-core, build and install your collection into that venv's `site-packages/ansible_collections/`, and pull in the collection's Python dependencies. Then it runs the test command for that environment type:
+
+| Environment | Command it runs |
+| --- | --- |
+| `sanity-*` | `ansible-test sanity --local --requirements --python X.Y` inside the installed collection |
+| `unit-*` | `pytest` (with pytest-ansible) on `tests/unit` |
+| `integration-*` | `pytest` (with pytest-ansible) on `tests/integration` |
+| `molecule-*` | `python3 -m molecule test --all` |
+| `galaxy` | builds the collection and runs galaxy-importer on it |
+
+Environment names follow `type-pyX.Y-core`, for example `sanity-py3.13-2.21`. The core factor is a stable branch (`2.19`, `2.20`, `2.21`) or `milestone` or `devel`.
+
+One thing surprised me. **The matrix isn't derived from your collection's metadata.** It's a list built into the plugin that tracks the ansible-core support matrix. In 26.9.0 it covers Python 3.11 to 3.14 and ansible-core 2.19, 2.20, 2.21, milestone and devel, with Python 3.14 only from 2.20 onwards. `galaxy.yml` only supplies the namespace and name. I set `requires_ansible: ">=2.21.0"` in `meta/runtime.yml` and the 2.19 environments were still listed. If your collection doesn't support a version, you remove it with `skip`.
+
+Integration and Molecule environments are detected automatically. `integration-*` only appears if `tests/integration/targets/` isn't empty or `tests/integration/` contains pytest modules. `molecule-*` only appears if `extensions/molecule/` has at least one scenario with a `molecule.yml`.
+
+## Install tox-ansible in a virtual environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install "tox-ansible==26.9.0"
+```
+
+This pulls in tox, pytest, pytest-xdist and pytest-ansible. Each test environment installs ansible-dev-environment itself. tox-ansible needs Python 3.10 or newer to run, and **every interpreter in your matrix must already be installed** on the machine (the README's example is `sudo dnf install python3.10`).
+
+For a throwaway lab I created a skeleton collection:
+
+```bash
+pip install ansible-core
+ansible-galaxy collection init demo.toxlab
+cd demo/toxlab
+```
+
+Then I added a small module in `plugins/modules/hello.py` (with `DOCUMENTATION`, `EXAMPLES` and `RETURN`), a pytest file in `tests/unit/plugins/modules/test_hello.py` that imports it via `ansible_collections.demo.toxlab.plugins.modules.hello`, and `requires_ansible` in `meta/runtime.yml`.
+
+## Configure tox-ansible: pyproject.toml or tox-ansible.ini
+
+The docs recommend a `[tool.tox-ansible]` table in `pyproject.toml`. tox also needs a `[tool.tox]` table so it picks that file as its configuration:
+
+```toml
+# pyproject.toml
+[tool.tox]
+requires = ["tox>=4.2"]
+
+[tool.tox-ansible]
+skip = ["py3.11", "devel", "milestone"]
+```
+
+The legacy alternative is an `[ansible]` section in a separate `tox-ansible.ini`, which you then pass with `--conf` on every command. A separate file is useful when the repo already has a `tox.ini` for other things:
+
+```ini
+# tox-ansible.ini
+[ansible]
+skip =
+    py3.11
+    devel
+    milestone
+```
+
+What the keys do:
+
+- **`skip`**: a plain substring match against environment names. `devel` drops every devel environment, `sanity-py3.13` drops sanity on Python 3.13 only, and `galaxy` drops the galaxy environment. It's not a glob or a regex.
+- **`downstream = true`**: adds the ansible-core versions supported by Red Hat Ansible Automation Platform that the community has already retired (2.16 and 2.18 in 26.9.0) on top of the upstream list. It extends the matrix; it doesn't replace it.
+- **`coverage = true`**: adds pytest-cov coverage for files under `plugins/` in the `unit-*` environments. `--coverage` and `--no-coverage` override it for one run.
+- **`molecule`**: `auto` (default), `true` or `false`, plus `molecule_append` or `molecule_commands` to change the Molecule command.
+
+If both files have tox-ansible settings, `pyproject.toml` wins for the whole section. Don't put the config in a plain `tox.ini` with no `pyproject.toml` config: the plugin warns that this can override its generated environment settings.
+
+## List and run the tox-ansible environments
+
+With the `tox-ansible.ini` above, listing gives:
+
+```bash
+tox list --ansible --conf tox-ansible.ini
+```
+
+```text
+default environments:
+galaxy             -> Build collection and run galaxy-importer on it
+sanity-py3.12-2.19 -> Sanity tests using ansible-core 2.19 and python 3.12
+sanity-py3.12-2.20 -> Sanity tests using ansible-core 2.20 and python 3.12
+...
+sanity-py3.14-2.21 -> Sanity tests using ansible-core 2.21 and python 3.14
+unit-py3.12-2.19   -> Unit tests using ansible-core 2.19 and python 3.12
+...
+unit-py3.14-2.21   -> Unit tests using ansible-core 2.21 and python 3.14
+```
+
+That's 17 environments: galaxy plus 8 sanity and 8 unit. Without the skip list it was 27. There are no integration or Molecule environments because the skeleton has neither.
+
+Running them:
+
+```bash
+# one environment
+tox -e sanity-py3.13-2.21 --ansible --conf tox-ansible.ini
+
+# several
+tox -e sanity-py3.13-2.21,unit-py3.13-2.21 --ansible --conf tox-ansible.ini
+
+# every unit environment, in parallel
+tox -f unit --ansible --conf tox-ansible.ini -p auto
+
+# only one test type, using the plugin's own scope option
+tox --ansible --conf tox-ansible.ini --matrix-scope sanity
+
+# show the generated commands, deps and env vars
+tox config --ansible --conf tox-ansible.ini -e unit-py3.13-2.21
+```
+
+Anything after `--` goes to the underlying tool. For sanity that's ansible-test, so you can run one sanity test while iterating:
+
+```bash
+tox -e sanity-py3.13-2.21 --ansible --conf tox-ansible.ini -- --test validate-modules
+```
+
+For unit and integration it's pytest, for example `-- --junit-xml=tests/output/junit/unit.xml`.
+
+Environments stay in `.tox/` after a run, so you can activate one and debug. ansible-test needs the collection under an `ansible_collections/NAMESPACE/NAME` path, which is why tox-ansible runs the sanity command inside the installed copy in `.tox/ENV/lib/pythonX.Y/site-packages/ansible_collections/`, not in your working tree.
+
+My first sanity run on the fresh skeleton failed, which is a useful example of what sanity catches:
+
+```text
+ERROR: Found 1 yamllint issue(s) which need to be resolved:
+ERROR: galaxy.yml:70:1: empty-lines: too many blank lines (1 > 0)
+FATAL: The 1 sanity test(s) listed below (out of 24) failed.
+yamllint
+```
+
+The `galaxy.yml` that `ansible-galaxy collection init` generated (ansible-core 2.21.4) ends with a blank line, and the yamllint sanity test rejects it. After removing it, both the sanity and unit environments passed.
+
+## Generate a GitHub Actions matrix with --gh-matrix
+
+`--gh-matrix` (it requires `--ansible`) prints the environment list as JSON instead of running anything:
+
+```bash
+tox --ansible --conf tox-ansible.ini --gh-matrix --matrix-scope sanity
+```
+
+```json
+[
+  {
+    "description": "Sanity tests using ansible-core 2.19 and python 3.12",
+    "factors": ["sanity", "py3.12", "2.19"],
+    "name": "sanity-py3.12-2.19",
+    "python": "3.12"
+  }
+]
+```
+
+When `GITHUB_OUTPUT` is set, as it is in a GitHub Actions step, the plugin writes the list to that file under the key `envlist` instead of printing it. A two-job workflow then builds the matrix in the first job and fans out in the second:
+
+```yaml
+# .github/workflows/tox-ansible.yml
+name: tox-ansible
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      envlist: ${{ steps.generate.outputs.envlist }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+      - run: python -m pip install "tox-ansible==26.9.0"
+      - id: generate
+        run: python -m tox --ansible --gh-matrix --conf tox-ansible.ini
+
+  test:
+    needs: matrix
+    name: ${{ matrix.entry.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: ${{ fromJSON(needs.matrix.outputs.envlist) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.entry.python }}
+      - run: python -m pip install "tox-ansible==26.9.0"
+      - name: Run ${{ matrix.entry.name }}
+        env:
+          TOX_ENV: ${{ matrix.entry.name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python -m tox --ansible --conf tox-ansible.ini -e "$TOX_ENV"
+```
+
+The parts that matter:
+
+- **`id: generate`** and **`outputs.envlist`**: the plugin appends `envlist=...` to `$GITHUB_OUTPUT`, and the job output re-exports it.
+- **`fromJSON(...)`** turns that string back into a list, so each entry becomes one job. `matrix.entry.name` is the tox environment and `matrix.entry.python` is the interpreter setup-python installs for it.
+- **`fail-fast: false`** keeps one failing combination from cancelling the others, which is the whole point of a matrix.
+- **`TOX_ENV`** passes the name through an environment variable instead of interpolating it into the shell line.
+- **`GITHUB_TOKEN`** is in the plugin's `pass_env` list, so it reaches the test environment if a step needs it.
+
+You can split sanity and unit into separate workflows with `--matrix-scope`. If you'd rather not maintain this file, the `ansible/ansible-content-actions` repository publishes reusable `sanity.yaml`, `unit.yaml` and `integration.yaml` workflows that run the same `tox --ansible --gh-matrix --matrix-scope ...` steps.
+
+## tox-ansible vs ansible-test vs Molecule
+
+They don't compete. tox-ansible is the orchestrator:
+
+- **ansible-test** is ansible-core's own testing tool. tox-ansible calls `ansible-test sanity` for sanity, but runs unit and integration tests with pytest and pytest-ansible, not `ansible-test units` or `ansible-test integration`. If your CI calls ansible-test directly, as in the pipeline in my [Ansible collections post](/blog/ansible-collections-best-practices/), you pick the versions yourself, usually with `--docker`.
+- **Molecule** tests roles and playbooks against real instances or containers. tox-ansible runs your Molecule scenarios across the same Python and ansible-core matrix. For Molecule itself, see [testing Ansible with Molecule and GitHub Actions](/blog/testing-ansible-molecule-github-actions/).
+- **tox-ansible** owns the matrix, the per-environment virtualenvs and the GitHub Actions JSON.
+
+## Common tox-ansible failures
+
+- **`could not find python interpreter matching any of the specs py3.11`**: that interpreter isn't installed. Install it, or add `py3.11` to `skip`. In CI the matching setup-python step handles this.
+- **`The --gh-matrix option requires --ansible`**: add `--ansible`. Every tox-ansible command needs it.
+- **yamllint failures in `galaxy.yml`**: see the blank line above. Run `-- --test yamllint` to iterate on that one test.
+- **`galaxy.yml` modified after a unit run**: unit and integration environments install the collection in editable mode, and ade then adds `.venv`, `collections` and `.tox` to `build_ignore`. With ade 26.9.0 and the skeleton's `build_ignore: []`, it appended list items under the inline empty list and left invalid YAML, so the next run failed with a `yaml.parser.ParserError`. Writing `build_ignore:` as a block list (one `- entry` per line) avoids it. Commit the entries ade adds.
+- **`git config --global init.defaultBranch main`**: the sanity environments run this before `git init` inside the installed collection. It writes to your global Git config. On a shared machine, set `GIT_CONFIG_GLOBAL` to a throwaway file when you run tox.
+- **No `integration-*` environments**: there are no targets in `tests/integration/targets/` and no pytest modules in `tests/integration/`. That's expected.
+- **The matrix changed after an upgrade**: new tox-ansible releases add new ansible-core and Python versions and drop old ones. That's the feature, but it can turn CI red on a day you didn't touch your collection.
+
+**My take:** pin tox-ansible in CI and bump it in a pull request of its own, so a new ansible-core showing up in your matrix is a reviewed change, not a surprise on an unrelated PR. Combine that with a short `skip` list of the versions you've decided not to support.
+
+## Related
+
+- [CfgMgmtCamp 2025 in Ghent: the talks I saw](/blog/cfgmgmtcamp-ghent-2025-talks/)
+- [Testing Ansible automation with Molecule and GitHub Actions](/blog/testing-ansible-molecule-github-actions/)
+- [Ansible collections: reusable automation](/blog/ansible-collections-best-practices/)
+- [Hands-On Ansible: playbooks to Automation Hub](/blog/hands-on-ansible-automation/)
+
+<BlogPromoCard />

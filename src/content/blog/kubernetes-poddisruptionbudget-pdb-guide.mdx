@@ -1,0 +1,260 @@
+---
+title: "Kubernetes PodDisruptionBudget: PDBs You Can Actually Trust"
+seoTitle: "PodDisruptionBudget Guide: minAvailable, Drains, Audits"
+snippet: "What a Kubernetes PodDisruptionBudget really guarantees, how the rounding works, why crashlooping pods block drains, and how to audit every PDB you have."
+description: "A tested Kubernetes PodDisruptionBudget guide: voluntary vs involuntary disruptions, minAvailable maths, unhealthyPodEvictionPolicy, autoscalers and audits."
+publishDate: "2026-10-02"
+lastModified: "2026-10-02"
+image:
+  src: "/blog/events/kubecon-europe-2026-amsterdam-keynotes-sessions-slides/session-poddisruptionbudgets.jpg"
+  alt: "A large breakout room at KubeCon Europe 2026 filling up for a Saxo session titled Do You Trust Your PodDisruptionBudgets? You Shouldn't!"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["Kubernetes", "PodDisruptionBudget", "PDB", "Node Drain", "Cluster Upgrades", "Karpenter", "Cluster Autoscaler", "ValidatingAdmissionPolicy", "Platform Engineering"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+A Kubernetes PodDisruptionBudget (PDB) is a promise about one kind of disruption only: evictions that go through the Eviction API. It does nothing for a node that dies, a `kubectl delete pod`, or a Deployment scaling down. On top of that, a PDB can be valid YAML and still protect nothing, or block every node drain forever. This post shows what a PDB really guarantees, how its maths works, how to stop crashlooping pods from blocking drains, and how to audit the PDBs you already have.
+
+At [KubeCon Europe 2026 in Amsterdam](/blog/kubecon-europe-2026-amsterdam-keynotes-sessions-slides/) I looked into a breakout room as it filled up for a Saxo-branded session called **"Do You Trust Your PodDisruptionBudgets? You Shouldn't!"**. The title stuck with me, so I went back to the docs and tested every behaviour below on a throwaway cluster. Everything here is my own testing, not a summary of that talk.
+
+**Versions:** checked against the kubernetes.io docs for v1.37 and tested on a kind v0.33.0 cluster running Kubernetes v1.37.0 (one control plane, two workers). The `policy/v1` PDB API has been stable since v1.21. `unhealthyPodEvictionPolicy` is stable since v1.31.
+
+## What a PodDisruptionBudget protects against
+
+The [disruptions concept page](https://kubernetes.io/docs/concepts/workloads/pods/disruptions/) splits disruptions into two groups:
+
+- **Involuntary:** hardware failure, a VM deleted by mistake, a kernel panic, a network partition, or a kubelet evicting pods because the node is out of resources. A PDB can't prevent these, but they *do* count against the budget.
+- **Voluntary:** draining a node for an upgrade or a scale-down, deleting a pod, deleting a Deployment, or changing its pod template.
+
+Only some voluntary disruptions respect the PDB. The docs say it directly: "deleting deployments or pods bypasses Pod Disruption Budgets." What respects it is the **Eviction API**. `kubectl drain` uses it, and the Cluster Autoscaler, Karpenter and managed node upgrades respect PDBs when they drain nodes. A refused eviction returns `429 Too Many Requests`. The drain tool keeps retrying until it succeeds or reaches its `--timeout`.
+
+That gives you three easy ways to bypass a PDB:
+
+1. `kubectl delete pod` goes straight to `DELETE`, with no budget check.
+2. `kubectl drain --disable-eviction` makes the drain delete pods instead of evicting them. Its help text says "This will bypass checking PodDisruptionBudgets, use with caution."
+3. Rolling updates. The docs say pods taken down by a rollout "do count against the disruption budget, but workload resources (such as Deployment and StatefulSet) are not limited by PDBs when doing rolling upgrades." Your `maxSurge` and `maxUnavailable` on the Deployment control the rollout, not the PDB.
+
+## minAvailable vs maxUnavailable: the arithmetic
+
+A PDB has a required `selector` and *one* of `minAvailable` or `maxUnavailable`, either an integer or a percentage string. A pod counts as healthy when its `Ready` condition is `True`. The "expected" pod count comes from the `.spec.replicas` of the pod's owner (Deployment, StatefulSet, ReplicaSet, ReplicationController, or a custom resource with a `scale` subresource).
+
+Percentages are rounded **up**. For `minAvailable: "50%"` on 7 pods, 3.5 becomes 4 pods that must stay available. For `maxUnavailable`, the number of pods that *may* be disrupted is rounded up, so a disruption can go past your percentage. These are the statuses I got on the kind cluster:
+
+| Workload | PDB | desiredHealthy | disruptionsAllowed |
+|---|---|---|---|
+| 7 replicas | `minAvailable: "50%"` | 4 | 3 |
+| 7 replicas | `maxUnavailable: "30%"` (30% of 7 is 2.1, rounded up to 3) | 4 | 3 |
+| 1 replica | `maxUnavailable: "30%"` | 0 | 1 |
+| 1 replica | `minAvailable: 1` | 1 | 0 |
+
+The last two rows are the single-replica traps. With a percentage `maxUnavailable` on one replica, the docs warn that the single pod "is still allowed for disruption, leading to an effective unavailability of 100%". With `minAvailable: 1`, the pod can never be evicted, so any node that runs it can't be drained. If you have a single-instance stateful app, the configure-pdb task page offers two honest options. Either don't create a PDB and accept occasional downtime, or set `maxUnavailable: 0` and agree outside Kubernetes that the cluster operator will contact you, after which you delete the PDB for the maintenance.
+
+Two more rules from [Specifying a Disruption Budget](https://kubernetes.io/docs/tasks/run-application/configure-pdb/):
+
+- **Prefer `maxUnavailable`.** The docs recommend it "as it automatically responds to changes in the number of replicas". An integer `minAvailable: 3` stays 3 when an HPA scales you down to 3, and from then on it allows zero disruptions.
+- **Bare pods and operator-managed pods without a scale subresource** only support an integer `minAvailable`. Kubernetes can't work out a total, so `maxUnavailable` and percentages don't work there.
+
+## unhealthyPodEvictionPolicy: stop crashlooping pods blocking drains
+
+`spec.unhealthyPodEvictionPolicy` decides what happens to pods that are `Running` but not `Ready`:
+
+- `IfHealthyBudget` (the behaviour you get when the field is unset): an unhealthy pod can be evicted only if the application isn't already disrupted, which means `currentHealthy >= desiredHealthy`.
+- `AlwaysAllow`: unhealthy running pods count as already disrupted and can always be evicted. Healthy pods are still protected by the budget.
+
+Pods in `Pending`, `Succeeded` or `Failed` can always be evicted. The disruptions concept page recommends `AlwaysAllow` "to support eviction of misbehaving applications during a node drain".
+
+Here's why that matters. I deployed two replicas of a container that exits after three seconds, plus `minAvailable: 1`:
+
+```bash
+kubectl -n lab get pdb crashy -o json \
+  | jq -c '{policy: .spec.unhealthyPodEvictionPolicy, s: .status | {currentHealthy, desiredHealthy, disruptionsAllowed}}'
+# {"policy":null,"s":{"currentHealthy":0,"desiredHealthy":1,"disruptionsAllowed":0}}
+```
+
+Both pods were in `CrashLoopBackOff`, with pod phase `Running` and `Ready` false. Notice that `policy` is `null`: the API server doesn't write a default into the object. An eviction request was refused:
+
+```bash
+POD=$(kubectl -n lab get pod -l app=crashy -o jsonpath='{.items[0].metadata.name}')
+kubectl create --raw /api/v1/namespaces/lab/pods/$POD/eviction -f - <<EOF
+{"apiVersion":"policy/v1","kind":"Eviction","metadata":{"name":"$POD","namespace":"lab"}}
+EOF
+# Error from server (TooManyRequests): Cannot evict pod as it would violate the pod's disruption budget.
+```
+
+That pod would never become healthy, so the drain would never finish. After `kubectl -n lab patch pdb crashy --type=merge -p '{"spec":{"unhealthyPodEvictionPolicy":"AlwaysAllow"}}'`, the same request returned `"status":"Success"` and the pod was gone.
+
+## Watch a PDB block a drain on kind
+
+To reproduce it, create a three-node kind cluster, run a 3-replica nginx Deployment (with a readiness probe) on one worker, and add the PDB everyone writes at least once:
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web
+  namespace: shop
+spec:
+  minAvailable: 3        # equal to replicas: zero voluntary evictions
+  selector:
+    matchLabels:
+      app: web           # must match the Deployment's pod labels
+```
+
+```bash
+kubectl -n shop get pdb
+# NAME   MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+# web    3               N/A               0                     3s
+
+kubectl drain deepdive-pdb-worker --ignore-daemonsets --timeout=30s
+# evicting pod shop/web-6956b546df-nbb27
+# error when evicting pods/"web-6956b546df-nbb27" -n "shop" (will retry after 5s):
+#   Cannot evict pod as it would violate the pod's disruption budget.
+# ...
+# error: unable to drain node "deepdive-pdb-worker" ... global timeout reached: 30s
+```
+
+The status condition explains it: `DisruptionAllowed` is `False` with reason `InsufficientPods`. Then I ran `kubectl -n shop delete pod <one of them>`. It worked straight away while the PDB still showed `0` allowed disruptions, which shows that a direct delete skips the budget.
+
+Next I replaced the PDB with the version I'd ship:
+
+```yaml
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app: web
+```
+
+The drain now evicted one pod, retried the other two every five seconds with the same "would violate" message, and moved on to the next pod once the replacement was `Ready` on the other worker. That one-at-a-time behaviour is what a PDB is for.
+
+## Rollouts, HPA, autoscalers and node upgrades
+
+- **Rolling updates** aren't limited by the PDB, but the pods they take down count against it. A drain that runs during a rollout can stall until the rollout finishes.
+- **HPA and manual scale-down** delete pods through the ReplicaSet and don't use eviction. I scaled a 7-replica Deployment with `minAvailable: "50%"` (4 required) down to 2. It went through, and the PDB recalculated to `desiredHealthy: 1`.
+- **Cluster Autoscaler**: its [FAQ](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md) lists "Pods with restrictive PodDisruptionBudget" as a reason a node won't be removed. It checks the PDBs before it starts removing a node, and it suggests adding PDBs for kube-system pods that can move, so those nodes can scale down.
+- **Karpenter** (v1.x [disruption docs](https://karpenter.sh/docs/concepts/disruption/)): pods with blocking PDBs aren't considered for voluntary disruption such as consolidation, and "a single blocking PDB can prevent the entire node from being voluntary disrupted". If you set `terminationGracePeriod` on the NodePool, Karpenter can disrupt a node through drift even when blocking PDBs exist, and it deletes the remaining pods early enough to finish within that period.
+- **Managed node upgrades** have a time limit too. GKE surge upgrades respect PDBs "for up to one hour", then force-evict what's left. EKS managed node groups wait 15 minutes, then fail with `PodEvictionFailure` unless you pass the force flag. EKS lists "Aggressive PDB" and "multiple PDBs pointing to the same Pod" as known causes.
+
+My take: if a provider forces the upgrade through after an hour anyway, a PDB with zero allowed disruptions doesn't protect you. You just lose the hour and the pods still go. Size the PDB so a drain can actually finish.
+
+## Common PodDisruptionBudget misconfigurations
+
+These are all from the kind cluster:
+
+1. **A selector that matches nothing.** A typo such as `app: r-seven` gives `expectedPods: 0`, `disruptionsAllowed: 0` and a `NoPods` event ("No matching pods found"). Nothing is protected, and it still looks fine in review.
+2. **`maxUnavailable` on bare or unmanaged pods.** The controller emits an `UnmanagedPods` event that tells you to use an integer `minAvailable`. The status stays at `expectedPods: 0`.
+3. **Zero allowed disruptions forever:** `maxUnavailable: 0`, `minAvailable: "100%"`, or `minAvailable` equal to the replica count. The docs are clear that a drain then "never completes", and that this "is permitted as per the semantics".
+4. **Overlapping PDBs.** With two PDBs selecting the same pods, the eviction failed with `This pod has more than one PodDisruptionBudget, which the eviction subresource does not support.` (a `500`). The pod can't be evicted at all.
+5. **An empty selector.** In `policy/v1` an empty selector matches *every pod in the namespace*. A null selector matches none.
+6. **Trusting stale status.** The API reference says the status "is valid only if observedGeneration equals the PDB's object generation." During my test the controller-manager restarted under load, and new PDBs sat at all-zero status with no `observedGeneration` for a while.
+
+## Audit your PDBs
+
+Start with the overview, then let jq do the checks. This script flags stale status, PDBs that match nothing, PDBs that block while healthy, and PDBs without `AlwaysAllow`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+kubectl get pdb -A -o json | jq -r '
+  .items[]
+  | . as $p
+  | [
+      (if (.status.observedGeneration // 0) != .metadata.generation
+       then "status is stale, re-check later" else empty end),
+      (if .status.expectedPods == 0
+       then "matches no pods with a scalable owner" else empty end),
+      (if .status.expectedPods > 0 and .status.disruptionsAllowed == 0
+          and .status.currentHealthy >= .status.expectedPods
+       then "allows 0 disruptions while every pod is healthy" else empty end),
+      (if (.spec.unhealthyPodEvictionPolicy // "IfHealthyBudget") != "AlwaysAllow"
+       then "unhealthy pods can block drains" else empty end)
+    ]
+  | select(length > 0)
+  | "\($p.metadata.namespace)/\($p.metadata.name)\t\(join("; "))"' |
+  column -t -s $'\t'
+```
+
+On my lab namespace it printed:
+
+```text
+lab/bare-max  matches no pods with a scalable owner; unhealthy pods can block drains
+lab/r1-min1   allows 0 disruptions while every pod is healthy; unhealthy pods can block drains
+lab/r7-min50  unhealthy pods can block drains
+lab/typo      matches no pods with a scalable owner; unhealthy pods can block drains
+```
+
+The `currentHealthy >= expectedPods` guard matters. During any rollout `disruptionsAllowed` drops to 0 for a while, so you only want to flag PDBs that block while everything is healthy. To find overlaps, list the pods each PDB selects and print any pod that appears more than once (this handles `matchLabels` selectors only):
+
+```bash
+kubectl get pdb -A -o json | jq -r '.items[]
+  | select(.spec.selector.matchLabels != null)
+  | [.metadata.namespace, .metadata.name,
+     (.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(","))] | @tsv' |
+while IFS=$'\t' read -r ns name sel; do
+  kubectl get pods -n "$ns" -l "$sel" -o name | sed "s|^|$ns/|; s|\$| $name|"
+done | sort | awk '{c[$1]++; p[$1]=p[$1]" "$2} END {for (k in c) if (c[k]>1) print k":"p[k]}'
+# lab/pod/r7-7499f4cc59-2dv4z: r7-extra r7-min50
+```
+
+### A simple policy check at admission
+
+Some mistakes can be caught when the PDB is created. This ValidatingAdmissionPolicy (stable since v1.30, no extra controller) warns about them. Start with `Warn` and switch to `Deny` once the audit is clean:
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: pdb-sanity
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["policy"]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["poddisruptionbudgets"]
+  validations:
+  - expression: >-
+      !has(object.spec.maxUnavailable) ||
+      !(string(object.spec.maxUnavailable) in ['0', '0%'])
+    message: "maxUnavailable: 0 blocks every voluntary eviction; node drains will hang."
+  - expression: >-
+      !has(object.spec.minAvailable) ||
+      string(object.spec.minAvailable) != '100%'
+    message: "minAvailable: 100% blocks every voluntary eviction; node drains will hang."
+  - expression: >-
+      has(object.spec.selector) &&
+      ((has(object.spec.selector.matchLabels) && size(object.spec.selector.matchLabels) > 0) ||
+       (has(object.spec.selector.matchExpressions) && size(object.spec.selector.matchExpressions) > 0))
+    message: "An empty selector matches every pod in the namespace; select the workload's pods explicitly."
+  - expression: >-
+      has(object.spec.unhealthyPodEvictionPolicy) &&
+      object.spec.unhealthyPodEvictionPolicy == 'AlwaysAllow'
+    message: "Set unhealthyPodEvictionPolicy: AlwaysAllow so crashlooping pods don't block drains."
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: pdb-sanity
+spec:
+  policyName: pdb-sanity
+  validationActions: ["Warn"]
+```
+
+`string()` handles the int-or-string fields, so `0` and `"0%"` are both caught. `kubectl apply` printed `Warning: Validation failed for ValidatingAdmissionPolicy 'pdb-sanity' ...` for each bad PDB and created the good ones silently. Admission can't know the replica count, so `minAvailable: 3` on 3 replicas is the audit script's job. If you already run Kyverno, my [Kyverno and VPA post](/blog/kyverno-vpa-kubernetes-cost-optimization/) has a background-scan policy for the same "blocks while healthy" case. That post is about cleaning up PDBs; this one is about writing them correctly.
+
+If a drain is stuck right now, start with [Fix Kubernetes Pod Disruption Budget Blocking](/blog/fix-kubernetes-pod-disruption-budget-blocking/). For the graceful-shutdown side of zero-downtime deploys, see [Pod Disruption Budgets and Zero-Downtime Rolling Updates](/blog/kubernetes-pod-disruption-budgets-rolling-updates-2026/).
+
+## Related
+
+- [KubeCon Europe 2026 Keynotes and Sessions, Slide by Slide](/blog/kubecon-europe-2026-amsterdam-keynotes-sessions-slides/)
+- [Fix Kubernetes Pod Disruption Budget Blocking](/blog/fix-kubernetes-pod-disruption-budget-blocking/)
+- [Kyverno and VPA: Policy-Driven Kubernetes Cost Optimization](/blog/kyverno-vpa-kubernetes-cost-optimization/)
+- [Pod Disruption Budgets and Zero-Downtime Rolling Updates](/blog/kubernetes-pod-disruption-budgets-rolling-updates-2026/)
+- [Fix Kubernetes Cannot Drain Node Error](/blog/fix-kubernetes-cordon-drain-error/)
+
+<BlogPromoCard />

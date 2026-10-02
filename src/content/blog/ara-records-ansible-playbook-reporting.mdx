@@ -1,0 +1,288 @@
+---
+title: "ARA Records Ansible: Record Every Playbook Run"
+seoTitle: "ARA Ansible Tutorial: Playbook Reporting, CLI and CI"
+snippet: "Set up ARA Records Ansible: enable the callback, record to SQLite or a shared API server, query runs with the ara CLI, label CI jobs and lock it down."
+description: "ARA Records Ansible step by step: callback setup, local SQLite vs a central API server in a container, the ara CLI, labels, CI recording and security."
+publishDate: "2026-10-02"
+lastModified: "2026-10-02"
+image:
+  src: "/blog/events/cfgmgmtcamp-ghent-2025-talks/ara-ansible-for-the-teams.jpg"
+  alt: "Kirill Satarin presenting ARA Ansible for the teams in the main auditorium at CfgMgmtCamp 2025 in Ghent"
+category: "Automation"
+author: "Luca Berton"
+tags: ["Ansible", "ARA", "Callback Plugin", "Reporting", "CI/CD", "Troubleshooting", "Automation", "DevOps"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+**ARA Records Ansible** (ARA) is a callback plugin that records every `ansible-playbook` run (playbooks, plays, tasks, results, hosts and facts) to a database, and gives you a CLI, a REST API and a web UI to search them. This tutorial sets it up from scratch: local recording to SQLite, a shared API server in a container, the `ara` CLI, labels, recording from CI, and the security settings you need before you point a team at it.
+
+Kirill Satarin's "ARA Ansible for the teams" talk at CfgMgmtCamp 2025 in Ghent got me thinking about this again. His pitch, as I wrote it up in my [CfgMgmtCamp 2025 talks recap](/blog/cfgmgmtcamp-ghent-2025-talks/), was that you stop adding debug tasks and reading badly formatted console output, because everything is persisted, searchable and shareable. This post is the hands-on version.
+
+Versions: written against the ARA 1.8.0 documentation (ara.readthedocs.io, released 2026-07-09) and the plugin's own option definitions. I tested every command below with ara 1.8.0, ansible-core 2.21 and Python 3.13, plus the `recordsansible/ara-api:latest` container image.
+
+## How ARA records Ansible runs
+
+ARA has three parts:
+
+- **The callback plugin** (`ara_default`). Ansible calls it on every event: playbook start, task start, each host result, the final stats. It sends that data to the ARA API.
+- **The API server**, a Django REST application with a built-in web UI. It stores data in SQLite by default, or MySQL and PostgreSQL.
+- **Clients**: the `ara` CLI, plus `ara_record`, `ara_label` and `ara_playbook` action plugins and an `ara_api` lookup you can call from playbooks.
+
+The plugin talks to the API through one of two clients:
+
+- `offline` (the default): the API runs in-process and writes to a local SQLite file. No server needed.
+- `http`: the plugin sends data over HTTP to a running ARA server.
+
+One requirement catches people out: the `ara` package must be installed for **the same Python interpreter as Ansible**. If Ansible lives in a venv or in pipx, ARA has to go there too.
+
+## Install ARA and enable the callback plugin
+
+```bash
+python3 -m venv ~/venvs/ansible
+source ~/venvs/ansible/bin/activate
+python3 -m pip install ansible-core "ara[server]"
+```
+
+The `[server]` extra pulls in Django and the API server. You need it for offline recording and for `ara-manage`. On a machine that only sends data to a remote server, plain `pip install ara` is enough.
+
+ARA ships helper modules that print where its plugins live. The simplest way to enable recording is an environment variable:
+
+```bash
+export ANSIBLE_CALLBACK_PLUGINS="$(python3 -m ara.setup.callback_plugins)"
+```
+
+If you also want the `ara_record` and `ara_label` action plugins and the lookup, export all paths at once:
+
+```bash
+source <(python3 -m ara.setup.env)
+```
+
+For a project you share with others, put it in `ansible.cfg` instead. `python3 -m ara.setup.ansible` prints a ready-made `[defaults]` block with the three plugin paths for your environment. Add an `[ara]` section below it:
+
+```ini
+[defaults]
+callback_plugins = /home/me/venvs/ansible/lib/python3.13/site-packages/ara/plugins/callback
+action_plugins   = /home/me/venvs/ansible/lib/python3.13/site-packages/ara/plugins/action
+lookup_plugins   = /home/me/venvs/ansible/lib/python3.13/site-packages/ara/plugins/lookup
+
+[ara]
+api_client = offline
+default_labels = local,laptop
+record_controller_name = my-laptop
+```
+
+Every `[ara]` key has an environment variable twin: `api_client` is `ARA_API_CLIENT`, `default_labels` is `ARA_DEFAULT_LABELS`, and so on. You don't need to list it in `callbacks_enabled`: the plugin path is enough, and your normal console output stays as it is.
+
+## Record a playbook to local SQLite
+
+Here is a small playbook that exercises the features worth knowing:
+
+```yaml
+- name: ARA smoke test
+  hosts: localhost
+  connection: local
+  gather_facts: true
+  vars:
+    ara_playbook_name: ara smoke test
+    ara_playbook_labels:
+      - env:dev
+      - team:platform
+  tasks:
+    - name: Say hello
+      ansible.builtin.command: echo hello
+      changed_when: false
+
+    - name: Secret task
+      ansible.builtin.command: echo supersecret-token-123
+      no_log: true
+      changed_when: false
+
+    - name: Record the git ref of this run
+      ara_record:
+        key: git_ref
+        value: "abc1234"
+      run_once: true
+
+    - name: Fail on purpose but carry on
+      ansible.builtin.command: /bin/false
+      ignore_errors: true
+```
+
+What the ARA-specific bits do:
+
+- `ara_playbook_name` gives the run a readable name instead of just a file path.
+- `ara_playbook_labels` attaches labels you can filter on later. Both variables can also be passed with `-e`.
+- `ara_record` stores an arbitrary key/value on the playbook. `type` can be `text` (default), `url`, `json`, `list` or `dict`, which changes how the UI renders it.
+
+Run it as usual:
+
+```bash
+ansible-playbook -i 'localhost,' site.yml
+```
+
+The offline client creates `~/.ara/server/` with a `settings.yaml` and an `ansible.sqlite` database on first use. Set `ARA_BASE_DIR` to put them somewhere else.
+
+To browse the results in the web UI, start the development server and open http://127.0.0.1:8000:
+
+```bash
+ara-manage runserver
+```
+
+That server is for your laptop only. For anything shared, use the container below.
+
+## Query runs with the ara CLI
+
+The `ara` CLI reads the same data. It uses the offline client by default, so it works against the local SQLite file with no server running:
+
+```bash
+ara playbook list
+ara playbook list --label env:dev
+ara playbook list --name "smoke" --long
+ara playbook list --status failed
+ara playbook show 1
+
+ara result list --playbook 1
+ara result list --status failed
+ara host list
+ara host show 1 --with-facts
+ara record list
+```
+
+A few flags I use all the time:
+
+- `-f json` (or `yaml`, `csv`, `value`) for scripting. `-c <column>` picks columns: `ara playbook list --limit 1 -f value -c id` prints the latest playbook ID.
+- `--long` adds untruncated paths and extra columns, such as the playbook name.
+- `ara playbook metrics` and `ara task metrics` aggregate counts and durations. `ara task metrics` is a quick way to find your slowest tasks.
+
+Labels are the main way to slice runs. Besides `ara_playbook_labels` and `default_labels`, the plugin adds labels automatically from CLI arguments through `argument_labels` (default: `remote_user`, `check`, `tags`, `skip_tags`, `subset`). A run with `--check --tags never` shows up with the labels `check:True` and `tags:never`, so `ara playbook list --label check:True` finds every dry run.
+
+## Run a central ARA API server in a container
+
+A shared server is where ARA becomes a team tool. The project publishes images on Docker Hub (`docker.io/recordsansible/ara-api`) and quay.io (`quay.io/recordsansible/ara-api`):
+
+```bash
+mkdir -p ~/.ara/server
+
+docker run --name ara-api --detach --tty \
+  --volume ~/.ara/server:/opt/ara \
+  -p 8000:8000 \
+  -e ARA_WRITE_LOGIN_REQUIRED=true \
+  -e ARA_ALLOWED_HOSTS="['ara.example.com', 'localhost']" \
+  docker.io/recordsansible/ara-api:latest
+```
+
+- `/opt/ara` holds `settings.yaml` and the SQLite database, so the volume keeps your data across restarts.
+- The container runs database migrations before it starts gunicorn on port 8000.
+- `ARA_ALLOWED_HOSTS` must include the hostname clients use to reach the server. The default only allows `127.0.0.1`, `localhost` and `::1`.
+- For a busy server, set `ARA_DATABASE_ENGINE` and the related `ARA_DATABASE_*` settings to use PostgreSQL or MySQL instead of SQLite.
+
+Create a user for the callback plugin:
+
+```bash
+docker exec -it ara-api ara-manage createsuperuser --username ci-recorder --email ci@example.com
+```
+
+Then point the plugin and the CLI at the server:
+
+```bash
+export ANSIBLE_CALLBACK_PLUGINS="$(python3 -m ara.setup.callback_plugins)"
+export ARA_API_CLIENT=http
+export ARA_API_SERVER=https://ara.example.com
+export ARA_API_USERNAME=ci-recorder
+export ARA_API_PASSWORD='...'
+
+ansible-playbook -i inventory site.yml
+ara playbook list
+```
+
+When your server uses PostgreSQL or MySQL, set `ARA_CALLBACK_THREADS` (maximum 4) so the plugin sends data in parallel. Leave it at the default `0` with SQLite.
+
+## Record playbook runs from CI pipelines
+
+CI is the case where ARA pays off fastest: the job log scrolls away, the runner disappears, and the person debugging wasn't watching. Here is a GitHub Actions step that records to a shared server and labels the run with the repository and run ID:
+
+```yaml
+- name: Run playbook and record it in ARA
+  env:
+    ARA_API_CLIENT: http
+    ARA_API_SERVER: https://ara.example.com
+    ARA_API_USERNAME: ${{ secrets.ARA_USERNAME }}
+    ARA_API_PASSWORD: ${{ secrets.ARA_PASSWORD }}
+    ARA_DEFAULT_LABELS: ci,repo:${{ github.repository }},run:${{ github.run_id }}
+    ARA_RECORD_CONTROLLER_NAME: github-actions
+  run: |
+    python3 -m pip install ansible-core ara
+    export ANSIBLE_CALLBACK_PLUGINS="$(python3 -m ara.setup.callback_plugins)"
+    ansible-playbook -i inventory site.yml
+
+- name: Print the ARA report link
+  if: always()
+  env:
+    ARA_API_CLIENT: http
+    ARA_API_SERVER: https://ara.example.com
+  run: |
+    id=$(ara playbook list --label "run:${GITHUB_RUN_ID}" --limit 1 -f value -c id)
+    echo "ARA report: ${ARA_API_SERVER}/playbooks/${id}.html"
+```
+
+`ARA_DEFAULT_LABELS` takes a comma-separated list. The second step doesn't need credentials as long as reads are open (more on that below). The same pattern works in GitLab CI or Jenkins: install `ara` next to Ansible, export the callback path and the four `ARA_API_*` variables, and run the playbook.
+
+## Secure ARA: authentication and sensitive data
+
+ARA records a lot, and the defaults are open. Out of the box, `ARA_READ_LOGIN_REQUIRED` and `ARA_WRITE_LOGIN_REQUIRED` are both `false`: anyone who can reach the port can read every result and post new ones. The ARA docs recommend enabling authentication so you don't leak passwords, tokens and other playbook data.
+
+Your options:
+
+- **Django users**: set `ARA_WRITE_LOGIN_REQUIRED=true` (and `ARA_READ_LOGIN_REQUIRED=true` if results shouldn't be public inside your network), then create users with `ara-manage createsuperuser`. Access isn't granular: a user can query everything or nothing.
+- **Reverse proxy**: set `EXTERNAL_AUTH: true` in `settings.yaml`, keep both login settings `false`, and let nginx or Apache handle authentication with htpasswd, LDAP or SSO. The docs recommend this approach for performance.
+
+When I ran a playbook without credentials against a server with write login required, the playbook still ran, but the plugin printed `Callback dispatch ... failed for plugin 'ara_default'` warnings and recorded nothing. Watch for those warnings in CI logs.
+
+On the recording side, these callback settings control what gets stored:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `ignored_arguments` | `extra_vars` | CLI arguments not saved. Extra vars often carry secrets, so this is the right default. |
+| `ignored_facts` | `ansible_env` | Host facts not saved. `all` drops every fact. |
+| `ignored_files` | `.ansible/tmp` | File path patterns not saved. Prefix with `regex:` for a regular expression. |
+| `record_task_content` | `true` | Whether the task's content is recorded. |
+| `record_user` / `record_controller` | `true` | Whether to store the user and controller hostname. |
+
+Ansible's own `no_log: true` is respected. In my test, the result of the "Secret task" above was stored as `"censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result"`. ARA does store the content of every file Ansible loads (playbooks, roles, vars files), read straight from disk. Plaintext secrets in a vars file end up in the database; a file encrypted with Ansible Vault or [SOPS with community.sops](/blog/ansible-sops-community-sops-encrypted-vars/) is stored encrypted. Add patterns to `ignored_files` for anything else you don't want copied.
+
+Finally, set a retention policy. `ara playbook prune` deletes playbooks older than `--days` (default 31), and it's a dry run until you add `--confirm`:
+
+```bash
+ara playbook prune --days 30 --confirm
+```
+
+## Common pitfalls
+
+- **Nothing gets recorded**: the callback path isn't set in the shell or `ansible.cfg` that actually runs the playbook, or ARA is installed in a different Python than Ansible.
+- **`ara result list` is missing a failed task**: results from tasks with `ignore_errors: true` are hidden by default. Add `--ignore-errors` to see them.
+- **The controller name is unreadable**: in my test on a Mac, it was recorded as a reverse-DNS IPv6 name. Set `record_controller_name` (or `ARA_RECORD_CONTROLLER_NAME`).
+- **"A worker was found in a dead state" on macOS**: I hit this with `ara_record` and the offline client on macOS. Setting `no_proxy='*'` in the environment fixed it for me.
+- **Slow container start on Apple Silicon**: the `latest` image I pulled was amd64-only, so it ran under emulation.
+- **Everything is recorded under `localhost`**: with `ansible-pull` or `-i 'localhost,'`, set `localhost_as_hostname = true` to record the real hostname instead.
+
+## When to use AWX or Ansible Automation Platform instead
+
+ARA is a recorder, not a controller. It doesn't schedule jobs, store credentials, sync inventories, run approval workflows or give per-team access control. If you need those, you need AWX or Red Hat Ansible Automation Platform, which also keep the output of every job they run. See my notes on [debugging failed AWX and Tower jobs](/blog/fix-ansible-tower-awx-job-failed/) and on [upgrading to AAP 2.6](/blog/ansible-automation-platform-upgrade-2-6-eol-timeline-2026/).
+
+The ARA README lists AWX and Automation Controller among the tools it can record from, so the two can run side by side. I find that useful when the same playbooks also run from laptops and CI.
+
+**My take:** if your team runs Ansible from terminals and pipelines and has no controller, a shared ARA server is the cheapest improvement you can make to how you debug. It takes an afternoon to set up, and "send me your output" becomes a link. If you already need RBAC, credentials and scheduling, start with AWX or AAP and add ARA only where runs happen outside it.
+
+ARA also has a chapter in my book [Hands-On Ansible Automation](/blog/hands-on-ansible-automation/), next to Ansible Semaphore and other tooling around Ansible.
+
+## Related
+
+- [CfgMgmtCamp 2025 in Ghent: the talks I saw](/blog/cfgmgmtcamp-ghent-2025-talks/)
+- [Hands-On Ansible: playbooks to Automation Hub](/blog/hands-on-ansible-automation/)
+- [Fix Ansible Tower/AWX job failed error](/blog/fix-ansible-tower-awx-job-failed/)
+- [Upgrading to Ansible Automation Platform 2.6+](/blog/ansible-automation-platform-upgrade-2-6-eol-timeline-2026/)
+- [SOPS with Ansible: encrypted vars with community.sops](/blog/ansible-sops-community-sops-encrypted-vars/)
+
+<BlogPromoCard />

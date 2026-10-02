@@ -1,0 +1,254 @@
+---
+title: "Claude Code OpenTelemetry: Monitor AI Coding Agents"
+seoTitle: "Claude Code OpenTelemetry: Collector, Prometheus, Grafana"
+snippet: "Send Claude Code OpenTelemetry metrics and events to a Collector, tag them by team and repo, and chart cost, tokens and edits in Prometheus and Grafana."
+description: "Export Claude Code OpenTelemetry metrics and events to a Collector, add team and repo labels, convert delta to cumulative for Prometheus, keep prompts private."
+publishDate: "2026-10-02"
+lastModified: "2026-10-02"
+image:
+  src: "/blog/events/kubecon-europe-2026-co-located-day-amsterdam/signal-overflow-mcp-usage-observability.jpg"
+  alt: "Andi Grabner presenting MCP usage observability at Signal Overflow at Booking.com during KubeCon Europe 2026"
+category: "AI"
+author: "Luca Berton"
+tags: ["Claude Code", "OpenTelemetry", "OpenTelemetry Collector", "AI Coding Agents", "Prometheus", "Grafana", "Observability", "FinOps"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Claude Code OpenTelemetry support is the quickest way to answer the questions every engineering manager asks once coding agents spread through a team: what are we spending, per developer and per repository, and what are we getting for it? Claude Code can export metrics and events over OTLP. Point it at an OpenTelemetry Collector, add the labels your org cares about, and the rest is ordinary Prometheus and Grafana work. This post walks through the whole path, including the delta-temporality details that silently break the numbers if you get them wrong.
+
+During KubeCon Europe 2026 week, Andi Grabner's Signal Overflow talk, **The AI Delivery Lifecycle: Observability for and with AI**, had a coding-agent slide built on the standard `OTEL_EXPORTER_OTLP_*` variables, with delta temporality and `http/protobuf`. It's in my [co-located day recap](/blog/kubecon-europe-2026-co-located-day-amsterdam/). That slide got me to wire it up end to end.
+
+![Andi Grabner presenting MCP usage observability at Signal Overflow at Booking.com, with a dashboard tracking MCP server usage and errors by client and tool](/blog/events/kubecon-europe-2026-co-located-day-amsterdam/signal-overflow-mcp-usage-observability.jpg)
+
+Versions: the Claude Code [Monitoring docs](https://code.claude.com/docs/en/monitoring-usage) as of 2 October 2026, tested with Claude Code 2.1.274 and `otelcol-contrib` 0.161.0.
+
+This is not LLM tracing for your own application. For that, see [tracing LLM calls with OpenTelemetry](/blog/ai-observability-opentelemetry-llm-tracing/). Here the agent is the thing being observed.
+
+## Claude Code OpenTelemetry metrics and events
+
+Metrics (all prefixed `claude_code.`):
+
+| Metric | What it answers | Useful attributes |
+| --- | --- | --- |
+| `cost.usage` (USD) | Spend per developer, team, repo, model | `model`, `query_source`, `skill.name` |
+| `token.usage` (tokens) | Token mix | `type`: `input`, `output`, `cacheRead`, `cacheCreation` |
+| `session.count` | Adoption | `start_type` |
+| `lines_of_code.count` | Lines added and removed | `type`, `model` |
+| `commit.count`, `pull_request.count` | Workflow impact | standard only |
+| `code_edit_tool.decision` | How often edits are accepted | `tool_name`, `decision`, `source`, `language` |
+| `active_time.total` (s) | Active time, excluding idle | `type`: `user` or `cli` |
+
+Events go out through the logs signal. The most useful ones for dashboards are `claude_code.user_prompt`, `claude_code.tool_result` (with `tool_name`, `success`, `duration_ms`, `error_type`), `claude_code.tool_decision`, `claude_code.api_request` (with `cost_usd` and token counts), `claude_code.api_error` and `claude_code.mcp_server_connection`. Events produced while handling a prompt share a `prompt.id`, so you can group all API calls and tool runs behind one prompt.
+
+Every metric and event also carries `session.id` and `user.id` and, when signed in with a Claude account, `organization.id`, `user.account_uuid` and `user.email`. The resource has `service.name` set to `claude-code` (or `claude-code-desktop` for the Desktop app's Code tab).
+
+The docs are explicit that cost metrics are approximations. Use your provider's billing for invoices and this telemetry for attribution and trends.
+
+## Configure a developer machine
+
+```bash
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+export OTEL_EXPORTER_OTLP_ENDPOINT=https://otel-gateway.example.com:4318
+export OTEL_EXPORTER_OTLP_HEADERS="Authorization=Bearer ${OTEL_TOKEN}"
+export OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta
+export OTEL_RESOURCE_ATTRIBUTES="team.id=platform,cost_center=eng-123"
+export OTEL_METRICS_INCLUDE_REPOSITORY=true
+```
+
+Line by line:
+
+- `CLAUDE_CODE_ENABLE_TELEMETRY=1` is the master switch. Nothing is exported without it.
+- `OTEL_METRICS_EXPORTER` accepts `otlp`, `prometheus`, `console` or `none`. `OTEL_LOGS_EXPORTER` accepts `otlp`, `console` or `none`. Leave the logs exporter unset and you get metrics only, with no events.
+- `OTEL_EXPORTER_OTLP_PROTOCOL` is `grpc`, `http/json` or `http/protobuf`. With HTTP, the SDK appends `/v1/metrics` and `/v1/logs` to the endpoint.
+- `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` already defaults to `delta`. I set it so nobody wonders. Use `cumulative` only if your backend can't take delta.
+- `OTEL_RESOURCE_ATTRIBUTES` adds your own labels. Commas separate pairs, and values can't contain spaces. By default these keys are copied onto every metric datapoint (`OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES=true`).
+- `OTEL_METRICS_INCLUDE_REPOSITORY=true` (v2.1.269+) adds `vcs.repository.name`, `vcs.owner.name`, `vcs.provider.name` and `vcs.repository.url.full`, read from the `origin` remote. That gives you per-repo cost without asking anyone to tag anything.
+
+Exports run every 60 seconds for metrics and every 5 seconds for logs (`OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_LOGS_EXPORT_INTERVAL`, in milliseconds). Lower them only while testing.
+
+### Roll it out with managed settings
+
+Asking every developer to edit their shell profile doesn't scale. Put the same keys in the `env` block of the managed settings file: `/Library/Application Support/ClaudeCode/managed-settings.json` on macOS, `/etc/claude-code/managed-settings.json` on Linux and WSL, `C:\Program Files\ClaudeCode\managed-settings.json` on Windows. Server-managed settings work too.
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+    "OTEL_METRICS_EXPORTER": "otlp",
+    "OTEL_LOGS_EXPORTER": "otlp",
+    "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "https://otel-gateway.example.com:4318",
+    "OTEL_METRICS_INCLUDE_REPOSITORY": "true"
+  },
+  "otelHeadersHelper": "/usr/local/bin/otel-token.sh"
+}
+```
+
+Three behaviours worth knowing:
+
+- When managed settings set `OTEL_EXPORTER_OTLP_ENDPOINT`, Claude Code removes developer-set per-signal endpoints at startup, so nobody can quietly point one signal elsewhere. The exporter selectors don't get that lock: a developer can still set one to `none` or `console`, unless managed settings set it too.
+- A repository's `.claude/settings.json` can't turn telemetry on, change the destination or enable content capture. It can only switch a signal off.
+- `otelHeadersHelper` runs a script that prints JSON headers, refreshed every 29 minutes by default. That beats a static token in a file every developer can read.
+
+## The Collector pipeline
+
+The gateway receives OTLP, adds an environment label, maps repositories to owning teams, strips `user.email`, converts delta to cumulative and exposes a Prometheus endpoint. Events go to Loki over its native OTLP endpoint.
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 20
+
+  resource:
+    attributes:
+      - key: deployment.environment.name
+        value: dev-laptops
+        action: upsert
+
+  transform:
+    error_mode: ignore
+    metric_statements:
+      - context: datapoint
+        statements:
+          - set(datapoint.attributes["team"], "payments") where datapoint.attributes["vcs.repository.name"] == "checkout-api"
+          - set(datapoint.attributes["team"], "platform") where datapoint.attributes["vcs.repository.name"] == "infra-modules"
+          - delete_key(datapoint.attributes, "user.email")
+    log_statements:
+      - context: log
+        statements:
+          - set(log.attributes["team"], "payments") where log.attributes["vcs.repository.name"] == "checkout-api"
+          - set(log.attributes["team"], "platform") where log.attributes["vcs.repository.name"] == "infra-modules"
+          - delete_key(log.attributes, "user.email")
+
+  delta_to_cumulative:
+    max_stale: 1h
+
+  batch: {}
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    metric_expiration: 1h
+    resource_constant_labels:
+      included: ["deployment.environment.name"]
+  otlp_http/logs:
+    endpoint: http://loki.monitoring.svc:3100/otlp
+  debug: # add to a pipeline's exporters while testing
+    verbosity: detailed
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, transform, delta_to_cumulative, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, transform, batch]
+      exporters: [otlp_http/logs]
+```
+
+What matters here:
+
+- **`transform`**: Claude Code puts `user.email` on datapoints and event attributes, not on the resource. A `resource` processor won't remove it, so the `delete_key` statements go in the datapoint and log contexts. The `team` mapping only works with `OTEL_METRICS_INCLUDE_REPOSITORY=true` on the client.
+- **`delta_to_cumulative`**: Prometheus counters are cumulative, so convert the delta stream before the Prometheus exporter. The processor keeps state in memory. If you run several gateway replicas, put a `load_balancing` exporter with `routing_key: streamID` in front, so every sample of a stream lands on the same replica.
+- **`max_stale` and `metric_expiration`**: both default to 5 minutes. A developer who goes for lunch would otherwise get their series dropped and restarted. I set both to one hour.
+- **Component names**: 0.161.0 uses `delta_to_cumulative` and `otlp_http`. Older releases call them `deltatocumulative` and `otlphttp`. The old names still validated in 0.161.0.
+
+Validate before deploying:
+
+```bash
+docker run --rm -v "$PWD/gateway.yaml:/c.yaml" \
+  otel/opentelemetry-collector-contrib:0.161.0 validate --config=/c.yaml
+```
+
+## Verify it with the debug exporter
+
+I ran the gateway in Docker with `debug` added to both pipelines, plus a second pipeline that sent the raw input to `debug` before any processing. Then I ran two short prompts with `claude -p`, inside a scratch repository whose `origin` was `https://github.com/example-org/checkout-api.git`. What came through:
+
+- Metrics: `claude_code.session.count`, `cost.usage`, `token.usage`, `active_time.total` and, after a prompt that wrote one file, `lines_of_code.count` and `code_edit_tool.decision`. Instrumentation scope: `com.anthropic.claude_code`.
+- Raw input had `AggregationTemporality: Delta`; after the processor it read `Cumulative`.
+- Events: `user_prompt`, `api_request`, `assistant_response`, `tool_decision`, `tool_result`, `mcp_server_connection`, `plugin_loaded`, `permission_mode_changed` and `managed_settings_resolved`. The `prompt` attribute read `<REDACTED>`.
+- `team.id`, `cost_center` and the `vcs.*` keys arrived on every datapoint, the transform added `team="payments"`, and `user.email` was present in the raw stream but gone after processing.
+
+The Prometheus exporter translated the names to `claude_code_cost_usage_USD_total`, `claude_code_token_usage_tokens_total`, `claude_code_session_count_total`, `claude_code_active_time_seconds_total`, `claude_code_lines_of_code_count_total` and `claude_code_code_edit_tool_decision_total`, with `job="claude-code"` taken from `service.name`.
+
+If nothing arrives, start Claude Code with `claude --debug-file /tmp/claude-otel.log` and look for `[3P telemetry]` lines. Mine showed the resolved exporter, protocol, interval and endpoint.
+
+## Dashboard queries
+
+Each series is one session's running total that starts at zero, because `session.id` is a label. That's why I use `max_over_time` for totals instead of `increase`: `increase` undercounts what a short-lived series added before its first scrape. In Grafana, replace `[7d]` with `[$__range]` so the window follows the time picker.
+
+```promql
+# Spend per team over the last 7 days
+sum by (team_id) (max_over_time(claude_code_cost_usage_USD_total[7d]))
+
+# Token mix by model, as a rate
+sum by (model, type) (rate(claude_code_token_usage_tokens_total[5m]))
+
+# Sessions per team per day, excluding the agents dashboard process
+sum by (team_id) (max_over_time(claude_code_session_count_total{start_type!="agents_view"}[1d]))
+
+# Lines added and removed per repository
+sum by (vcs_repository_name, type) (max_over_time(claude_code_lines_of_code_count_total[7d]))
+
+# Edit acceptance rate by language
+sum by (language) (max_over_time(claude_code_code_edit_tool_decision_total{decision="accept"}[7d]))
+  / sum by (language) (max_over_time(claude_code_code_edit_tool_decision_total[7d]))
+```
+
+A session that crosses the window edge is counted in full, which is fine for chargeback trends. Tool failure rates come from events: count `claude_code.tool_result` where `success` is `"false"`, grouped by `tool_name` and `error_type`, in your log backend. For terminal API failures, `claude_code.api_error` fires once, after retries are exhausted.
+
+## Privacy controls
+
+The defaults are conservative, and I'd keep them:
+
+- Prompt text is redacted. Only `prompt_length` is sent unless `OTEL_LOG_USER_PROMPTS=1`.
+- Assistant response text is redacted unless `OTEL_LOG_ASSISTANT_RESPONSES=1`. If that's unset, it follows `OTEL_LOG_USER_PROMPTS`, so set it to `0` explicitly when you enable prompts but not responses.
+- Bash commands, file paths, MCP server and tool names, and tool arguments need `OTEL_LOG_TOOL_DETAILS=1`. Without it, user-configured MCP server names are replaced with placeholders such as `custom` or `mcp_tool`.
+- `OTEL_LOG_RAW_API_BODIES` exports full API request and response bodies, conversation history included. It's off by default, and repository settings can't turn it on.
+- Raw file contents and code snippets are never in metrics or events.
+- `user.email` is sent when signed in with OAuth, only to your endpoint. Drop it in the Collector as above if you don't need it.
+
+My take: turn on `OTEL_LOG_TOOL_DETAILS` only for a security audit stream that goes to your SIEM, with its own retention, not for the cost dashboard.
+
+## Other coding agents
+
+- **Gemini CLI** supports OpenTelemetry through `telemetry.*` in `.gemini/settings.json`, or the matching `GEMINI_TELEMETRY_*` variables. It's off by default, and `otlpEndpoint` defaults to `http://localhost:4317`. Watch out: `logPrompts` defaults to `true`, the opposite of Claude Code. Its metrics are prefixed `gemini_cli.`, such as `gemini_cli.token.usage`, `gemini_cli.tool.call.count` and `gemini_cli.lines.changed` ([docs](https://github.com/google-gemini/gemini-cli/blob/main/docs/cli/telemetry.md)).
+- **OpenAI Codex** configures it in the `[otel]` table of `~/.codex/config.toml`. The exporter defaults to `"none"`, `log_user_prompt = false` keeps prompts redacted, and it emits events such as `codex.tool_result` and metrics such as `codex.tool.call` ([docs](https://developers.openai.com/codex/config-advanced)).
+
+The same gateway takes all three. Key dashboards on `service.name`.
+
+## Common pitfalls
+
+- **Turning off `session.id` with delta.** `OTEL_METRICS_INCLUDE_SESSION_ID=false` makes two concurrent sessions on one machine send the exact same stream. `delta_to_cumulative` then drops one of them as out of order, and its own error message says to check for multiple processes sending the same series.
+- **Remote write with delta.** The Prometheus remote write exporter drops non-cumulative monotonic metrics. Convert first.
+- **Exporter variables in the repo.** They're ignored in `.claude/settings.json`. Use managed settings or user settings.
+- **Spaces in `OTEL_RESOURCE_ATTRIBUTES`.** Use underscores or percent-encoding.
+- **Laptop-local `prometheus` exporter.** It serves `localhost:9464/metrics` on each machine, which is fine for a demo but nothing you can scrape across a fleet.
+- **Treating cost as an invoice.** It's an estimate. Reconcile with billing monthly.
+
+## Related
+
+- [KubeCon Europe 2026 co-located day: Platform Engineering Day, Observability Day, ArgoCon and Signal Overflow](/blog/kubecon-europe-2026-co-located-day-amsterdam/)
+- [AI Observability: Tracing LLM Calls with OpenTelemetry](/blog/ai-observability-opentelemetry-llm-tracing/)
+- [OpenTelemetry Trace Quality: A Checklist for Large Systems](/blog/opentelemetry-trace-quality-checklist/)
+- [Who's Watching the Agents? AI Observability Meetup at Miro Amsterdam](/blog/sre-nl-whos-watching-agents-miro-amsterdam-2026/)
+- [Dash0 at KubeCon EU 2026: Observability Without Lock-In](/blog/dash0-kubecon-eu-2026-observability-opentelemetry/)
+
+<BlogPromoCard />

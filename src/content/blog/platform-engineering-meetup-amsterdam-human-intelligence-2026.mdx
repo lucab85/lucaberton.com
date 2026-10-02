@@ -189,10 +189,31 @@ Later slides walked through detailed architecture diagrams of the setup.
 
 ### Two more sessions: Orcheo and an AI QA framework
 
-After the three talks, two more sessions followed. The first was **"Orcheo: From Install to Your First Live Workflow"**; the title slide credited Shaojie Jiang, AI Colleagues, March 2026. The second was a walkthrough of an open-source GitHub repository called `ai-qa-framework`. Its description read "Autonomous AI-driven QA framework — give it a URL, get comprehensive test coverage", under an Apache-2.0 licence, and recent commits added Ollama provider support.
+After the three talks, two more sessions followed. The first was **"Orcheo: From Install to Your First Live Workflow"**; the title slide credited Shaojie Jiang, AI Colleagues, March 2026. The second was a walkthrough of an open-source GitHub repository called [`ai-qa-framework`](https://github.com/brentkastner/ai-qa-framework). Its description read "Autonomous AI-driven QA framework — give it a URL, get comprehensive test coverage", under an Apache-2.0 licence, and recent commits added Ollama provider support.
 
 ![Shaojie Jiang presenting the Orcheo title slide, From Install to Your First Live Workflow, beside a tarmac banner](/blog/events/platform-engineering-meetup-amsterdam-human-intelligence-2026/orcheo-first-live-workflow.jpg)
 *Orcheo, from install to a first live workflow.*
+
+#### How the AI QA framework works
+
+The `ai-qa-framework` session was a live demo rather than a slide talk, and my clips caught most of it. The speaker, who wasn't named on screen, started with the idea: point it at a URL and give it a few settings, such as how deep to go and which kinds of testing to run. Then the LLM takes over. It discovers the site by scraping, makes a plan, moves from the plan into execution, gathers the results and analyses them with the evidence, and presents them to the user. He said they had open-sourced it and the audience was welcome to use it.
+
+![The ai-qa-framework GitHub repository on the big screen at Tolhuistuin, with the presenter holding a microphone beside it and the tarmac roll-up banner on the left](/blog/events/platform-engineering-meetup-amsterdam-human-intelligence-2026/ai-qa-framework-repo-walkthrough.jpg)
+*The `ai-qa-framework` repository on screen during the walkthrough.*
+
+He ran it from a terminal with `python -m src.cli run` against Sauce Demo, a public Shopify demo store. The log showed three stages:
+
+1. **Crawl.** He had set it to look at 10 pages. The crawler spidered through the store: the home page, About Us, News, account registration and login, search, the product list and two jacket product pages. The log ended with "10 pages visited, 35 total URLs seen", in under half a minute. According to him, it also looks at previous runs, so it doesn't keep walking a well-worn path and leave other sections undiscovered. On screen, this showed up as a gap analysis before planning: 1 untested, 4 stale, 0 low-coverage and 3 failures.
+2. **Plan.** The crawl result becomes a structured document with all the links it found. That goes to the LLM together with the kinds of testing wanted (he named functional, visual and security testing) and hints about the areas to cover, all loaded into the context. In the log, the call went to `claude-opus-4-6` with a 32,000-token limit. The answer took 94.6 seconds and came back as a plan of 19 test cases, with one validation warning (a "fill" step that had no value). The plan is then translated directly into Playwright actions.
+3. **Execute.** He said the tests run in parallel on four threads to keep the run reasonably fast. The first tests on screen were functional ones: registration with valid data, login with invalid credentials, a password-reset form and adding a product to the cart from a product page. A security test for XSS injection in the search field came next. Adding to the cart passed. The login and registration tests failed and were re-run with video capture for failure analysis.
+
+The part I found most practical was how it deals with flaky tests. As a developer, he said, one of the things he hates most is a fragile automation test, because he wants results back rather than time spent debugging tests that fail for no real reason. So there is a fallback. When a test fails, the framework takes a screenshot of the failing part and passes it back to the LLM with the plan, and the LLM decides whether the test should pass or fail. In the log, these were the "Calling AI with image" calls, capped at 500 tokens each and answered in about four to five seconds.
+
+He also explained a design choice. For quality control you want deterministic flows that cover the core paths every time, but you also want some non-determinism in there. That's why they separated the two: rather than giving the LLM total control, they give it hints about what must be covered on every run. According to him, that's also why they didn't use MCP. He believed Playwright now has a tool of its own for this, which he thought would be interesting to add.
+
+The [repository's README](https://github.com/brentkastner/ai-qa-framework) describes the same pipeline in four stages, adding a report stage that produces HTML and JSON reports with screenshots. According to the README, it tracks coverage between runs to target gaps, takes natural-language hints in a `qa-config.json` file, and can use a local Ollama model instead of the Anthropic API. It describes the screenshot step more broadly than the demo did, as AI-assisted error recovery that also fixes broken selectors.
+
+My take: separating the paths that must be covered on every run from the parts the LLM can explore is the right call. I would still keep a small hand-written smoke suite for the critical paths, though. And when the LLM rules that a failed step is really a pass, I'd want a person to review that verdict before it counts as green in a CI gate.
 
 Between talks, the organisers also showed an "Other Communities & Events" slide pointing to [MLOps Amsterdam](https://luma.com/amsterdam-mlops).
 

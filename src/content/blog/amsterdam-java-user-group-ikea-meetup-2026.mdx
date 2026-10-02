@@ -1,0 +1,128 @@
+---
+title: "Amsterdam JUG at IKEA: Virtual Threads, ECC and Testing"
+seoTitle: "Amsterdam Java User Group at IKEA: March 2026 Recap"
+snippet: "Amsterdam JUG at IKEA, March 2026: Java virtual threads, elliptic curve signatures and JWS, and a system test suite for deploying on a Friday."
+description: "My recap of the Amsterdam Java User Group meetup at IKEA in March 2026: virtual threads, ECDSA and JSON Web Signatures, and system tests at NS."
+publishDate: "2026-10-02"
+lastModified: "2026-10-02"
+image:
+  src: "/blog/thumbnails/amsterdam-java-user-group-ikea-meetup-2026.jpg"
+  alt: "Luca Berton at the IKEA Meet Up of the Amsterdam Java User Group, with the hosts on stage and the audience behind him"
+category: "Conferences"
+author: "Luca Berton"
+tags: ["Java", "Amsterdam JUG", "Virtual Threads", "Project Loom", "Cryptography", "ECDSA", "JWS", "Testing", "Testcontainers", "Playwright", "Meetup", "Amsterdam"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+On Thursday 19 March 2026 I went to the **Amsterdam Java User Group**, hosted by IKEA. The slides were branded "IKEA Meet Up – Amsterdam Java User Group". The evening had three talks: Java virtual threads, elliptic curve cryptography, and testing a production system well enough to deploy it on a Friday afternoon. Two posts I published the same day grew out of the first two talks.
+
+![Luca Berton taking a selfie at the IKEA Meet Up of the Amsterdam Java User Group, with the hosts on stage, the audience and the food table behind him](/blog/events/amsterdam-java-user-group-ikea-meetup-2026/jug-ikea-selfie.jpg)
+
+*Wraps on the table, the hosts at the lectern, and the opening slide on the big screen.*
+
+## Virtual Threads, by Cameron Harris
+
+The first talk was **"Virtual Threads"** by Cameron Harris. The title slide showed a big blue IKEA bag, which suited the venue.
+
+![Title slide of the Virtual Threads talk by Cameron Harris at the IKEA Meet Up of the Amsterdam Java User Group, with an IKEA bag on the slide](/blog/events/amsterdam-java-user-group-ikea-meetup-2026/virtual-threads-title.jpg)
+
+*"Virtual Threads", Cameron Harris, on the IKEA Meet Up slide template.*
+
+The slides made clear up front that this wasn't a how-to: the virtual thread API mirrors the existing platform `Thread` API. The talk was about *why* the feature exists. The "Problems we're trying to solve" slide listed four:
+
+1. **Not a how-to.** The API is the same as for platform threads, so learning the syntax isn't the hard part.
+2. **C10K.** The 2000s problem of handling more than 10,000 concurrent clients on one server.
+3. **Asynchronous processing.** Keeping the CPU busy, with a high instructions-per-cycle rate on every core, while threads wait.
+4. **Polling.** OS APIs struggled with more than about 1,000 open file descriptors, which is why epoll, kqueue and io_uring were built.
+
+The **"Thread per Request"** slide explained why the simple model is attractive and where it stops working. When code hits an I/O operation, you block the thread and let the OS scheduler wake it when the I/O completes. That's simple and intuitive. But each thread needs its own stack plus OS data structures, so there's a limit on how many you can spawn. The workarounds have their own problems. Thread pools become a bottleneck when there are more concurrent tasks than threads. Spawning threads without a pool risks running out of memory (threads × stack size). And creating and destroying threads always costs something.
+
+![Thread per Request slide at the Amsterdam Java User Group listing simple and intuitive, threads are expensive, and possible workarounds and pitfalls](/blog/events/amsterdam-java-user-group-ikea-meetup-2026/thread-per-request.jpg)
+
+*Thread per request: simple, but each thread brings its own stack and OS bookkeeping.*
+
+Next came **asynchronous programming**. A user-space event scheduler "comes with its own set of headaches". The program must know where it waits on I/O. Code turns into "arbitrary bits of code glued together through events" instead of a list of instructions you can read top to bottom. Cancelling a task is hard, because the cancellation logic sits outside the task. Most languages paper over this with async/await (the slide cited the EA async library). The slide also gave the speaker's own opinion: Java didn't yet have the features that make monads pleasant to use, such as pattern matching and algebraic data types.
+
+The closing **"Some side notes on Virtual Threads"** slide had the practical warnings. Virtual threads run on a pool of carrier threads (OS threads). By default the pool has one carrier per processor, and a system property can change that. JEP 425 covers both debugging and scheduling. A virtual thread *looks* like the same thread throughout its run, and that causes odd behaviour in some libraries. The slide's example was Hibernate, which doesn't allow access from separate threads on the same session.
+
+I wrote that last point up as [why JDBC and Hibernate break with virtual threads](/blog/jdbc-virtual-threads-hibernate-java-problems/). It covers pinning, connection pool exhaustion and session-per-thread assumptions.
+
+My take: virtual threads remove the thread bottleneck, but the next bottleneck is usually the connection pool, so plan your capacity around that.
+
+## Elliptic Curve Cryptography Unleashed
+
+The second talk was **"Elliptic Curve Cryptography Unleashed: Faster, Smaller, Stronger"**. The speaker's "About me" slide described a solution architect working on CIAM, access control, security and compliance.
+
+![Title slide of Elliptic Curve Cryptography Unleashed: Faster, Smaller, Stronger at the Amsterdam Java User Group meetup at IKEA](/blog/events/amsterdam-java-user-group-ikea-meetup-2026/ecc-unleashed-title.jpg)
+
+*Faster, smaller, stronger: the promise of elliptic curves.*
+
+The talk started from the basics: **digital signature algorithms** take a document, run it through a function with a private key, and produce a signature. Then came the maths slide, **"The Elliptic Curve Algorithm"**. It showed a curve function such as y² = x³ − 3x + b, noted that it's used in TLS, and described the scheme as hiding a point on the curve using its geometric properties: point addition (P + Q = R) and the curve group law (P + Q + R′ = 0). The speaker walked through the plotted curve on screen.
+
+![Speaker pointing at the plotted curve on The Elliptic Curve Algorithm slide, showing point addition P + Q = R, at the Amsterdam Java User Group](/blog/events/amsterdam-java-user-group-ikea-meetup-2026/elliptic-curve-algorithm.jpg)
+
+*Point addition on the curve: the geometry behind ECDSA.*
+
+The **"NIST Recommendation for Key Management"** table made the "smaller" part of the title concrete. For the same security strength, ECC keys are far shorter than RSA keys:
+
+| Security strength | Symmetric | RSA (k) | ECC (f) |
+|---|---|---|---|
+| 112 | 3TDEA | 2048 | 224–255 |
+| 128 | AES-128 | 3072 | 256–383 |
+| 192 | AES-192 | 7680 | 384–511 |
+| 256 | AES-256 | 15360 | 512+ |
+
+From there the talk moved to tokens. **JSON Web Signature (RFC 7515)**: a JSON-based structure for secured content, made of headers (alg, key ID, web key, key set URL), a Base64URL-encoded JSON payload and a Base64URL-encoded signature. The slide pointed to jwt.io for Java libraries and the algorithms they support. Then there was a live demo: a small local web app called "ECDSA and RSA digital signatures". It had buttons to generate EC and RSA keys, sign a message, verify the signature, view the public keys and compare execution time.
+
+That JWS slide is where my [JSON Web Signature (RFC 7515) in Java guide](/blog/json-web-signature-rfc-7515-java/) started. It covers the three-part structure, the header parameters, and jjwt, Nimbus and jose4j examples.
+
+My take: if you're designing new token signing today, start from ECDSA or EdDSA and treat RSA as the compatibility option, not the default.
+
+## Deploying On Friday Afternoons Without Stress, by Bas Stoker
+
+Before the last talk, a giveaway slide went up, **"Gift: Grow Beyond Senior"**. It advertised an online programme that Bruno Souza, "the Brazilian JavaMan", gives to his mentees, with a deep dive on five paths to grow beyond senior level.
+
+The last talk was **"Deploying On Friday Afternoons Without Stress"** by Bas Stoker (the title slide read "Bas Stoker // AmsterdamJUG // March 19, 2026").
+
+![Title slide of Deploying On Friday Afternoons Without Stress by Bas Stoker at the Amsterdam Java User Group, March 19, 2026](/blog/events/amsterdam-java-user-group-ikea-meetup-2026/deploying-on-friday-title.jpg)
+
+*The third talk of the night: a testing story from a real production system.*
+
+The framing was the **Testing Trophy**, credited to Kent C. Dodds. Static analysis is the base, then unit tests, a wide band of integration tests, and end-to-end tests on top (the slide used the Dutch labels *Statische analyse*, *Unit*, *Integratie* and *End to End*). The quoted idea: you get "great" value for the cost from static analysis and integration tests, and "good" value from unit and e2e tests. Use them all.
+
+![Testing Trophy slide coined by Kent C. Dodds, with static analysis, unit, integration and end-to-end layers, at the Amsterdam Java User Group](/blog/events/amsterdam-java-user-group-ikea-meetup-2026/testing-trophy.jpg)
+
+*The Testing Trophy, with the layers labelled in Dutch.*
+
+The case study was **Dutch Railroads (NS)**: real-time control of all NS rolling stock, four or more agile DevOps teams, a microservices architecture, and data sources including scheduling, changes from traffic control and GPS updates. The architecture diagram showed a browser going through an ingress to a single-page frontend, a backend, Keycloak and a Postgres database. The toolset was **Java, Docker, Testcontainers and Playwright**, plus JUnit 5. A "Container startup time → Problem" slide showed where that stack gets slow.
+
+The tests themselves are written in **Cucumber**, in Dutch. The example scenario "Tijdsconflict" places messages on a queue, logs in, searches for a unit, scrolls to 12:00 and checks that a delayed deployment shows up as a time conflict, with the right delay in its tooltip. A line count of the codebase showed 133 files and about 160,000 lines of code. Velocity templates made up 155,229 of those lines, Java 3,271 and Cucumber 1,603. The CI pipeline slide showed a single SystemTest job of 9m 32s that logged in to Harbor, ran the Maven tests and published screenshots, test results and a Cucumber report.
+
+![Value of this system test slide: extra safety net, quickly validate updates such as Keycloak, security testing with ZAP proxy, living documentation and chaos testing with Toxiproxy](/blog/events/amsterdam-java-user-group-ikea-meetup-2026/system-test-value.jpg)
+
+*Why the system test is worth its CI minutes.*
+
+The **"Value of this system test"** slide summed it up:
+
+- An extra safety net, with all major use cases covered
+- Quick validation of lifecycle-management updates, such as Keycloak upgrades
+- Security testing with ZAP proxy
+- Documentation generated from the tests, so it's always up to date with the product
+- Chaos testing with Toxiproxy
+
+He ended on a light note: "Maybe thanks to these tests\*, we won the NLJUG innovation award", with the footnote "\* This is my personal opinion :-)". The closing slide pointed to testcontainers.com and playwright.dev.
+
+I wrote more about this layer in [System Tests: Cucumber, Playwright, and Chaos Engineering](/blog/system-tests-safety-net-cucumber-playwright-chaos/).
+
+My take: a slow, full-stack test suite that every merge must pass is what makes Friday deploys boring. It's the same reasoning I use for platform upgrades on Kubernetes.
+
+## Related
+
+- [Why JDBC Breaks with Virtual Threads and Hibernate in Java](/blog/jdbc-virtual-threads-hibernate-java-problems/)
+- [JWS in Java: RFC 7515 Implementation (Code Examples)](/blog/json-web-signature-rfc-7515-java/)
+- [System Tests: Cucumber, Playwright, and Chaos Engineering](/blog/system-tests-safety-net-cucumber-playwright-chaos/)
+- [I Lost a Day to @Retryable: Amsterdam JUG at Doctolib](/blog/amsterdam-jug-doctolib-retryable-spring-aop-2026/)
+
+<BlogPromoCard />

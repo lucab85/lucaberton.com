@@ -5,7 +5,7 @@ seoTitle: "Hermes Agent Errors: Fix 429, Auth, 404 & Gateway Issues"
 snippet: "Hermes Agent troubleshooting: 'provider failed after retries', 429 rate-limit, model 404, auth failed, credit paused, gateway shutdown — exact CLI fixes."
 description: "Hermes Agent troubleshooting: 'provider failed after retries', 429 rate-limit, model 404, auth failed, credit paused, gateway shutdown — exact CLI fixes."
 publishDate: "2026-07-31"
-lastModified: "2026-09-16"
+lastModified: "2026-09-29"
 image:
   src: "/blog/thumbnails/hermes-agent-troubleshooting.svg"
   alt: "Hermes Agent troubleshooting flow: diagnose, fix model, credentials, and gateway"
@@ -815,3 +815,198 @@ When you have isolated the problem but still need help:
 | "Model returned no content after all retries"       | `hermes fallback add`                     | add a fallback chain, or switch/smoke-test the model                                |
 | "Credit access paused — run /topup"                 | `hermes portal open`                      | top up at portal.nousresearch.com; credit restores automatically                    |
 | "Provider authentication failed"                    | `hermes auth list`                        | refresh/re-add credential; check gateway logs for raw error                         |
+
+## Case Study: Free-Tier Model Expiry + Discord Gateway Recovery (Sep 2026)
+
+Real incident from September 28–29, 2026. A free-tier Nous Portal model (`tencent/hy3:free`) expired its free period mid-session. Every inference call returned HTTP 404. During recovery, the Discord WebSocket connection cycled through `latency_exceeded` and `socket_closed` health failures, producing live Python tracebacks. Below are the **verbatim** error messages from `~/.hermes/logs/gateway.log`, `journalctl -u hermes-gateway`, and `~/.hermes/sessions/request_dump_*.json`.
+
+### Error 1 — Model free period expired: `HTTP 404` from `tencent/hy3:free`
+
+The gateway was configured with `model.default: tencent/hy3:free` (`provider: nous`). That model's free period ended. The retry loop attempted 3 times, each returning the same 404:
+
+**Request dump** (`request_dump_20260928_201253_12161f4b_20260928_201302_740792.json`):
+
+```json
+{
+  "type": "NotFoundError",
+  "message": "Error code: 404 - {'status': 404, 'message': \"This model's free period has ended. Please select a different model to continue!\"}",
+  "status_code": 404,
+  "body": {
+    "status": 404,
+    "message": "This model's free period has ended. Please select a different model to continue!"
+  }
+}
+```
+
+The request body used `model: "tencent/hy3:free"`, URL `https://inference-api.nousresearch.com/v1/chat/completions`, with 73 tool definitions in the `tools` array.
+
+**Gateway log** (journalctl, PID 929):
+
+```text
+    📝 Error: HTTP 404: This model's free period has ended. Please select a different model to continue!
+    📋 Details: {'status': 404, 'message': "This model's free period has ended. Please select a different model to continue!"}
+    ⚠️  API call failed (attempt 2/3): NotFoundError [HTTP 404]
+    🔌 Provider: nous  Model: tencent/hy3:free
+    ❌ API failed after 3 retries — HTTP 404: This model's free period has ended.
+    💀 Final error: HTTP 404: This model's free period has ended. Please select a different model to continue!
+```
+
+**User-facing Discord output:**
+
+```text
+⚠️ The model provider failed after retries. I kept raw provider details out of chat; check gateway logs for diagnostics.
+```
+
+### Error 2 — Nous Portal OAuth token missing
+
+```text
+2026-09-26 17:30:34,652 WARNING gateway.run: Primary provider auth failed: No access token found for Nous Portal login. — trying fallback
+2026-09-26 17:30:38,436 WARNING gateway.run: Primary provider auth failed: No access token found for Nous Portal login. — trying fallback
+```
+
+### Error 3 — Discord WebSocket health degradation: `latency_exceeded`
+
+Repeated health-check failures across Sep 28–29:
+
+```text
+2026-09-28 21:33:14,045 WARNING hermes_plugins.discord_platform.adapter: [Discord] Discord Gateway WebSocket unhealthy (latency_exceeded, 1/2)
+2026-09-28 21:33:29,325 WARNING hermes_plugins.discord_platform.adapter: [Discord] Discord Gateway WebSocket unhealthy (latency_exceeded, 2/2)
+2026-09-28 21:33:29,326 ERROR hermes_plugins.discord_platform.adapter: [Discord] Discord Gateway WebSocket remained unhealthy (latency_exceeded); forcing reconnect
+2026-09-28 21:33:32,324 ERROR gateway.run: Fatal discord adapter error (discord_websocket_health_stale): Discord Gateway WebSocket health check failed: latency_exceeded
+```
+
+Same pattern repeated at: 21:34, 21:37, 21:46, 22:52, 23:32, 00:01 (Sep 29).
+
+### Error 4 — Discord WebSocket transport closed: `socket_closed` with Python tracebacks
+
+When the WebSocket transport closed mid-operation, the gateway attempted to edit or send Discord messages against a dead session, producing full Python tracebacks.
+
+**Message edit failure — `ServerDisconnectedError`:**
+
+```text
+2026-09-29 00:50:21,730 ERROR hermes_plugins.platforms__discord.adapter: [Discord] Failed to edit Discord message 1554290842687115295: Server disconnected
+Traceback (most recent call last):
+  File "/home/ubuntu/.hermes/hermes-agent/plugins/platforms/discord/adapter.py", line 3267, in edit_message
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/discord/message.py", line 1414, in edit
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/discord/http.py", line 659, in request
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/aiohttp/client.py", line 1693, in __aenter__
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/aiohttp/client.py", line 858, in _request
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/aiohttp/client.py", line 836, in _connect_and_send_request
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/aiohttp/client_reqrep.py", line 558, in start
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/aiohttp/streams.py", line 705, in read
+aiohttp.client_exceptions.ServerDisconnectedError: Server disconnected
+```
+
+**Message send failure — `RuntimeError: Session is closed`:**
+
+```text
+2026-09-29 00:50:22,333 ERROR hermes_plugins.platforms__discord.adapter: [Discord] Failed to send Discord message: Session is closed
+Traceback (most recent call last):
+  File "/home/ubuntu/.hermes/hermes-agent/plugins/platforms/discord/adapter.py", line 3100, in send
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/discord/abc.py", line 1706, in send
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/discord/http.py", line 659, in request
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/aiohttp/client.py", line 1693, in __aenter__
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/aiohttp/client.py", line 581, in _request
+    raise RuntimeError("Session is closed")
+RuntimeError: Session is closed
+```
+
+A second identical traceback followed immediately before escalation:
+
+```text
+2026-09-29 00:50:23,542 ERROR hermes_plugins.platforms__discord.adapter: [Discord] Failed to send Discord message: Session is closed
+Traceback (most recent call last):
+  File "/home/ubuntu/.hermes/hermes-agent/plugins/platforms/discord/adapter.py", line 3100, in send
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/discord/abc.py", line 1706, in send
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/discord/http.py", line 659, in request
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/aiohttp/client.py", line 1693, in __aenter__
+  File "/home/ubuntu/.hermes/installs/5f0a1ff4045d044e/environments/6c0cd4c33b404ab39a6e3ed13badd8c3/venv/lib/python3.14/site-packages/aiohttp/client.py", line 581, in _request
+    raise RuntimeError("Session is closed")
+RuntimeError: Session is closed
+```
+
+Then the adapter escalated to a fatal error:
+
+```text
+2026-09-29 00:50:23,144 WARNING hermes_plugins.platforms__discord.adapter: [Discord] Timed out closing unhealthy Discord client
+2026-09-29 00:50:23,145 WARNING hermes_plugins.platforms__discord.adapter: [Discord] Aborted unresponsive Discord WebSocket transport
+2026-09-29 00:50:24,142 ERROR gateway.run: Fatal discord adapter error (discord_websocket_health_stale): Discord Gateway WebSocket health check failed: socket_closed
+```
+
+### Error 5 — Gateway SIGTERM and clean shutdown sequence
+
+```text
+2026-09-29 00:17:51,642 INFO gateway.run: Received SIGTERM — initiating shutdown
+2026-09-29 00:17:51,644 WARNING gateway.run: Shutdown context: signal=SIGTERM under_systemd=yes parent_pid=1 parent_name=systemd loadavg_1m=3.67 parent_cmdline='/sbin/init iscsi_auto_skip_initramfs_networking'
+2026-09-29 00:17:51,826 INFO gateway.run: Stopping gateway...
+2026-09-29 00:17:52,696 INFO gateway.run: Sent shutdown notification to home channel discord:1476339124200800400
+2026-09-29 00:17:52,696 INFO gateway.run: Shutdown phase: notify_active_sessions done at +0.87s
+2026-09-29 00:17:52,704 INFO gateway.run: Shutdown phase: drain done at +0.88s (drain took 0.01s, timed_out=False, active_at_start=0, active_now=0, cron_at_start=0, cron_now=0, api_at_start=0, api_now=0)
+2026-09-29 00:17:52,781 INFO hermes_plugins.discord_platform.adapter: [Discord] Disconnected
+2026-09-29 00:17:52,824 INFO gateway.run: ✓ discord disconnected (0.06s)
+2026-09-29 00:17:52,824 INFO gateway.run: Shutdown phase: all adapters disconnected at +1.00s
+2026-09-29 00:17:52,832 INFO gateway.run: Shutdown phase: final-cleanup tool kill done at +1.01s
+2026-09-29 00:17:52,958 INFO gateway.run: Shutdown phase: SessionDB close done at +1.13s
+2026-09-29 00:17:52,962 INFO gateway.run: Gateway stopped by an unexpected signal — persisting gateway_state=running so container_boot auto-starts on the next boot (issue #42675)
+2026-09-29 00:17:52,968 INFO gateway.run: Gateway stopped (total teardown 1.14s)
+2026-09-29 00:17:53,160 INFO gateway.run: Exiting with code 1 (signal-initiated shutdown without restart request) so systemd Restart=on-failure can revive the gateway.
+```
+
+### Recovery — Gateway restart with `poolside/laguna-s-2.1:free`
+
+After updating `config.yaml` to set `model.default: poolside/laguna-s-2.1:free` and restarting via `systemctl restart hermes-gateway`:
+
+```text
+2026-09-29 00:31:00,246 INFO gateway.control_socket: Gateway control socket listening at /home/ubuntu/.hermes/gateway.sock
+2026-09-29 00:31:17,541 INFO gateway.run: Starting Hermes Gateway...
+2026-09-29 00:31:17,550 INFO gateway.run: Session storage: /home/ubuntu/.hermes/sessions
+2026-09-29 00:31:18,249 INFO gateway.run: Agent budget: max_iterations=150 (agent.max_turns from config.yaml, else the HERMES_MAX_ITERATIONS bridge)
+2026-09-29 00:31:18,250 INFO gateway.run: Secret redaction: ENABLED (tool output, logs, and chat responses are scrubbed before delivery)
+2026-09-29 00:31:18,935 INFO gateway.run: Previous gateway exited cleanly — skipping session suspension
+2026-09-29 00:31:20,925 INFO gateway.run: Connecting to discord...
+2026-09-29 00:31:29,045 INFO hermes_plugins.platforms__discord.adapter: [Discord] Registered /skill command with 160 skill(s) via autocomplete
+2026-09-29 00:31:32,234 INFO hermes_plugins.platforms__discord.adapter: [Discord] Connected as hermes001#7933
+2026-09-29 00:31:32,333 INFO gateway.run: ✓ discord connected
+2026-09-29 00:31:42,741 INFO gateway.run: Model context warmed: poolside/laguna-s-2.1:free -> 262144 tokens (detected)
+2026-09-29 00:31:42,742 INFO gateway.run: Turn machinery warmed in 21.8s (24 tool schema(s) materialized)
+2026-09-29 00:31:49,129 INFO gateway.run: Gateway running with 1 platform(s)
+2026-09-29 00:31:50,839 INFO gateway.run: Channel directory built: 264 target(s)
+```
+
+### Tool-call validation against candidate free models
+
+Before selecting `poolside/laguna-s-2.1:free`, five free models were tested via direct API calls to verify tool-calling support. All five returned valid `tool_calls`:
+
+```text
+poolside/laguna-s-2.1:free         TOOL_CALL OK  {"name": "publish_post", "arguments": "{\"title\": \"Ciao\", \"body\": \"Prova\"}"}
+upstage/solar-pro4:free            TOOL_CALL OK  {"name": "publish_post", "arguments": "{\"body\": \"Prova\", \"title\": \"Ciao\"}"}
+meituan/longcat-2.5-preview:free   TOOL_CALL OK  {"name": "publish_post", "arguments": "{\"title\": \"Ciao\", \"body\": \"Prova\"}"}
+stepfun/step-3.7-flash:free        TOOL_CALL OK  {"name": "publish_post\", "arguments\": \"{\\\"title\\\": \\\"Ciao\\\", \\\"body\\\": \\\"Prova\\\"}"}
+poolside/laguna-xs-2.1:free        TOOL_CALL OK  {"name": "publish_post", "arguments": "{\"title\": \"Ciao\", \"body\": \"Prova\"}"}
+```
+
+`poolside/laguna-s-2.1:free` was selected — largest of the five, 262,144-token context, suitable for long agentic sessions.
+
+### Post-recovery Discord instability
+
+Even after the model change, Discord WebSocket continued cycling `socket_closed` failures at 03:14, 03:31, 03:40, 03:45 UTC. The gateway's reconnection logic used exponential backoff (30s → 60s → 120s → 240s → 300s). Final successful reconnect:
+
+```text
+2026-09-29 05:54:14,440 INFO hermes_plugins.platforms__discord.adapter: [Discord] Connected as hermes001#7933
+2026-09-29 05:54:16,144 INFO gateway.run: ✓ discord reconnected successfully
+```
+
+### State file vs. live process
+
+During this incident, `gateway_state.json` can show a stale `connected` state after a restart. Always verify against the live process and current log:
+
+```bash
+# Stale state (written by the OLD process, not yet updated by the NEW one):
+python3 -c "import json;d=json.load(open('/home/ubuntu/.hermes/gateway_state.json'));print(d['gateway_state'],d['platforms'])"
+
+# Live process:
+systemctl show hermes-gateway -p MainPID -p ActiveEnterTimestamp
+
+# Live log tail:
+tail -F /home/ubuntu/.hermes/logs/gateway.log | grep --line-buffered -iE "discord.*(connected|ready|error)|model.*laguna|Gateway running"
+```

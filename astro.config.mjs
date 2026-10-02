@@ -28,6 +28,26 @@ const stubBlogSlugs = (() => {
   return slugs;
 })();
 
+// Blog posts whose frontmatter `canonical` points to another site (the topic is
+// owned elsewhere, e.g. openempower.com). A page that canonicalises away must
+// not also be listed in this site's sitemap. Astro content slugs are the
+// lowercased file name.
+const offsiteCanonicalBlogSlugs = (() => {
+  const blogContentDir = fileURLToPath(new URL("./src/content/blog/", import.meta.url));
+  const slugs = new Set();
+  if (!fs.existsSync(blogContentDir)) return slugs;
+  for (const file of fs.readdirSync(blogContentDir)) {
+    if (!/\.mdx?$/.test(file)) continue;
+    const src = fs.readFileSync(path.join(blogContentDir, file), "utf8");
+    const frontmatter = src.match(/^---\n([\s\S]*?)\n---/);
+    const canonical = frontmatter?.[1].match(/^canonical:\s*["']?(https?:\/\/[^"'\s]+)/m)?.[1];
+    if (canonical && !canonical.startsWith("https://lucaberton.com")) {
+      slugs.add(file.replace(/\.mdx?$/, "").toLowerCase());
+    }
+  }
+  return slugs;
+})();
+
 // https://astro.build/config
 export default defineConfig({
   image: {
@@ -66,6 +86,9 @@ export default defineConfig({
         // Skip team page (it's empty/placeholder)
         if (page.includes('/team')) return false;
         if (page.includes('partytown')) return false;
+        // Noindex conversion-confirmation redirect targets (Kit/Calendly)
+        if (page.includes('/newsletter-thank-you')) return false;
+        if (page.includes('/call-booked')) return false;
         if (page.includes('?ref=')) return false;
         if (page.includes('?utm_')) return false;
 
@@ -73,6 +96,8 @@ export default defineConfig({
         // from src/pages/blog/<slug>/index.astro so the list never drifts.
         const blogSlugMatch = page.match(/\/blog\/([^/]+)\/?$/);
         if (blogSlugMatch && stubBlogSlugs.has(blogSlugMatch[1])) return false;
+        // Skip posts that canonicalise to another site.
+        if (blogSlugMatch && offsiteCanonicalBlogSlugs.has(blogSlugMatch[1])) return false;
         
         // Skip root-level categories and tags (they redirect to /blog/categories/ and /blog/tags/)
         if (page.match(/\/categories\/[^/]+\/?$/) && !page.includes('/blog/categories/')) return false;

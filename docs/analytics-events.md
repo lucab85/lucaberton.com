@@ -1,0 +1,182 @@
+# Analytics events — canonical schema
+
+Source of truth for GA4 event names, parameters, and monetization priority on
+lucaberton.com. Implementation: `src/components/ConversionTracker.astro`
+(declarative `data-track-event` / `data-tp-*` attributes; property
+`G-M9Q5F672JT`). Do not invent new event names — differentiate with
+parameters (`company`, `offer_id`, `target_offer`).
+
+**Enforced:** the controlled vocabularies live in
+`src/config/analytics-taxonomy.json` and `scripts/validate-analytics.cjs`
+checks every tracked element against them in the pre-commit hook (`--staged`)
+and CI (`pnpm validate:analytics`). Topic clusters come from
+`src/utils/topicCluster.ts`; target offers are the taxonomy list plus the
+service/pillar URLs in `src/utils/serviceMatches.ts` slugified
+(`/services/kubernetes-workshops/` → `services_kubernetes_workshops`). To use a
+new value, add it there first — the validator rejects anything else, including
+spec-style attribute names (`data-target-offer`) that the tracker cannot read,
+un-annotated Calendly links, and unknown `<BlogPromoCard variant>` names.
+
+## Monetization priority
+
+1. Qualified consulting leads from organic (north star)
+2. Discovery calls / assessment submissions
+3. Blog → commercial-page CTR
+4. Email capture
+5. Bootcamp applications
+6. Affiliate revenue
+
+An enterprise-intent article (GPU/OpenShift AI/MLOps governance) shows an
+assessment CTA first, even when an affiliate offer could monetize the same
+visitor.
+
+### Partner channel restrictions
+
+- **Pocket:** the affiliate programme does **not** allow referrals from Google Ads.
+  Use Pocket affiliate links only in organic/editorial placements (site content,
+  newsletter, social/editorial traffic as permitted by the programme), never in
+  Google Ads campaigns. Current tracked launch offer:
+  `offer_id=pocket_launch`, `company=pocket`.
+
+- **Flatpay:** PartnerStack explicitly permits the personal referral link on
+  the site, in content, and in newsletters. Current tracked offer:
+  `offer_id=flatpay_partner_referral`, `company=flatpay`,
+  destination `https://try.flatpay.com/lmd1w8x5omhj`. The partner terms in
+  the Feb 2026 welcome email use country-specific lead/demo payouts, so do not
+  hard-code commission amounts into public site copy; keep them in the partner
+  registry/outreach notes and re-confirm before quoting externally.
+
+- **Linux Foundation:** evergreen Awin tracking uses advertiser ID `85919`
+  with publisher ID `1937397`. Current tracked offer:
+  `offer_id=linux_foundation_training`, `company=linux_foundation`.
+  Use the supplied Awin creative/link for evergreen Linux/Kubernetes training
+  placements. Do not reuse expired campaign codes (for example the September
+  2026 promo codes) unless a current partner email explicitly reactivates them.
+
+## Events
+
+| Event | Fires when | Key params | GA4 role |
+|---|---|---|---|
+| `consulting_cta_click` | CTA toward services/assessment/Calendly clicked (un-annotated Calendly links count too: `cta_variant=inline_calendly_link`) | `target_offer`, `cta_position`, `cta_variant` | micro-conversion |
+| `booking_start` | Calendly scheduler actually opened — popup init, or native-navigation fallback (`booking_source`) | `booking_type`, `booking_source` | micro-conversion |
+| `booked_call` | Calendly confirmed the booking: `calendly.event_scheduled` postMessage from the popup (`src/components/CalendlyPopup.astro`, works on the free plan) — or `/call-booked/` viewed via the paid-plan success redirect | `booking_type`, `booking_source` | **key event** |
+| `contact_form_submit` | business inquiry form accepted by Web3Forms (`data.success`) — `form_id=contact` on `/contact/`, `form_id=partnership` on `/partner-with-luca/` | `form_id` | **key event** |
+| `assessment_submit` | Production AI Readiness Check on `/production-ai-assessment/` (`src/components/react/ProductionReadinessCheck.tsx`) — email submitted to unlock the category gap map | `target_offer` | **key event** |
+| `email_signup_start` | newsletter CTA/form opened | `form_id` | micro-conversion |
+| `email_signup` | `/newsletter-thank-you/` viewed (Kit success redirect) | `form_id` | **key event** |
+| `bootcamp_click` | link toward `/ai-platform-engineer-bootcamp/` (auto) | `cta_variant` | micro-conversion |
+| `bootcamp_apply_start` | first focus inside the application form | — | micro-conversion |
+| `bootcamp_application_submitted` | application POST succeeded (name kept for data continuity; add a separate purchase event only if paid enrollment moves on-site) | — | **key event** |
+| `affiliate_click` | outbound affiliate/partner CTA clicked — one event for ALL partners | `company`, `offer_id`, `offer_type`, `cta_position`, `cta_variant`, `destination_url` | key event (lowest priority) |
+
+CTA clicks are operational metrics; `booked_call`, `contact_form_submit`,
+`assessment_submit`, `email_signup`, and `bootcamp_application_submitted` are
+the numbers to quote as "conversions".
+
+## Shared parameters (every event)
+
+- `page_path`, `page_type` (`article` / `page` / `confirmation`)
+- `topic_cluster` — from `src/utils/topicCluster.ts`, stamped on the article
+  element (`data-page-context`) in `src/pages/blog/[slug].astro` and
+  `src/layouts/BlogLayout.astro`
+- First-touch attribution (localStorage, 30-day TTL): `original_landing_page`,
+  `original_topic_cluster`, `original_referrer`, `utm_source/medium/campaign`
+  (when present), `first_consulting_cta` — so a booking on `/contact/` still
+  reports which article created it. No PII is ever sent.
+
+`cta_position` controlled set: `top_banner`, `hero`, `inline_25`, `inline_50`,
+`inline_75`, `inline` (depth unknown — auto-tracked links in post bodies),
+`post_solution`, `post_conclusion`, `sidebar`, `sticky_bar`, `related_offer`,
+`unlabeled` (auto-tracked Calendly link outside an article body — annotate it).
+
+## Production AI Readiness Check
+
+`/production-ai-assessment/` embeds a free, 8-question self-serve check
+(`src/components/react/ProductionReadinessCheck.tsx`, one question per
+diagnostic area already on the page) as the middle step between "read the
+page" and "book a call": the score and tier are free, the category gap map
+and top-3 actions are gated behind an email (submitted to Web3Forms).
+`assessment_submit` (`target_offer=production_ai_assessment`) fires ONLY on
+a confirmed Web3Forms success — a rejected or failed submission keeps the
+user on the email step with a retry and two honest fallbacks (a tracked
+"book a call directly" link, and "Continue without confirmation" to see the
+report without counting it as a captured lead). The report's CTA into
+Calendly is a normal `consulting_cta_click`.
+
+Programmatic events fired from JS/TSX (no HTML element to scan) use the same
+declarative names via `window.lucaTrack(name, params)` — the validator checks
+`lucaTrack(...)` call sites the same way it checks `data-track-event`, but
+deliberately does not scan bare `gtag()` calls: several older landing pages
+call gtag directly with their own page-local event names that predate and
+sit outside this taxonomy.
+
+## Consulting CTAs on high-traffic posts
+
+`src/utils/blogConsultingCtas.ts` holds one offer per post (keyed by slug):
+headline, body, benefit chips, `ctaLabel` / `ctaHref` (the assessment or
+readiness page), `targetOffer` and `ctaVariant` (the copy experiment name —
+never a layout word like `dark`). For a configured post,
+`src/pages/blog/[slug].astro` renders `BlogConsultationCta` with that offer
+and injects it mid-article (after the H2 at ~45% of the post's H2 count) with
+`cta_position=inline_50`; the post-conclusion consultation CTA and the
+bootcamp CTA are suppressed there so the page has one primary consulting
+action. Every other post keeps the generic, `serviceMatches.ts`-driven closing
+CTA (`target_offer=ai_platform_assessment`, `cta_variant=schedule_free_assessment`,
+Calendly popup).
+
+Both links on the card emit `consulting_cta_click` (secondary:
+`<cta_variant>_service_detail`, `target_offer` = the destination slugified,
+e.g. `services`). The secondary link comes from the offer's
+`secondaryLabel` / `secondaryHref`; without them it falls back to the
+`serviceMatches.ts` service, which is "AI Integration & GPU Platforms" for
+most AI posts — so set them. Configured posts also skip the generic
+`RelatedServices` cards. `topic_cluster` always comes from the page.
+The card is an `<aside>`, so its heading is excluded from the table of
+contents. The validator fails on offers or variants in that file that are not
+in the taxonomy, on keys that are not real post slugs, and on `ctaHref` /
+`secondaryHref` values that are not pages on this site.
+
+## Calendly booking flow
+
+Every `calendly.com/lucaberton` link on the site opens as a Calendly popup
+(assets lazy-loaded on first click). The popup URL carries attribution as UTM
+params (`utm_campaign` = original topic cluster, `utm_content` = original
+landing page) so the booking record inside Calendly shows which article
+created it. Add `data-calendly-native` to a link to opt out of the popup;
+modifier-clicks and no-JS visitors always get the native link.
+
+## Adding a tracked CTA
+
+```html
+<a href="…"
+   data-track-event="affiliate_click"
+   data-tp-company="racknerd"
+   data-tp-offer-id="racknerd_vps_4gb"
+   data-tp-offer-type="affiliate"
+   data-tp-cta-position="post_solution"
+   data-tp-cta-variant="skip_free_tier_queue">…</a>
+```
+
+Forms: `data-track-start-event` (first focus) and `data-track-submit-event`.
+Async success handlers: `window.lucaTrack(name, params)`.
+Confirmation pages: `data-track-pageview-event` on the `data-page-context`
+element (deduped per session against refreshes).
+
+## External setup (not in this repo)
+
+- **Kit**: set each form's success redirect to
+  `https://lucaberton.com/newsletter-thank-you/`.
+- **Calendly**: nothing required on the free plan — `booked_call` comes from
+  the popup. On a paid plan you may additionally set each event type's
+  confirmation redirect to `https://lucaberton.com/call-booked/`
+  (optionally `?booking_type=<slug>`). The popup marks the `/call-booked/`
+  pageview as already counted for the session, so a redirect in the same tab
+  does not double-count; a redirect opened in a *new* tab still would.
+- **GA4 admin**: mark the key events above as key events (`contact_form_submit`
+  was added 2026-09-27 — create it by name like the others); register custom
+  dimensions `topic_cluster`, `cta_position`, `cta_variant`, `target_offer`,
+  `company`, `offer_id`, `page_type`, `original_landing_page`,
+  `original_topic_cluster`, `booking_type`, `booking_source`,
+  `first_consulting_cta`, `form_id`.
+- Baseline 28–60 days before setting targets; then fix funnel leakage (CTA
+  CTR, form completion) before chasing more traffic.

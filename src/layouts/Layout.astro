@@ -4,8 +4,11 @@ import Footer from "@components/footer.astro";
 import Navbar from "@components/navbar/navbar.astro";
 import PostHog from "@components/posthog.astro";
 import AnnouncementBanner from "@components/AnnouncementBanner.astro";
+import { bannerFor } from "@utils/topicBanners";
 import WebVitals from "@components/WebVitals.astro";
 import InteractionTracker from "@components/InteractionTracker.astro";
+import ConversionTracker from "@components/ConversionTracker.astro";
+import CalendlyPopup from "@components/CalendlyPopup.astro";
 import StickyCta from "@components/StickyCta.astro";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -23,6 +26,13 @@ export interface Props {
   minimalChrome?: boolean;
   minimalCtaHref?: string;
   minimalCtaLabel?: string;
+  // target_offer for the consulting_cta_click event on the minimal CTA
+  minimalCtaOffer?: string;
+  // Absolute canonical URL override, for pages whose primary version lives
+  // on another site. Defaults to this page's own URL.
+  canonical?: string;
+  // Topic cluster of the page (blog posts) — picks the announcement banner.
+  topicCluster?: string;
 }
 
 // ============================================
@@ -41,17 +51,6 @@ const kubeconBanner = {
   gradientTo: "purple-600",
 };
 
-const redHatSummitBanner = {
-  enabled: true,
-  emoji: "🎓",
-  headline: "Claude Code Masterclass",
-  description: "Learn AI-assisted development on Udemy — plus the companion book on Leanpub & Amazon.",
-  linkText: "Start Learning",
-  linkUrl: "https://www.udemy.com/course/claude-code-masterclass-ai-coding/",
-  gradientFrom: "indigo-600",
-  gradientVia: "purple-600",
-  gradientTo: "pink-600",
-};
 // ============================================
 
 const siteName = "Luca Berton | The Production AI Expert";
@@ -69,7 +68,9 @@ if (!canonicalURL.endsWith('/')) {
 }
 
 const resolvedImageWithDomain = new URL("/opengraph.jpg", siteOrigin).toString();
-const { title, description: customDescription, image: customImage, noindex, minimalChrome = false, minimalCtaHref, minimalCtaLabel = "Book Assessment" } = Astro.props;
+const { title, description: customDescription, image: customImage, noindex, minimalChrome = false, minimalCtaHref, minimalCtaLabel = "Book Assessment", minimalCtaOffer = "discovery_call", canonical: canonicalOverride, topicCluster } = Astro.props;
+const hasCanonicalOverride = Boolean(canonicalOverride);
+if (canonicalOverride) canonicalURL = canonicalOverride;
 
 // Use custom image if provided (e.g. blog post hero), otherwise default.
 // Guard: a custom image that does NOT exist in the build output (a missing
@@ -153,15 +154,17 @@ const linkedInPartnerId = import.meta.env.PUBLIC_LINKEDIN_PARTNER_ID || "";
       }
     </style>
 
-    {isHome && (
-      <link rel="preload" as="image" href="/hero-stage-1.webp" fetchpriority="high" />
-    )}
-    
-    <!-- Additional SEO meta tags -->
-    <meta http-equiv="Strict-Transport-Security" content="max-age=31536000; includeSubDomains" />
-    <link rel="alternate" hreflang="en" href={canonicalURL} />
-    <link rel="alternate" hreflang="x-default" href={canonicalURL} />
-
+    <!--
+      SEO is deliberately the first dynamic (non-static) child of <head>.
+      @astrojs/compiler 2.13.1 has a codegen bug where the first `{cond &&
+      <tag/>}`-shaped expression right after the static head content gets its
+      JS condition emitted as literal HTML text (e.g. a stray "isHome &&"
+      string visible on the page) instead of being evaluated. A component
+      call like <SEO/> here doesn't trigger it, so it shields the real
+      conditionals (hreflang links, hero preload) below it. Don't reorder
+      this above the static content, and don't add a new `{cond && <tag/>}`
+      expression before it.
+    -->
     <SEO
       title={makeTitle}
       description={metaDescription}
@@ -193,6 +196,14 @@ const linkedInPartnerId = import.meta.env.PUBLIC_LINKEDIN_PARTNER_ID || "";
         },
       }}
     />
+
+    <meta http-equiv="Strict-Transport-Security" content="max-age=31536000; includeSubDomains" />
+    {!hasCanonicalOverride && <link rel="alternate" hreflang="en" href={canonicalURL} />}
+    {!hasCanonicalOverride && <link rel="alternate" hreflang="x-default" href={canonicalURL} />}
+
+    {isHome && (
+      <link rel="preload" as="image" href="/hero-stage-1.webp" fetchpriority="high" />
+    )}
 
     <!-- opengraph.jpg only used by social crawlers, no need to preload -->
 
@@ -394,7 +405,7 @@ const linkedInPartnerId = import.meta.env.PUBLIC_LINKEDIN_PARTNER_ID || "";
       Skip to main content
     </a>
     {!minimalChrome && <AnnouncementBanner {...kubeconBanner} />}
-    {!minimalChrome && <AnnouncementBanner {...redHatSummitBanner} />}
+    {!minimalChrome && <AnnouncementBanner {...bannerFor(topicCluster)} />}
     {minimalChrome ? (
       <header class="sticky top-0 z-50 border-b border-slate-200/80 bg-white/90 py-4 backdrop-blur-xl">
         <div class="mx-auto flex max-w-7xl items-center justify-between px-5 sm:px-8 lg:px-12">
@@ -402,7 +413,7 @@ const linkedInPartnerId = import.meta.env.PUBLIC_LINKEDIN_PARTNER_ID || "";
             Luca Berton
           </a>
           {minimalCtaHref && (
-            <a href={minimalCtaHref} class="rounded-full bg-red-600 px-4 py-2 text-sm font-bold text-white shadow-lg shadow-red-600/20 transition hover:bg-red-500">
+            <a href={minimalCtaHref} data-track-event="consulting_cta_click" data-tp-target-offer={minimalCtaOffer} data-tp-cta-position="top_banner" data-tp-cta-variant="minimal_header_cta" class="rounded-full bg-red-600 px-4 py-2 text-sm font-bold text-white shadow-lg shadow-red-600/20 transition hover:bg-red-500">
               {minimalCtaLabel}
             </a>
           )}
@@ -438,6 +449,8 @@ const linkedInPartnerId = import.meta.env.PUBLIC_LINKEDIN_PARTNER_ID || "";
     {!minimalChrome && <StickyCta />}
     <WebVitals />
     <InteractionTracker />
+    <ConversionTracker />
+    <CalendlyPopup />
     <script>
       // Shared scroll-reveal: any element with [data-reveal] fades/rises in
       // once when it enters the viewport. See the .is-revealed CSS in

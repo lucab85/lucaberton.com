@@ -20,6 +20,10 @@ Scaling Argo CD usually goes wrong in the same way. The application count grows,
 
 ArgoCon Europe 2026 got me writing this down. At the KubeCon co-located day I watched **The $10,000 ArgoCD Mistake: Eliminating Phantom Syncs and Scaling the Repo Server**, which I summarised in my [co-located day recap](/blog/kubecon-europe-2026-co-located-day-amsterdam/). In the talk, the results slide showed average CPU going from 3.8 to 0.9 cores and mean sync time from 600 s to 60 s on the same workload. The rest of this post is my own walkthrough, checked against the official Argo CD docs.
 
+![Title slide of The $10,000 ArgoCD Mistake: Eliminating Phantom Syncs and Scaling the Repo Server on the ArgoCon Europe stage at KubeCon Europe 2026 in Amsterdam](/blog/events/scaling-argo-cd-phantom-syncs-repo-server/argocon-10k-mistake-title.jpg)
+
+*The title slide of The $10,000 ArgoCD Mistake at ArgoCon Europe 2026, in the ArgoCon auditorium at the RAI Amsterdam.*
+
 **Version note:** I checked every key, flag and metric against the Argo CD **3.5** documentation (the `stable` docs, release v3.5.3). Settings that only appear in 3.5 are marked as such. Most of the rest has been around since 2.x.
 
 ## What a phantom sync actually is
@@ -78,6 +82,10 @@ Write down the `ls-remote` and `fetch` rates. They're the numbers the next two s
 
 ## Reduce Git polling with timeout.reconciliation and jitter
 
+![ArgoCon Europe 2026 slide Reduce Polling, fix 1 of 4, comparing a spiky CPU load at the default polling interval with a calm load at 180 seconds, next to an argocd-cm ConfigMap setting timeout.reconciliation](/blog/events/scaling-argo-cd-phantom-syncs-repo-server/argocon-fix-1-reduce-polling.jpg)
+
+*A slide from The $10,000 ArgoCD Mistake at ArgoCon Europe 2026: fix #1 of 4, "Reduce Polling", contrasting high CPU load from frequent polling with a stable load after raising timeout.reconciliation to 180s in argocd-cm.*
+
 The application controller polls Git on a timer configured in `argocd-cm`:
 
 ```yaml
@@ -116,6 +124,10 @@ My take: once webhooks are in place, I raise the interval but don't set it to `0
 
 A webhook lets Argo CD refresh only the Applications whose repo just changed. The API server accepts webhook events from GitHub, GitLab, Bitbucket, Bitbucket Server, Azure DevOps and Gogs at `/api/webhook`.
 
+![ArgoCon Europe 2026 slide Event Driven Webhooks, fix 2 of 4, showing a commit flowing from GitHub through a webhook POST to an Argo CD sync instead of a polling loop](/blog/events/scaling-argo-cd-phantom-syncs-repo-server/argocon-fix-2-webhooks.jpg)
+
+*A slide from The $10,000 ArgoCD Mistake at ArgoCon Europe 2026: fix #2 of 4, "Event Driven Webhooks", replacing the polling loop with a commit, GitHub, webhook POST and sync pipeline.*
+
 1. In your Git provider, add a webhook with payload URL `https://argocd.example.com/api/webhook`. On GitHub, set the content type to `application/json`. The default `application/x-www-form-urlencoded` isn't supported.
 2. Set a shared secret and put it in `argocd-secret`:
 
@@ -153,6 +165,10 @@ data:
 **Verify it:** GitHub's webhook page shows each delivery and the response code. On the Argo CD side, the `ls-remote` rate in `argocd_git_request_total` should fall once you've raised the polling interval. On 3.5, `argocd_webhook_requests_total` (label `repo`, on the API server endpoint) counts the events that arrive.
 
 ## Replace hundreds of Applications with an ApplicationSet
+
+![ArgoCon Europe 2026 slide Use ApplicationSet, fix 3 of 4, contrasting 500-plus individual Application YAML files with one Git directory generator template](/blog/events/scaling-argo-cd-phantom-syncs-repo-server/argocon-fix-3-applicationset.jpg)
+
+*A slide from The $10,000 ArgoCD Mistake at ArgoCon Europe 2026: fix #3 of 4, "Use ApplicationSet", swapping hundreds of hand-written Application manifests for one Git directory generator.*
 
 Hand-written Application manifests don't scale. They drift apart, and each one is another object to keep consistent. A Git directory generator creates one Application per directory:
 

@@ -20,6 +20,10 @@ PgBouncer connection pooling is the fix I reach for when a PostgreSQL database s
 
 I started thinking about this again after Ruud Schilders' talk "Mastodon and PostgreSQL, or: … and then November happened!" at a [PostgreSQL user meetup in Amsterdam](/blog/postgresql-user-meetup-amsterdam-2025/) in February 2025. In the talk, adding Sidekiq threads moved the bottleneck to Postgres connections. The first emergency fix was setting `max_connections` to 800. The next fix was PgBouncer in Docker with `max_client_conn=2000` and `default_pool_size=500`, and later `max_client_conn=10000` to absorb peaks. The rest of this post is a general tutorial, not a description of that setup.
 
+![Speaker at the lectern next to a slide reading The growth continued, end of the work-day: 3500 users, above a steadily rising server users graph](/blog/events/pgbouncer-connection-pooling-traffic-spikes/mastodon-workday-growth-3500-users.jpg)
+
+*A slide from Ruud Schilders' "Mastodon and PostgreSQL" talk at the PostgreSQL user meetup in Amsterdam: "The growth continued.. end of the work-day: 3500 users!", with a server users graph climbing all afternoon.*
+
 Settings were checked against the [PgBouncer configuration docs](https://www.pgbouncer.org/config.html), the [usage docs](https://www.pgbouncer.org/usage.html) and the [changelog](https://www.pgbouncer.org/changelog.html) for PgBouncer 1.26.0 (released 2026-09-23), plus the PostgreSQL 18 docs. I ran the Docker example below locally with PgBouncer 1.24.1 and PostgreSQL 18.
 
 ## Why raising max_connections is not a strategy
@@ -73,11 +77,19 @@ Since 1.26.0, PgBouncer also tracks every parameter PostgreSQL reports by defaul
 | `query_wait_timeout` | 120.0 s | disconnect a client that waited this long for a server |
 | `max_prepared_statements` | 200 | prepared statements cached per server connection |
 
+![Slide about the November 18 registration spike: 30k to 62k users in 12 hours, new database connection issues, PgBouncer installed in Docker with max_client_conn=2000 and default_pool_size=500](/blog/events/pgbouncer-connection-pooling-traffic-spikes/november-spike-pgbouncer-settings.jpg)
+
+*A slide from Ruud Schilders' "Mastodon and PostgreSQL" talk at the PostgreSQL user meetup in Amsterdam: the 18 November spike, from 30k to 62k users in 12 hours, followed by PgBouncer in Docker with `max_client_conn=2000` and `default_pool_size=500`.*
+
 Two things to note. `default_pool_size` is **per user/database pair**, so ten app roles against one database can open ten pools. And `max_client_conn` also drives file descriptors: the docs give the theoretical maximum as `max_client_conn + (max pool_size * total databases * total users)`, so raise `ulimit -n` to match.
 
 ## Sizing math from workers and threads
 
 Start from the client side. Every thread that can check out a database connection is a potential PgBouncer client. Sidekiq-style job runners start one process with 5 threads by default, and the Sidekiq docs tell you to set the Active Record `pool` equal to the thread count.
+
+![Sidekiq slide: default 1 process with 5 threads, queue over 350,000, threads changed to 200 and the queue went down quickly, with a Sidekiq dashboard screenshot](/blog/events/pgbouncer-connection-pooling-traffic-spikes/sidekiq-threads-tuning-slide.jpg)
+
+*A slide from Ruud Schilders' "Mastodon and PostgreSQL" talk at the PostgreSQL user meetup in Amsterdam: Sidekiq's default of 1 process with 5 threads, a queue of over 350,000 jobs, and the number of threads changed to 200.*
 
 Here's a worked example:
 
@@ -89,6 +101,10 @@ Here's a worked example:
 | ×2 for a rolling deploy (old and new pods overlap) | 560 |
 
 Setting `max_client_conn = 1000` per PgBouncer leaves room for that and for a spike in scheduled jobs.
+
+![Speaker pointing at a slide reading Today: Sidekiq has 44 processes, 1100 threads in total. Can handle peaks (max_client_conn=10000), next to a Sidekiq dashboard](/blog/events/pgbouncer-connection-pooling-traffic-spikes/sidekiq-44-processes-1100-threads.jpg)
+
+*A slide from Ruud Schilders' "Mastodon and PostgreSQL" talk at the PostgreSQL user meetup in Amsterdam: "Today: Sidekiq has 44 processes, 1100 threads in total. Can handle peaks. (max_client_conn=10000)".*
 
 Then work out the server side, which is what Postgres actually pays for:
 

@@ -54,6 +54,10 @@ WHERE (name = 'Module7.Setting7' AND (flags & 32) > 0)
 
 ## Step 1: find the slow PostgreSQL query with pg_stat_statements
 
+![The statement slide in a full room: according to pg_stat_statements the query takes about 8.656 milliseconds and runs 359,513,795 times a year on a table of about 13,000 rows](/blog/events/fix-slow-postgresql-query-expression-partial-hash-indexes/pg-stat-statements-statement-slide.jpg)
+
+*A slide from the Database Academy talk at the PostgreSQL user meetup in Amsterdam: according to `pg_stat_statements` the query averaged about 8.656 ms, ran 359,513,795 times in one year on a table of about 13,000 rows, and could not be changed.*
+
 `pg_stat_statements` has to be loaded at server start, so you need a restart:
 
 ```ini
@@ -98,6 +102,10 @@ WHERE (name = 'Module7.Setting7' AND (flags & 32) > 0)
  Execution Time: 1.530 ms
 ```
 
+![The queryplan slide showing a Seq Scan on parameterinfo with Rows Removed by Filter 13029 and an execution time of 7.337 ms](/blog/events/fix-slow-postgresql-query-expression-partial-hash-indexes/seq-scan-query-plan-slide.jpg)
+
+*A slide from the Database Academy talk at the PostgreSQL user meetup in Amsterdam: the original plan, a `Seq Scan` on `parameterinfo` with `Rows Removed by Filter: 13029` and an execution time of 7.337 ms.*
+
 Look for three things:
 
 - **`Seq Scan`**: every row is read.
@@ -117,6 +125,10 @@ UNION
 SELECT id, name, value FROM parameterinfo
  WHERE lower(name) = lower('Module7.Setting7') AND (flags & 128) > 0;
 ```
+
+![Better readable slide comparing the original query with an OR in the WHERE clause to the same query split into two SELECTs joined by UNION](/blog/events/fix-slow-postgresql-query-expression-partial-hash-indexes/or-to-union-rewrite-slide.jpg)
+
+*A slide from the Database Academy talk at the PostgreSQL user meetup in Amsterdam: the original `OR` query next to the same query split into two `SELECT`s joined by `UNION`.*
 
 Without indexes it doesn't help. My plan showed two sequential scans and 322 buffers, twice the original. It just makes it obvious which index each branch needs. Once those indexes existed, each branch used its own index scan. For the rest of this post, assume the SQL is fixed and only the schema can change.
 
@@ -149,6 +161,10 @@ The parentheses around the expression can be left out only when it's a single fu
 That's 5 buffers instead of 161. This is how the planner handles an `OR` across different indexes. It scans each index, builds an in-memory bitmap of matching row locations, ORs the bitmaps together, and then reads the table in physical order. The flag checks still run as a `Filter` on the rows it fetches. Because the rows come back in physical order, any ordering the indexes had is lost, so an `ORDER BY` needs a separate sort.
 
 ## Step 5: partial indexes
+
+![Second index partial slide with create index concurrently statements on name and LOWER(name), each with a WHERE clause on the FLAGS bits, above the UNION query](/blog/events/fix-slow-postgresql-query-expression-partial-hash-indexes/second-index-partial-slide.jpg)
+
+*A slide from the Database Academy talk at the PostgreSQL user meetup in Amsterdam: the second approach, partial indexes on `name` and `LOWER(NAME)` whose `WHERE` clauses match the `FLAGS` bit checks.*
 
 The query only cares about rows with bit `0x20` set (for the `name` branch) or bit `0x80` set (for the `lower(name)` branch). A partial index stores only those rows:
 
@@ -196,6 +212,10 @@ EXPLAIN (COSTS OFF) EXECUTE p2('Module7.Setting7', 32); -- Seq Scan
 Partial indexes work well when the query's fixed conditions are literals in the SQL text and the changing value is the indexed column.
 
 ## Step 6: hash indexes
+
+![Third index hash slide with create index concurrently statements using hash on NAME and on LOWER(NAME), each restricted by the FLAGS bits](/blog/events/fix-slow-postgresql-query-expression-partial-hash-indexes/third-index-hash-slide.jpg)
+
+*A slide from the Database Academy talk at the PostgreSQL user meetup in Amsterdam: the third approach, partial hash indexes on `NAME` and `LOWER(NAME)`.*
 
 Hash indexes store a 32-bit hash of the value and support only `=`. Since PostgreSQL 10 they're WAL-logged, which makes them crash-safe and replicated. On older versions they weren't, and that's where their bad reputation comes from. They can be partial, they can index an expression, and they can be part of a `BitmapOr`:
 

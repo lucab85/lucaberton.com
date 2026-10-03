@@ -1,0 +1,339 @@
+---
+title: "Ansible Conjur Tutorial: Secrets with cyberark.conjur"
+seoTitle: "Ansible Conjur Lookup: CyberArk Conjur Secrets in Playbooks"
+snippet: "A tested Ansible Conjur tutorial: run Conjur OSS in Docker, load a host policy, fetch a password with the cyberark.conjur lookup, hide it from logs, rotate it."
+description: "CyberArk Conjur and Ansible: host identity, policy and the conjur_variable lookup, tested on Conjur OSS 1.24 with no_log, rotation and TLS pitfalls covered."
+publishDate: "2026-10-03"
+lastModified: "2026-10-03"
+image:
+  src: "/blog/thumbnails/ansible-conjur-cyberark-conjur-variable-lookup.jpg"
+  alt: "James Freeman presenting a Things I learned slide about Ansible and CyberArk Conjur in a classroom at CfgMgmtCamp 2025 in Ghent"
+category: "Automation"
+author: "Luca Berton"
+tags: ["Ansible", "CyberArk Conjur", "cyberark.conjur", "Secrets Management", "Ansible Vault", "HashiCorp Vault", "Security", "Automation"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+**Ansible Conjur** integration means your playbooks fetch passwords and keys from CyberArk Conjur at run time, so nothing secret sits in Git, not even encrypted. In this tutorial I run Conjur Open Source with the official Docker Compose quickstart, load a policy that gives the Ansible control node its own host identity and access to one database password, read that password with the `cyberark.conjur.conjur_variable` lookup, prove it never appears in `ansible-playbook -v` output, and rotate it. At the end I compare the approach with Ansible Vault and the HashiCorp Vault lookups.
+
+At [CfgMgmtCamp 2025 in Ghent](/blog/cfgmgmtcamp-ghent-2025-talks/) I sat in on James Freeman's talk on integrating Ansible with CyberArk Conjur. One thing he stressed in the clip I recorded is that a Conjur *account* isn't a person: "accounts are the top level object in the hierarchy", the container for every variable, policy and user. He'd named his first one after himself and only later understood why that felt odd. His "Things I learned" slides are the reason I wanted to rebuild the setup on a laptop, a year and a half and several collection releases later. Everything below is my own lab, not his demo; his own demo code is in [ansible-conjur-integration-demo](https://github.com/jamesfreeman959/ansible-conjur-integration-demo) on GitHub.
+
+**Versions.** I tested everything here with Conjur Open Source 1.24.0 (`cyberark/conjur:latest` from the quickstart), Conjur CLI 9.3.1 (`cyberark/conjur-cli:9`), the `cyberark.conjur` collection 1.3.14 from Galaxy, ansible-core 2.21.4 and Python 3.13 on macOS. The collection needs ansible-core 2.17 or later.
+
+## How the Ansible Conjur lookup authenticates
+
+Four Conjur objects matter here:
+
+- **Account**: the top-level namespace (`myConjurAccount` in the quickstart).
+- **Host**: a machine identity with its own API key. The Ansible control node gets one.
+- **Variable**: a secret, versioned. Each `variable set` adds a new version.
+- **Permit**: a policy statement. `read` lets a role see the variable's metadata, `execute` lets it fetch the value.
+
+The `conjur_variable` lookup runs on the **control node**, like every Ansible lookup. It authenticates as a host with an API key, gets a short-lived access token, and calls `GET /secrets/{account}/variable/{id}`. It reads its settings from Ansible variables, from environment variables (`CONJUR_APPLIANCE_URL`, `CONJUR_ACCOUNT`, `CONJUR_AUTHN_LOGIN`, `CONJUR_AUTHN_API_KEY`, `CONJUR_CERT_FILE`), or from two files: `/etc/conjur.conf` (YAML) and `/etc/conjur.identity` (netrc format). Since 1.3.11 it also supports JWT and certificate authentication, and since 1.3.6 AWS, Azure and GCP. I use the API key here because it works on a laptop.
+
+## Run Conjur Open Source with Docker Compose
+
+The [conjur-quickstart](https://github.com/cyberark/conjur-quickstart) repository is CyberArk's demo environment. Its README states it is for demos only and must not be used for production. I start only the five services I need and skip pgAdmin and the sample bot app:
+
+```bash
+git clone https://github.com/cyberark/conjur-quickstart.git
+cd conjur-quickstart
+docker compose pull database conjur proxy client
+
+# The data key encrypts secrets in Postgres. Keep it in a file, not on screen.
+docker compose run --no-deps --rm conjur data-key generate > data_key
+export CONJUR_DATA_KEY="$(< data_key)"
+
+docker compose up -d database openssl conjur proxy client
+docker compose exec conjur conjurctl wait -r 30
+docker compose exec conjur conjurctl account create myConjurAccount > admin_data
+```
+
+`admin_data` now holds the admin API key. Connect the CLI container to the server through the nginx proxy and log in as admin, pasting the key from `admin_data` when prompted:
+
+```bash
+docker compose exec client conjur init oss -u https://proxy -a myConjurAccount --self-signed
+docker compose exec client conjur login -i admin
+```
+
+The proxy publishes HTTPS on `localhost:8443` with a self-signed certificate whose SANs include `localhost`, `proxy` and `127.0.0.1`, so Ansible on the host can reach it at `https://localhost:8443`.
+
+## Load a policy for the Ansible control node
+
+Create `conf/policy/ansible.yml` (the quickstart mounts `conf/policy` into the client container as `/policy`):
+
+```yaml
+# Loaded into the root policy: creates everything under "ansible/"
+- !policy
+  id: ansible
+  body:
+    # Machines that run ansible-playbook
+    - !layer controllers
+
+    # The identity of the Ansible control node
+    - !host control-node
+
+    - !grant
+      role: !layer controllers
+      member: !host control-node
+
+    # Enrol more controllers later without the admin key
+    - !host-factory
+      id: controllers
+      layers: [ !layer controllers ]
+
+    # The secret the playbook needs
+    - !variable db/password
+
+    # read = see metadata, execute = fetch the value
+    - !permit
+      role: !layer controllers
+      privileges: [ read, execute ]
+      resource: !variable db/password
+```
+
+Permissions go to the layer, not the host, so every controller you add to the layer later gets the same access. Load it and store the output in a file, because it contains the new host's API key:
+
+```bash
+docker compose exec client conjur policy load -b root -f /policy/ansible.yml > ansible_policy_out.json
+```
+
+```json
+{
+  "created_roles": {
+    "myConjurAccount:host:ansible/control-node": {
+      "id": "myConjurAccount:host:ansible/control-node",
+      "api_key": "<HOST_API_KEY>"
+    }
+  },
+  "version": 1
+}
+```
+
+Now set the database password. I generate a throwaway value so it never appears in my shell history in clear text:
+
+```bash
+docker compose exec client conjur variable set -i ansible/db/password -v "demo-$(openssl rand -hex 8)"
+```
+
+## Configure the control node
+
+Install ansible-core and the collection in a virtualenv:
+
+```bash
+python3 -m venv venv
+./venv/bin/pip install ansible-core
+./venv/bin/ansible-galaxy collection install cyberark.conjur -p ./collections
+```
+
+Fetch the server certificate. This is the same `openssl s_client` approach James showed on his prep slide:
+
+```bash
+openssl s_client -showcerts -connect localhost:8443 </dev/null 2>/dev/null \
+  | sed -ne '/-BEGIN CERTIFICATE-/,/-END CERTIFICATE-/p' > conjur.pem
+```
+
+Then give the lookup its identity through environment variables. Put them in a file with mode `0600` and `source` it; don't type the key on the command line:
+
+```bash
+# conjur.env
+export CONJUR_APPLIANCE_URL=https://localhost:8443
+export CONJUR_ACCOUNT=myConjurAccount
+export CONJUR_AUTHN_LOGIN=host/ansible/control-node
+export CONJUR_AUTHN_API_KEY=<HOST_API_KEY>
+export CONJUR_CERT_FILE=/path/to/conjur.pem
+```
+
+Note the `host/` prefix on the login and the full policy path `ansible/control-node`. Without the prefix, Conjur looks for a *user* with that name, and the lookup failed with `HTTP Error 401: Unauthorized`.
+
+## Fetch the secret with cyberark.conjur.conjur_variable
+
+`ansible.cfg` and `inventory.ini`:
+
+```ini
+# ansible.cfg
+[defaults]
+collections_path = ./collections
+inventory = inventory.ini
+```
+
+```ini
+# inventory.ini
+[local]
+localhost ansible_connection=local ansible_python_interpreter="{{ ansible_playbook_python }}"
+```
+
+The playbook, `site.yml`:
+
+```yaml
+- name: Configure the app with a database password from Conjur
+  hosts: local
+  gather_facts: false
+  tasks:
+    - name: Fetch the password once
+      ansible.builtin.set_fact:
+        db_password: "{{ lookup('cyberark.conjur.conjur_variable', 'ansible/db/password') }}"
+      no_log: true
+
+    - name: Render the app config
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/out/app.env"
+        content: "DB_PASSWORD={{ db_password }}\n"
+        mode: "0600"
+      no_log: true
+
+    - name: Show that we have a value, without printing it
+      ansible.builtin.debug:
+        msg: "Got a {{ db_password | length }}-character password from Conjur"
+```
+
+The lookup term is the variable path without the account and without URL encoding. The plugin encodes `ansible/db/password` to `ansible%2Fdb%2Fpassword` itself.
+
+```text
+$ mkdir -p out && source conjur.env && ansible-playbook site.yml
+
+TASK [Fetch the password once] *************************************************
+ok: [localhost]
+
+TASK [Render the app config] ***************************************************
+changed: [localhost]
+
+TASK [Show that we have a value, without printing it] **************************
+ok: [localhost] => {
+    "msg": "Got a 21-character password from Conjur"
+}
+
+PLAY RECAP *********************************************************************
+localhost                  : ok=3    changed=1    unreachable=0    failed=0    skipped=0    rescued=0    ignored=0
+```
+
+![A CfgMgmtCamp 2025 slide titled Playbook Run showing ansible-playbook output against conjur-ansible-node01.example.com with Get user name and Get host name tasks](/blog/events/ansible-conjur-cyberark-conjur-variable-lookup/conjur-playbook-run-slide.jpg)
+
+*A slide from James Freeman's Ansible and Conjur talk at CfgMgmtCamp 2025: the "Playbook Run" of his demo, with "Get user name" and "Get host name" tasks and a debug message on a managed node.*
+
+**Why `set_fact` and not play `vars`?** A lookup inside `vars:` is lazy: Ansible evaluates it every time the variable is used. I put the same lookup in play `vars` and used it in three tasks. With `-vvvv`, the log showed three `Conjur Variable URL` requests. The `set_fact` version above made one.
+
+## Keep the secret out of ansible-playbook -v output
+
+`no_log: true` is the part people forget. To check it, I read the real value into a shell variable and counted how often it appeared in each log:
+
+```bash
+SECRET=$(docker compose exec -T client conjur variable get -i ansible/db/password)
+for v in "" -v -vvv -vvvv; do
+  ansible-playbook site.yml $v > "run$v.log" 2>&1
+  echo "flag[$v] hits=$(grep -cF "$SECRET" "run$v.log")"
+done
+```
+
+`site.yml` scored 0 at every verbosity, and so did a search for the host API key. At `-vvvv` the plugin logs the variable URL, and the two `no_log` tasks show `"censored": "the output has been hidden due to the fact that 'no_log: true' was specified for this result"`.
+
+Then I removed `no_log` and passed the password on a command line, which is the common way it slips out:
+
+```text
+$ ansible-playbook leak.yml -v
+TASK [Fetch the password (no no_log)] ******************************************
+ok: [localhost] => {"ansible_facts": {"db_password": "<THE-SECRET>"}, "changed": false}
+
+TASK [Use it on a command line (no no_log)] ************************************
+ok: [localhost] => {"changed": false, "cmd": ["test", "-n", "<THE-SECRET>"], ...}
+```
+
+Two hits with a single `-v`, and zero without it, which is why this survives code review: the default output looks clean. Fetching the secret from Conjur doesn't protect you from Ansible printing it.
+
+## Rotate the secret and re-run
+
+Rotation is a new version of the variable. Nothing changes in the playbook or the inventory:
+
+```bash
+docker compose exec client conjur variable set -i ansible/db/password -v "demo-$(openssl rand -hex 8)"
+ansible-playbook site.yml
+```
+
+`Render the app config` went from `ok` on the run before the rotation to `changed` on the run after it, and back to `ok` on the next run. Earlier values remain readable by version with `conjur variable get -i ansible/db/password --version 1`. Whatever consumes `app.env` still needs a handler or restart to pick up the new password; Conjur doesn't push anything.
+
+## Config files instead of environment variables
+
+Environment variables suit CI. On a long-lived control node, the lookup's defaults are `/etc/conjur.conf` and `/etc/conjur.identity`, which you can relocate with `CONJUR_CONFIG_FILE` and `CONJUR_IDENTITY_FILE`:
+
+```yaml
+# /etc/conjur.conf
+account: myConjurAccount
+appliance_url: https://localhost:8443
+cert_file: /etc/conjur.pem
+```
+
+```text
+# /etc/conjur.identity (netrc format, mode 0600)
+machine https://localhost:8443/authn
+  login host/ansible/control-node
+  password <HOST_API_KEY>
+```
+
+The `machine` line must be the appliance URL plus `/authn`, or the plugin fails with "The netrc file on the controlling host does not contain an entry for". With both files in place and every `CONJUR_*` variable unset, `site.yml` ran unchanged.
+
+![A CfgMgmtCamp 2025 slide titled Grant Ansible Control Host ID - Grant, showing an inventory and a playbook that applies the cyberark.conjur.conjur_host_identity role with appliance URL, account, host factory token and SSL certificate variables](/blog/events/ansible-conjur-cyberark-conjur-variable-lookup/conjur-host-identity-role-slide.jpg)
+
+*James Freeman's "Grant" slide: the `cyberark.conjur.conjur_host_identity` role applied to the control host, with the host factory token read from an environment variable.*
+
+The collection's `conjur_host_identity` role writes exactly those files (`/etc/conjur.conf`, `/etc/conjur.identity` and `/etc/conjur.pem`) and installs Summon. In the talk James said the role stores the CA certificate under `/etc` itself, so you only need to put the downloaded PEM somewhere temporary for it to pick up. I didn't run the role in this lab, because it needs a Linux target and `become`.
+
+## Enrol more controllers with a host factory token
+
+The `!host-factory` in the policy lets a pipeline create new hosts in the `controllers` layer with a short-lived token instead of the admin key:
+
+```bash
+docker compose exec client conjur hostfactory tokens create --duration 15m -i ansible/controllers
+docker compose exec client conjur hostfactory hosts create -i ci-runner-01 -t <HOST_FACTORY_TOKEN>
+```
+
+The second command returns an API key for `host/ci-runner-01`. With that login and key, the same lookup fetched `ansible/db/password`, because the factory added the host to the layer that holds the permit. Note the host ID: in my test the factory created `ci-runner-01` at the top level, not under `ansible/`.
+
+![A CfgMgmtCamp 2025 slide titled Grant Ansible Control Host ID - Prep with ansible-galaxy collection install cyberark.conjur, an openssl s_client command to fetch the Conjur certificate and conjur hostfactory tokens create](/blog/events/ansible-conjur-cyberark-conjur-variable-lookup/host-factory-token-prep-slide.jpg)
+
+*The "Prep" slide from the same talk: install the collection, fetch the server certificate with `openssl s_client`, and create a host factory token with a masked value.*
+
+## TLS: what changed since the talk
+
+![A CfgMgmtCamp 2025 Things I learned slide: the Conjur CLI can't stay logged in as a user on the control node because the lookup uses the host identity, and the lookup plugin failed to verify Let's Encrypt certificates, with three workarounds](/blog/events/ansible-conjur-cyberark-conjur-variable-lookup/things-i-learned-host-identity-tls.jpg)
+
+*James Freeman's "Things I learned" slide at CfgMgmtCamp 2025.*
+
+His slide said the lookup plugin "currently fails to verify the TLS certificate of the Conjur server if you use LetsEncrypt/ACME", and listed three workarounds: turn off TLS verification ("not good"), export `CONJUR_CERT_FILE` pointing at the system CA bundle, or extract the whole CA chain into `/etc/conjur.pem`. The first bullet matches the plugin code: the lookup takes its identity from Ansible variables, environment variables or `/etc/conjur.identity`, never from a CLI session.
+
+The collection changelog has since fixed the TLS side. Release 1.3.7 (August 2025) fixed TLS verification failing when the Conjur certificate was issued by a trusted CA, and 1.3.13 (July 2026) fixed CA bundle files and allows `validate_certs=true` with no explicit certificate when the CA is in the system trust store. In 1.3.14, when you pass a certificate, the plugin writes a temporary bundle of the system CAs plus your PEM and verifies against that.
+
+With a self-signed lab certificate you still need `CONJUR_CERT_FILE`. Without it the lookup failed immediately with `CERTIFICATE_VERIFY_FAILED ... self-signed certificate`. Passing `validate_certs=false` worked but printed `Certificate validation has been disabled`. Leave validation on.
+
+## Pitfalls I hit
+
+- **404 for everything.** A variable that exists but isn't permitted to your host returns the same `HTTP Error 404: Not Found` as one that doesn't exist. Conjur doesn't reveal resources you can't see. Check the permit and the layer membership before checking the spelling.
+- **A 40-second failure.** The plugin retries failed variable requests five times, 10 seconds apart, and a 404 counts. My missing-variable test took 41 seconds. Set `conjur_retry_interval` (an Ansible variable) lower while you develop; with `-e conjur_retry_interval=1` it failed in under 5 seconds.
+- **Lazy lookups in `vars`** hit Conjur once per use, as shown above.
+- **macOS:** the first run died with "A worker was found in a dead state" until I exported `OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES`. That's a macOS fork-safety issue, not a Conjur one.
+- **`as_file=true`** returns a path to a `0600` temporary file (in `/dev/shm` when it's writable), which is the way to feed an SSH private key to `ansible_ssh_private_key_file`.
+
+## Ansible Conjur vs Ansible Vault vs HashiCorp Vault
+
+| | Ansible Vault | cyberark.conjur lookup | community.hashi_vault lookups |
+|---|---|---|---|
+| Where the secret lives | Encrypted in your repo | Conjur server | Vault server |
+| What the controller needs | The vault password | A Conjur identity (API key, JWT, cert or cloud identity) | A Vault auth method (token by default) and the `hvac` Python library |
+| Rotation | Re-encrypt and commit | `variable set`, next run picks it up | Write a new KV version, next run picks it up |
+| Access control | Whoever has the password | Policy: per host or layer, `read` and `execute` | Vault policies |
+| Lookup | none needed, vars are decrypted on load | `cyberark.conjur.conjur_variable` | for example `community.hashi_vault.vault_kv2_get` |
+
+For HashiCorp Vault, the equivalent call is `lookup('community.hashi_vault.vault_kv2_get', 'db', engine_mount_point='secret').secret.password`: the lookup returns a dictionary, and `secret` holds the key/value data. My [Ansible Vault tutorial](/blog/ansible-vault-tutorial-secrets-management/) and the [SOPS with Ansible guide](/blog/ansible-sops-community-sops-encrypted-vars/) cover the in-repo options.
+
+**My take:** if your organisation already runs CyberArk, use Conjur and give each controller and CI runner its own host identity through a layer, so revoking one runner doesn't touch the others. If you're choosing from scratch for a small team, SOPS or Ansible Vault is less to operate. Whichever you pick, the `-v` test above is worth adding to CI, because the leak comes from Ansible's output, not from the secret store.
+
+## Related
+
+- [CfgMgmtCamp 2025 in Ghent: The Talks I Saw](/blog/cfgmgmtcamp-ghent-2025-talks/)
+- [Ansible Vault Tutorial: Encrypt Secrets and Variables](/blog/ansible-vault-tutorial-secrets-management/)
+- [SOPS with Ansible: Encrypted Vars with community.sops](/blog/ansible-sops-community-sops-encrypted-vars/)
+- [External Secrets Operator: Vault & Cloud to Kubernetes](/blog/external-secrets-operator-kubernetes-vault-2026/)
+- [HashiCorp Vault vs AWS Secrets Manager: Which to Choose?](/blog/hashicorp-vault-vs-aws-secrets-manager-2026/)
+
+<BlogPromoCard />

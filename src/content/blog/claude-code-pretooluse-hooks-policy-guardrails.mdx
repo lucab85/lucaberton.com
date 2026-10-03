@@ -1,0 +1,533 @@
+---
+title: "Claude Code PreToolUse Hooks: Block, Redirect, Require"
+seoTitle: "Claude Code PreToolUse Hooks as Policy Guardrails"
+snippet: "Four working Claude Code PreToolUse hooks: deny rm, block brand-new packages, require tests before git commit and keep file paths inside the workspace."
+description: "Build Claude Code PreToolUse hooks that deny rm, block young PyPI and npm packages, gate git commit on tests and confine paths, then test them offline."
+publishDate: "2026-10-02"
+lastModified: "2026-10-02"
+image:
+  src: "/blog/events/claude-code-meetup-amsterdam-2026/claude-code-meetup-agent-policies-server.jpg"
+  alt: "Diagram at Claude Code Meetup Amsterdam with three Claude Code boxes connected via hooks to an Agent Policies Server holding 200+ policies"
+category: "AI"
+author: "Luca Berton"
+tags: ["Claude Code", "Hooks", "PreToolUse", "Policy as Code", "AI Coding Agents", "Supply Chain Security", "Guardrails", "Python"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Claude Code PreToolUse hooks run your code before every tool call and can answer allow, deny or ask. That makes them the place for team rules an agent should follow without reminders: no `rm`, no package published last week, no commit before tests pass, no writes outside the repository. This post builds those four rules as working scripts, wires them up, centralises them for a team and tests them offline.
+
+The first talk at [Claude Code Meetup Amsterdam](/blog/claude-code-meetup-amsterdam-2026/) in February 2026 got me thinking about this. It showed an Agent Policies Server with 200+ policies, called from many Claude Code sessions via hooks, and a demo where the agent read each denial reason and changed course without a new prompt. I wanted the same behaviour, first without a server, then with one.
+
+![Diagram at Claude Code Meetup Amsterdam with three Claude Code boxes connected via hooks to an Agent Policies Server holding 200+ policies](/blog/events/claude-code-meetup-amsterdam-2026/claude-code-meetup-agent-policies-server.jpg)
+
+Versions: every field, event name and exit-code rule below comes from the official [hooks reference](https://code.claude.com/docs/en/hooks) and [hooks guide](https://code.claude.com/docs/en/hooks-guide) as of 2 October 2026 (the reference cites behaviour up to Claude Code v2.1.274). I tested the scripts with Python 3.13, jq 1.7 and macOS's bash 3.2 by piping sample hook JSON into them. I didn't run them inside a live Claude Code session for this post.
+
+## What Claude Code PreToolUse hooks receive
+
+A command hook gets one JSON object on stdin. For a Bash call it looks like this (from the reference):
+
+```json
+{
+  "session_id": "abc123",
+  "transcript_path": "/home/user/.claude/projects/.../transcript.jsonl",
+  "cwd": "/home/user/my-project",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": { "command": "npm test", "description": "Run test suite", "timeout": 120000, "run_in_background": false },
+  "tool_use_id": "toolu_01ABC123..."
+}
+```
+
+`tool_input` depends on the tool: `command` for Bash, `file_path` for Read, Edit and Write, `path` for Glob and Grep, `notebook_path` for NotebookEdit. File-tool paths arrive absolute, with `~` and relative paths already expanded. Newer versions add `prompt_id`, `scratchpad_dir` and `effort`; subagent calls add `agent_id` and `agent_type`.
+
+## Exit codes and the JSON decision
+
+There are two ways to answer, and the reference says to pick one per hook:
+
+| Hook does | Result for PreToolUse |
+| --- | --- |
+| Exit 0, no output | No opinion. The normal permission flow decides |
+| Exit 0, JSON with `permissionDecision` | `allow`, `deny`, `ask` or `defer` |
+| Exit 2 | Blocks the call. Stderr becomes the reason Claude sees |
+| Any other exit code without valid JSON, including 1 | Non-blocking error. **The tool call proceeds** |
+
+The JSON goes inside `hookSpecificOutput`:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "rm is blocked by project policy. Use trash instead."
+  }
+}
+```
+
+A `deny` reason goes to Claude, which is how the agent learns the policy. An `ask` reason goes to the user. `allow` skips the prompt, but deny and ask rules in settings still apply: hooks tighten permissions, they don't loosen them. Across several hooks the most restrictive answer wins, `deny` over `defer` over `ask` over `allow`. `defer` only works with `-p`, so I skip it. A hook `deny` also holds in `bypassPermissions` mode, which matters if your team uses [YOLO mode](/blog/claude-code-yolo-mode-dangerously-skip-permissions-2026/).
+
+## Rule 1: deny rm, point at trash
+
+This one is plain bash and jq. It splits the command on `;`, `&`, `|`, parentheses and backticks, skips `VAR=value` and wrappers like `sudo`, and denies when the first word is `rm`, `/bin/rm` or `\rm`.
+
+```bash
+#!/usr/bin/env bash
+# PreToolUse hook (matcher: Bash). Deny rm, point the agent at trash.
+set -euo pipefail
+cmd=$(jq -r '.tool_input.command // empty')
+
+# Split on ; & | ( ) ` and newlines, then check the first word of each piece.
+while read -r -a words; do
+  [[ ${#words[@]} -eq 0 ]] && continue
+  i=0
+  # Skip VAR=value assignments and wrappers such as sudo or env.
+  while [[ $i -lt ${#words[@]} && ${words[$i]} =~ ^([A-Za-z_][A-Za-z0-9_]*=.*|sudo|env|command|builtin|xargs|nohup|nice)$ ]]; do
+    i=$((i + 1))
+  done
+  first=${words[$i]:-}
+  first=${first#\\}            # \rm bypasses aliases
+  if [[ ${first##*/} == rm ]]; then # also catches /bin/rm
+    jq -n '{hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "deny",
+      permissionDecisionReason: "rm is blocked by project policy. Use trash with a workspace-relative path instead, for example: trash build/old.log"
+    }}'
+    exit 0
+  fi
+done < <(printf '%s\n' "$cmd" | tr ';&|()`' '\n\n\n\n\n\n')
+
+exit 0 # no opinion: the normal permission flow decides
+```
+
+![A slide at Claude Code Meetup Amsterdam with a Rego-style rule that denies any command whose parsed executable is rm, with the reason "The rm command is not allowed. Always use trash instead."](/blog/events/claude-code-pretooluse-hooks-policy-guardrails/claude-code-meetup-rm-deny-policy.jpg)
+
+*A slide from the agent policies talk at Claude Code Meetup Amsterdam: the rm rule, matching on the parsed executable and returning a deny with "Always use trash instead."*
+
+I don't set `"if": "Bash(rm *)"` here, though the reference uses it to avoid spawning the script. `if` uses permission-rule matching, and the permissions docs say `Bash(rm *)` doesn't match `/bin/rm -rf build/`. For a deny rule I'd rather pay one extra process per Bash call.
+
+## A small shared helper
+
+The other rules are standard-library Python sharing one helper. It splits a Bash string into simple commands and turns `check(data)` into the JSON decision. A crashing rule answers `ask` instead of exiting 1, because exit 1 fails open.
+
+```python
+"""Shared helpers for Claude Code policy hooks (stdlib only)."""
+import json, os, re, shlex, sys
+
+WRAPPERS = {"sudo", "env", "command", "builtin", "xargs", "nohup", "nice", "time"}
+
+
+def commands(command):
+    """Yield argv for each simple command in a Bash string. Best effort, not a parser."""
+    for part in re.split(r"&&|\|\||\$\(|[;&|\n()`]", command or ""):
+        try:
+            words = shlex.split(part)
+        except ValueError:  # unbalanced quotes after splitting
+            words = part.split()
+        while words and (words[0] in WRAPPERS or re.match(r"^[A-Za-z_]\w*=", words[0])):
+            words.pop(0)
+        if words:
+            words[0] = os.path.basename(words[0].lstrip("\\"))
+            yield words
+
+
+def project_root(data):
+    return os.path.realpath(os.environ.get("CLAUDE_PROJECT_DIR") or data.get("cwd") or ".")
+
+
+def emit(decision, reason):
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": decision,
+        "permissionDecisionReason": reason,
+    }}))
+
+
+def run(check):
+    """Read hook JSON from stdin, run check(data) -> (decision, reason) or None."""
+    data = json.load(sys.stdin)
+    try:
+        result = check(data)
+    except Exception as exc:  # a crashing policy should not fail open silently
+        result = ("ask", f"Policy hook error: {exc}")
+    if result and data.get("hook_event_name") == "PreToolUse":
+        emit(*result)
+    sys.exit(0)
+```
+
+## Rule 2: deny packages younger than N days
+
+In the talk, `uv add` was denied for packages under 365 days old. Mine covers pip, uv, npm, pnpm, yarn and bun, with a 30-day default in `PKG_MIN_AGE_DAYS`. For PyPI it asks the [Index API](https://docs.pypi.org/api/index-api/) (`Accept: application/vnd.pypi.simple.v1+json`) for the oldest file `upload-time`, since the JSON API's `releases` key is [deprecated](https://docs.pypi.org/api/json/). For npm it reads `time.created` from the [package metadata](https://github.com/npm/registry/blob/main/docs/responses/package-metadata.md).
+
+```python
+#!/usr/bin/env python3
+"""PreToolUse hook (matcher: Bash). Deny packages first published less than N days ago."""
+import json, os, re, sys
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from policylib import commands, run
+
+MIN_DAYS = int(os.environ.get("PKG_MIN_AGE_DAYS", "30"))
+CACHE = os.path.expanduser(os.environ.get("PKG_AGE_CACHE", "~/.cache/claude-policy/package-age.json"))
+INSTALLERS = {  # (command, subcommand) -> registry
+    ("pip", "install"): "pypi", ("pip3", "install"): "pypi", ("uv", "add"): "pypi",
+    ("npm", "install"): "npm", ("npm", "i"): "npm", ("npm", "add"): "npm",
+    ("pnpm", "add"): "npm", ("yarn", "add"): "npm", ("bun", "add"): "npm",
+}
+VALUE_FLAGS = {"-r", "--requirement", "-c", "--constraint", "-e", "--editable",
+               "-i", "--index-url", "--extra-index-url", "--registry"}
+
+
+def packages(argv):
+    """Turn 'uv add requests==2.32' or 'npm i @scope/pkg@1' into (registry, name) pairs."""
+    if argv[:3] == ["python", "-m", "pip"] or argv[:3] == ["python3", "-m", "pip"]:
+        argv = ["pip"] + argv[3:]
+    if argv[:2] == ["uv", "pip"]:
+        argv = ["pip"] + argv[2:]
+    registry = INSTALLERS.get(tuple(argv[:2]))
+    if not registry:
+        return
+    skip = False
+    for arg in argv[2:]:
+        if skip or arg in VALUE_FLAGS:
+            skip = not skip  # skip the flag's value too (-r requirements.txt)
+            continue
+        if arg.startswith("-") or "://" in arg or arg.startswith((".", "/", "~")):
+            continue  # flags, URLs and local paths are out of scope here
+        if registry == "pypi":
+            name = re.match(r"[A-Za-z0-9][A-Za-z0-9._-]*", arg)
+        else:
+            name = re.match(r"(@[^/@\s]+/)?[^/@\s]+", arg)
+        if name:
+            yield registry, name.group(0)
+
+
+def first_release(registry, name):
+    import urllib.parse, urllib.request  # slow import: only on the install path
+    if registry == "pypi":  # PyPI Index API (JSON); each file has an upload-time
+        req = urllib.request.Request(f"https://pypi.org/simple/{name}/",
+                                     headers={"Accept": "application/vnd.pypi.simple.v1+json"})
+        files = json.load(urllib.request.urlopen(req, timeout=5))["files"]
+        created = min((f["upload-time"] for f in files if f.get("upload-time")), default=None)
+    else:  # npm packument: time.created
+        url = "https://registry.npmjs.org/" + urllib.parse.quote(name, safe="@")
+        created = json.load(urllib.request.urlopen(url, timeout=5))["time"]["created"]
+    return datetime.fromisoformat(created.replace("Z", "+00:00")) if created else None
+
+
+def check(data):
+    found = [p for argv in commands(data["tool_input"].get("command", "")) for p in packages(argv)]
+    if not found:
+        return None  # fast path: not an install command
+    import urllib.error
+    try:
+        cache = json.load(open(CACHE))
+    except (OSError, ValueError):
+        cache = {}
+    for registry, name in found:
+        key = f"{registry}:{name.lower()}"
+        if key not in cache:
+            try:
+                created = first_release(registry, name)
+            except urllib.error.HTTPError as err:
+                if err.code == 404:
+                    return "deny", f"Package '{name}' does not exist on {registry}. Check the spelling."
+                return "ask", f"Could not check the age of '{name}' ({err})."
+            except (urllib.error.URLError, TimeoutError) as err:
+                return "ask", f"Could not check the age of '{name}' ({err})."
+            if created is None:
+                return "ask", f"'{name}' has no published files on {registry}."
+            cache[key] = created.isoformat()
+        created = datetime.fromisoformat(cache[key])
+        age = (datetime.now(timezone.utc) - created).days
+        if age < MIN_DAYS:
+            return "deny", (f"Package '{name}' is only {age} days old (first released "
+                            f"{created:%Y-%m-%d}). Policy requires {MIN_DAYS} days. "
+                            "Pick an established alternative or ask the user.")
+    os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+    with open(CACHE, "w") as f:
+        json.dump(cache, f)  # first-release dates never change, so cache them
+    return None
+
+
+if __name__ == "__main__":
+    run(check)
+```
+
+![A slide at Claude Code Meetup Amsterdam with a Rego-style rule that denies uv add when input.pypi_metadata.age_days is under 365, with a sprintf reason giving the package age and first release date](/blog/events/claude-code-pretooluse-hooks-policy-guardrails/claude-code-meetup-package-age-policy.jpg)
+
+*A slide from the agent policies talk at Claude Code Meetup Amsterdam: deny `uv add` when the package's PyPI age is under 365 days, with the age and first release date in the reason.*
+
+A 404 is denied too: that's a typo or a hallucinated package. An unreachable registry gets `ask`, so a human decides. To see a real denial, raise the threshold:
+
+```bash
+echo '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"uv add httpx"}}' \
+  | PKG_MIN_AGE_DAYS=99999 .claude/hooks/package_age.py
+# {"hookSpecificOutput": {..., "permissionDecision": "deny", "permissionDecisionReason":
+#  "Package 'httpx' is only 2632 days old (first released 2019-07-19). Policy requires 99999 days. ..."}}
+```
+
+## Rule 3: require tests before git commit
+
+This rule needs state, like the talk's `ran_tests` flag. `PostToolUse` fires only after a tool succeeds; `PostToolUseFailure` fires when it fails, including a Bash non-zero exit. So a passing pytest sets the flag, a failing one or a `.py` edit clears it, and `git commit` is denied unless it's true. The state file is keyed by `session_id`.
+
+```python
+#!/usr/bin/env python3
+"""Pre/PostToolUse(Failure) hook: deny git commit until pytest has passed since the last .py edit."""
+import json, os, re, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from policylib import commands, project_root, run
+
+
+def state_file(data):
+    session = re.sub(r"[^A-Za-z0-9_-]", "", data.get("session_id", "default"))
+    return os.path.join(project_root(data), ".claude", "state", f"{session}.json")
+
+
+def set_flag(data, value):
+    path = state_file(data)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"ran_tests": value}, f)
+
+
+def ran_tests(data):
+    try:
+        return json.load(open(state_file(data))).get("ran_tests") is True
+    except (OSError, ValueError):
+        return False
+
+
+def is_pytest(argv):
+    return argv[0] == "pytest" or argv[1:3] == ["-m", "pytest"] or argv[1:3] == ["run", "pytest"]
+
+
+def is_commit(argv):
+    if argv[0] != "git":
+        return False
+    rest = argv[1:]
+    while rest and rest[0] in ("-C", "-c"):  # git -C dir / -c key=value
+        rest = rest[2:]
+    return bool(rest) and rest[0] == "commit"
+
+
+def check(data):
+    event, tool, tin = data["hook_event_name"], data["tool_name"], data["tool_input"]
+    if tool in ("Edit", "Write") and tin.get("file_path", "").endswith(".py"):
+        set_flag(data, False)
+        return None
+    argvs = list(commands(tin.get("command", ""))) if tool == "Bash" else []
+    if any(is_pytest(a) for a in argvs):
+        if event == "PostToolUse":
+            set_flag(data, True)
+        elif event == "PostToolUseFailure":
+            set_flag(data, False)
+    if event == "PreToolUse" and any(is_commit(a) for a in argvs) and not ran_tests(data):
+        return "deny", "Please run tests before committing: run pytest, fix any failures, then commit."
+    return None
+
+
+if __name__ == "__main__":
+    run(check)
+```
+
+![A slide at Claude Code Meetup Amsterdam with three rules: editing a .py file sets ran_tests to false, running pytest sets it to true, and git commit is denied with "Please run tests before committing" unless ran_tests is true](/blog/events/claude-code-pretooluse-hooks-policy-guardrails/claude-code-meetup-ran-tests-flags.jpg)
+
+*A slide from the agent policies talk at Claude Code Meetup Amsterdam: flags set on .py edits and pytest runs, and a git commit rule that reads them.*
+
+## Rule 4: keep file paths inside the workspace
+
+Writes outside the project are denied; reads get `ask`, since reading `~/.gitconfig` can be legitimate. `os.path.realpath` resolves symlinks and `../`, so a symlink to `/etc` inside the repo doesn't help. The session's `scratchpad_dir` is allowed. For Bash it mirrors the demo's second policy: `trash` takes workspace-relative paths only.
+
+```python
+#!/usr/bin/env python3
+"""PreToolUse hook. Keep file tools inside the project; trash takes relative paths only."""
+import os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from policylib import commands, project_root, run
+
+WRITE_TOOLS = {"Edit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path"}
+READ_TOOLS = {"Read": "file_path", "Glob": "path", "Grep": "path"}
+
+
+def inside(path, roots):
+    real = os.path.realpath(path)  # resolves symlinks and ../
+    return any(os.path.commonpath([real, r]) == r for r in roots)
+
+
+def check(data):
+    tool, tin = data["tool_name"], data["tool_input"]
+    roots = [project_root(data)]
+    if data.get("scratchpad_dir"):
+        roots.append(os.path.realpath(data["scratchpad_dir"]))
+    field = WRITE_TOOLS.get(tool) or READ_TOOLS.get(tool)
+    path = tin.get(field) if field else None
+    if path and not inside(path, roots):
+        if tool in WRITE_TOOLS:
+            return "deny", f"{tool} outside the workspace is not allowed: {path}"
+        return "ask", f"{tool} wants to read outside the workspace: {path}"
+    if tool == "Bash":
+        for argv in commands(tin.get("command", "")):
+            if argv[0] != "trash":
+                continue
+            for arg in argv[1:]:
+                if arg.startswith(("/", "~")) or ".." in arg.split("/"):
+                    return "deny", ("trash: only workspace-relative paths are allowed "
+                                    "(no absolute paths, no ../, no /tmp)")
+    return None
+
+
+if __name__ == "__main__":
+    run(check)
+```
+
+## Wire the hooks with matchers
+
+`.claude/settings.json` registers each script. A matcher of only letters, digits, `_`, `-`, spaces, `,` and `|` is an exact name or list of names; anything else is an unanchored JavaScript regex, so `Edit.*` also matches `NotebookEdit`. Matchers are case-sensitive. `"args": []` selects exec form: no shell, and `${CLAUDE_PROJECT_DIR}` needs no quoting.
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/deny-rm.sh", "args": [] },
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/package_age.py", "args": [], "timeout": 15 },
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/test_gate.py", "args": [] }
+        ]
+      },
+      {
+        "matcher": "Bash|Read|Edit|Write|NotebookEdit|Glob|Grep",
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/workspace_paths.py", "args": [] }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash|Edit|Write",
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/test_gate.py", "args": [] }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/test_gate.py", "args": [] }
+        ]
+      }
+    ]
+  }
+}
+```
+
+On Windows, use `Bash|PowerShell`, or the hook never fires for PowerShell commands. Matching handlers run in parallel, and one deny doesn't stop the others running.
+
+## Project, user or managed settings
+
+| Location | Scope |
+| --- | --- |
+| `~/.claude/settings.json` | All your projects, your machine only |
+| `.claude/settings.json` | This project, committed for the team |
+| `.claude/settings.local.json` | This project, just you |
+| Managed policy settings | Organisation-wide, admin-controlled |
+| Plugin `hooks/hooks.json` | While the plugin is enabled |
+
+Hooks merge across levels instead of replacing each other. `disableAllHooks` in user or project settings can't switch off managed hooks, and `allowManagedHooksOnly` in managed settings blocks user, project, local and plugin hooks. To ship the rules as a plugin instead, see [Claude Code skills and plugins](/blog/claude-code-skills-plugins-2026/).
+
+## Centralise the rules for a team
+
+Copies of four scripts in every repository drift. Put the rules in one place. Option one is a dispatcher: one process per tool call, most restrictive answer wins.
+
+```python
+#!/usr/bin/env python3
+"""One entry point for every rule: one process per tool call, most restrictive answer wins."""
+import os, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import package_age, test_gate, workspace_paths
+from policylib import commands, run
+
+
+def deny_rm(data):
+    if any(argv[0] == "rm" for argv in commands(data["tool_input"].get("command", ""))):
+        return "deny", "rm is blocked by project policy. Use trash with a workspace-relative path."
+
+
+RULES = [deny_rm, workspace_paths.check, test_gate.check, package_age.check]
+RANK = {"deny": 3, "ask": 2, "allow": 1}
+
+
+def check(data):
+    rules = RULES if data["hook_event_name"] == "PreToolUse" else [test_gate.check]
+    results = [r for r in (rule(data) for rule in rules) if r]
+    if not results:
+        return None
+    top = max(results, key=lambda r: RANK[r[0]])[0]
+    return top, " ".join(reason for decision, reason in results if decision == top)
+
+
+if __name__ == "__main__":
+    run(check)
+```
+
+Install it at a fixed path and register it in managed settings, for example `/Library/Application Support/ClaudeCode/managed-settings.json` on macOS or `/etc/claude-code/managed-settings.json` on Linux, with `"command": "/opt/claude-policy/policy.py", "args": []` under `PreToolUse`, `PostToolUse` and `PostToolUseFailure`.
+
+Option two is the talk's architecture, an HTTP hook. Claude Code POSTs the same JSON and reads the same output format from the response body. My test service was a 25-line `http.server` wrapper around the dispatcher's `check()`, registered like this:
+
+```json
+{
+  "type": "http",
+  "url": "https://policy.example.com/hooks",
+  "timeout": 5,
+  "headers": { "Authorization": "Bearer $POLICY_TOKEN" },
+  "allowedEnvVars": ["POLICY_TOKEN"]
+}
+```
+
+A non-2xx status, connection failure or timeout is a non-blocking error: the call goes ahead. To block, return 2xx with the deny JSON. My take: keep the critical rules (`rm`, workspace writes) local or as permission deny rules, so a policy-service outage doesn't switch them off. `allowedHttpHookUrls` pins which URLs HTTP hooks may call.
+
+## Test hooks offline
+
+No Claude session needed: pipe JSON in, read stdout, check the exit code, as the hooks guide suggests.
+
+```bash
+export CLAUDE_PROJECT_DIR=$PWD
+gate=.claude/hooks/test_gate.py
+j() { jq -nc --arg c "$1" --arg e "$2" '{session_id:"t1",hook_event_name:$e,tool_name:"Bash",tool_input:{command:$c}}'; }
+
+j 'git commit -m wip' PreToolUse  | $gate   # deny: Please run tests before committing...
+j 'uv run pytest -q'  PostToolUse | $gate   # no output, state file now {"ran_tests": true}
+j 'git commit -m ok'  PreToolUse  | $gate   # no output: allowed
+echo $?                                     # 0
+```
+
+I keep a file of tricky commands next to the hooks and replay it after every change. In a real session, `claude --debug-file /tmp/claude.log` records which hooks matched, their exit codes and output. Watch for a `hook error` notice on first run: a mistyped path in `settings.json` silently disables the gate.
+
+## Pitfalls
+
+- **Exit 1 fails open.** Only exit 2 or a JSON `deny` blocks. A missing script, a traceback or a hook that hits its `timeout` lets the call through. Hence `run()` turning crashes into `ask`, and a 15-second timeout on the network hook instead of the 600-second default.
+- **Performance.** Every Bash call spawns every matching handler. Importing `urllib.request` at module load added about 150 ms per call on my laptop; importing it only on the install path brought the dispatcher to about 50 ms. Cache lookups too: npm's docs note some full metadata documents exceed 10 MB.
+- **Shell-quoting bypasses.** The Python rm check catches `r''m -rf build` and `"rm" -rf build` because `shlex` strips the quotes; the bash one doesn't. Neither catches `bash -c 'rm -rf build'`, `eval "rm -rf build"`, `$(printf rm) -rf build`, `find build -delete`, `python3 -c "import shutil; shutil.rmtree('build')"` or `git clean -fdx`.
+- **State is only as good as its signals.** `sed -i` on a `.py` file fires no Edit or Write hook, so `ran_tests` stays true. `pytest | tail` exits with `tail`'s status, so a failing run looks like a pass.
+- **`@` file references skip PreToolUse.** Use a `Read` deny rule for paths that must never reach the model.
+- **Hooks are not a security boundary.** They run with your user permissions, and with `-p` a repository's own `.claude/settings.json` hooks run without a trust prompt. They steer a cooperative agent. For hard limits, use permission deny rules, managed settings and the [sandbox](https://code.claude.com/docs/en/sandboxing).
+
+My take: write the reason for the agent. "Use trash with a workspace-relative path" fixes the next tool call; "Blocked" invites a workaround. For the wider hook lifecycle, see my [complete guide to hooks, MCP and the SDK](/blog/claude-code-complete-guide-hooks-mcp-sdk-2026/); for guardrails beyond coding agents, [AI agent guardrails in production](/blog/ai-agent-guardrails-production/).
+
+## Related
+
+- [Claude Code Meetup Amsterdam 2026: Hooks, Skills, Agents](/blog/claude-code-meetup-amsterdam-2026/)
+- [Claude Code: Complete Guide to Hooks, MCP, and the SDK](/blog/claude-code-complete-guide-hooks-mcp-sdk-2026/)
+- [Claude Code Skills & Plugins: The Extensibility Layer](/blog/claude-code-skills-plugins-2026/)
+- [Claude Code YOLO Mode: Skip Permissions Safely](/blog/claude-code-yolo-mode-dangerously-skip-permissions-2026/)
+- [Claude Code OpenTelemetry: Monitor AI Coding Agents](/blog/claude-code-opentelemetry-monitoring-coding-agents/)
+
+<BlogPromoCard />

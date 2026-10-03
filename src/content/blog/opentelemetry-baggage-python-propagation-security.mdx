@@ -1,0 +1,313 @@
+---
+title: "OpenTelemetry Baggage in Python Without Leaking It"
+seoTitle: "OpenTelemetry Baggage: Python Guide and Third-Party Leaks"
+snippet: "OpenTelemetry baggage in Python: the W3C header, reading and writing it, BaggageSpanProcessor, and a tested lab that stops it leaking to third-party APIs."
+description: "How OpenTelemetry baggage works in Python: W3C baggage header, propagation, BaggageSpanProcessor, and three tested ways to keep it away from third-party APIs."
+publishDate: "2026-10-03"
+lastModified: "2026-10-03"
+image:
+  src: "/blog/events/sre-nl-dashboards-brain-elastic-amsterdam-2026/otel-baggage-ottl-opamp.jpg"
+  alt: "To infinity and beyond slide listing OpenTelemetry Baggage, OTTL and OpAMP at the SRE NL meetup at Elastic Amsterdam"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["OpenTelemetry", "Baggage", "Python", "Context Propagation", "W3C Baggage", "Observability", "Security", "SRE"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+OpenTelemetry baggage lets you set a value such as a tenant ID once, at the edge, and read it in every service the request touches. It's also one of the easiest ways to send your users' data to a company you never meant to share it with. This post explains what baggage is, how it differs from span attributes, how to read and write it in Python, and how to copy it onto spans. Then it reproduces the leak with three small local services and tests three ways to stop it.
+
+I tested everything with Python 3.13, `opentelemetry-api` and `opentelemetry-sdk` 1.45.0, and the 0.66b0 releases of `opentelemetry-instrumentation-flask`, `opentelemetry-instrumentation-requests` and `opentelemetry-processor-baggage`, plus Flask 3.1.3, requests 2.34.2 and nginx 1.31.6.
+
+## Where this came from
+
+At the [SRE NL meetup at Elastic Amsterdam](/blog/sre-nl-dashboards-brain-elastic-amsterdam-2026/) in February 2026, Evelien Schellekens's "Guide to Observability with OpenTelemetry" ended with a "To infinity and beyond" slide: Baggage, OTTL and OpAMP. On baggage, she said you can use it to share session IDs and user IDs with all the services in the back end. She also warned that auto-instrumentation adds this metadata to any outgoing request, so it can reach third-party APIs, and that you shouldn't send baggage, or at least nothing sensitive, to a third party. That warning is what this post tests. I already wrote up OpAMP, the third item on the slide, in [OpAMP: Manage OpenTelemetry Collector Fleets Safely](/blog/opentelemetry-opamp-collector-fleet-management/).
+
+![Evelien Schellekens presenting the To infinity and beyond slide at the SRE NL meetup at Elastic Amsterdam, with Baggage described as metadata that travels with the request](/blog/events/opentelemetry-baggage-python-propagation-security/baggage-metadata-slide.jpg)
+
+*A slide from "Guide to Observability with OpenTelemetry" at SRE NL: Baggage, "metadata that travels with the request", listed next to OTTL and OpAMP.*
+
+## What OpenTelemetry baggage is (and isn't)
+
+The [OpenTelemetry baggage docs](https://opentelemetry.io/docs/concepts/signals/baggage/) describe baggage as contextual information that is passed between signals: a key-value store that travels with the context. Three things follow from that:
+
+- **It's not a span attribute.** The docs say baggage is "a separate key-value store and is unassociated with attributes on spans, metrics, or logs without explicitly adding them". If you want `tenant.id` on your spans, something has to copy it there.
+- **It crosses process boundaries.** A span attribute stays in your telemetry pipeline. A baggage entry goes into the HTTP headers of the next request, and the one after that.
+- **Nobody signs it.** The same page warns that "there are no built-in integrity checks to ensure that Baggage items are yours". Any caller can send a `baggage` header.
+
+Good baggage is small, non-secret, and useful to many services: a tenant ID, an opaque user or session ID, a synthetic-traffic flag. Bad baggage is anything you wouldn't put in a URL: emails, names, tokens, account numbers.
+
+## The W3C baggage header
+
+On the wire, baggage is the `baggage` HTTP header from the [W3C Baggage specification](https://www.w3.org/TR/baggage/) (the current version is a Candidate Recommendation Snapshot dated 30 May 2024). It's a comma-separated list of `key=value` members, each with optional `;`-separated properties:
+
+```text
+baggage: tenant.id=acme,user.id=u-1234,user.email=jane%40example.com
+```
+
+Values are percent-encoded, which is why `@` shows up as `%40`. That's encoding, not protection: anyone who sees the header can decode it.
+
+The spec says a platform must propagate all entries when there are 64 list-members or fewer and the header is 8192 bytes or less. Its grammar allows at most 180 members. The Python propagator (`W3CBaggagePropagator` in 1.45.0) enforces 8192 bytes per header, 4096 bytes per member and 180 members. When I set 200 entries, it injected 180 and logged "Baggage exceeded the maximum number of list-members". A single 5,000-character value was dropped with a warning, and the header wasn't sent at all.
+
+You don't have to configure the propagator. `OTEL_PROPAGATORS` defaults to `tracecontext,baggage` in the [SDK environment variable spec](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/), so `traceparent` and `baggage` go out together on every instrumented call.
+
+## Reading and writing baggage in Python
+
+The API lives in `opentelemetry.baggage`: `set_baggage`, `get_baggage`, `get_all`, `remove_baggage` and `clear` ([API reference](https://opentelemetry-python.readthedocs.io/en/latest/api/baggage.html)). Contexts are immutable, so `set_baggage` doesn't change anything in place. It returns a new `Context`, and you `attach` that context to make it current:
+
+```python
+from opentelemetry import baggage, context
+
+ctx = baggage.set_baggage("tenant.id", "acme")
+ctx = baggage.set_baggage("user.id", "u-1234", context=ctx)
+token = context.attach(ctx)
+try:
+    ...  # every instrumented outgoing call in here carries both entries
+finally:
+    context.detach(token)
+```
+
+Downstream, the Flask instrumentation extracts the incoming header for you, so reading it is one call:
+
+```python
+tenant = baggage.get_baggage("tenant.id")   # "acme", or None
+everything = dict(baggage.get_all())
+```
+
+`set_baggage` takes a name and a value, with no metadata argument. When I extracted `user.id=u-1;ttl=60`, the property stayed inside the value: `get_baggage("user.id")` returned `"u-1;ttl=60"`. If another service adds properties, don't compare values with `==` without checking.
+
+## The lab: two services and a nosy "third party"
+
+The setup runs on a laptop, with no Docker until the last fix:
+
+- `frontend` (port 9100) is the edge service. It sets baggage and calls `checkout`.
+- `checkout` (port 9200) reads the baggage and calls a scoring API.
+- `external_api` (port 9300) plays the third party. It has no OpenTelemetry and logs the trace headers it receives.
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install opentelemetry-distro opentelemetry-instrumentation-flask \
+  opentelemetry-instrumentation-requests opentelemetry-processor-baggage flask requests
+```
+
+The fake third party:
+
+```python
+# external_api.py
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.get("/v1/score")
+def score():
+    seen = {k.lower(): v for k, v in request.headers.items()
+            if k.lower() in ("baggage", "traceparent", "tracestate")}
+    print(f"[external-api] received trace headers: {seen}", flush=True)
+    return jsonify(score=42, headers_seen=seen)
+
+if __name__ == "__main__":
+    app.run(port=9300)
+```
+
+The edge service sets three entries. The third one is the mistake:
+
+```python
+# frontend.py
+import requests
+from flask import Flask, jsonify
+from opentelemetry import baggage, context
+
+app = Flask(__name__)
+
+@app.get("/buy")
+def buy():
+    ctx = baggage.set_baggage("tenant.id", "acme")
+    ctx = baggage.set_baggage("user.id", "u-1234", context=ctx)
+    ctx = baggage.set_baggage("user.email", "jane@example.com", context=ctx)
+    token = context.attach(ctx)
+    try:
+        r = requests.get("http://127.0.0.1:9200/checkout", timeout=5)
+    finally:
+        context.detach(token)
+    return jsonify(r.json())
+
+if __name__ == "__main__":
+    app.run(port=9100)
+```
+
+`checkout` reads the baggage, copies two keys onto its spans (more on that below) and calls the third party:
+
+```python
+# checkout.py
+import os
+import requests
+from flask import Flask, jsonify
+from opentelemetry import baggage, trace
+from opentelemetry.processor.baggage import BaggageSpanProcessor
+
+ALLOWED = ("tenant.id", "user.id")
+trace.get_tracer_provider().add_span_processor(
+    BaggageSpanProcessor(lambda key: key in ALLOWED)
+)
+
+EXTERNAL_URL = os.environ.get("EXTERNAL_URL", "http://127.0.0.1:9300/v1/score")
+app = Flask(__name__)
+
+@app.get("/checkout")
+def checkout():
+    tenant = baggage.get_baggage("tenant.id")
+    r = requests.get(EXTERNAL_URL, timeout=5)
+    return jsonify(tenant=tenant, baggage=dict(baggage.get_all()), external=r.json())
+
+if __name__ == "__main__":
+    app.run(port=9200)
+```
+
+Both instrumented services run under zero-code auto-instrumentation, with spans printed to the console:
+
+```bash
+export OTEL_TRACES_EXPORTER=console OTEL_METRICS_EXPORTER=none OTEL_LOGS_EXPORTER=none
+.venv/bin/python external_api.py &
+OTEL_SERVICE_NAME=checkout .venv/bin/opentelemetry-instrument .venv/bin/python checkout.py &
+OTEL_SERVICE_NAME=frontend .venv/bin/opentelemetry-instrument .venv/bin/python frontend.py &
+curl -s localhost:9100/buy
+```
+
+## Copying baggage onto spans with BaggageSpanProcessor
+
+The contrib package `opentelemetry-processor-baggage` provides `BaggageSpanProcessor`. On span start, it reads the baggage from the parent context and sets each entry whose key passes your predicate as a span attribute. `ALLOW_ALL_BAGGAGE_KEYS` copies everything. A list of predicates works too. The package also has a `BaggageLogProcessor` for log records ([README](https://github.com/open-telemetry/opentelemetry-python-contrib/tree/main/processor/opentelemetry-processor-baggage)).
+
+There's no environment variable for it, so with `opentelemetry-instrument` I added it in code with `trace.get_tracer_provider().add_span_processor(...)`. That works because the agent has already installed the SDK `TracerProvider` by the time the app imports. Run the same file with plain `python` and you get the API's proxy provider, which has no `add_span_processor`.
+
+In my run, both `checkout` spans, the `GET /checkout` server span and the outgoing client span, had `tenant.id=acme` and `user.id=u-1234`. Neither had `user.email`, because the predicate filtered it out. `frontend`'s server span had neither: it started before the baggage was set, and `frontend` has no processor.
+
+This is why the copy matters. A backend can only filter or group by tenant if the tenant is on the span.
+
+![The room at the SRE NL meetup at Elastic Amsterdam during the live Elastic Observability demo, with failed transaction latency and correlations on both screens](/blog/events/opentelemetry-baggage-python-propagation-security/elastic-demo-correlations-room.jpg)
+
+*Earlier in the same talk: the live Elastic demo, showing failed transaction latency and correlations for a service.*
+
+## The leak: auto-instrumentation sends baggage to the third party
+
+Here's what the fake third party logged:
+
+```text
+[external-api] received trace headers: {'traceparent': '00-87cb9ad2894dda8af9254c98c97a2f54-e5de38093de699af-03', 'baggage': 'tenant.id=acme,user.id=u-1234,user.email=jane%40example.com'}
+```
+
+All three entries left the building, including the email. That's the important detail: **the `BaggageSpanProcessor` predicate controls what gets onto your spans, not what gets propagated.** `checkout` never touched baggage in its code. The requests instrumentation injected the current context into the outgoing call, as it does for every call. The OpenTelemetry docs say the same: "automatic instrumentation includes Baggage in most of your service's network requests."
+
+There's a second problem. I called the edge with a forged header:
+
+```bash
+curl -s -H 'baggage: is.admin=true,tenant.id=globex' localhost:9100/buy
+```
+
+`frontend` overwrote `tenant.id` with its own value, but `is.admin=true` reached `checkout` and then the third party. If any service makes a decision based on baggage, a caller can set it.
+
+## Fix 1: decide what goes in, and reset at the edge
+
+The cheapest fix happens before anything is propagated. Only put in values you'd be fine seeing in a third party's access log, and start from empty baggage at your trust boundary:
+
+```python
+ctx = baggage.clear()                                        # drop whatever the caller sent
+ctx = baggage.set_baggage("tenant.id", "acme", context=ctx)
+ctx = baggage.set_baggage("user.id", "u-1234", context=ctx)  # opaque ID, no email
+```
+
+`baggage.clear()` returns a copy of the current context with no baggage. The active span is kept, so the trace still links up. With this change, the forged `is.admin` entry no longer reached `checkout`. You can also strip the inbound `baggage` header at your ingress proxy, which protects services you don't control the code of.
+
+## Fix 2: send nothing to external hosts
+
+I found no setting in the Python SDK or the requests instrumentation (as of 1.45.0 and 0.66b0) that limits propagation to a list of internal hosts. A propagator's `inject` only receives the header carrier, not the URL, so it can't decide by destination. These three options did work in the lab, each with a trade-off.
+
+**Clear baggage around the call.** This follows the [Baggage API spec](https://opentelemetry.io/docs/specs/otel/baggage/api/), which requires a way to remove all entries "to avoid sending any name/value pairs to an untrusted process":
+
+```python
+from contextlib import contextmanager
+from opentelemetry import baggage, context
+
+@contextmanager
+def without_baggage():
+    token = context.attach(baggage.clear())
+    try:
+        yield
+    finally:
+        context.detach(token)
+
+with without_baggage():
+    r = requests.get(EXTERNAL_URL, timeout=5)
+```
+
+The third party received only `traceparent`. The trade-off: the client span for that call also lost its `tenant.id` and `user.id` attributes, because the processor copies from the context, and that context is now empty.
+
+**Strip the header in a dedicated session.** The instrumentation wraps `Session.send`, injects the headers, then calls the transport adapter. An adapter that pops the header runs after the injection:
+
+```python
+from requests.adapters import HTTPAdapter
+
+class StripBaggageAdapter(HTTPAdapter):
+    def send(self, request, **kwargs):
+        request.headers.pop("baggage", None)
+        return super().send(request, **kwargs)
+
+third_party = requests.Session()
+third_party.mount("http://", StripBaggageAdapter())
+third_party.mount("https://", StripBaggageAdapter())
+```
+
+Calls through `third_party` arrived with `traceparent` only, and the client span kept its tenant attributes. Pop `traceparent` and `tracestate` too if you don't want to share trace IDs with the vendor.
+
+**Exclude the URL from instrumentation.** `OTEL_PYTHON_REQUESTS_EXCLUDED_URLS` takes comma-separated regexes ([requests instrumentation docs](https://opentelemetry-python-contrib.readthedocs.io/en/latest/instrumentation/requests/requests.html)). For a matching URL, the instrumentation calls the original `send` straight away, so nothing is injected. With `OTEL_PYTHON_REQUESTS_EXCLUDED_URLS="127.0.0.1:9300"`, the third party saw no trace headers at all. You also lose the client span, so the slow vendor call disappears from your traces. I'd only use this for calls you don't care to see.
+
+Each HTTP client library has its own instrumentation package, so check its options for any other client you use.
+
+## Fix 3: strip it at the egress proxy
+
+If outbound traffic already goes through a proxy, remove the header there. It works for every language and every service behind it. In nginx, a `proxy_set_header` with an empty value means the header ["will not be passed to a proxied server"](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_set_header):
+
+```nginx
+server {
+    listen 8080;
+    location / {
+        proxy_pass http://host.docker.internal:9300;
+        proxy_set_header baggage "";
+    }
+}
+```
+
+I saved that as `egress.conf`, ran it with `nginx:alpine`, and pointed the original leaky `checkout.py` at the proxy:
+
+```bash
+docker run -d --rm --name baggage-egress -p 127.0.0.1:9380:8080 \
+  -v "$PWD/egress.conf:/etc/nginx/conf.d/default.conf:ro" nginx:alpine
+EXTERNAL_URL=http://127.0.0.1:9380/v1/score OTEL_SERVICE_NAME=checkout \
+  .venv/bin/opentelemetry-instrument .venv/bin/python checkout.py &
+```
+
+The third party received `traceparent` and no `baggage`. `host.docker.internal` resolves to the host on Docker Desktop. On Linux, add `--add-host=host.docker.internal:host-gateway` to the `docker run` command.
+
+The OpenTelemetry Collector can't do this job. It sits in the telemetry path, not between your services and the vendor. What it can do is clean up the copy: if a sensitive baggage key ended up as a span attribute, delete it in the Collector before it reaches a backend. My [OpAMP post](/blog/opentelemetry-opamp-collector-fleet-management/) pushes exactly that kind of redaction to a fleet.
+
+## Checklist
+
+- Baggage is for small, non-secret, cross-cutting IDs. If it would hurt in a vendor's logs, it doesn't belong there.
+- Call `baggage.clear()` (or strip the header at ingress) at the edge, and never authorise anything based on baggage.
+- Copy keys onto spans with an explicit allowlist, not `ALLOW_ALL_BAGGAGE_KEYS`.
+- Wrap third-party clients: clear the context, strip the header in the transport, or strip it at the egress proxy.
+- Keep it under the limits: 64 entries and 8 KB is what every implementation must carry.
+- Check propagation the way I did here: point a call at a header-logging endpoint and look.
+
+My take: baggage is worth using, but treat it like a cookie you set on every request your platform makes. Put the egress strip in the platform (proxy or shared HTTP client), so that each team doesn't have to remember it.
+
+For the rest of the context-propagation picture, see my [OpenTelemetry trace quality checklist](/blog/opentelemetry-trace-quality-checklist/).
+
+## Related
+
+- [SRE NL at Elastic: OpenTelemetry and Your Brain's Biases](/blog/sre-nl-dashboards-brain-elastic-amsterdam-2026/)
+- [OpAMP: Manage OpenTelemetry Collector Fleets Safely](/blog/opentelemetry-opamp-collector-fleet-management/)
+- [OpenTelemetry Trace Quality: A Checklist for Large Systems](/blog/opentelemetry-trace-quality-checklist/)
+- [OpenTelemetry on Kubernetes: Complete Observability Stack](/blog/opentelemetry-kubernetes-distributed-tracing-2026/)
+
+<BlogPromoCard />

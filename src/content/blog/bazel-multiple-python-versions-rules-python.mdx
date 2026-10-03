@@ -1,0 +1,339 @@
+---
+title: "Bazel Multiple Python Versions with rules_python"
+seoTitle: "Bazel Multiple Python Versions: rules_python python_version"
+snippet: "Bazel multiple Python versions in one monorepo: two rules_python toolchains, per-version pip locks, python_version pins, cquery checks and real pitfalls."
+description: "Tested with Bazel 9.2 and rules_python 2.3.4: register Python 3.12 and 3.13 in MODULE.bazel, pin targets, split pip locks and run one py_test on both."
+publishDate: "2026-10-03"
+lastModified: "2026-10-03"
+image:
+  src: "/blog/events/uber-engflow-build-meetup-amsterdam-bazel-buildbarn-2026/python-verse-bazel-monorepo.jpg"
+  alt: "Alex Preobrazhenskiy from Uber presenting the title slide Into the python-verse: supporting multiple python versions in a bazel monorepo at the Build Meetup Amsterdam"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["Bazel", "rules_python", "Python", "Bzlmod", "Monorepo", "Build Systems", "pip", "Hermetic Builds", "Developer Productivity", "Platform Engineering"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Supporting **Bazel multiple Python versions** in one monorepo means one service can move to a new interpreter while another stays where it is, in the same build, with the same `bazel test //...`. In this tutorial I register Python 3.12 and 3.13 as hermetic toolchains with rules_python and Bzlmod, give each version its own pip lock file behind one hub, pin targets with the `python_version` attribute, run the same `py_test` under both interpreters, and check the result with `bazel query`, `bazel cquery` and `bazel config`. At the end I list the pitfalls I hit while building the demo.
+
+At the [Uber x EngFlow Build Meetup in Amsterdam](/blog/uber-engflow-build-meetup-amsterdam-bazel-buildbarn-2026/) on 28 January 2026, the first talk was "Into the python-verse: supporting multiple python versions in a bazel monorepo" by Alex Preobrazhenskiy from Uber. I only photographed the title slide, so I can't tell you how Uber does it. The title stayed with me, though, and this post is my own lab built from the rules_python documentation, not a summary of the talk.
+
+![Alex Preobrazhenskiy from Uber presenting the title slide Into the python-verse: supporting multiple python versions in a bazel monorepo](/blog/events/uber-engflow-build-meetup-amsterdam-bazel-buildbarn-2026/python-verse-bazel-monorepo.jpg)
+
+*The title slide of the Python-verse talk at the Build Meetup Amsterdam, the only photo I have of it.*
+
+**Versions.** Everything below ran on macOS (Apple silicon) with Bazel 9.2.0 started through Bazelisk 1.29.0, rules_python 2.3.4 (released 21 September 2026), the python-build-standalone interpreters 3.12.13 and 3.13.13 that rules_python 2.3.4 maps `3.12` and `3.13` to, and `packaging` 24.2 and 25.0 as the one PyPI dependency. The rules_python API for this has changed several times since 1.0, so check the version you install against the notes below.
+
+## How rules_python handles multiple Python versions
+
+Three pieces work together:
+
+1. **Toolchains.** Each `python.toolchain(python_version = "X.Y")` call in `MODULE.bazel` registers a hermetic interpreter for that version. rules_python downloads it only when a target needs it.
+2. **A build setting.** `@rules_python//python/config_settings:python_version` decides which toolchain Bazel picks. The default comes from `python.defaults`.
+3. **A transition.** When a `py_binary` or `py_test` sets `python_version`, rules_python changes that build setting for the target and everything it depends on. Libraries don't need their own version, they follow the binary or test that uses them.
+
+The pip hub joins in through `select()`: one hub can hold a different wheel set per Python version and picks the one that matches the current setting.
+
+## Register two toolchains in MODULE.bazel
+
+```starlark
+module(name = "pyverse_demo")
+
+bazel_dep(name = "rules_python", version = "2.3.4")
+
+python = use_extension("@rules_python//python/extensions:python.bzl", "python")
+
+# The default for every target that doesn't ask for a version.
+python.defaults(
+    python_version = "3.12",
+    python_version_env = "BAZEL_PYTHON_VERSION",
+)
+
+python.toolchain(python_version = "3.12")
+python.toolchain(python_version = "3.13")
+```
+
+Line by line:
+
+- `python.defaults(python_version = "3.12")` sets the default version for the whole build. The `defaults` tag arrived in rules_python 1.3.0, and since 1.4.0 the older `is_default = True` on `python.toolchain` is ignored when `defaults` is set. The docs call `defaults` the encouraged option, so I don't use `is_default` at all.
+- `python_version_env = "BAZEL_PYTHON_VERSION"` lets an environment variable override that default. I come back to this below.
+- Each `python.toolchain` registers one interpreter. `3.12` is a `major.minor` version, and rules_python resolves it to the patch release it knows about (3.12.13 in 2.3.4). You can pin a full `3.12.13` instead if you want the patch level in `MODULE.bazel` too.
+
+Each toolchain also creates a repository named `python_X_Y` (`@python_3_13`), which you only need to bring in with `use_repo` if you reference the interpreter directly.
+
+## Per-version pip dependencies in one hub
+
+Each Python version gets its own lock file. I generated them with `uv` so the demo needs no extra Bazel targets:
+
+```bash
+printf 'packaging==24.2\n' > req_3_12.in
+printf 'packaging==25.0\n' > req_3_13.in
+uv pip compile --python-version 3.12 --generate-hashes req_3_12.in -o requirements_3_12.txt
+uv pip compile --python-version 3.13 --generate-hashes req_3_13.in -o requirements_3_13.txt
+```
+
+I pinned different `packaging` versions on purpose, so the test output shows which lock file a target got. Then both files go to the same hub:
+
+```starlark
+pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
+
+# One hub, one lock file per Python version.
+pip.parse(
+    hub_name = "pip_deps",
+    python_version = "3.12",
+    requirements_lock = "//:requirements_3_12.txt",
+)
+pip.parse(
+    hub_name = "pip_deps",
+    python_version = "3.13",
+    requirements_lock = "//:requirements_3_13.txt",
+)
+use_repo(pip, "pip_deps")
+```
+
+The `hub_name` docs spell out the rule: within a module, repeating the same `hub_name` with different `python_version` values groups those versions under one repository name, "the correct version will be automatically selected". Your `BUILD` files say `@pip_deps//packaging` and never mention a version. `python_version` on `pip.parse` needs a matching `python.toolchain()` unless you give an interpreter explicitly.
+
+Two naming notes from the 2.x docs. Don't call a hub `pypi`: since 2.2.0 that name is reserved for the automatically generated unified hub, which routes between *different* hubs (for example, two teams with two resolutions) through the `--@rules_python//python/config_settings:venv` flag. That's a different problem from multiple Python versions. And if your module isn't always the root module, the docs recommend including the module name in the hub name.
+
+Bazel generates the hub's `BUILD` file. Here is what `@pip_deps//packaging` turned into:
+
+```starlark
+pkg_aliases(
+    name = "packaging",
+    actual = {
+        whl_config_setting(
+            target_platforms = ("cp312_osx_aarch64",),
+            version = "3.12",
+        ): "pip_deps_312_packaging_py3_none_any_09abb1bc",
+        whl_config_setting(
+            target_platforms = ("cp313_osx_aarch64",),
+            version = "3.13",
+        ): "pip_deps_313_packaging_py3_none_any_29572ef2",
+    },
+)
+```
+
+One wheel repository per version, selected by Python version and platform.
+
+## Pin targets with python_version
+
+Bazel 9 no longer ships native Python rules, so every `BUILD` file loads them from rules_python. In `app/BUILD.bazel`:
+
+```starlark
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python:py_test.bzl", "py_test")
+
+py_library(
+    name = "versioninfo",
+    srcs = [
+        "__init__.py",
+        "versioninfo.py",
+    ],
+    deps = ["@pip_deps//packaging"],
+)
+
+# Same source, same deps, two interpreters.
+[
+    py_test(
+        name = "versioninfo_test_" + v.replace(".", "_"),
+        srcs = ["versioninfo_test.py"],
+        main = "versioninfo_test.py",
+        python_version = v,
+        env = {"EXPECTED_PYTHON": v},
+        deps = [":versioninfo"],
+    )
+    for v in ["3.12", "3.13"]
+]
+
+# Not pinned: follows the default or the python_version flag.
+py_test(
+    name = "versioninfo_test_default",
+    srcs = ["versioninfo_test.py"],
+    main = "versioninfo_test.py",
+    deps = [":versioninfo"],
+)
+```
+
+The library has no version. The list comprehension creates `versioninfo_test_3_12` and `versioninfo_test_3_13` from one source file, which is the simplest way to run the same test under two interpreters. In a real repo I'd wrap it in a small macro.
+
+If you find older examples, two styles are deprecated since rules_python 1.1.0: loading `py_test` from `@python_versions//3.11:defs.bzl`, and the wrappers in `//python/config_settings:transitions.bzl`. Both are now aliases of the regular rules. Load the regular rules and set `python_version`.
+
+`versioninfo.py` reports what it runs on:
+
+```python
+import sys
+
+import packaging
+from packaging.version import Version
+
+
+def describe():
+    return {
+        "python": "%d.%d.%d" % sys.version_info[:3],
+        "packaging": packaging.__version__,
+        "executable": sys.executable,
+        "base_prefix": sys.base_prefix,
+    }
+
+
+def at_least(minimum):
+    return Version("%d.%d" % sys.version_info[:2]) >= Version(minimum)
+```
+
+The test prints `describe()` and asserts that the interpreter matches `EXPECTED_PYTHON`, defaulting to 3.12 when the variable isn't set.
+
+## Run the same py_test under two interpreters
+
+```bash
+bazel test //app:all --test_output=all
+```
+
+Trimmed output:
+
+```text
+{'python': '3.12.13', 'packaging': '24.2', 'executable': '.../bazel-out/darwin_arm64-fastbuild/bin/app/versioninfo_test_3_12.runfiles/_main/app/_versioninfo_test_3_12.venv/bin/python3', ...}
+{'python': '3.13.13', 'packaging': '25.0', 'executable': '.../bazel-out/darwin_arm64-fastbuild-ST-9d3588d462b9/bin/app/versioninfo_test_3_13.runfiles/_main/app/_versioninfo_test_3_13.venv/bin/python3', ...}
+{'python': '3.12.13', 'packaging': '24.2', 'executable': '.../bazel-out/darwin_arm64-fastbuild/bin/app/versioninfo_test_default.runfiles/_main/app/_versioninfo_test_default.venv/bin/python3', ...}
+//app:versioninfo_test_3_12                                              PASSED in 0.8s
+//app:versioninfo_test_3_13                                              PASSED in 0.8s
+//app:versioninfo_test_default                                           PASSED in 0.7s
+
+Executed 3 out of 3 tests: 3 tests pass.
+```
+
+Each test got the interpreter and the `packaging` version from its own lock file. Look at the output paths: the 3.13 test lives under `darwin_arm64-fastbuild-ST-9d3588d462b9`, a separate output directory created by the transition. The 3.12 test asks for the default version, so it stays in the normal `darwin_arm64-fastbuild` directory. Every extra version you pin means a second copy of the libraries that test depends on in the action graph, built and cached separately.
+
+## Switch the default with a flag or an environment variable
+
+Unpinned targets follow the build setting, so you can run them under another version from the command line:
+
+```bash
+bazel test //app:versioninfo_test_default //app:versioninfo_test_3_12 \
+  --@rules_python//python/config_settings:python_version=3.13 \
+  --test_env=EXPECTED_PYTHON=3.13 --test_output=all
+```
+
+The unpinned test ran on 3.13.13 with `packaging` 25.0. The pinned `versioninfo_test_3_12` still ran on 3.12.13: the attribute on the target wins over the flag. That's what you want for a gradual migration, where a CI job can test everything unpinned against the next version while pinned services stay put.
+
+`python_version_env` does the same through the environment, which is handy in a CI matrix:
+
+```bash
+BAZEL_PYTHON_VERSION=3.13 bazel test //app:versioninfo_test_default \
+  --test_env=EXPECTED_PYTHON=3.13
+```
+
+Either way, switching back and forth has a cost. Bazel printed this when I dropped the flag again:
+
+```text
+WARNING: Build option --@@rules_python+//python/config_settings:python_version has changed, discarding analysis cache
+```
+
+On a large repo, give each Python version its own CI job (or its own output base) instead of alternating in one Bazel server.
+
+## What bazel query and cquery show
+
+`bazel query` works on the unconfigured graph, so it's good for inventories:
+
+```bash
+$ bazel query 'attr(python_version, "3.13", //...)'
+//app:versioninfo_test_3_13
+
+$ bazel query 'labels(deps, //app:versioninfo)'
+@pip_deps//packaging:packaging
+```
+
+The first is the list of targets already pinned to 3.13, which is useful for tracking a migration. The second shows the limit of `query`: it sees only the version-agnostic hub alias, not which wheel will be used.
+
+`bazel cquery` resolves the `select()` per configuration:
+
+```bash
+$ bazel cquery 'kind("py_library", deps(//app:all))'
+//app:versioninfo (276a5bd)
+//app:versioninfo (2d89340)
+@@rules_python++pip+pip_deps_313_packaging_py3_none_any_29572ef2//:pkg (276a5bd)
+@@rules_python++pip+pip_deps_312_packaging_py3_none_any_09abb1bc//:pkg (2d89340)
+...
+```
+
+The same library appears twice, once per configuration, each with its own wheel. To see what differs between the two configurations, pass both IDs to `bazel config`:
+
+```bash
+$ bazel config 2d89340 276a5bd
+Displaying diff between configs 2d89340 and 276a5bd
+FragmentOptions user-defined {
+  @@rules_python+//python/config_settings:python_version: null, 3.13
+}
+```
+
+`null` is the default (3.12 here). To confirm which interpreter a target resolved to, ask toolchain resolution:
+
+```bash
+$ bazel cquery //app:versioninfo_test_3_13 \
+    --toolchain_resolution_debug='@@bazel_tools//tools/python:toolchain_type'
+...
+ToolchainResolution:   Selected @@rules_python++python+python_3_13_aarch64-apple-darwin//:python_runtimes to run on execution platform @@platforms//host:host
+```
+
+## Hermeticity: which interpreter actually ran
+
+My laptop has Python 3.13.3 from pyenv on its `PATH`. The 3.13 test ran 3.13.13, so it didn't touch the host interpreter. Two details from the output above:
+
+- `sys.executable` is a `python3` inside a `.venv` in the test's runfiles. Since rules_python 2.0.0, binaries (and tests, as the paths show) are venv-based by default on Linux and macOS with Bazel 8 or later.
+- `sys.base_prefix` pointed into Bazel's repository cache, at the same directory that `external/rules_python++python+python_3_13_aarch64-apple-darwin` links to. That's the python-build-standalone runtime rules_python downloaded and checked against its known SHA-256.
+
+The wheels are pinned by hash in the lock files, and Bazel writes the module resolution to `MODULE.bazel.lock`. Commit that file along with the requirements files.
+
+## Pitfalls I hit
+
+**A version you never registered can still work.** I pinned a throwaway `py_binary` to `3.11` without a 3.11 toolchain in my `MODULE.bazel`, expecting an error. It built and printed `3.11.15`. rules_python's own `MODULE.bazel` registers 3.11 as its default, so that toolchain is visible to the whole module graph. A target pinned to `3.14`, which nobody registered, failed as expected:
+
+```text
+ERROR: ... While resolving toolchains for target //pitfall:hello_314 (705eaeb): No matching toolchains found for types:
+  @@bazel_tools//tools/python:toolchain_type
+```
+
+**Restricting the versions broke the build.** The documented fix for unexpected versions is `python.override(available_python_versions = [...])`. With only `["3.12.13", "3.13.13"]`, every target failed, including my own:
+
+```text
+module extension @@rules_python+//python/extensions:python.bzl%python does not generate repository "python_3_11", yet it is imported as "python_3_11" in the usage at https://bcr.bazel.build/modules/rules_python/2.3.4/MODULE.bazel:41:23
+```
+
+With rules_python 2.3.4 you have to keep its default version in that list. I removed the override and use the `bazel query 'attr(python_version, ...)'` inventory as a CI check instead.
+
+**The pip hub fails before the toolchain does.** With the 3.11 pin on a target that depends on `@pip_deps//packaging`, analysis stopped at the hub, because no lock file exists for 3.11:
+
+```text
+The current build configuration's Python version doesn't match any of the Python
+wheels available for this distribution. This distribution supports the following Python
+configuration settings:
+    //_config:is_cp312_osx_aarch64
+    //_config:is_cp313_osx_aarch64
+```
+
+Adding a version means a toolchain *and* a `pip.parse` entry for every hub the target uses.
+
+**No `load()`, no rule.** Without the `load` line, Bazel 9 fails with `name 'py_binary' is not defined (did you mean 'cc_binary'?)`.
+
+**The implicit `__init__.py` warning.** My first run printed a long warning per target: rules_python still creates missing `__init__.py` files, calls that behaviour deprecated and will disable it by default. I added an empty `app/__init__.py` to `srcs` and opted in to the new behaviour:
+
+```starlark
+rules_python_config = use_extension("@rules_python//python/extensions:config.bzl", "config")
+rules_python_config.explicit_init_py(default = True)
+```
+
+**Disk usage.** On my machine the Bazel install base, the two interpreters, the wheels and the toolchain repositories took about 530 MB under the output user root (177 MB of it the Bazel install base), plus 58 MB for the Bazel binary that Bazelisk downloaded. Each extra Python version adds an interpreter download and another set of configured targets. `bazel clean --expunge` removes the output base. The repository cache under the output user root survives that, so delete it yourself when you're done.
+
+## My take
+
+Pinning per target with `python_version` is the right default for a monorepo upgrade: the library code stays version-agnostic, the binaries and tests choose, and `bazel query` gives you a migration tracker for free. I'd keep the list of supported versions short, two at a time if you can, because every version adds another configured copy of each shared library to analysis and the cache, and the pip hub must stay complete for each of them. I'd also make "which versions are allowed" a reviewed file in the platform team's hands, since a dependency can make an extra version available without anyone noticing.
+
+## Related
+
+- [Build Meetup Amsterdam 2026: Bazel, Buildbarn, Bonanza](/blog/uber-engflow-build-meetup-amsterdam-bazel-buildbarn-2026/)
+- [GitHub Actions CI/CD Pipeline Tutorial](/blog/github-actions-cicd-pipeline-tutorial-2026/)
+- [Measuring Developer Experience](/blog/devex-internal-developer-platform/)
+- [Platform Engineering Metrics: How to Measure Success (2026)](/blog/platform-engineering-metrics-measure-success-2026/)
+
+<BlogPromoCard />

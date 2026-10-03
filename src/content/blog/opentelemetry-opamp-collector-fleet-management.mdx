@@ -1,0 +1,249 @@
+---
+title: "OpAMP: Manage OpenTelemetry Collector Fleets Safely"
+seoTitle: "OpAMP for OpenTelemetry Collector Fleets: A Lab Guide"
+snippet: "Manage OpenTelemetry Collector fleets with OpAMP: extension vs Supervisor, the opamp-go example server, safe rollouts, OTTL redaction and TLS."
+description: "OpAMP for OpenTelemetry Collector fleets: Supervisor setup, a tested opamp-go lab, pushing OTTL PII redaction, validation and rollback, TLS, auth and pitfalls."
+publishDate: "2026-10-02"
+lastModified: "2026-10-02"
+image:
+  src: "/blog/events/sre-nl-dashboards-brain-elastic-amsterdam-2026/otel-baggage-ottl-opamp.jpg"
+  alt: "To infinity and beyond slide listing OpenTelemetry Baggage, OTTL and OpAMP at the SRE NL meetup at Elastic Amsterdam"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["OpAMP", "OpenTelemetry", "OpenTelemetry Collector", "OTTL", "OpAMP Supervisor", "Observability", "PII Redaction", "SRE"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+OpAMP, the Open Agent Management Protocol, is how you stop SSH-ing into hosts to change an OpenTelemetry Collector config. With more than a handful of Collectors, the hard part is knowing what each one runs, whether it's healthy, and getting a change such as "stop shipping that email attribute" onto all of them without taking the pipeline down. This post shows how OpAMP does that for a Collector fleet, with a lab I ran locally and an OTTL redaction change pushed over the wire.
+
+In February I went to the SRE NL meetup at Elastic in Amsterdam. Near the end of the OpenTelemetry talk, a "To infinity and beyond" slide listed Baggage, OTTL and OpAMP as the next things to learn, and OpAMP is described there as "remote management of large fleets of data collection Agents". I wrote the evening up in my [SRE NL at Elastic recap](/blog/sre-nl-dashboards-brain-elastic-amsterdam-2026/).
+
+![Luca Berton in the audience at the SRE NL meetup at Elastic Amsterdam during the OpenTelemetry talk, with the speaker and two screens in the background](/blog/events/opentelemetry-opamp-collector-fleet-management/otel-talk-audience.jpg)
+
+*In the audience for the OpenTelemetry talk at SRE NL at Elastic Amsterdam.*
+
+Versions I verified against: OpAMP specification (Status: Beta, opamp-spec v0.20.0), opamp-go v0.25.0, OpenTelemetry Collector Contrib v0.162.0 and the OpAMP Supervisor v0.162.0. I ran everything below on macOS (arm64) with the release binaries.
+
+## What OpAMP is, and what it isn't
+
+OpAMP is a network protocol. The [specification](https://opentelemetry.io/docs/specs/opamp/) says it lets agents report their status to a server, receive configuration from it, and receive agent package updates. It's vendor-agnostic, so one server can manage a mixed fleet.
+
+The pieces:
+
+- **Server:** holds the desired state and the fleet inventory. Many clients connect to one server.
+- **Client:** speaks OpAMP on behalf of an agent. The spec doesn't require the client to live inside the agent. It can be a plugin, a sidecar or a separate Supervisor process.
+- **Transport:** WebSocket or plain HTTP (polling). Servers should accept both. The default path is `/v1/opamp` and the default port is 4320.
+- **Identity:** each agent has an `instance_uid`. The extension's docs ask for a UUIDv7.
+
+The specification as a whole is marked Beta. Some fields, such as available components, custom messages and heartbeats, are still marked Development.
+
+![To infinity and beyond slide at the SRE NL meetup at Elastic, describing OpAMP as the Open Agent Management Protocol for remote management of large fleets of data collection Agents](/blog/events/opentelemetry-opamp-collector-fleet-management/opamp-fleet-management-slide.jpg)
+
+*The slide at SRE NL at Elastic: OpAMP as "remote management of large fleets of data collection Agents", next to Baggage and OTTL.*
+
+What it isn't: a rollout engine. OpAMP carries the config, the status and the hashes. Deciding which Collectors get which config, and when, is your server's job.
+
+## The capabilities that matter
+
+During the first message exchange, the agent and server each send a capabilities bit field. A server must not use a capability the agent didn't announce. These are the ones that matter for running a Collector fleet:
+
+| Capability | What it gives you |
+|---|---|
+| `ReportsStatus` | Mandatory. Agent description: service name, version, OS, your own attributes. |
+| `AcceptsRemoteConfig` | The server can push a config. Status comes back as `APPLYING`, `APPLIED` or `FAILED` with the config hash. |
+| `ReportsEffectiveConfig` | The agent reports the config it's actually running, after merging local and remote. |
+| `ReportsHealth` | Healthy or not, plus a status string. |
+| `ReportsOwnMetrics` / `Logs` / `Traces` | The server tells the agent where to send its own telemetry. |
+| `AcceptsRestartCommand` | The server can ask for a restart. |
+| `AcceptsPackages` / `ReportsPackageStatuses` | Package (binary) offers and install status. Beta in the spec. |
+
+## OpAMP extension vs OpAMP Supervisor
+
+Collector Contrib ships two components, and the difference is the most important thing to understand.
+
+**The OpAMP extension** (`opamp`, in `extension/opampextension`) is **alpha** and ships in the contrib and k8s distributions. It runs inside the Collector and reports: agent description, effective config, health and available components. It can also accept a restart command behind the `extension.opampextension.RemoteRestarts` feature gate. **It doesn't accept remote config.** When I connected a Collector with only the extension, it announced `ReportsStatus|ReportsEffectiveConfig|ReportsHealth|ReportsAvailableComponents` and nothing else.
+
+**The OpAMP Supervisor** (`cmd/opampsupervisor`) is a separate binary, also **alpha**, published under release tags that start with `cmd/opampsupervisor`. It starts the Collector as a child process, connects to your OpAMP server, receives remote config, merges it with local files, writes the result and restarts the Collector. It configures the extension to connect back to a local OpAMP endpoint inside the Supervisor. Its README lists `AcceptsRemoteConfig`, effective config, own telemetry, connection settings, restart and available components as implemented. `ReportsHealth` works with caveats. Package handling and Collector binary updates are still linked to open issues.
+
+My take: use the extension alone if you want an inventory and nothing pushed into production. Use the Supervisor if the server is meant to change configs.
+
+## A local lab: example server, Supervisor and a Collector
+
+The [opamp-go](https://github.com/open-telemetry/opamp-go) repository includes an example server with a small web UI. It's a reference implementation, not a product.
+
+```sh
+git clone --depth 1 --branch v0.25.0 https://github.com/open-telemetry/opamp-go.git
+cd opamp-go/internal/examples/server
+go run .
+# OpAMP on 0.0.0.0:4320/v1/opamp with TLS, UI on http://localhost:4321
+```
+
+The server uses demo certificates from `internal/examples/certs`, and its listener binds to every interface. Keep it on a laptop.
+
+Get the Collector and the Supervisor (swap in your OS and architecture):
+
+```sh
+V=0.162.0
+curl -fLO "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${V}/otelcol-contrib_${V}_darwin_arm64.tar.gz"
+tar xzf "otelcol-contrib_${V}_darwin_arm64.tar.gz" otelcol-contrib
+curl -fL -o opampsupervisor "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/cmd%2Fopampsupervisor%2Fv${V}/opampsupervisor_${V}_darwin_arm64"
+chmod +x opampsupervisor
+```
+
+A local base config, `base.yaml`, that the Collector always gets:
+
+```yaml
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:4318
+
+exporters:
+  debug:
+    verbosity: detailed
+
+service:
+  pipelines:
+    logs:
+      receivers: [otlp]
+      exporters: [debug]
+```
+
+And `supervisor.yaml`:
+
+```yaml
+server:
+  endpoint: wss://127.0.0.1:4320/v1/opamp
+  tls:
+    ca_file: ./opamp-go/internal/examples/certs/certs/ca.cert.pem
+
+capabilities:
+  accepts_remote_config: true      # default false: remote config is opt-in
+  reports_effective_config: true
+  reports_health: true
+  reports_own_metrics: false       # default true; off here, nothing to receive it
+
+agent:
+  executable: ./otelcol-contrib
+  config_files:
+    - ./base.yaml
+  validate_config: true            # run `otelcol validate` before applying (default false)
+  automatic_config_rollback: true  # fall back to the last working config (default false)
+  passthrough_logs: true           # Collector logs in the Supervisor log
+  description:
+    non_identifying_attributes:
+      fleet.ring: canary
+
+storage:
+  directory: ./supervisor-state    # default /var/lib/otelcol/supervisor
+
+healthcheck:
+  endpoint: 127.0.0.1:13140        # GET /health; disabled unless set
+```
+
+Run `./opampsupervisor --config=supervisor.yaml`. The Supervisor logged `Connected to the OpAMP server.`, started the Collector, and the server saw the agent with `AcceptsRemoteConfig` in its capabilities, `fleet.ring: canary` in its description and `RemoteConfigStatus=APPLIED`. The agent then appears in the UI on port 4321.
+
+## Pushing an OTTL redaction change
+
+Before any change, I sent an OTLP/HTTP log record with an email in the body and the attributes `user.email`, `http.request.header.authorization` and `db.password`. The debug exporter printed all of it, plus a DEBUG record. That's the leak we want to fix fleet-wide.
+
+The remote config only contains what changes. The Supervisor merges it on top of `base.yaml`:
+
+```yaml
+processors:
+  filter/drop-debug:
+    error_mode: ignore
+    log_conditions:
+      - log.severity_number < SEVERITY_NUMBER_INFO
+
+  transform/redact-pii:
+    error_mode: ignore
+    log_statements:
+      - delete_key(log.attributes, "http.request.header.authorization")
+      - delete_matching_keys(log.attributes, "(?i).*(password|secret|token).*")
+      - set(log.attributes["user.email"], SHA256(log.attributes["user.email"])) where log.attributes["user.email"] != nil
+      - replace_pattern(log.body, "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", "[email]")
+      - replace_pattern(log.body, "\\b(?:\\d[ -]?){13,16}\\b", "[card]")
+
+service:
+  pipelines:
+    logs:
+      processors: [filter/drop-debug, transform/redact-pii]
+```
+
+Line by line:
+
+- **`filter` drops what matches.** Any log below INFO is removed before the transform runs. The filter processor's logs signal is alpha in v0.162.0.
+- **`delete_key` and `delete_matching_keys`** remove the auth header and anything whose key looks like a credential. The `(?i)` makes the regex case-insensitive.
+- **`SHA256`** replaces the email with its hash, so you can still count unique users without storing the address.
+- **`replace_pattern` on `log.body`** masks emails and card-like numbers inside free text. Attribute rules don't help when the PII is in the message string.
+- **`error_mode: ignore`** logs a failed statement and moves on. The transform processor's README recommends it, so one bad record doesn't drop the batch.
+
+Before pushing, validate the merged result exactly as the Supervisor will build it:
+
+```sh
+./otelcol-contrib validate --config=base.yaml --config=remote-redact.yaml
+```
+
+Then paste it into the agent's page in the example UI and save. The server logged `APPLYING`, then `APPLIED`. Sending the same records again gave:
+
+```text
+Body: Str(payment ok for [email] card [card])
+-> user.email: Str(86e0b9e56c17cc4d12387e1949b85053fbe73bc3ce5a1188713a9d300cc6133d)
+-> http.route: Str(/pay)
+```
+
+The authorization header and password were gone, and the DEBUG record never reached the exporter.
+
+Contrib also has a dedicated `redaction` processor; the OTTL version is easier to roll out as a small diff.
+
+## Rolling out config changes safely across a fleet
+
+This is where fleets break. A safe rollout uses settings that are already in the Supervisor:
+
+1. **Validate on the agent.** With `validate_config: true`, the Supervisor runs the Collector's `validate` against the merged config before switching. I pushed a config that called a non-existent `delete_keys` function. The Supervisor logged `New configuration failed validation, keeping previous config`, reported `FAILED` with the validation error to the server, and redaction kept working on the old config.
+2. **Roll back on a bad start.** `automatic_config_rollback: true` caches the last working remote config and restores it if a new one stops the Collector from starting. Both settings are off by default. Turn them on.
+3. **Stage by ring.** Put `fleet.ring` (or region, cluster, team) in `agent::description::non_identifying_attributes`, and have your server offer a new config to canaries first. Promote only when they report `APPLIED`, healthy, and their effective config hash matches what you sent.
+4. **Survive an outage.** `startup_fallback_configs` gives a Collector a known-good, standalone config when it starts with no persisted state and can't reach the server.
+5. **Watch the Collectors, not just the server.** With `reports_own_metrics`, the server can point each Collector's own metrics at an OTLP endpoint. For an OTTL change, compare `otelcol_processor_incoming_items` and `otelcol_processor_outgoing_items` for the filter before and after.
+
+![The room at the SRE NL meetup at Elastic Amsterdam during the OpenTelemetry talk, with the Elastic Observability live demo on both screens](/blog/events/opentelemetry-opamp-collector-fleet-management/elastic-otel-live-demo-room.jpg)
+
+*The OpenTelemetry talk's live demo in Elastic Observability, on both screens at SRE NL.*
+
+My take: a config that passes `validate` can still drop everything. The canary ring and a throughput comparison catch that; the validator doesn't.
+
+## Security: TLS, auth and what remote config may do
+
+The spec is blunt: remote configuration and downloadable packages are "a significant security risk", because a compromised server can make every agent do undesirable work. Treat your OpAMP server like your CI system.
+
+- **TLS everywhere.** Both components use the Collector's standard client TLS settings. Use `ca_file` (and `cert_file`/`key_file` for mTLS) instead of `insecure_skip_verify`, which only belongs in the README's local example.
+- **Authenticate the client.** The spec allows HTTP Basic or Bearer auth during the connection upgrade, and a server must answer 401 on failure. The extension takes `headers` or an `auth` extension ID per transport. For example, `auth: bearertokenauth` with a `bearertokenauth` extension (beta) reading a token `filename`. The Supervisor has `server::headers`. Its `server::auth` needs the alpha `opampsupervisor.Extensions` feature gate.
+- **Keep remote config opt-in.** The spec recommends it, and the Supervisor defaults `accepts_remote_config` to false.
+- **Pin what remote config can't override.** Files in `agent::config_files` merge top to bottom, and `$REMOTE_CONFIG` goes last by default. The Supervisor's design doc shows listing a `compliance_config.yaml` after `$REMOTE_CONFIG`, so your local redaction pipeline wins. That matters because the README lists "Sanitization or restriction of Collector config" as not implemented yet.
+- **Mind what you report.** `reports_raw_config` on the extension can expose secrets written in config files, and it's off by default. The Supervisor's `collector_crash_log_snippet_kib` is off by default too, since Collector logs may contain sensitive data.
+- **Least privilege.** The spec recommends not running the agent as root.
+
+## Pitfalls
+
+- **Expecting the extension to apply configs.** It doesn't. Remote config needs the Supervisor or your own OpAMP client.
+- **`$` in pushed OTTL.** The merged config goes through the Collector's normal variable expansion, so a pushed `"a$$b"` arrived as `a$b`. Escape `$` as `$$`, as the OTTL docs say for any Collector config.
+- **Deprecated `reports_remote_config`.** In v0.162.0 the Supervisor logs an error if you set it. Remote config status is reported whenever `accepts_remote_config` is on.
+- **Lists replace, maps merge.** My remote `processors` list was added to the local pipeline because the local one had none. Without the experimental `confmap.enableMergeAppendOption` gate, a list in a later file discards the earlier list instead of appending to it.
+- **False validation failures.** The Supervisor warns that validation "may fail for valid configs if resources (e.g., ports) are temporarily unavailable".
+- **Restart over SIGHUP.** The extension's restart command uses `SIGHUP`, which isn't supported on Windows. A bad config then leaves the Collector down until something else restarts it.
+- **Hashing isn't anonymising.** An unsalted SHA-256 of an email can be reversed with a list of known addresses. Delete it if you don't need it.
+
+If the traces themselves are the problem, start with my [OpenTelemetry trace quality checklist](/blog/opentelemetry-trace-quality-checklist/). Its gateway config is a good candidate to manage through OpAMP once it's stable.
+
+## Related
+
+- [SRE NL at Elastic: OpenTelemetry and Your Brain's Biases](/blog/sre-nl-dashboards-brain-elastic-amsterdam-2026/)
+- [OpenTelemetry Trace Quality: A Checklist for Large Systems](/blog/opentelemetry-trace-quality-checklist/)
+- [OpenTelemetry on Kubernetes: The 2026 Observability Stack](/blog/opentelemetry-kubernetes-observability-2026/)
+- [Installing Everything by Hand Sucks: The Automation Imperative for OpenTelemetry](/blog/otel-install-automation-by-hand-sucks/)
+
+<BlogPromoCard />

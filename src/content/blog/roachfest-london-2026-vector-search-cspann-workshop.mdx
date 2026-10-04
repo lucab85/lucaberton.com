@@ -1,0 +1,129 @@
+---
+draft: false
+title: "CockroachDB C-SPANN vs pgvector: RoachFest Workshop"
+seoTitle: "C-SPANN vs pgvector: RoachFest London 2026 Workshop"
+snippet: "What the RoachFest London 2026 vector search and RAG workshop showed: C-SPANN vs HNSW and IVFFlat, orphaned vectors, and multi-tenant retrieval in SQL."
+description: "Notes from the RoachFest London 2026 transactional vector search and RAG workshop: how C-SPANN compares with HNSW and IVFFlat (pgvector), and why one database avoids orphaned vectors."
+publishDate: "2026-10-04"
+lastModified: "2026-10-04"
+image:
+  src: "/blog/thumbnails/roachfest-london-2026-vector-search-cspann-workshop.jpg"
+  alt: "Workshop slide at RoachFest London 2026 comparing HNSW, IVFFlat and C-SPANN vector index algorithms"
+category: "database"
+author: "Luca Berton"
+tags:
+  - "CockroachDB"
+  - "Vector Search"
+  - "pgvector"
+  - "RAG"
+  - "C-SPANN"
+  - "Distributed SQL"
+  - "RoachFest"
+  - "London"
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+On 25 June 2026 I spent the morning of **RoachFest London 2026** in a hands-on session titled **"Vector Search, Transactional & RAG on CockroachDB"**, part of Cockroach Labs' "AI Workshops" series. My [main RoachFest recap](/blog/roachfest-london-2026-distributed-sql-ai-resilience/) covers the day and the keynotes, and mentions this workshop in one section. This post goes deeper into the part I found most useful as a platform engineer: how CockroachDB's own vector index, **C-SPANN**, compares with the HNSW and IVFFlat indexes you get from **pgvector**.
+
+One framing note before the details. Everything below comes from the workshop's slides and lab screens, which I photographed from the room, plus the public documentation I checked afterwards. The latency numbers shown in the workshop UI come from an interactive simulation, not from a benchmark I ran.
+
+## The Problem: Dual-Database Architectures
+
+The workshop opened with a problem statement on its slides: dual-database architectures create consistency gaps for AI applications. The usual pattern is a relational database for the application data plus a separate vector store for embeddings, glued together by an embedding pipeline. The slide pointed at three symptoms: similarity search without relational context, vector-only workloads, and managed embedding pipelines. The question to ask of your own stack was written on the slide too: **do your vectors reference transactional data?**
+
+If they do, you are keeping two systems in agreement. The workshop returned to that later with a crash demo (see below). It is the same trade-off I covered in [vector databases on Kubernetes](/blog/vector-database-kubernetes-qdrant-milvus-pgvector-2026/): a dedicated vector store can be fast, but you take on a consistency boundary.
+
+## Why C-SPANN Instead of HNSW or IVFFlat
+
+The "Algorithm" section of the lab, titled "Why CockroachDB built C-SPANN instead of using HNSW or IVFFlat", put the three approaches side by side.
+
+![Workshop lab screen comparing HNSW (multi-layer navigable graph), IVFFlat (k-means clusters with brute force inside) and C-SPANN (k-means partitions aligned with CockroachDB ranges)](/blog/events/roachfest-london-2026-vector-search-cspann-workshop/workshop-algorithm-hnsw-ivfflat-cspann.jpg)
+
+*The workshop's algorithm comparison: HNSW as a multi-layer navigable graph, IVFFlat as k-means clusters, and C-SPANN as k-means partitions aligned with CockroachDB ranges.*
+
+- **HNSW**: a multi-layer navigable graph, described on the slide as having excellent recall on a single node.
+- **IVFFlat**: k-means clusters with brute-force search inside each cluster, described as simple with lower memory use.
+- **C-SPANN**: k-means partitions aligned with CockroachDB ranges, "built for distributed".
+
+HNSW and IVFFlat are the two index types in [pgvector](https://github.com/pgvector/pgvector), the open-source Postgres extension. Its README describes HNSW as the one with better query performance but slower builds and higher memory use, and IVFFlat as the one with faster builds and lower memory use, at the cost of query performance.
+
+The comparison table further down the same screen is where the distributed argument showed up. As I read it:
+
+| | HNSW | IVFFlat | C-SPANN |
+|---|---|---|---|
+| Single-node recall | 95%+ | 85-90% | 90-95% |
+| Distributed recall | degrades | degrades | maintained |
+| Memory | high (in-memory graph) | low (centroids only) | low (centroids only) |
+| Cross-node hops | many (graph traversal) | some (split cells) | zero (range-aligned) |
+
+Take those figures as the workshop slide's claims, read off a photo, rather than as an independent benchmark. Cockroach Labs' own write-up describes C-SPANN as adapting Microsoft's SPANN and SPFresh algorithms to CockroachDB's distributed architecture, with a hierarchical k-means tree whose partitions are stored in the key-value layer ([Cockroach Labs blog: Real-Time Indexing for Billions of Vectors](https://www.cockroachlabs.com/blog/cspann-real-time-indexing-billions-vectors/), [Introducing Distributed Vector Indexing](https://www.cockroachlabs.com/blog/distributed-vector-indexing-cockroachdb/)). It arrived with CockroachDB 25.2.
+
+![Workshop lab slide reading: CockroachDB uses C-SPANN (Clustered Scalable Partition-based ANN) for vector indexing. Let's benchmark the performance difference and learn how to tune index parameters.](/blog/events/roachfest-london-2026-vector-search-cspann-workshop/workshop-cspann-vector-indexing-slide.jpg)
+
+*The lab step that introduces C-SPANN and the index-tuning exercise.*
+
+### The Simulated Latency Demo
+
+The same lab screen includes a small simulation of a multi-region search. In it, an HNSW trace made three cross-region hops and took 294.6 ms, while the C-SPANN trace stayed local with zero cross-region hops and took 3.7 ms. The screen then showed "C-SPANN is 291ms faster (99% improvement)".
+
+![Workshop lab screen showing an HNSW trace at 294.6 ms with three cross-region hops against a C-SPANN trace at 3.7 ms with zero cross-region hops, and the line C-SPANN is 291ms faster (99% improvement)](/blog/events/roachfest-london-2026-vector-search-cspann-workshop/workshop-cspann-latency-simulation.jpg)
+
+*An illustration, not a benchmark: the lab's multi-region trace compares an HNSW graph walk across regions with C-SPANN searching partitions locally.*
+
+My take: the point of the demo is the shape of the argument, not the millisecond values. A graph index that wanders across regions pays for every hop, while a partitioned index that lives next to its data does not. That is a fair argument for a distributed database. It says little about a single Postgres node running pgvector, where HNSW's graph sits in one machine's memory and the cross-region problem does not exist.
+
+## What the Docs Say
+
+I checked the public docs after the session. CockroachDB's [vector index documentation](https://docs.cockroachlabs.com/docs/stable/vector-indexes) describes `CREATE VECTOR INDEX` and supports three operators: L2 distance (`<->`), cosine distance (`<=>`), which suits semantic similarity and RAG, and negative inner product (`<#>`). It also describes **prefix columns**, which pre-filter the search space and are used only when every prefix column is constrained to a specific value in the query. That is the feature the multi-tenant lab relied on. The page also lists limitations, including that large batch inserts can degrade performance and that `IMPORT INTO` is unsupported on indexed tables. That page describes the index as organising vectors with k-means clustering into hierarchical partitions and does not use the name C-SPANN, which comes from the workshop and Cockroach Labs' blog.
+
+On the pgvector side, the README notes that with approximate indexes "filtering is applied after the index is scanned", so a filtered query can return fewer rows than expected unless iterative index scans are enabled. pgvector keeps what you expect from Postgres: ACID compliance, point-in-time recovery and joins.
+
+## Orphaned Vectors: The Dual-Database Rebuttal
+
+The most memorable lab was the transactional ingestion exercise. Each document is split into chunks and embedded, and a successful run should leave exactly three chunks per document. The lab then ran a crash demo comparing two architectures.
+
+![Workshop crash demo comparing a dual database architecture with CockroachDB: the left side shows orphaned vectors after a failure, the right side shows a clean rollback](/blog/events/roachfest-london-2026-vector-search-cspann-workshop/workshop-crash-demo-dual-database-vs-cockroachdb.jpg)
+
+*The "Transaction Crash Comparison" screen: dual database on the left, CockroachDB on the right.*
+
+According to the lab instructions on screen: in the dual-database case, the vector database accepted two chunks before the crash while the relational database had no document record, leaving two orphaned vectors and queries that may return stale or meaningless results. In the CockroachDB case, the `ROLLBACK` removed everything atomically, with zero orphaned vectors. Verifying in the SQL shell returned zero rows for the failed document.
+
+My take: this is a rebuttal to the dual-database pattern (relational database plus separate vector store), not to pgvector. A single Postgres instance with pgvector gets the same atomicity for free, because the vectors live in the same transactional store. The fair comparison for pgvector is scale and operations: how far one Postgres primary takes you, and what you do when you need multi-region writes and survivability. That is the gap CockroachDB is aiming at, and it is why the migration lab below mattered to me.
+
+## Migrating Off Postgres Plus Pinecone
+
+A later lab, "Migration to CockroachDB", walked through moving from PostgreSQL plus Pinecone to a single converged system.
+
+![Workshop lab screen titled Migration to CockroachDB, from PostgreSQL and Pinecone to a single converged system, with a dual-write step where new inserts go to both systems](/blog/events/roachfest-london-2026-vector-search-cspann-workshop/workshop-migration-postgresql-pinecone-dual-write.jpg)
+
+*The migration lab: a dual-write phase where new inserts go to both systems.*
+
+The step on screen was a dual-write phase: new inserts go to both PostgreSQL plus Pinecone and CockroachDB, a changefeed on CockroachDB watches for any drift, and old data still lives only in the legacy system. It is a standard expand-and-contract migration, and the same approach applies to any [AI-assisted database migration](/blog/human-in-the-loop-ai-database-migrations-roachfest-2026/). Run the dual-write phase long enough to trust the drift check before cutting over.
+
+## Multi-Tenant Retrieval in One SQL Query
+
+The last lab covered a multi-tenant RAG pipeline. The instructions on screen describe it as combining vector similarity search with relational filtering in a single SQL query, with no need for separate vector indexes per tenant. The steps were to search as tenant "acme", run the same query for a different tenant, verify that tenants cannot see each other's results, filter by source, and visualise tenant isolation. The terminal showed embeddings generated locally with Ollama (nomic-embed-text, 768 dimensions) and the closest chunks returned with their distances.
+
+![Workshop terminal output from the multi-tenant retrieval lab: a retrieval script run for tenant acme returns ranked document chunks with distances, beside the lab instructions](/blog/events/roachfest-london-2026-vector-search-cspann-workshop/workshop-multi-tenant-retrieval-lab.jpg)
+
+*Searching as tenant "acme": ranked chunks with their distances, filtered by tenant.*
+
+This is where prefix columns earn their place. The tenant becomes a prefix column on the vector index, so a query constrained to one tenant searches only that tenant's slice of the index. Compare that with pgvector, where a filtered query on an approximate index filters after the scan unless you turn on iterative scans, and where per-tenant isolation usually means partitioning, separate indexes or row-level security.
+
+## My Takeaways
+
+- **Pick the index for the topology.** On one Postgres node, pgvector with HNSW is simple and strong. The C-SPANN argument starts when your data is spread across nodes or regions.
+- **The consistency argument is about two systems, not about pgvector.** If your vectors and rows live in separate stores, you need a story for orphaned vectors.
+- **Filters are part of the index design.** Whether tenant filters are prefix columns or post-scan predicates decides how your multi-tenant RAG behaves.
+- **Treat vendor numbers as illustrations.** The 291 ms figure was a simulation. Benchmark with your own embeddings and recall target before choosing.
+
+## Related
+
+- [RoachFest London 2026: Distributed SQL Meets AI Resilience](/blog/roachfest-london-2026-distributed-sql-ai-resilience/)
+- [Spencer Kimball: From "We're Not Google" to CockroachDB's Agentic Future](/blog/spencer-kimball-cockroachdb-agentic-vision-roachfest-2026/)
+- [Will AI Make Us the Humans From WALL-E?](/blog/felipe-cockroach-labs-wall-e-agentic-future-roachfest-2026/)
+- [AI Agents in Healthcare: A Floor Chat at RoachFest London](/blog/ai-agents-healthcare-roachfest-london-2026/)
+- [Vector Databases on Kubernetes: Qdrant vs Milvus vs pgvector](/blog/vector-database-kubernetes-qdrant-milvus-pgvector-2026/)
+
+<BlogPromoCard />

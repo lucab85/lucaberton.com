@@ -1,0 +1,194 @@
+---
+title: "Dutch Cloud Native & AI: Spegel and Dash0 Meetups 2025"
+seoTitle: "Spegel and OpenTelemetry at Dutch Cloud Native & AI 2025"
+snippet: "Philip Laine on Spegel, the stateless P2P image mirror, then Dash0's December meetup: Kasper Borg Nissen on OpenTelemetry and a Rust Kafka alternative."
+description: "Two Dutch Cloud Native & AI meetups in Amsterdam, autumn 2025: Spegel for node-to-node image sharing, OpenTelemetry and Perses, and Walrus benchmarks."
+publishDate: "2026-10-04"
+lastModified: "2026-10-04"
+image:
+  src: "/blog/thumbnails/dutch-cloud-native-ai-spegel-dash0-2025.jpg"
+  alt: "Audience at the Dutch Cloud Native & AI Community Group meetup facing two screens showing the Spegel title slide"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["Kubernetes", "Cloud Native", "Meetup", "Spegel", "OCI", "containerd", "KServe", "OpenTelemetry", "Perses", "Dash0", "Observability", "Platform Engineering", "Rust", "Kafka", "Amsterdam"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+The **Dutch Cloud Native & AI Community Group** met twice more in Amsterdam at the end of 2025, and I went to both. On Thursday 23 October the main talk was about **Spegel**, a peer-to-peer image mirror for Kubernetes nodes. On Monday 15 December the group met **in collaboration with Dash0**, with a double bill: OpenTelemetry and Perses from Dash0's developer advocate, then a Rust project that set out to beat Kafka on raw write throughput.
+
+These notes are written from the slides I photographed, plus two short phone clips from the October evening. Where I add context from project documentation or my own opinion, I say so.
+
+![Audience in rows of chairs facing two screens that both show the Spegel title slide, Stateless cluster local OCI registry mirror, with the speaker standing to the left](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/spegel-title-room.jpg)
+
+*23 October 2025: Spegel on both screens before the talk.*
+
+## 23 October: the evening and the agenda
+
+The September meetup at ASML in Veldhoven had announced this one for 23 October in Amsterdam at JetBrains (I wrote that evening up in [Dutch Cloud Native at ASML: Kubewarden, Argo CD, GitOps](/blog/dutch-cloud-native-asml-kubewarden-argo-cd-gitops-2025/)). The welcome slide showed the group's name, **Dutch Cloud Native & AI Community Group**, the Meetup logo and [cloudnative.amsterdam](https://cloudnative.amsterdam/).
+
+The agenda on screen was simple:
+
+- 17:30 doors open
+- 18:15 first talk
+- 18:45 pizza
+- 19:45 second talk
+- 20:30 lightning talks and networking
+- 21:30 doors close
+
+Before the talks, the hosts put up a slide for **KubeCon + CloudNativeCon North America 2025** (10–13 November, Atlanta, Georgia) with a registration code for the community.
+
+## Spegel: nodes pulling images from each other
+
+**Philip Laine** presented **Spegel**, subtitled on his title slide "Stateless cluster local OCI registry mirror". His closing slide pointed to [spegel.dev](https://spegel.dev/) and [github.com/spegel-org/spegel](https://github.com/spegel-org/spegel).
+
+### Planting the seed: a cluster at 1 AM
+
+The origin story slide was called **"Planting the Seed"**, and it read like an incident report:
+
+- A presentation about saving a cluster at 1 AM
+- Docker Hub is down
+- Critical pods require images from Docker Hub
+- No ability to scale up
+- Docker export the images from the old node
+- SCP the image to the new node
+
+The diagram showed exactly that: a node, `docker export` to an image tarball, `scp` to a new node. The images the cluster needed were already on disk on the existing nodes. The registry was the only thing missing.
+
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 my-6">
+
+![Slide Planting the Seed: a diagram of a node exporting a Docker image to an image TAR and copying it with SCP to another node, with bullets about Docker Hub being down at 1 AM](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/spegel-planting-the-seed.jpg)
+
+![Slide Image Storage: containerd stores all pulled compressed layers on disk by default, under /var/lib/containerd/io.containerd.content.v1.content/blobs, and Kubernetes garbage-collects them under disk pressure](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/spegel-containerd-image-storage.jpg)
+
+</div>
+
+*Left: the 1 AM incident that started it. Right: where containerd keeps the layers that Spegel serves.*
+
+### How it works
+
+The next slide put it in one line: Spegel **"enables Kubernetes nodes to pull images from each other"**, with a ring of nodes requesting layers by digest from their neighbours and a registry off to the side.
+
+![Philip Laine on stage next to the slide Spegel, showing a ring of Kubernetes nodes requesting image layers from each other and the line Enables Kubernetes nodes to pull images from each other](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/spegel-nodes-pull-images-from-each-other.jpg)
+
+*Philip Laine explaining the peer-to-peer ring.*
+
+In a short clip I recorded during this part, he explained that once an image is inside the cluster, the next node that wants the same image can fetch it from the other node.
+
+The **"Image Storage"** slide explained why no extra storage is needed. containerd keeps every pulled compressed layer on disk by default, under `/var/lib/containerd/io.containerd.content.v1.content/blobs`, where it can be read straight from the file system. In Kubernetes, garbage collection removes them only when disk pressure gets too high.
+
+The [Spegel documentation](https://spegel.dev/docs/overview/) describes the rest of the mechanism. Spegel runs a read-only OCI registry on every host and integrates with containerd to serve images containerd has already pulled and cached. A pull is first redirected to the local Spegel instance. Each instance is a member of a DHT, so it can quickly find which node has the content. If another node has it, the request is forwarded and served from that node's containerd cache. If no node has it, the pull falls back to the upstream registry. The [README](https://github.com/spegel-org/spegel) lists the use cases: caching images from external registries, surviving registry outages, faster pulls and pod start-up, getting around Docker Hub rate limits, less egress traffic, and edge deployments. The project is MIT licensed and was initially developed at Xenit AB.
+
+### Spegel + KServe
+
+The slide I liked most was **"Spegel + KServe"**:
+
+- Package models in OCI artifacts
+- Use OCI volumes to mount models
+- Models are cached by containerd
+- Spegel enables sharing of models
+
+![Slide Spegel + KServe on the side screen: a diagram of KServe and containerd on a node with several Spegel instances, and bullets on packaging models in OCI artifacts, mounting them with OCI volumes, containerd caching and Spegel sharing](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/spegel-kserve-model-sharing.jpg)
+
+*Model weights as OCI artifacts, shared between nodes by Spegel.*
+
+My take: this is the part that matters for AI platforms. Container images are a few hundred megabytes; model weights are tens or hundreds of gigabytes, and every new GPU node pulls them again. Kubernetes [image volumes](https://kubernetes.io/docs/tasks/configure-pod-container/image-volumes/) mount OCI content straight into a pod. The feature arrived in v1.31 and the documentation now lists it as stable since v1.36. Once models are OCI artifacts that containerd caches, a node-local P2P mirror is a cheap way to stop every scale-up from hammering the registry. I cover the wider options, including Harbor and Dragonfly, in [The AI Model Weight Problem](/blog/ai-model-weight-distribution-kubernetes-oci-2026/).
+
+The thank-you slide closed with questions and the Spegel links.
+
+### The next talk: a slide that said "AI"
+
+The agenda listed the second talk only as "Talk 2: Kelsey". My last photos of the evening show the next speaker in front of a slide that said just "AI", and I recorded a short clip of that opening. He joked that in Silicon Valley a few slides like that are enough to raise a funding round, then said that was the end of his AI portion: "This is the first technology wave in my entire career that I've consciously chosen not to serve." His reason was that he can afford to, and that the point of work is getting to choose the work you want to do. I didn't record the rest of the talk.
+
+## 15 December: Dash0 hosts a double-header
+
+The December meetup's welcome slide read "Welcome to the Dutch Cloud Native & AI Community Meet-up, 15th of December 2025, in collaboration with Dash0". The room had sofas and armchairs in place of rows of chairs, a Dash0 lectern and a Dash0 roll-up banner: "Observability, Simplified. AI-Native Observability Platform", with ticks for "Removing Vendor Lock-in", "Simple Pricing Model" and "OpenTelemetry-native".
+
+![Host on stage next to the agenda slide: 30-45 mins Networking Break, Coming up: A double-header of expert insights, with Kasper Borg Nissen, Principal Developer Advocate, and Daksh R, Software Engineer](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/dash0-meetup-double-header-agenda.jpg)
+
+*The agenda slide: two talks with a 30–45 minute networking break.*
+
+The agenda slide promised "a double-header of expert insights":
+
+- **Kasper Borg Nissen**, Principal Developer Advocate: *Breaking Free with Open Standards: OpenTelemetry and Perses for Observability*
+- **Daksh R**, Software Engineer: *Lessons learned creating Walrus (High Performance Kafka alternative written in Rust)*
+
+## Kasper Borg Nissen: breaking free with open standards
+
+Kasper put the conclusion up early. His **tl;dr** slide had four bullets:
+
+- OpenTelemetry is standardising telemetry collection.
+- Perses is standardising dashboarding.
+- Applying platform engineering principles turns observability into a seamless, scalable and developer-friendly experience.
+- Building on open standards lets you move freely between vendors, which keeps them on their toes and gives you the best possible experience.
+
+![Kasper Borg Nissen presenting next to his tl;dr slide: OpenTelemetry is standardizing telemetry collection, Perses is standardizing dashboarding, platform engineering principles, and building on open standards to move between vendors](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/kasper-borg-nissen-tldr-open-standards.jpg)
+
+*The tl;dr came first.*
+
+### The haystack problem
+
+The problem slide was a hand-drawn sketch: tabs for **logs, metrics, traces, RUM and profiling**, "hundreds+ thousands of micro services" feeding into one big **haystack**, and log lines that say `level=DEBUG`, `level=debug` and `LEVEL=DEBUG`. Three spellings of the same attribute is the problem in one picture: without shared conventions, the data can't be correlated.
+
+![Kasper Borg Nissen pointing at a hand-drawn slide with tabs for logs, metrics, traces, RUM and profiling, showing hundreds or thousands of microservices feeding a haystack and three different spellings of level=DEBUG](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/distributed-haystack-logs-metrics-traces.jpg)
+
+*Distributed systems turn telemetry into a haystack.*
+
+### OpenTelemetry in a nutshell
+
+The **"OpenTelemetry in a nutshell"** slide described the project as the "2nd largest CNCF project by contributor count", and as "a set of various things focused on letting you collect telemetry about systems": data models, API specifications, semantic conventions, library implementations in many languages, utilities, "and much more".
+
+![Kasper Borg Nissen next to the slide OpenTelemetry in a nutshell, What it is, listing data models, API specifications, semantic conventions, library implementations in many languages and utilities, beside a Dash0 roll-up banner](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/opentelemetry-in-a-nutshell.jpg)
+
+*"What it is": the OpenTelemetry building blocks.*
+
+That matches the project's own [What is OpenTelemetry?](https://opentelemetry.io/docs/what-is-opentelemetry/) page. It lists a specification, OTLP, semantic conventions, APIs, language SDKs, instrumentation libraries, zero-code instrumentation, the Collector and Kubernetes tooling. It also says plainly that OpenTelemetry "is not an observability backend": storage and visualisation are left to other tools. That gap is where [Perses](https://perses.dev/) comes in. Perses is a CNCF Sandbox dashboard project with an open dashboard specification and dashboards-as-code SDKs in CUE and Go.
+
+### A book, a whitepaper and a demo
+
+Near the end, Kasper held up a copy of **OpenTelemetry For Dummies**. The cover lists him and Ayooluwa Isaiah as authors, and the slide offered a free copy. Dash0 publishes it as a free [Dash0 Special Edition download](https://www.dash0.com/lp/opentelemetry-for-dummies). The next slide pointed to a whitepaper, [Observability for platform engineers](https://platformengineering.org/reports/observability-for-platform-engineers), published by Platform Engineering with Dash0.
+
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 my-6">
+
+![Kasper Borg Nissen holding up a copy of OpenTelemetry For Dummies next to a slide reading New book, Get a free copy, with a QR code and the book cover](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/opentelemetry-for-dummies-free-copy.jpg)
+
+![Kasper Borg Nissen next to a slide titled Whitepaper, Observability for Platform Engineering, with the Platform Engineering and Dash0 logos and the report URL](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/observability-for-platform-engineering-whitepaper.jpg)
+
+</div>
+
+*Left: OpenTelemetry For Dummies. Right: the Observability for Platform Engineering whitepaper.*
+
+The thank-you slide linked the demo, [dash0hq/otel-platform-demo](https://github.com/dash0hq/otel-platform-demo). According to its README, it combines a Backstage developer portal with OpenTelemetry-instrumented microservices on a kind cluster. A Backstage template creates a new service, an OpenTelemetry Operator annotation turns on auto-instrumentation, the Collector hashes a sensitive span attribute (`user.email`), and the same template generates a Perses dashboard for the new service.
+
+My take: that demo is the tl;dr made concrete. The golden path gives you telemetry and a dashboard without anyone writing instrumentation code, and both are built on open standards, so the backend stays replaceable. That is what I want from a platform team. I go through the OpenTelemetry side in [OpenTelemetry on Kubernetes: The 2026 Observability Stack](/blog/opentelemetry-kubernetes-observability-2026/).
+
+## Daksh R: lessons learned creating Walrus
+
+After the networking break, **Daksh R** talked about **Walrus**, billed on the agenda as a "High Performance Kafka alternative written in Rust". The slide I photographed was a benchmark: **Write Throughput Comparison** and **Write Bandwidth Comparison** over about 60 seconds, for Walrus, RocksDB and Kafka.
+
+![Daksh R at the Dash0 lectern next to a slide with two line charts, Write Throughput Comparison and Write Bandwidth Comparison, for Walrus, RocksDB and Kafka over about 60 seconds](/blog/events/dutch-cloud-native-ai-spegel-dash0-2025/walrus-kafka-rocksdb-write-benchmark.jpg)
+
+*Walrus against RocksDB and Kafka on writes per second and MB/s.*
+
+The legend under the charts gave the averages and peaks:
+
+| System | Avg writes/s | Avg MB/s | Max writes/s | Max MB/s |
+|---|---|---|---|---|
+| Walrus | 1,205,762 | 876.22 | 1,593,984 | 1,158.62 |
+| Kafka | 1,112,120 | 808.33 | 1,424,073 | 1,035.74 |
+| RocksDB | 432,821 | 314.53 | 1,000,000 | 726.53 |
+
+These are the same numbers as the "no fsync" table in the [Walrus README](https://github.com/nubskr/walrus), which describes Walrus as a distributed message streaming platform on a log storage engine, with Raft for metadata, segment-based leadership rotation and io_uring on Linux. It's MIT licensed.
+
+My take: read the README's second table too. With fsync on every write, all three land at about 5,000 writes per second (RocksDB 5,222, Walrus 4,980, Kafka 4,921 on average), and the README notes the comparison uses a single Kafka broker with no replication and no network overhead. That doesn't take anything away from the project. It is a reminder that "faster than Kafka" depends on the durability settings, and those are what decide the result in production.
+
+## Related
+
+- [Dash0 OTel Meetup Amsterdam: Weaver, Packaging, Go](/blog/opentelemetry-meetup-dash0-amsterdam-weaver-packaging-2026/)
+- [Dash0 at KubeCon EU 2026: Observability Without Lock-In](/blog/dash0-kubecon-eu-2026-observability-opentelemetry/)
+- [Dutch Cloud Native at ASML: Kubewarden, Argo CD, GitOps](/blog/dutch-cloud-native-asml-kubewarden-argo-cd-gitops-2025/)
+- [The AI Model Weight Problem](/blog/ai-model-weight-distribution-kubernetes-oci-2026/)
+- [Harbor: Enterprise Container Registry on Kubernetes](/blog/harbor-container-registry-kubernetes-setup-2026/)
+
+<BlogPromoCard />

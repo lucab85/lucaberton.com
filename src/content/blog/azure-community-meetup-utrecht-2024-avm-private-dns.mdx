@@ -1,0 +1,110 @@
+---
+title: "Azure Meetup Utrecht 2024: Verified Modules and Private DNS"
+seoTitle: "Azure Platform Engineering Utrecht: AVM and Private DNS"
+snippet: "Rabobank's Azure platform team on Template Specs, Azure Verified Modules and template tests, then Mark Scholman (CA8) on Private DNS in landing zones."
+description: "Azure Platform Engineering meetup in Utrecht: Template Specs, Azure Verified Modules, template testing, and private DNS in hub-spoke and Virtual WAN."
+publishDate: "2026-10-04"
+lastModified: "2026-10-04"
+image:
+  src: "/blog/thumbnails/azure-community-meetup-utrecht-2024-avm-private-dns.jpg"
+  alt: "A full meeting room at the Azure Platform Engineering meetup in Utrecht, with a Challenges slide on the screen"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["Azure", "Platform Engineering", "Bicep", "Azure Verified Modules", "Template Specs", "Private DNS", "Azure Landing Zones", "Utrecht", "Meetup"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+On Tuesday 3 September 2024 I went to Utrecht for an evening of the **Azure Platform Engineering** meetup. The roll-up banner next to the screen listed the topics the group covers: Azure infrastructure, automation, security, Kubernetes, networking and Azure Arc. Both talks that night were about the same problem from two sides. How does a central platform team give hundreds of application teams something safe to deploy, and how do you keep name resolution working once everything sits behind private endpoints?
+
+This is a throwback post, written from the slides I photographed. I've linked the Microsoft documentation for each building block so you can check the details yourself.
+
+![A full meeting room in Utrecht during the Rabobank talk, with a Guidance on Azure slide on the screen and the Azure Platform Engineering banner on the left](/blog/events/azure-community-meetup-utrecht-2024-avm-private-dns/room-guidance-on-azure.jpg)
+
+*A full room for the first talk. The slide asks the questions behind the whole talk: a compliant Azure service for teams to deploy, what about multiple resources, and can the cognitive load be less?*
+
+## Talk 1: standard templates for a bank-sized Azure estate
+
+The first talk came from two Azure platform engineers at Rabobank, and every slide carried the Rabobank logo. Their opening numbers set the scale: **3 teams with 8 platform engineers** in total, there to enable Azure within Rabobank, looking after **1,208 subscriptions for development workloads** and **1,002 subscriptions for production workloads**.
+
+![A Rabobank platform engineer presenting a slide titled What are we doing as Platform Engineers, with 3 teams, 8 platform engineers and the subscription counts](/blog/events/azure-community-meetup-utrecht-2024-avm-private-dns/platform-engineers-rabobank.jpg)
+
+*"What are we doing as Platform Engineers?": eight engineers and more than 2,200 subscriptions.*
+
+With that ratio you can't review every team's infrastructure code by hand. The problem slide showed a list of near-identical Bicep files, all variations on a storage account module: one for a function app, one for a web app, one for blob storage, and so on. Every team had written its own. The talk's answer was **"A new approach: standardised templates!"**, split into two tracks named in the slide header: **Distribution** and **Quality Templates**.
+
+### Distribution with Template Specs
+
+For distribution they use [Azure Template Specs](https://learn.microsoft.com/en-us/azure/azure-resource-manager/templates/template-specs). A template spec is an Azure resource that stores an ARM template, with versions, so you share it through Azure RBAC instead of a Git repo or a storage account with SAS tokens. Users only need read access to deploy it, so they can't change it. The slides showed an `action-group` template spec in the portal with a version number and two tags, a template commit ID and a commit date, which tie each published version back to its source commit.
+
+Application teams then consume a spec straight from Bicep. The slide's example was a `module` that points at a `ts:` reference ending in `building-blocks-v1/sql-server:1.0.0`. The [Bicep template spec docs](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/template-specs) describe the same pattern: link to a template spec from a module, and it deploys together with the Bicep file.
+
+### Quality with Azure Verified Modules
+
+For the content of the templates they pointed to **Azure Verified Modules (AVM)**. The slide described AVM as an initiative to consolidate and set the standards for what a good infrastructure-as-code module looks like, across languages (Bicep, Terraform and others), published through each language's registry, and "an official, Microsoft driven initiative". The circular diagram showed the module lifecycle as static validation, deployment validation and publish.
+
+![The AVM Value Proposition slide from the Rabobank talk, with the two speakers on either side of the screen](/blog/events/azure-community-meetup-utrecht-2024-avm-private-dns/azure-verified-modules.jpg)
+
+*The AVM slide, under the "Quality Templates" tab.*
+
+Microsoft Learn has a [community page on Azure Verified Modules](https://learn.microsoft.com/en-us/community/content/azure-verified-modules) that explains the resource and pattern module classifications, and the project itself lives at [azure.github.io/Azure-Verified-Modules](https://azure.github.io/Azure-Verified-Modules/).
+
+### "It's Azure, is everything still working?"
+
+The slide I liked most was about testing. Azure changes underneath you, so a template that deployed fine last month can fail today. Their flow: every **managed template** has **one or more tests** that check two things, *does the deployment work?* and *is it compliant with policies?* The tests run **three times a week**. On a pass, nothing happens. On a fail, a **work item is created** so someone verifies the cause.
+
+![A slide titled It's Azure, is everything still working? showing managed templates, tests run three times a week, and a work item created on failure](/blog/events/azure-community-meetup-utrecht-2024-avm-private-dns/template-tests.jpg)
+
+*Scheduled tests for every managed template, with a work item on failure.*
+
+They also showed that they measure usage. A dashboard slide, "What is the data used for?", listed **2.879K total template spec runs**, **22 templates used**, **37 projects** and **37 subscriptions** using managed templates, and a usage chart by month through 2024 that climbed sharply over the summer.
+
+The closing slides were honest about the hard parts. **Challenges:** the balance between freedom and standardisation, not every resource type has an AVM module, a shift in the way of working (from example to product), and getting existing users to move.
+
+**My take:** the testing loop is what makes this a platform rather than a template library. A template catalogue that nobody re-validates slowly breaks as the provider APIs and the policy set move on. Running the deployments on a schedule and turning failures into work items gives the platform team the same feedback a product team gets from production.
+
+## Talk 2: Mark Scholman on private DNS in landing zones
+
+The second talk was by **Mark Scholman** (Co-founder and Director of CA8 and a Microsoft Azure MVP, according to his agenda slide) titled **"Private DNS resolution in your Azure environment."**
+
+He opened with the question he hears from customers: **"How does registration work for PaaS services when we use ALZ?"** ALZ is Azure Landing Zones. His agenda went from private DNS for PaaS services, through the enterprise-scale hub-and-spoke and Virtual WAN (VWAN/VHUB) models, to private DNS resolution for IaaS and PaaS, and finally the Private DNS Resolver with DNS rulesets.
+
+### Start with a simple example
+
+His "simple example" was a normal AKS workload. AKS needs to pull an image from Azure Container Registry, a pod starts with a connection string to an Azure SQL database, and that connection string comes from Key Vault. That's three PaaS services, and with private endpoints each one needs a private DNS record that the cluster can resolve.
+
+He also had a slide on the scope of **168.63.129.16**, the virtual IP that Azure uses for platform services. Microsoft's [page on 168.63.129.16](https://learn.microsoft.com/en-us/azure/virtual-network/what-is-ip-address-168-63-129-16) lists the same five functions: the VM Agent's "Ready" signal, the DNS virtual server for resources without a custom DNS server, Load Balancer health probes, DHCP, and Guest Agent heartbeats for PaaS roles.
+
+### Hub-and-spoke versus Virtual WAN
+
+In the traditional hub-and-spoke model, his slide said, **private DNS is moved to the network hub, and registration is done in the zone in the network hub subscription.** The diagram showed the spoke with application gateway, AKS and private endpoint subnets, and the hub with the firewall, VPN gateway and ExpressRoute gateway subnets and the private DNS zones.
+
+The Virtual WAN version had more steps. One slide showed private DNS linked to the spoke networks. The next showed private DNS **centrally managed and routed via the Firewall DNS Proxy**. The last architecture slide added the **Azure DNS Private Resolver with a forwarding ruleset**. Microsoft's [DNS Private Resolver overview](https://learn.microsoft.com/en-us/azure/dns/dns-private-resolver-overview) explains the parts: inbound endpoints that on-premises DNS can forward to, outbound endpoints for conditional forwarding out of Azure, and forwarding rulesets linked to virtual networks.
+
+He then showed the configuration live in the Azure portal. I've left out photos of this talk: the portal shots show real resource names, and the deck used a company-confidential template.
+
+The policy side matches the Cloud Adoption Framework article [Private Link and DNS integration at scale](https://learn.microsoft.com/en-us/azure/cloud-adoption-framework/ready/azure-best-practices/private-link-and-dns-integration-at-scale). There, a `DeployIfNotExists` policy watches for new private endpoints and creates a `privateDnsZoneGroup` that registers the record in the central zone. Application teams then never need write access to the DNS zones in the connectivity subscription.
+
+### Common mistakes
+
+He closed with three mistakes he sees often:
+
+- A new private DNS zone is created and linked to a VNet, but that VNet has custom DNS servers configured, so name resolution doesn't work.
+- Several private DNS zones with the same name are created and linked to different VNets, and registration eventually becomes a mess.
+- Someone tries to create and link a private DNS zone that already exists to a VNet.
+
+**My take:** the second mistake is the easiest one to fall into, because the portal offers to "integrate with private DNS zone" every time someone creates a private endpoint. In a landing zone, the platform team should own the `privatelink.*` zones, and policy should do the registration. That's the same ownership split as the template catalogue in the first talk: the platform makes the right path the easy one.
+
+## Two talks, one theme
+
+Both speakers were describing a platform team's contract with the rest of the organisation. Rabobank's team publishes versioned, tested templates so that teams don't each write their own storage module. Mark's DNS design centralises zones and lets policy register records so that teams don't each create their own `privatelink` zone. Either way, it works only if the central option is easier than the local workaround.
+
+## Related
+
+- [Platform Engineering Amsterdam Meetups, Autumn 2025](/blog/platform-engineering-amsterdam-meetups-2025/)
+- [Terraform Azure Tutorial: Build Production](/blog/terraform-azure-infrastructure-tutorial/)
+- [Entra ID Access Packages and PIM for Least-Privilege Azure](/blog/entra-id-access-packages-pim-least-privilege-azure/)
+- [Platform Engineering Team Topologies That Actually Ship](/blog/platform-engineering-team-topology/)
+
+<BlogPromoCard />

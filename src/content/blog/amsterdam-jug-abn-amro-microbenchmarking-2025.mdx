@@ -1,0 +1,177 @@
+---
+title: "Amsterdam JUG at ABN AMRO: JMH and Microbenchmarks"
+seoTitle: "Amsterdam JUG 2025 at ABN AMRO: Java Microbenchmarks, JMH"
+snippet: "Pet projects, ABN AMRO's open source secret scanner RESC, and François Martin proving which HTML unescape library is fastest with JMH. Plus Arch9 by day."
+description: "Amsterdam JUG at ABN AMRO, November 2025: pet projects and RESC, then JMH microbenchmarks of four Java HTML-unescape libraries. Plus Levi9's Arch9 day."
+publishDate: "2026-10-04"
+lastModified: "2026-10-04"
+image:
+  src: "/blog/thumbnails/amsterdam-jug-abn-amro-microbenchmarking-2025.jpg"
+  alt: "Audience at the Amsterdam JUG meetup at ABN AMRO facing the title slide My code is faster than yours, let me prove it to you, by François Martin"
+category: "DevOps"
+author: "Luca Berton"
+tags: ["Java", "JMH", "Microbenchmarking", "Performance", "Amsterdam JUG", "ABN AMRO", "Open Source", "Secret Scanning", "Gitleaks", "Levi9", "Arch9", "AI-SDLC", "Innovation", "Meetup", "Amsterdam"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Tuesday 4 November 2025 was a two-event day. During the day I was at **Arch9**, Levi9's architecture event, at Hotel Arena in Amsterdam. In the evening I went to the **Amsterdam JUG** at **ABN AMRO**, where the main talk was **François Martin**'s *"My code is faster than yours… let me prove it to you!"*: a step-by-step guide to settling a performance argument with JMH instead of opinions.
+
+This post covers the evening first, because it had the most to take home, and the day after it. As always, it's written from the slides I photographed, plus my own recordings of parts of the Arch9 day. Where I add documentation or my own view, I say so.
+
+![Audience in a full room at ABN AMRO facing the Amsterdam JUG title slide My code is faster than yours… let me prove it to you!, François Martin, with the Karakun logo](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/amsterdam-jug-francois-martin-title-room.jpg)
+
+*The Amsterdam JUG at ABN AMRO, just before the microbenchmarking talk.*
+
+## The power of open source: pet projects
+
+The evening opened with an ABN AMRO talk: **"The Power of Open-Source: How pet projects help your daily work"**, by **Benoit Viguier**, dated November 4th, 2025 on the title slide.
+
+![ABN AMRO title slide The Power of Open-Source, How pet projects help your daily work, Benoit Viguier, November 4th 2025, in a full meeting room](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/power-of-open-source-pet-projects-title.jpg)
+
+*The opening talk on pet projects.*
+
+I only caught a few of the slides in that slot. At one point the screen showed a recording of Adam Wathan's *Tailwind CSS Best Practice Patterns* from Laracon US 2019. Then came two ABN AMRO examples. The first was an architecture diagram in which ServiceNow, REST API users and Azure Pipeline users all talk to an **Azure Cloud RA**, which in turn talks to the **certificate authority**. One front door for certificate requests, whatever the client.
+
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 my-6">
+
+![ABN AMRO architecture slide with ServiceNow, REST API users and Azure Pipeline users connected to an Azure Cloud RA, which connects to a certificate authority, with the presenter below](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/abn-amro-azure-cloud-ra-certificate-authority.jpg)
+
+![Slide showing the GitHub README of Repository Scanner (RESC) by ABN AMRO, with its table of contents and the Repository Scanner logo](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/abn-amro-repository-scanner-resc.jpg)
+
+</div>
+
+*Left: certificate requests through one Azure Cloud RA. Right: the Repository Scanner (RESC) README.*
+
+The second was the **Repository Scanner (RESC)**, shown as its GitHub README. The [repository](https://github.com/abnamro/repository-scanner) describes RESC as a tool to detect secrets (credentials, passwords, tokens, API keys and certificates) in source code management systems such as GitHub, Bitbucket and Azure DevOps. It runs on Kubernetes: a scraper collects projects and repositories from the VCS providers, a scanner worker runs **Gitleaks** on each repository, and a FastAPI backend with RabbitMQ and a Vue frontend handle findings, rules and analytics. It is MIT licensed.
+
+One update since the meetup: the README now carries a notice that ABN AMRO has paused active maintenance, citing evolving security requirements, stricter regulatory expectations and software supply-chain risk management. My take: that is a useful data point for anyone adopting a company-sponsored open source tool. Check who maintains it and why before you build a process around it. The scanning engine underneath, Gitleaks, carries on independently, and secret scanning belongs in the pipeline either way (I show a setup in my [DevSecOps pipeline tutorial](/blog/devsecops-pipeline-tutorial-2026/)).
+
+## My code is faster than yours… let me prove it
+
+The main talk, by **François Martin** (Karakun on the slides), started with a familiar code review argument. The slide **"Performance of Regular Expressions"** showed a method called `removeIllegalCharacters(String text, String replace)` built from two `replaceAll` calls: one regex for control characters and characters like `/ \ : * ? " < > |`, one for leading and trailing whitespace. It turns `"\tproject\\name:final<version>\u007F "` into `"-project-name-final-version---"`. A later slide showed the same logic written by hand as a loop over the characters.
+
+So which version is faster? Both sides of that argument usually guess.
+
+![Slide Performance of Regular Expressions, showing a Java method removeIllegalCharacters with two replaceAll calls, an example input and the expected output, with François Martin below](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/performance-of-regular-expressions.jpg)
+
+*The question that starts every performance argument.*
+
+### Microbenchmarking and JMH
+
+The definition slide quoted the HPC Wiki: "Microbenchmarking is about measuring the time or performance of small to very small building blocks of real programs. This can be a common data access pattern, a sequence of operations or even a single instruction." For Java and other JVM languages, the state-of-the-art tool is **JMH**, the Java Microbenchmark Harness. Plenty of hands were up in the room while that slide was on screen.
+
+![François Martin in front of the Microbenchmarking slide with the HPC Wiki definition and JMH as the state-of-the-art tool for Java, while several people in the audience raise their hands](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/microbenchmarking-jmh-show-of-hands.jpg)
+
+*Hands up at the microbenchmarking slide.*
+
+JavaScript got a slide too: [jsbenchmark.com](https://jsbenchmark.com/), [perf.link](https://perf.link/) and Benchmark.js, described as "from 2016 and unmaintained, but still working well".
+
+[JMH](https://openjdk.org/projects/code-tools/jmh/) is part of OpenJDK's code tools and describes itself as "a Java harness for building, running, and analysing nano/micro/milli/macro benchmarks". The [README](https://github.com/openjdk/jmh) recommends a standalone Maven project generated from the `jmh-java-benchmark-archetype`, and advises against running benchmarks from the IDE because the environment is uncontrolled.
+
+### Step 2: what to compare, and how
+
+The worked example was decoding HTML entities. **"Step 2 – What to compare?"** listed four libraries:
+
+- **Apache Commons Text**: `StringEscapeUtils.unescapeHtml4(htmlEncodedString)`
+- **jsoup**: `Jsoup.parse(htmlEncodedString).text()`
+- **unbescape**: `HtmlEscape.unescapeHtml(htmlEncodedString)`
+- **Spring Web**: `htmlUnescape(htmlEncodedString)`
+
+![Slide Step 2 – What to compare? listing Apache Commons Text, jsoup, unbescape and Spring Web methods for decoding HTML-encoded strings](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/step-2-what-to-compare-html-unescape.jpg)
+
+*Four ways to decode HTML entities in Java.*
+
+The next two slides were the part that makes or breaks a microbenchmark. **"Adding benchmarks"** showed that when a benchmark needs to "return multiple results", you pass each one to a `Blackhole` with `bh.consume(...)` rather than throwing it away. **"Benchmarking with State"** moved the input strings into a `@State(Scope.Thread)` class, so the benchmark method gets them as a parameter.
+
+![Slide Step 2 – Benchmarking with State: a ThreadState class annotated @State(Scope.Thread) holding HTML-encoded strings, and a @Benchmark method that consumes StringEscapeUtils.unescapeHtml4 results into a Blackhole](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/step-2-benchmarking-with-state-blackhole.jpg)
+
+*@State for the inputs, a Blackhole for the outputs.*
+
+Both are there for a reason. If the JIT can see that a result is never used, it can remove the work and you end up benchmarking nothing. JMH's own samples cover exactly this in `JMHSample_08_DeadCode` and `JMHSample_09_Blackholes`, and the `@State` samples (`JMHSample_03_States` onwards) show how to keep inputs out of constant folding.
+
+### Step 5: the results
+
+I didn't photograph steps 3 and 4. **"Step 5 – Interpretation of Results"** was a bar chart, "Performance Comparison of Library Functions for HTML Entity Decoding", in ns/op (lower is better):
+
+| Library | Score (ns/op) |
+|---|---|
+| jsoup | 246,421.45 |
+| Apache Commons Text | 212,347.61 |
+| unbescape | 19,406.92 |
+| Spring | 9,101.92 |
+
+![Slide Step 5 – Interpretation of Results: horizontal bar chart of HTML entity decoding scores in ns/op, with jsoup at 246421.45, Apache Commons Text at 212347.61, unbescape at 19406.92 and Spring at 9101.92](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/step-5-interpretation-of-results.jpg)
+
+*Spring's htmlUnescape was more than 25 times faster than jsoup in this benchmark.*
+
+My take: the spread is the lesson. In the same JVM with the same input, the slowest option was about 27 times slower than the fastest. jsoup is not a bad library; `Jsoup.parse(...).text()` builds a whole document model to get at the text, which is a different job from unescaping a string. That is what a benchmark tells you that a code review can't. For the regex question from the first slide, start with the cheap fix: `String.replaceAll` compiles its pattern on every call (the Javadoc defines it as `Pattern.compile(regex).matcher(str).replaceAll(repl)`), so a precompiled `static final Pattern` is the first thing to measure. And measure it with JMH, from a Maven project, not with `System.nanoTime()` around a loop in a unit test.
+
+## By day: Arch9 at Hotel Arena
+
+Earlier that day I was at **Arch9**, the architecture event run by Levi9. The plenary sessions were in the main hall under a big "9", with ARCH9 columns on the stage and a "Welcome to Arch9" slide. Levi9's timeline banners lined the walls, including "2022: Our new Tech Campus opens in Belgrade" and "2023: Levi9 turns 18!".
+
+![The Arch9 main hall: a long room with arches, purple lighting and a large 9 above the stage, with ARCH9 columns and a Welcome to Arch9 slide](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/arch9-welcome-main-hall.jpg)
+
+*The main hall at Arch9.*
+
+A Levi9 speaker opened the day (I have the audio but not the name). They said a year had flown by since the last edition, and that the mission set then was technology that matters not only to customers but to their end customers and to society. Several customers on the agenda were presenting innovation they had built together with Levi9.
+
+### The AI-SDLC plenary: adoption versus absorption
+
+The morning plenary was a two-person talk about bringing AI into the software development life cycle, and it ended with a Q&A slide for an **AI-SDLC Workshop**. I recorded the second half. The speakers' names weren't on any slide I captured, so I'll leave them out.
+
+Their main point was that tools are only part of the change. The biggest change is the people. They compared AI to a katana: the best sword there is, but if you swing it with the technique you learned on a heavy two-handed sword, you get none of the benefit. People have to experiment and adapt their technique. They were also frank about the limits. AI still lacks a deep understanding of the whole project and its interfaces, and "quite often the suggestions are quite rubbishy", so you have to check everything against your own experience.
+
+Their recipe for spreading it across an organisation had four steps:
+
+1. **Set the goal.** Use a maturity model to assess where you are and where you want to go. Projects without clear goals are the ones that fail.
+2. **Write an AI policy.** Decide which tools are allowed, from a security, privacy, IP and infrastructure point of view, and who may use what.
+3. **Create excitement.** Tools change quickly, and someone who tried one once and found it useless should try again a few months later. They ran hackathons, including with customers, and gave weekly updates to keep the spark going.
+4. **Scale and measure.** Set up an AI metrics framework. Lines of code generated or accepted mean little on their own, so combine them with code quality and the project metrics you already have.
+
+The results they shared were candid. About 80% of their people now use AI actively, meaning at least a couple of times a week, which took a lot of training and enthusiasm-building after the first licences went unused. They weren't satisfied with that, and that was the difference they drew between *adoption* and *absorption*. Productivity gains varied from project to project, and on some they were zero, almost always because the team wasn't willing to experiment. The surprise was that the biggest gains came from legacy projects, not greenfield ones: when fixing a bug in a huge codebase nobody fully understands used to mean two days of searching before writing one line, an assistant with the whole context saves real time.
+
+They closed with two takeaways. First, be open-minded: some of their most proficient developers, who let AI write almost all their code, complain that they've turned into reviewers and want to be creative again, so the developer role is changing whether we like it or not. Second, leave emotions aside: collect data, measure and improve, knowing the target keeps moving. After more than two years of experimenting, they said, they see value in every phase of the SDLC. Each seat had a voucher for help implementing an AI-SDLC with Levi9's experts.
+
+My take: the legacy-code result matches what I see. The context window is most valuable where human context is most expensive to rebuild. And "adoption versus absorption" is a good way to explain why licence counts are a poor success metric for platform and developer-experience teams too.
+
+### ai.io and aiScout
+
+In a breakout room, the **ai.io** team told the story of their sports platform. "The Expansion: Beyond football and primary markets" listed multi-language, right-to-left and multi-sport support. "The Evolution: Platform as a Product" said customers can run their own platform for talent discovery, performance analysis and athlete development, with infrastructure as code for "fast and automated one-click deployments" and config-driven mobile apps built with Fastlane. A "Crawl, Walk, Run" slide mapped generative AI adoption from free GenAI tools to an enterprise LLM platform, next to a data transformation path.
+
+![ai.io speaker presenting the slide The Evolution, Platform as a Product: run your own platform for talent discovery, performance analysis and athlete development, infrastructure as code and config-driven mobile apps with Fastlane](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/arch9-ai-io-platform-as-a-product.jpg)
+
+*ai.io: from one product to a platform customers run themselves.*
+
+The product at the centre was the **aiScout** app, and my recordings from the start of the session cover the demo. (Whisper decided the English talk was Welsh, so I'm working from a rough translation and keeping to the main points.) A player films a set of drills on a phone. Computer vision tracks points on the body in every video frame, around a thousand data points per frame according to the speaker, and turns them into measurements such as acceleration, deceleration and joint angles to understand the athlete's biomechanics. The drills measure what scouts care about, such as speed, agility, power and change of direction, and each one is scored from 1 to 5. The aim was to democratise trials: you don't need a perfect pitch and a tripod. A parent or a friend holding the phone is enough. Clubs can publish their own trials for specific age groups or positions, with athletic and technical drills designed together with the club. The results go two ways: back to the player with feedback on how to improve, and to the club's scouts, who can search for players across the whole pool.
+
+A case-study slide made it concrete: a player who had never been scouted was, at 17, the first ever analysed and identified by a club through the aiScout app. Chelsea FC trialled him after noticing his scores, and he went on to sign for AFC Bournemouth and play for the Republic of Ireland.
+
+### Building an innovation engine
+
+The afternoon talk I followed most closely was **"Building an Innovation Engine"** by **Chris Heemskerk**, Founder & CEO of The Innovation Alliance according to his title slide. His **Innovation Scorecard** scores four areas, spelling CODE: **Culture** (psychological safety, capability building, rapid experimentation, time and space), **Organization** (paths to yes, funding, innovation lab, portfolio management), **External dimensions** (customer interviews, co-creation, emergent trends, partners) and **Effectiveness** (patents, velocity, market share, R&D-to-sales conversion).
+
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 my-6">
+
+![Speaker on the Arch9 stage next to the slide 3 Horizons of Innovation: core, adjacent and transformational innovation, with a magic formula of 70 percent core, 20 percent adjacent and 10 percent transformational](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/arch9-3-horizons-of-innovation.jpg)
+
+![Speaker on the Arch9 stage next to the slide The Lean Startup: MVP (Minimum viable product), a bell-curve meme where both ends say launch quickly, then iterate](/blog/events/amsterdam-jug-abn-amro-microbenchmarking-2025/arch9-lean-startup-mvp.jpg)
+
+</div>
+
+*Left: the 70/20/10 split across three horizons. Right: the Lean Startup's MVP, as a meme.*
+
+The **"3 Horizons of Innovation"** slide split the work into **core** (optimising existing products for existing customers), **adjacent** (expanding into business that is "new to the company") and **transformational** (developing breakthroughs for markets that don't yet exist). The "magic formula" was **70% / 20% / 10%**, credited on the slide to Deloitte & McKinsey, 2016. Later slides quoted Edgar Schein ("the way we do things around here") and Geert Hofstede ("a collective programming of the mind") on culture, and named idea-management tools such as IdeaScale, Brightidea and Qmarkets. The Lean Startup slide used a bell-curve meme: both ends say "launch quickly, then iterate", and the middle wants to do a survey, raise money, build a team and spec the perfect product first.
+
+My take: the platform version of 70/20/10 is a roadmap where most of the effort keeps the golden paths healthy, a slice extends them to new teams, and a small, protected slice is allowed to fail. ai.io's "platform as a product" story is the same idea from the vendor side. I wrote about the adoption side in [Golden Paths](/blog/golden-paths-cicd-templates-adoption/).
+
+## Related
+
+- [I Lost a Day to @Retryable — Amsterdam JUG at Doctolib](/blog/amsterdam-jug-doctolib-retryable-spring-aop-2026/)
+- [Amsterdam JUG at IKEA: Virtual Threads, ECC and Testing](/blog/amsterdam-java-user-group-ikea-meetup-2026/)
+- [Red Hat Summit Connect Utrecht 2024: AI, Ansible, OpenShift](/blog/red-hat-summit-connect-utrecht-2024/)
+- [DevSecOps Pipeline Tutorial: Shift Left](/blog/devsecops-pipeline-tutorial-2026/)
+
+<BlogPromoCard />

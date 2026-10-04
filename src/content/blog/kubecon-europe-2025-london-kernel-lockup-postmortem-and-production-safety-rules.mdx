@@ -1,0 +1,118 @@
+---
+title: "KubeCon London 2025: Kernel Lockup and Safety Rules"
+seoTitle: "Kernel Lockup Postmortem and Safety Rules: KubeCon 2025"
+snippet: "Day two of KubeCon London 2025: keynote slides on CNCF at ten years, and a Fastly talk with a kernel lockup postmortem and five production safety rules."
+description: "Slides from 2 April 2025 at ExCeL London: a shrinker_rwsem kernel lockup postmortem, the 1-2-24 blast radius rule and four more production safety rules."
+publishDate: "2026-10-05"
+lastModified: "2026-10-05"
+image:
+  src: "/blog/thumbnails/kubecon-europe-2025-london-kernel-lockup-postmortem-and-production-safety-rules.jpg"
+  alt: "Slide titled Production safety rules listing five rules including the 1-2-24 blast radius rule"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["KubeCon", "CloudNativeCon", "Platform Engineering", "SRE", "Postmortem", "Blast Radius", "Linux Kernel", "CNCF", "London"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Wednesday 2 April 2025 was the first main-conference day of KubeCon + CloudNativeCon Europe at ExCeL London. This post follows my photos from that day in two parts: a few keynote slides I thought were worth keeping, and one breakout talk from Fastly that was mostly a postmortem and a set of rules for changing production safely. The other days are linked from the [KubeCon Europe 2025 hub post](/blog/kubecon-europe-2025/).
+
+## Keynote slides
+
+The keynote hall was one very wide screen with the London skyline artwork in the middle and a slide on each side. I did not note speaker names for the keynote slides, so I describe the content only.
+
+The first slides were about the CNCF turning ten. Under "Cloud Native Today: A Global Community", one slide says that over the past ten years 275,000+ contributors made 3,350,000+ code commits, 1,200,000+ pull requests and 18,800,000+ contributions, across 200+ projects and 190+ countries. A footnote says Kubernetes trails Linux, which is 33 years old, as the highest velocity project, and points to the CNCF velocity data.
+
+![Keynote slide Cloud Native Today: A Global Community, with figures on contributors, code commits, pull requests and countries over ten years](/blog/events/kubecon-europe-2025-london-kernel-lockup-postmortem-and-production-safety-rules/keynote-community-stats.jpg)
+
+*Ten years of CNCF in numbers, from the keynote.*
+
+A later slide used the Linux kernel as a comparison. "Linux Developer Community" gives 76,496 changes accepted, 8.7 changes per hour, 40 changes per day in stable trees, 13 CVEs assigned per day, and a new release every 8 to 9 weeks. The slide is marked 2024.
+
+![Keynote slide Linux Developer Community with figures for accepted changes, changes per hour, CVEs per day and release cadence](/blog/events/kubecon-europe-2025-london-kernel-lockup-postmortem-and-production-safety-rules/linux-dev-stats.jpg)
+
+*Linux kernel development in 2024, as shown in the keynote.*
+
+Three more slides were relevant to my work:
+
+- **Platform engineering certification.** The slide "What's New in #PlatformEngineering Education" says the Cloud Native Platform Engineering Associate (CNPA) is available for purchase and that development of the Cloud Native Platform Engineer (CNPE) certification kicks off soon. All attendees got 40% off Cloud Native training, certifications and bundles. The [CNPA page at the Linux Foundation](https://training.linuxfoundation.org/certification/certified-cloud-native-platform-engineering-associate-cnpa/) describes the exam.
+- **Sovereign cloud.** A slide announced NeoNephos, with the mission "Build a sovereign cloud-edge continuum for Europe." and member logos including SAP, T-Systems and STACKIT. The [NeoNephos website](https://neonephos.org/) describes it as a project of Linux Foundation Europe, funded by the European Union.
+- **LLM evaluations.** A slide titled "Evaluations: foundations for quality" separates evals (defined inputs plus a scoring function with pass/fail criteria, a countable number of evals, predictable inputs) from observability (always-on capture of live use, unpredictable inputs). Both evolve with your code. The closing slide of that talk pointed to honeycomb.io.
+
+![Keynote slide about the CNCF Cloud Native Platform Engineering Associate and Engineer certifications with a 40 percent discount for attendees](/blog/events/kubecon-europe-2025-london-kernel-lockup-postmortem-and-production-safety-rules/cnpa-certification.jpg)
+
+*CNPA is available; CNPE is in development.*
+
+![Keynote slide for NeoNephos, a Linux Foundation Europe initiative to build a sovereign cloud-edge continuum for Europe, with a map and member logos](/blog/events/kubecon-europe-2025-london-kernel-lockup-postmortem-and-production-safety-rules/neonephos.jpg)
+
+*The NeoNephos announcement slide.*
+
+![Keynote slide Evaluations: foundations for quality comparing evals and observability for LLM applications](/blog/events/kubecon-europe-2025-london-kernel-lockup-postmortem-and-production-safety-rules/llm-evals.jpg)
+
+*Evals and observability side by side.*
+
+## Lessons from architecting the highest-scale operational systems
+
+The breakout talk was "Lessons Learned From Architecting the Highest-scale Operational Systems in the World" by Artur Bergman, Founder and CTO of Fastly, in the Platform Engineering track on [the official schedule](https://kccnceu2025.sched.com/event/1tx9q/) (11:15 to 11:45 BST). The title slide shows his name and role. The schedule description says the session covers lessons from testing the limits of vendor systems and guidance on when to build versus buy.
+
+![Title slide from Fastly with the talk title Lessons Learned from Architecting the Highest scale Operational Systems in the World and the speaker Artur Bergman, Founder and Chief Technology Officer](/blog/events/kubecon-europe-2025-london-kernel-lockup-postmortem-and-production-safety-rules/fastly-title.jpg)
+
+*The opening slide of the Fastly talk.*
+
+One slide collected quotes from open source infrastructure teams who rely on Fastly. A director of infrastructure at the Python Software Foundation said Fastly "single handedly made it possible" for them to provide their quality of service. A director of technology at the Rust Foundation said it is hard to overstate how valuable Fastly has been. The Kubernetes infra SIG co-chair and technical lead quoted on the slide said they were confident Fastly would help maintain the sustainability of Kubernetes without scalability worries.
+
+![Slide with three quotes from the Python Software Foundation, the Rust Foundation and the Kubernetes infrastructure SIG about Fastly's support](/blog/events/kubecon-europe-2025-london-kernel-lockup-postmortem-and-production-safety-rules/foundation-quotes.jpg)
+
+*Quotes from three open source foundations on the slide.*
+
+### A kernel lockup postmortem
+
+The part I found most useful was an incident write-up shown as plain text. It describes the primary issue as a race condition between a kernel thread managing the shrinker_rwsem (a semaphore used for memory management in the kernel) and other processes reading cgroup information from /proc. The race could lead to a deadlock in which the kernel thread got stuck and the machine locked up.
+
+The slide then lists three contributing factors:
+
+1. **A kernel bug.** The kernel version on the affected nodes had a bug in the shrinker_rwsem implementation that made the race more likely.
+2. **Duplicate systemd timers.** A bug in a configuration management cookbook deployed duplicate timers. They spawned processes that read cgroup information heavily, which increased the number of readers competing for the semaphore and made the race worse.
+3. **A shared memory leak.** A change in one service increased shared memory usage on the nodes. It did not cause the lockups directly but probably added memory pressure and made the shrinker more active.
+
+![Slide with a postmortem summary: a race condition on shrinker_rwsem with cgroup readers in /proc, plus three contributing factors](/blog/events/kubecon-europe-2025-london-kernel-lockup-postmortem-and-production-safety-rules/shrinker-rwsem.jpg)
+
+*The postmortem slide: one race condition and three contributing factors.*
+
+My take: this is the useful shape for a postmortem. A single root cause is rare. Usually one latent bug, one configuration mistake and one unrelated change line up, and fixing only the obvious one leaves the others to cause the next incident.
+
+### Production safety rules
+
+The next slide, "Production safety rules", is the one I would copy into an engineering handbook. It lists five rules, which I reproduce from the slide:
+
+1. **The 1-2-24 Blast Radius Rule.** All code and configuration changes must be rolled out to at least 1% and at most 2% of the fleet for initial canary testing. They must be stable for 24 hours before going to the first quadrant.
+2. Code and configuration must be tested with all of their dependencies.
+3. All new or modified software features must have a rapid rollback mechanism, for example feature flags.
+4. **No Fast Rolls.** Code and configuration must not be fast-rolled for instant deployment. Exceptions may be granted if compensating controls limit the blast radius of any failure, or if the operation has to be atomic.
+5. Every known instance of a crash in canary or production must trigger an investigation to identify contributing factors. Eliminating all causes of crashes must be resolved above all other priorities.
+
+![Slide titled Production safety rules with five rules: the 1-2-24 blast radius rule, test with dependencies, rapid rollback, no fast rolls, investigate every crash](/blog/events/kubecon-europe-2025-london-kernel-lockup-postmortem-and-production-safety-rules/safety-rules.jpg)
+
+*Production safety rules, as shown on the slide.*
+
+The same idea appeared at KubeCon two days later in a different form, when New Relic described [cell-based architecture](/blog/kubecon-europe-2025-london-kubernetes-at-scale-linkedin-and-new-relic/) as a way to limit blast radius.
+
+### The final rule: abstractions
+
+The closing slide is titled "Final rule: abstractions are key". It says that if you do not understand something, you fix it at the wrong level of abstraction; that abstractions are a source of complexity; and that abstractions cannot hide physical limits. The postmortem above fits: the lockup lived in a kernel semaphore that no platform abstraction on top of it could hide.
+
+![Slide titled Final rule: abstractions are key, with the line Abstractions cannot hide physical limits](/blog/events/kubecon-europe-2025-london-kernel-lockup-postmortem-and-production-safety-rules/abstractions-limits.jpg)
+
+*"Abstractions cannot hide physical limits."*
+
+I also covered the other side of this argument on day one, in [the Platform Engineering Day post on abstraction debt](/blog/kubecon-europe-2025-london-platform-engineering-day-abstraction-debt/).
+
+## Related
+
+- [KubeCon Europe 2025: highlights and the other London posts](/blog/kubecon-europe-2025/)
+- [Platform Engineering Day London 2025: Abstraction Debt](/blog/kubecon-europe-2025-london-platform-engineering-day-abstraction-debt/)
+- [CNCF Platform Engineering Technology Radar 2026](/blog/cncf-platform-engineering-technology-radar-2026/)
+- [KubeCon Europe 2026 keynotes and sessions: on the slides](/blog/kubecon-europe-2026-amsterdam-keynotes-sessions-slides/)
+
+<BlogPromoCard />

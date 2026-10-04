@@ -4,7 +4,7 @@ seoTitle: "RISC-V Summit Europe 2026: Open Hardware Meets AI in Bologna"
 snippet: "On-the-ground coverage from RISC-V Summit Europe 2026 in Bologna — SiFive, ETH Zurich, Qualcomm, and Luxottica on open silicon for AI and smart eyewear."
 description: "On-the-ground coverage from RISC-V Summit Europe 2026 in Bologna — SiFive, ETH Zurich, Qualcomm, and Luxottica on open silicon for AI and smart eyewear."
 publishDate: "2026-06-10"
-lastModified: "2026-07-01"
+lastModified: "2026-10-04"
 author: "Luca Berton"
 category: "RISC-V"
 tags: ["RISC-V", "Open Source", "AI", "Hardware"]
@@ -118,6 +118,55 @@ The XiangShan team presented their open-source high-performance RISC-V CPU that 
 ![Critical role of verification infrastructure — ISA complexity at RVA23 Profile level](/blog/events/risc-v-summit-2026-31.jpg)
 
 With the RVA23 profile's complexity (integer, float, vector, hypervisor, debug CSRs, plus memory consistency and TLBs), extensive simulation before tape-out is critical. The approach co-simulates RTL (Verilog) against a software reference model (C++), comparing instruction commits — match means no-bug, mismatch flags a bug.
+
+### DiffTest-H: Co-Simulation at FPGA Speed
+
+The XiangShan verification talk went further than the overview slide. [DiffTest](https://github.com/OpenXiangShan/difftest) is the co-simulation framework behind XiangShan's agile flow (its repository describes a co-simulation framework for RISC-V processors that compares a design under test against reference implementations, with Verilator, VCS and Cadence Palladium support). The talk was about **DiffTest-H**, the hardware-accelerated variant. The "Hardware-accelerated co-simulation" slide set up the bottleneck: the DUT on an emulator or FPGA runs at 1 to 100 MHz (up to 10,000x speedup), the software reference model at about 100 MHz, but the overall speed drops to **5 to 100 KHz** because of the HW/SW communication between them.
+
+![Slide "Hardware-accelerated co-simulation" showing the DUT at 1~100 MHz, the reference model at ~100 MHz and overall speed of 5~100 KHz](/blog/events/risc-v-summit-europe-2026-bologna-open-hardware-ai/difftesth-hw-accelerated.jpg)
+
+*The communication link, not the DUT or the reference model, caps the co-simulation speed.*
+
+The next slide, "What is HW/SW communication?", quantified it: nearly 15 event types to check (instruction commits, register updates, exceptions and interrupts) produce about 1.2 KB of data per cycle, or 60 GB/s at 50 MHz, and the CPU waits and stalls on transfers. The slide's answer had two verbs: **packing** (scattered events become aggregated packets) and **fusion** (massive data becomes fewer transfers and fewer CPU stalls).
+
+![Slide "What is HW/SW communication?" with nearly 15 events and 1.2 KB of data per cycle](/blog/events/risc-v-summit-europe-2026-bologna-open-hardware-ai/difftesth-hwsw-communication.jpg)
+
+*Packing and fusion: aggregate scattered events, and send fewer transfers.*
+
+The catch with fusing events is debuggability, and the slide "Fusion: less transfers, same debuggability" addressed it. Fusion hides the faulty instruction, so DiffTest-H adds **error-replay**: buffer the pre-fusion events in hardware, notify the software side, and replay them for per-instruction checking to find where the bug is.
+
+![Slide "Fusion: less transfers, same debuggability" with error-replay for debuggability](/blog/events/risc-v-summit-europe-2026-bologna-open-hardware-ai/difftesth-fusion-error-replay.jpg)
+
+*Error-replay: fused checking for speed, then per-instruction replay when a mismatch appears.*
+
+For debugging, the "Instr-level ISA checking with waveform" slide drew the timeline from the earliest faulty state to the ILA trigger at the ISA-check mismatch, a gap of under 10K cycles, about 0.0002 s at a 50 MHz FPGA. The cost slide reported only **3% LUT overhead on a Xilinx VU19P** for DiffTest-H on top of XiangShan.
+
+![Slide "Debugging: Instr-level ISA checking with waveform" with under 10K cycles gap about 0.0002 s at 50 MHz FPGA](/blog/events/risc-v-summit-europe-2026-bologna-open-hardware-ai/difftesth-isa-check.jpg)
+
+*From the earliest faulty state to the ISA-check mismatch: under 10K cycles, about 0.0002 s at 50 MHz.*
+
+![Slide "Area: minimal overhead for FPGA deployment" with a LUT, FF/Register and BRAM table for XiangShan and DiffTest-H](/blog/events/risc-v-summit-europe-2026-bologna-open-hardware-ai/difftesth-fpga-area.jpg)
+
+*Area: DiffTest-H adds 3.3% LUT, 4.3% FF/Register and 0% BRAM in the table shown.*
+
+My take: this is what makes an open CPU credible at industrial scale. A reference model and a co-simulation flow that finds 151 bugs before tape-out is worth more than another benchmark chart.
+
+### The Sail Model as Reference: A Poster on Pydrofoil
+
+At the poster session, "An Efficient Approach to Apply the RISC-V Sail Model to Chip Verification" came from Yanming Zhu and Yunxiang Luo of the Intelligent Software Research Center, Institute of Software, Chinese Academy of Sciences. The [Sail RISC-V model](https://github.com/riscv/sail-riscv) is a formal specification of the architecture written in Sail, adopted by RISC-V International as its official reference model, and it can generate an executable C++ emulator. The poster asked: can that formal model replace NEMU as the reference in XiangShan's DiffTest workflow without rewriting the environment?
+
+![Poster "An Efficient Approach to Apply the RISC-V Sail Model to Chip Verification" with motivation, method, results and conclusion](/blog/events/risc-v-summit-europe-2026-bologna-open-hardware-ai/sail-pydrofoil-poster.jpg)
+
+*The Sail model poster: a Python adapter on top of pydrofoil plugs the Sail model into the existing DiffTest flow.*
+
+What the poster said:
+
+- **Method:** keep the Sail semantic core as the correctness foundation and use **pydrofoil**, a high-performance execution path for Sail-based models with a Python API, for the integration. The adapter layer is written in Python and compiled through pypy cffi into native C-level artifacts, to avoid a full C++ or Rust wrapper.
+- **Target:** XiangShan, whose codebase includes a difftest framework that traditionally uses NEMU as the reference model; the goal was to replace NEMU with a Sail-based dynamic library and keep the difftest workflow.
+- **Result:** the core implementation needed only about 800 lines of Python, mostly CSR encoding definitions, register-name mapping and special state handling such as nextpc, not instruction stepping.
+- **Limits, stated openly:** the Sail model does not currently support RVA23, RVA23 features cannot easily be disabled for XiangShan, which causes state inconsistency, and the run stopped at an instruction count of 894,352 after PMP-related state problems when trying to disable the H extension. Pydrofoil is tied to a specific commit and needs updates for broader extension support.
+
+I like that the limits were on the poster. A formal reference that cannot yet follow RVA23 is a useful thing to know before you pick it for a new core.
 
 ### True Random Number Generators (TRNG)
 

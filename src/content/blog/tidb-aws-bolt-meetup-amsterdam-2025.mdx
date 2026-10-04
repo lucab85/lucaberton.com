@@ -2,7 +2,7 @@
 title: "TiDB, AWS and Bolt Meetup Amsterdam 2025"
 seoTitle: "TiDB Vector Search, Bolt and Concurrency: Amsterdam 2025"
 snippet: "Two Amsterdam database evenings, late 2025: TiDB vector and full-text search, Bolt on the TiKV in-memory engine, and a tour of dirty writes, MVCC, 2PL and SSI."
-description: "Notes from a TiDB × AWS meetup with Bolt in Amsterdam (26 Nov 2025) and a database concurrency talk (4 Dec 2025), checked against TiDB and PostgreSQL docs."
+description: "Notes from a TiDB, AWS and Bolt meetup in Amsterdam (26 Nov 2025) and a 4 Dec 2025 database night: concurrency, TiDB online DDL and ClickHouse."
 publishDate: "2026-10-04"
 lastModified: "2026-10-04"
 image:
@@ -93,7 +93,7 @@ The [TiKV MVCC In-Memory Engine docs](https://docs.pingcap.com/tidb/stable/tikv-
 
 ## 4 December: concurrency anomalies, from dirty writes to SSI
 
-Eight days later I was at another database meetup in central Amsterdam. My photos don't show who organised it, so I'll stick to the talks. The first was by **José María Muñoz Rey, Backend Engineer** (as on his closing slide). It walked through concurrency problems using one running example: an `Events` table with a row for "Best Concert Ever", where `tickets_sold` is 9 and `max_tickets_to_sell` is 10. There's one ticket left and two buyers.
+Eight days later I was at another database meetup in central Amsterdam. My photos don't show who organised it, so I'll stick to the talks. The talks I saw covered concurrency anomalies, TiDB schema changes and ClickHouse internals. The first was by **José María Muñoz Rey, Backend Engineer** (as on his closing slide). It walked through concurrency problems using one running example: an `Events` table with a row for "Best Concert Ever", where `tickets_sold` is 9 and `max_tickets_to_sell` is 10. There's one ticket left and two buyers.
 
 ### The anomalies
 
@@ -142,11 +142,35 @@ The [PostgreSQL transaction isolation docs](https://www.postgresql.org/docs/curr
 
 **My take:** the slide labels are a simplification, and that's fine for a meetup talk. MySQL's InnoDB is also a [multi-version storage engine](https://dev.mysql.com/doc/refman/8.4/en/innodb-multi-versioning.html), so the 2PL logo really refers to how it handles locking reads and writes. For the ticket example in practice, I'd reach for the cheapest fix first: an atomic `UPDATE events SET tickets_sold = tickets_sold + 1 WHERE id = 1 AND tickets_sold < max_tickets_to_sell`, then check the affected row count. Use SSI or explicit locks when the invariant spans more than one row.
 
-### TiDB online DDL and ClickHouse
+### TiDB architecture and online DDL
 
-The second talk of the evening was about schema changes in TiDB. I only photographed its closing slide. It credited **"Online, Asynchronous Schema Change in F1"** by Google as the inspiration (StateNone → DeleteOnly → WriteOnly…), and pointed to TiDB's original DDL design doc, github.com/pingcap/tidb and TiDBCloud.com. The [TiDB DDL introduction](https://docs.pingcap.com/tidb/stable/ddl-introduction/) describes the same progression for adding an index: absent → delete only → write only → write reorg → public. That's how TiDB runs DDL online and asynchronously without blocking DML in other sessions.
+The second talk of the evening was about schema changes in TiDB. My photos only show its closing slide, which credited **"Online, Asynchronous Schema Change in F1"** by Google as the inspiration (StateNone → DeleteOnly → WriteOnly…), and pointed to TiDB's original DDL design doc, github.com/pingcap/tidb and TiDBCloud.com. The speaker wasn't named on any slide I photographed, so I'm leaving the name out. My notes on the rest come from the clips I filmed of the talk, which only cover the middle and the end.
 
-The evening finished with a ClickHouse talk. Its slide pointed to github.com/clickhouse/clickhouse and to the paper "ClickHouse - Lightning Fast Analytics for Everyone". My photos only show its title slide, so for ClickHouse internals see my posts from the [ClickHouse Open House Amsterdam 2025](/blog/clickhouse-open-house-amsterdam-2025-picnic-langfuse/).
+The speaker started with a short architecture tour. According to him, TiDB was designed as an OLTP database with some lighter analytics, and it has three node types. The SQL layer looks like a MySQL server to clients, but the protocol, parser and optimizer are re-implemented and the nodes are stateless, so they are quick to add or remove. The data lives in a row store built on an LSM tree (RocksDB) and replicated with Raft, three copies by default. Per table you can optionally ask for copies in a column store too. It is fed by the same Raft stream and carries the transaction timestamp, so both stores show the same state of the database. In his words the optimizer can mix row and column access in one query, and would pick the column store for a big single-column scan and the row store for an index lookup. The third component is the placement driver. It hands out the timestamps behind TiDB's MVCC, splits data into ranges and moves them around when it sees an imbalance in size or in read and write load, while keeping copies in different availability zones.
+
+On DDL, he explained why a distributed database wants non-blocking schema changes. The idea is the same as a rolling application deployment: instead of stopping everything, you version the schema globally and move through intermediate states that are compatible with the previous one, so running transactions carry on. Adding an index is the textbook example:
+
+- **None**: the index doesn't exist.
+- **Delete only**: the index is not visible for reads, but deletes (and the delete half of updates) reach it. He said this state exists because a node one state behind could otherwise leave orphaned index entries.
+- **Write only**: new writes go into the index, but nothing reads from it. He joked that the name is not ideal, because it also deletes, and that naming is hard.
+- **Write reorganisation**: the existing rows are read and the index is backfilled. On a big table this is where most of the time goes.
+- **Public**: the index is ready for queries.
+
+Then came the practical part, which I found the most interesting. According to him, TiDB's first backfill used many small transactions: very stable and well tested, but slower than competing databases, because each transaction has its own overhead. The newer approach reads everything, sorts it and writes the result straight into the LSM tree, which can even be done on nodes that don't serve online traffic. For multi-tenant users with a very large number of tables, he said DDL for several tables can share a single schema version, and that for new tenants without statistics the optimizer can reuse a known-good set of plans. He also described the release they were then preparing, which uses an object store such as S3 as the back store: files are shipped through it rather than copied between nodes, compaction can run off to the side, and backups become mostly a metadata snapshot. The speaker presented this as reducing cost for customers. That is a vendor claim, so test it on your own workload.
+
+The [TiDB DDL introduction](https://docs.pingcap.com/tidb/stable/ddl-introduction/) describes the same progression for adding an index: absent → delete only → write only → write reorg → public. That's how TiDB runs DDL online and asynchronously without blocking DML in other sessions.
+
+**My take:** the part to remember is why "delete only" exists. In a rolling schema change, two adjacent states are live at the same time, and each state has to be safe next to the previous one. It is the same reasoning as an expand-and-contract migration in application code, applied inside the database.
+
+### ClickHouse: pruning and HTTP errors
+
+The evening finished with ClickHouse. A slide pointed to github.com/clickhouse/clickhouse and to the paper "ClickHouse - Lightning Fast Analytics for Everyone", and a closing slide listed three names. I can't match them to the two talks I filmed, so I'm describing the talks without names.
+
+**Storage and pruning.** The first talk explained how ClickHouse stores data and avoids reading it. Every insert creates an immutable "part" on disk, sorted by the table's primary key, so an insert doesn't need to coordinate with existing data or check uniqueness. Background merges combine parts. It looks like an LSM tree, the speaker said, but there is no level hierarchy, so merges can be parallelised freely. Within a part, data is divided into **granules** of 8192 rows by default, and a small **sparse primary index** keeps the first row of each granule in memory. A query that filters on the key does a binary search on that index and loads only the matching granules. The speaker named two more pruning tools: **projections**, which are copies of the table sorted differently (at the cost of storage), and **skipping indexes** such as min-max and Bloom filters, which are cheaper but, in his words, harder to tune.
+
+**HTTP errors in the middle of a stream.** The second talk was about a surprisingly practical problem. With chunked HTTP responses, ClickHouse may already have sent the `200` status when a query fails halfway through. A client that sees 200 assumes success. According to the speaker, the way the error was reported used to depend on the output format and on a setting, and clients in several languages had complained. A recent change, shipped in the 25.11 release, made it consistent: the old setting that wrote the exception into the output is now off by default, the exception block has a fixed size of 16 KB so a client knows how much to read, and the server deliberately breaks the chunked encoding by not sending the final empty chunk. That last point is the only way left to tell the client that the response is broken, and it's why `curl` exited with a non-zero code in his demo. He also showed the same failing query on an old and a new container, in CSV and JSON formats, with different results before and the same result after. My take: if you write an HTTP client for any streaming API, check what it does when the stream ends without the terminating chunk. Many clients treat a status code of 200 as the end of the story.
+
+There was also a short, unscheduled talk after the ClickHouse slides about a write-ahead log and streaming engine written in Rust, which the speaker described as an alternative to Apache Kafka for single-node ingest. He had no slides and I didn't catch the project name reliably, so I'll leave it at that. For ClickHouse internals see my posts from the [ClickHouse Open House Amsterdam 2025](/blog/clickhouse-open-house-amsterdam-2025-picnic-langfuse/).
 
 ## What connects the two evenings
 

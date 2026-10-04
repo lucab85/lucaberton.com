@@ -1,0 +1,85 @@
+---
+title: "Friends of OpenJDK at Uber: Upgrades and Supply Chain"
+seoTitle: "Friends of OpenJDK Uber Amsterdam: Large-Scale Upgrades"
+snippet: "Notes from the Friends of OpenJDK meetup at Uber Amsterdam, 11 November 2025: JVM monorepo upgrades with OpenRewrite and a live supply chain attack demo."
+description: "What I learned at the Friends of OpenJDK meetup at Uber Amsterdam: JUnit, Java and Spring Boot upgrades in a Bazel monorepo, plus a supply chain attack demo."
+publishDate: "2026-10-04"
+lastModified: "2026-10-04"
+image:
+  src: "/blog/thumbnails/friends-of-openjdk-uber-amsterdam-2025.jpg"
+  alt: "Pavel Belousov presenting Large-Scale Upgrades: Lessons Learned to a seated audience at the Friends of OpenJDK meetup at Uber in Amsterdam"
+category: "Open Source"
+author: "Luca Berton"
+tags: ["Java", "OpenJDK", "JVM", "Bazel", "OpenRewrite", "Spring Boot", "Supply Chain Security", "Meetups", "Amsterdam"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+On 11 November 2025 the Amsterdam Java User Group, together with the Friends of OpenJDK (Foojay) community, met at Uber's Amsterdam office for a three-talk evening. The welcome slide read "Welcome to OpenJDK @ Uber!". I recorded two of the talks: a staff engineer from Uber's JVM platform team on upgrading a huge monorepo, and a developer-architect from the consultancy Code Nomads on supply chain attacks. The third talk, with Azul branding, was "Scotty, I need warp speed" about JVM startup and warmup, and I do not have a recording of it. The [autumn roundup](/blog/amsterdam-ai-meetups-autumn-2025-roundup/) has a short version of the evening; this is the long one.
+
+This is my own summary from the recordings. Numbers and company claims are the speakers' own.
+
+![A seated audience at the Friends of OpenJDK meetup at Uber, with the Large-Scale Upgrades title slide on the screen and the speaker holding a microphone](/blog/events/friends-of-openjdk-uber-amsterdam-2025/uber-meetup-room.jpg)
+
+*The room at Uber's Amsterdam office, with the first talk about to start.*
+
+## Large-scale upgrades in a JVM monorepo
+
+**Pavel Belousov**, Staff Software Engineer (as on his title slide), presented "Large-Scale Upgrades: Lessons Learned". He said he works in Uber's JVM platform team, and that the company runs a single Bazel monorepo. That gives consistency, but every change can affect hundreds or thousands of services. According to him, services run on Java 17 and 21 across the board, a migration to Java 25 had started, and the code base has thousands of services and batch jobs with more than a thousand direct dependencies.
+
+![The title slide Large-Scale Upgrades: Lessons Learned with a train illustration, with the speaker standing beside the screen](/blog/events/friends-of-openjdk-uber-amsterdam-2025/large-scale-upgrades-title.jpg)
+
+*"Large-Scale Upgrades: Lessons Learned", the opening talk.*
+
+He walked through three upgrades of increasing difficulty.
+
+**JUnit 4 to 5.** A massive code change with low operational risk: millions of lines of test code, but each test class can move independently, so it could go in batches. [OpenRewrite](https://docs.openrewrite.org/), the open source automated refactoring tool, covered much of it, and the team wrote extra code for the dependency handling. The painful lesson: they did not block new JUnit 4 classes at the start, so some projects had to be migrated more than once.
+
+**Java 11 to 17 and 21.** Harder operationally. They did it in three phases: first the runtime of each service independently, then the compiler, then the APIs used in the code. The compiler step cannot be independent: if a core library moves to Java 21, everything that depends on it must move at once. So they started at the leaf nodes of the dependency graph and went layer by layer, only starting the next layer when the previous one was stable. In the Q&A he said the dependency graph can be four layers deep or more, with Spark jobs and services as leaves and internal libraries underneath.
+
+**Spring Boot 2 to 3.** The trigger was the move from the `javax` to the `jakarta` namespace, a consequence of Java EE moving to the Eclipse Foundation. The larger problem was dependency trees. They introduced a parallel set of Spring Boot 3 dependencies, applied OpenRewrite recipes automatically and recompiled, which let services move one by one while Spring Boot 2 services kept working. When the last one moves, the old projects can be deleted.
+
+### The lessons he distilled
+
+- **Forking and shading.** Uber often forks open source libraries, and a fork can conflict with the monorepo's own version of a dependency. Teams sometimes bundle ("shade") dependencies into fat jars. His advice: bundle as little as possible, ideally only the one conflicting library, and relocate the package names, or the copies will clash. Bundling also makes you responsible for patching vulnerabilities in the bundled classes. For applications such as Spark jobs, he said, bundling is sometimes the only option.
+- **Transition APIs.** If a library has breaking changes, release an intermediate version that supports both old and new APIs. He pointed to Spring Boot 2.7 introducing the Spring Boot 3 APIs ahead of the major bump.
+- **Stop the bleeding first.** Enforce the new standard (no new deprecated usage) before starting the migration, otherwise it never ends.
+- **Small blast radius.** Break upgrades into the smallest self-contained units, module by module, so one tiny change can be reverted instead of a whole library across the ecosystem.
+- **Upgrade early and often.** Technical debt compounds, the version gap widens, and outdated dependencies mean unpatched vulnerabilities. Small, frequent upgrades keep the changelog readable.
+- **Automate.** At this size manual migration is not sustainable.
+
+In the Q&A he said they had used Buck until 2023 and now have nothing left from it in the Java monorepo, which is entirely on Bazel. For IDEs, IntelliJ IDEA and Visual Studio Code are used, and you load only the subset of projects you work on through a Bazel plugin (he said the Google one is no longer maintained and the JetBrains one is the one to use). Asked why they have an in-house tool for automated dependency updates instead of Renovate or Dependabot, he said it was built years ago, allows custom notifications, and the trade-off is rewriting versus evolving something simple that works. He also pointed to a deep dive on the JUnit migration with the OpenRewrite team on 3 December.
+
+My take: the part I would copy tomorrow is the order of operations: forbid new old-style code, then migrate in the smallest independent unit the graph allows, with automated recipes. It applies to any platform team, not only to a monorepo of this size. For the build-system side of Uber's setup, see my notes from the [Uber x EngFlow build meetup](/blog/uber-engflow-build-meetup-amsterdam-bazel-buildbarn-2026/).
+
+## A supply chain attack, live
+
+The speaker of the second talk introduced himself as a developer and architect at Code Nomads, a consultancy in Amsterdam, working on mitigating supply chain attacks for his client. He opened with a show of hands on who has pasted shell commands from the internet without reading them, then explained that a **reverse shell** works like handing an SSH connection to an attacker: the victim's machine opens an outgoing connection, which firewalls rarely block, so a laptop with no public IP is still reachable.
+
+Then he ran two demos on stage, using a remote server he controlled as the "hacker machine" in one terminal and his laptop in another. In the first, a freshly generated, empty Spring Boot project had only one extra dependency added to its Maven file. Running the Maven install gave the listening terminal an interactive shell on the laptop. In the second, he did the same with an npm install of a popular package, in the "install the latest version" style, and again got a connection. The setup was staged to illustrate the mechanism, and he then explained the network picture on slides.
+
+He placed this in context. The new OWASP Top 10 had come out days earlier and, as he said, software supply chain risk ranks third. I checked: the [OWASP Top 10:2025](https://top10.owasp.org/2025) lists A03 as "Software Supply Chain Failures". He separated the risks into third-party vulnerabilities (Log4Shell being the best-known example, and he said a share of downloads in Maven Central are still vulnerable versions), dependency confusion, and hijacked or compromised build environments, and mentioned a recent very large npm package compromise. He also told the audience to try attacks such as SQL injection in a free hands-on lab, because it changes how you write code.
+
+My take: the demos work because installing a dependency means running someone else's code, so the useful controls are boring ones: pinned and reviewed versions, a lockfile, an SBOM, and egress filtering on build machines. I covered those in [Supply chain security with SBOM, Sigstore and SLSA](/blog/supply-chain-security-sbom-sigstore-slsa/).
+
+## The warp speed talk
+
+The third talk was the one with the "Scotty, I need warp speed" slide, on improving JVM startup and warmup. I did not record it, so there is nothing more to report.
+
+![A talk slide reading Scotty I need warp speed with a speaker standing in front of a seated audience](/blog/events/friends-of-openjdk-uber-amsterdam-2025/scotty-warp-speed.jpg)
+
+*The third talk's title slide.*
+
+## The community side
+
+At the start the Amsterdam JUG organisers explained that the group meets once or twice a month and moves from one company to another, and that the evening repeated one held at Uber two years before. Foojay is the international "Friends of OpenJDK" network, with a website and a Slack channel, and they handed out stickers. They are looking for speakers, and said that three talks per evening seems a better balance than two or four. For another JUG evening, see [Amsterdam JUG at IKEA](/blog/amsterdam-java-user-group-ikea-meetup-2026/).
+
+## Related
+
+- [Build Meetup Amsterdam 2026: Bazel, Buildbarn, Bonanza](/blog/uber-engflow-build-meetup-amsterdam-bazel-buildbarn-2026/)
+- [Supply chain security with SBOM, Sigstore and SLSA](/blog/supply-chain-security-sbom-sigstore-slsa/)
+- [CRA SBOM requirements and implementation](/blog/cra-sbom-requirements-implementation/)
+- [Amsterdam AI and Dev Meetups, Autumn 2025: A Roundup](/blog/amsterdam-ai-meetups-autumn-2025-roundup/)
+
+<BlogPromoCard />

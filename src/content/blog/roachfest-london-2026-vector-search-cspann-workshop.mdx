@@ -24,7 +24,7 @@ tags:
 
 import BlogPromoCard from "../../components/BlogPromoCard.astro";
 
-On 25 June 2026 I spent the morning of **RoachFest London 2026** in a hands-on session titled **"Vector Search, Transactional & RAG on CockroachDB"**, part of Cockroach Labs' "AI Workshops" series. My [main RoachFest recap](/blog/roachfest-london-2026-distributed-sql-ai-resilience/) covers the day and the keynotes, and mentions this workshop in one section. This post goes deeper into the part I found most useful as a platform engineer: how CockroachDB's own vector index, **C-SPANN**, compares with the HNSW and IVFFlat indexes you get from **pgvector**.
+On 25 June 2026 I spent the morning of **RoachFest London 2026** in a hands-on session titled **"Transactional Vector Search & RAG on CockroachDB"**, part of Cockroach Labs' "AI Workshops" series. My [main RoachFest recap](/blog/roachfest-london-2026-distributed-sql-ai-resilience/) covers the day and the keynotes, and mentions this workshop in one section. This post goes deeper into the part I found most useful as a platform engineer: how CockroachDB's own vector index, **C-SPANN**, compares with the HNSW and IVFFlat indexes you get from **pgvector**.
 
 One framing note before the details. Everything below comes from the workshop's slides and lab screens, which I photographed from the room, plus the public documentation I checked afterwards. The latency numbers shown in the workshop UI come from an interactive simulation, not from a benchmark I ran.
 
@@ -79,6 +79,12 @@ I checked the public docs after the session. CockroachDB's [vector index documen
 
 On the pgvector side, the README notes that with approximate indexes "filtering is applied after the index is scanned", so a filtered query can return fewer rows than expected unless iterative index scans are enabled. pgvector keeps what you expect from Postgres: ACID compliance, point-in-time recovery and joins.
 
+![Lab screen from the C-SPANN index and performance challenge showing a CREATE INDEX statement with min_partition_size and max_partition_size and an EXPLAIN ANALYZE query](/blog/events/roachfest-london-2026-vector-search-cspann-workshop/workshop-cspann-index-tuning-partition-size.jpg)
+
+*The index tuning step: a C-SPANN index created with min_partition_size = 2 and max_partition_size = 32, plus an EXPLAIN ANALYZE of a similarity query.*
+
+An earlier lab, on index behaviour, showed the tuning knobs. The instructions created `idx_embedding_tuned` using `cspann (embedding vector_cosine_ops)` with `min_partition_size = 2` and `max_partition_size = 32`. The on-screen guidance was that these two settings trade search speed against recall (a smaller `min_partition_size` for faster search with potentially lower recall, a larger `max_partition_size` for better recall and slower search) and that RAG workloads should favour recall while real-time search should favour lower latency. The step then ran `EXPLAIN ANALYZE` on a similarity query: it reported a full scan of a 30-row table in about 4 ms total.
+
 ## Orphaned Vectors: The Dual-Database Rebuttal
 
 The most memorable lab was the transactional ingestion exercise. Each document is split into chunks and embedded, and a successful run should leave exactly three chunks per document. The lab then ran a crash demo comparing two architectures.
@@ -90,6 +96,12 @@ The most memorable lab was the transactional ingestion exercise. Each document i
 According to the lab instructions on screen: in the dual-database case, the vector database accepted two chunks before the crash while the relational database had no document record, leaving two orphaned vectors and queries that may return stale or meaningless results. In the CockroachDB case, the `ROLLBACK` removed everything atomically, with zero orphaned vectors. Verifying in the SQL shell returned zero rows for the failed document.
 
 My take: this is a rebuttal to the dual-database pattern (relational database plus separate vector store), not to pgvector. A single Postgres instance with pgvector gets the same atomicity for free, because the vectors live in the same transactional store. The fair comparison for pgvector is scale and operations: how far one Postgres primary takes you, and what you do when you need multi-region writes and survivability. That is the gap CockroachDB is aiming at, and it is why the migration lab below mattered to me.
+
+![Lab screen showing the ingest_files.py script with LangChain document loaders and a table of three source files: a PDF, a Word document and a Markdown file](/blog/events/roachfest-london-2026-vector-search-cspann-workshop/workshop-file-ingestion-loaders-and-chunking.jpg)
+
+*The file ingestion step: loaders per file format, then chunking, embedding and one ACID transaction per document.*
+
+The lab then extended the pipeline from hardcoded text to real files. A table on screen listed three sources (a PDF on distributed architecture, a Word SQL tuning guide and a Markdown file on transaction best practices), and the script mapped file extensions to LangChain loaders. The four steps were load, chunk with `RecursiveCharacterTextSplitter` (500 characters, 50 overlap), embed with 768-dimension vectors via Ollama, and store everything in a single ACID transaction per document. The point is the last step: a half-ingested PDF can never leave stray chunks behind.
 
 ## Migrating Off Postgres Plus Pinecone
 

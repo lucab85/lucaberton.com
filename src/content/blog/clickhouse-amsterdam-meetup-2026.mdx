@@ -1,14 +1,14 @@
 ---
-title: "ClickHouse Amsterdam Meetup @ Adyen: AI Agents Meets Real-Time Analytics"
+title: "ClickHouse Amsterdam Meetup @ Adyen: AI Agents and Vectors"
 seoTitle: "ClickHouse Amsterdam Meetup @ Adyen: AI Fintech"
-snippet: "Recap of the ClickHouse Amsterdam Meetup at Adyen, covering autonomous AI fee agents, vector embeddings, and AI reshaping fintech."
-description: "Recap of the ClickHouse Amsterdam Meetup at Adyen on AI in fintech: autonomous fee agents, vector embeddings, and real-time analytics."
+snippet: "Recap of the ClickHouse Amsterdam Meetup at Adyen: a skills-first autonomous fee agent, and Alexey Milovidov on storing embeddings in ClickHouse."
+description: "Recap of the ClickHouse Amsterdam Meetup at Adyen: Adyen's skills-first fee agent and Alexey Milovidov on embeddings, BFloat16 and the QBit data type."
 publishDate: "2026-09-16"
-lastModified: "2026-09-16"
+lastModified: "2026-10-04"
 image:
   src: "/blog/thumbnails/clickhouse-amsterdam-meetup-2026.jpg"
   alt: "ClickHouse Amsterdam Meetup @ Adyen — AI agents meet real-time analytical databases in fintech"
-tags: ["ClickHouse", "Adyen", "meetup", "Amsterdam", "AI agents", "fintech", "real-time analytics", "vector embeddings"]
+tags: ["ClickHouse", "Adyen", "meetup", "Amsterdam", "AI agents", "fintech", "real-time analytics", "vector embeddings", "QBit", "agent skills"]
 category: "AI"
 author: "Luca Berton"
 draft: false
@@ -16,67 +16,214 @@ draft: false
 
 import BlogPromoCard from "../../components/BlogPromoCard.astro";
 
-Last night I attended the **ClickHouse Amsterdam Meetup @ Adyen**, hosted at Adyen's Amsterdam office. The evening was dedicated to one of the most fascinating intersections in tech right now: how AI is changing the fintech landscape — from autonomous agentic copilots in production to what's next for the world's fastest analytical database.
+Last night (Tuesday 15 September 2026) I attended the **ClickHouse Amsterdam Meetup @ Adyen**, hosted at Adyen's Amsterdam office. The screens in the room carried the Adyen × ClickHouse logos and the evening's theme, *"How AI is changing the fintech landscape"*: from an autonomous agent in production at a payments company to what you can do with a few hundred million vector embeddings in the world's fastest analytical database.
 
-About **236 attendees** turned out for the event, which brought together engineers, data practitioners, and fintech builders. The meetup was co-hosted by **Kwok He Chu** (Developer Relations @ Adyen) and **Tyler Hannan** (Global Advocate @ ClickHouse), with food and drinks provided by Adyen.
+About **236 attendees** turned out, a mix of engineers, data practitioners and fintech builders. The agenda on screen read: doors and food and drinks by Adyen from 17:15, a welcome from **Kwok He Chu** (Developer Relations @ Adyen) and **Tyler Hannan** (Global Advocate @ ClickHouse) at 18:15, **Iftach Arbel** (Senior AI Research Engineer, Adyen) at 18:20, **Alexey Milovidov** (Co-founder & CTO, ClickHouse) at 19:00, each talk followed by Q&A, then drinks and networking from 19:40.
+
+Almost a year earlier I spent a day at [ClickHouse Open House Amsterdam 2025](/blog/clickhouse-open-house-amsterdam-2025-picnic-langfuse/), where Picnic and Langfuse showed ClickHouse in production. This evening was smaller and much more focused on AI.
 
 ## The Theme: AI Meets Real-Time Analytics in Fintech
 
-The central question driving the evening was simple but profound: how do you build AI systems that operate reliably in production environments where correctness matters more than creativity? From agentic copilots that handle financial transactions to analytical databases that power real-time fraud detection, the answers span architecture, engineering discipline, and a healthy dose of pragmatism.
+The central question driving the evening was simple but profound: how do you build AI systems that operate reliably in production environments where correctness matters more than creativity? The two talks answered it from opposite ends: one from the agent side (what to pin down in code), one from the data side (how to store and search embeddings cheaply enough to do it at all).
 
-## Talk 1: Skills First — Shipping an Autonomous Fee Agent Before Writing an Agent Harness
+## Talk 1: Skills First, Structure Later
 
-**Iftach Arbel**, Senior AI Research Engineer at Adyen, kicked things off with a grounded, no-nonsense talk about building **autonomous agents for production** — specifically, an autonomous fee calculation agent.
+**Iftach Arbel**, Senior AI Research Engineer at Adyen, opened with a talk titled **"Skills First, Structure Later"**, subtitled *"Developing autonomous agents · Ship an agent using skills"*. It was a grounded, no-nonsense account of building an **autonomous fee agent** for production. The talk had four parts: the problem, skills first, the restructure, and proving it.
+
+![Iftach Arbel on stage at Adyen in front of his title slide, Skills First, Structure Later: Developing autonomous agents, ship an agent using skills](/blog/events/clickhouse-amsterdam-meetup-2026/iftach-arbel-skills-first-structure-later.jpg)
+
+*Iftach Arbel opening "Skills First, Structure Later" at the ClickHouse Amsterdam Meetup at Adyen.*
+
+From the abstract:
 
 > "We built an autonomous agent for a task where reliability mattered most. We will describe agent design patterns to explain our decisions: deterministic vs. agentic behavior, predictability vs. flexibility, auditability vs. adaptiveness, and routing vs. parallelization."
 
-Iftach's core insight is one I've been advocating for in enterprise settings: **not everything in your agent should be left to the model**. The four patterns he laid out are worth bookmarking:
+### The four trade-offs
 
-1. **Deterministic vs. agentic behavior** — Wherever a decision is fixed by business logic or compliance requirements, encode it in code. Let the model handle ambiguity.
-2. **Predictability vs. flexibility** — In fintech, predictability is a feature, not a bug. You want the same input to produce the same output (within known variance), not creative reinterpretations.
-3. **Auditability vs. adaptiveness** — Financial systems need paper trails. Every agent decision must be traceable for compliance, even when the agent took an unexpected path.
-4. **Routing vs. parallelization** — Domain knowledge routing (which expert model/sub-agent handles which case) vs. parallel execution of independent subtasks. Confusing the two leads to either bottlenecks or hallucinated handoffs.
+The slide "Four trade-offs we keep coming back to" defined each axis, and the rest of the talk kept returning to it ("Watch which side of each axis every decision lands on"):
 
-The key architectural decision: the surrounding structure — the flow, its guardrails, and the routing between pieces of domain knowledge — all moved into **deterministic code**. The core reasoning stayed agentic: "the model's calls remained open-ended wherever that flexibility earned better results."
+1. **Deterministic ↔ agentic**: fix behaviour in code and tools, or leave it to the model.
+2. **Predictable ↔ flexible**: constrain the agent's actions; keep its prose and reasoning free-form.
+3. **Auditable ↔ adaptive**: reproduce the outcome; let the exploration path vary from run to run.
+4. **Routing ↔ parallelization**: commit the task to one chosen path, or split it across different paths running at once.
 
-For practitioners building agents in regulated domains, this talk is essential viewing. You can't ship agents the way you ship chatbots.
+### The problem: a wrong match is worse than no match
 
-## Talk 2: ClickHouse for Analytical Workloads with Vector Embeddings
+The task: card schemes publish fee bulletins (one example on screen was a Visa Business News item announcing modified rates in the UK). The agent has to read a bulletin, find the fees it affects in Adyen's database, and work out the impact. The slide **"A wrong match is worse than no match"** explained why that is hard:
 
-**Alexey Milovidov**, co-founder and CTO of ClickHouse, Inc., took the stage next to discuss how vector embeddings are reshaping analytical workloads — and what it means for fintech specifically.
+- **Terminology never matches.** Bulletin fee names are marketing language; the database stores internal program names, so a naive name query returns zero rows and looks like "no match".
+- **The schema is ambiguous.** Deprecated and duplicate programs stay by design, and regional quirks silently drop data.
+- **The failure is silent.** A wrong database match doesn't raise an error; it reaches production billing as a misconfiguration. Loud bugs are safe; silent ones aren't.
 
-Alexey has 17 years of experience designing, developing, and operating data-intensive applications. Before ClickHouse, he created the data processing engine of the world's 2nd largest web analytics system. His area of interest is data processing algorithms and technologies.
+The footer made it explicit: a wrong match is a compliance risk, not a quality-of-analysis question. That confidence policy drove every trade-off above.
 
-While the talk details are still being finalized (TBA), the direction is clear: ClickHouse is positioning itself not just as an analytics database, but as a **unified platform for real-time analytics + AI/ML embeddings**. For fintech teams that need to join transactional data with vector search results — fraud pattern matching, anomaly detection, recommendation engines — the ability to do both in a single query is a significant architectural simplification.
+![Adyen slide: A wrong match is worse than no match, with three columns: terminology never matches, the schema is ambiguous, the failure is silent](/blog/events/clickhouse-amsterdam-meetup-2026/wrong-match-worse-than-no-match.jpg)
+
+*"The problem": why fee matching is risky, next to the ClickHouse "The leading database for AI" banner.*
+
+### Skills first: 7 phases in one skill
+
+The first version was built the "skills first" way. After a primer on what an Agent Skill is (progressive disclosure: roughly 100 tokens of metadata always loaded, the `SKILL.md` body loaded when needed, and docs, templates and schemas loaded on demand), Iftach showed what the skill actually did, in **7 phases**:
+
+- **Find and confirm the fee**: 1 · Verify metadata → 2 · Catalog lookup → 3 · Exploration scan (terminology mapping, with Strategies A, B and C running inside phase 3) → 4 · Targeted rate pull.
+- **Judge, report and validate**: 5 · Classify change → 6 · Invoice validation → 7 · Impact report.
+
+![Slide: What the skill actually does: 7 phases, grouped into Find and confirm the fee and Judge, report and validate, with strategies A, B and C inside phase 3](/blog/events/clickhouse-amsterdam-meetup-2026/fee-agent-skill-seven-phases.jpg)
+
+*The seven phases of the original fee-agent skill. Phase 3 runs three matching strategies in parallel.*
+
+It worked, but "The limits of the skill-driven agent" slide listed three problems:
+
+- **Not predictable enough.** The flow was driven by **2,400 lines of skill prose**, so behaviour moved with prompt wording and model run.
+- **Hard to debug.** There was no structured record of *what* the agent queried or *why*.
+- **Hard to extend.** Changing one behaviour meant editing one giant skill.
+
+Underneath, this showed up as duplication: the same query built twice (once to run, once to audit), and the same rule written in three places.
+
+### One rule, enforced three times
+
+That last point got its own slide. The rule: in a historical simulation, never read data dated after the bulletin, because it leaks the answer. In the skill-driven version it was enforced in three layers:
+
+1. **Prose**: `SKILL.md` spells it out ("FORBIDDEN — a hard data-leakage rule, not a guideline"). The weakest guard: the model can simply not follow it.
+2. **PreToolUse hook**: a regex hook parses every Bash call and denies it when `--as-of-date` is missing or past the ceiling. Brittle, because it guesses intent from a string.
+3. **Query builder**: raises `ValueError` if `post_cutover` meets `as_of_date`, independent of prompt and hook. The last line of defence.
+
+The slide's conclusion: "One rule, three places to keep in sync — the cost of writing guardrails as text. […] Make the action typed and the illegal state can't be built at all."
+
+![Slide: One rule, enforced three times: prose in SKILL.md, a PreToolUse hook, and a query builder that raises ValueError](/blog/events/clickhouse-amsterdam-meetup-2026/one-rule-enforced-three-times.jpg)
+
+*"When prose isn't enough": the same data-leakage rule written as prose, as a hook and as code.*
+
+### The restructure: one skill becomes four
+
+The restructure moved routing into code. The mega-skill was split into four skills: **Index** (scope, the temporal model, the output template and the routing table), **fee-resolution** (matching, classification and the full schema, "the heaviest tacit knowledge, kept together on purpose"), **invoice-validation**, and **match-verifier** (a verification matrix over five signals in code; the LLM rubric fires only when signals conflict).
+
+**Typed tools replaced Bash.** Before, the model invoked a Bash tool that ran a SQL query wrapped in Python, and downstream code had to re-parse that string to recover the query. After, the model calls the same queries as tools through the SDK's `@tool` interface: function arguments in, a `{sql, rows, context}` triplet out. The "Same SDK, a different shape" slide summed up the result: code builds the guards (such as the temporal ceiling), the agent runs code-orchestrated phases with one skill loaded per phase, tool calls provide the records for the audit, and code assembles the audit and confidence.
+
+### Eval: prove it's a refactor, not a rewrite
+
+How do you show that the restructured agent still does what the old one did? The "Proving it" slide had three parts:
+
+- **Built as refactor step 0.** The system was already tested, so no tool or skill change ships until it passes the harness first, much like a unit test.
+- **A golden baseline.** Curated, human-validated prior output. A divergence from golden is a real quality signal, compared on structured data rather than raw Markdown.
+- **Align fees first.** Pair golden and candidate results by database and bulletin identity. Unpaired golden results count against recall; unpaired candidates count against precision.
+
+![Slide: Eval: Prove it's a refactor, not a rewrite, with three columns: built as refactor step 0, a golden baseline, align fees first](/blog/events/clickhouse-amsterdam-meetup-2026/eval-refactor-not-rewrite.jpg)
+
+*The eval strategy: a golden baseline and fee alignment before any comparison.*
+
+The talk ended with a live demo of the bulletin analysis agent on a Mastercard Canada bulletin (mapping the database landscape, finding the matching fees, validating against real invoices and writing the impact report). The wrap-up slide, **"Four principles to keep"**, mapped back to the four trade-offs:
+
+- **Draw the line per rule** (deterministic ↔ agentic): decide per rule whether it's pinned in code or left to the model, by how expensive a violation is.
+- **Typed actions, free-form outputs** (predictable ↔ flexible): constrain what the agent does, but leave its reasoning free-form where flexibility improves quality.
+- **Orchestrate, don't constrain** (auditable ↔ adaptive): a single mega-skill is adaptive but unauditable; four skills plus an orchestrator make the path reproducible while each skill stays adaptive.
+- **Cut skills by knowledge, not by generic responsibility** (routing ↔ parallelization): matching and classification look separable, but the tacit judgment ties them together, so they stayed one skill.
+
+My take: this is the clearest public account I've seen of *why* you start with a skill and then harden it. The skill is how you discover the workflow; the code is how you guarantee it. For practitioners building agents in regulated domains, this talk is essential viewing.
+
+## Talk 2: What to Do with Vectors?
+
+**Alexey Milovidov**, co-founder and CTO of ClickHouse, Inc., followed with **"What to do with vectors?"**. Alexey has 17 years of experience designing, developing and operating data-intensive applications; before ClickHouse, he created the data processing engine of the world's second-largest web analytics system.
+
+His answer came on the second slide: *"Store them in ClickHouse and have fun!"*, with a link to [embeddings.info](https://embeddings.info/), the **Embeddings Explorer** he built for the talk. The rest of the talk showed how.
+
+### The corpus: a web crawl, photos and Hacker News
+
+Alexey started with the data. For **"The Internet: a web crawl"** he took the list of top websites from the Chrome UX Report (CrUX), **18,988,131 websites**, and wrote a script that requests each front page, records as much metadata as possible, saves the content and takes a screenshot with headless Chrome and Playwright. It ran in AWS Lambda for a few weeks. Result: **395 TB, 189 TB compressed**. "AWS security kindly asked me what I'm doing", said the slide. Alongside the crawl he used Hacker News comments and a set of about 99 million photos (the Explorer credits Multimedia Commons, under CC licences).
+
+![Alexey Milovidov on stage next to the slide The Internet: a web crawl, 18,988,131 websites from CrUX, 395 TB of data, 189 TB compressed](/blog/events/clickhouse-amsterdam-meetup-2026/alexey-milovidov-web-crawl-corpus.jpg)
+
+*Alexey Milovidov on the web-crawl corpus behind the demo: 18,988,131 websites, 189 TB compressed.*
+
+He then went through what "vector embedding" can mean (from word2vec in 2013 to token embeddings and model activations) before getting to the practical question: how do you calculate them?
+
+### The 22 models
+
+The slide **"The 22 models I used"** listed every model with its year, size, dimensions and licence:
+
+- **Images** (99.2M photos, 17.8M screenshots): `siglip2-so400m-patch16-512` (1152 dimensions), `nomic-embed-vision-v1.5` (768) and `CLIP ViT-L/14` (768).
+- **Text** (37.8M comments, 19.0M pages): from `Qwen3-Embedding-8B` (7.6B parameters, 4096 dimensions) down to `all-MiniLM-L6-v2` and `granite-embedding-30m-english` (384 dimensions), plus the E5, GTE, BGE, Jina, Nomic, Snowflake Arctic and EmbeddingGemma families, and a hashed bag of words with 8192 dimensions.
+
+The footnote is the part I'd underline: "All 22 are open-weight — the closed APIs (Gemini Embedding, Nemotron-VL over OpenRouter) were trialled and dropped: per-token pricing does not survive 100 million rows."
+
+![Slide: The 22 models I used, a table of image and text embedding models with year, parameters, dimensions and licence](/blog/events/clickhouse-amsterdam-meetup-2026/the-22-embedding-models.jpg)
+
+*Three image models and nineteen text models, all open-weight.*
+
+### Three ways to get embeddings
+
+- **Option 1: open models on a GPU.** For the 99 million photos: SigLIP2, OpenCLIP ViT-L-14 and Nomic Embed Vision, each into its own table. One `g6.12xlarge` (4× NVIDIA L4), spot, in the same region as the S3 bucket, with all three models loaded on every GPU so the S3 read and the JPEG decode are shared across them. Wall time: about a day. Cost: **$50–200 for 300 million embeddings**. For text, the 30M-parameter models took hours and the 8B ones took days.
+- **Option 2: an API**, from inside ClickHouse. The slide showed a named collection pointing at OpenRouter (which speaks the OpenAI API) and a `SELECT aiEmbed(review_text, 'google/gemini-embedding-2', map('credentials', 'openrouter'))`. The [`aiEmbed` function](https://clickhouse.com/docs/sql-reference/functions/ai-functions) arrived in ClickHouse 26.6; it takes the model as a positional argument and works with any OpenAI-compatible endpoint.
+- **Option 3: make them yourself.** "You do not always need a model." A hashed bag of words, a TF-IDF vector or a vector of aggregated features are embeddings too. The bag-of-words map in the demo was built with a single `INSERT SELECT` using `tokens`, `cityHash64`, `countEqual` and `L2Norm`, stored as `Array(BFloat16)`.
+
+![Slide: Option 1: open models on a GPU, three image models on one g6.12xlarge with 4 NVIDIA L4 GPUs, about a day and 50 to 200 dollars for 300 million embeddings](/blog/events/clickhouse-amsterdam-meetup-2026/open-models-on-a-gpu.jpg)
+
+*The cost of embedding 99 million photos with three open models on one spot GPU instance.*
+
+### The Embeddings Explorer
+
+Then came the live demo. The [Embeddings Explorer](https://embeddings.info/) ("Proudly made with ClickHouse open-source database") lets you switch between three corpora (Photos, HackerNews, Web), the models, and linear, UMAP or 3D UMAP projections, and query the top-K most similar items. A linear projection of 99 million SigLIP2 photo embeddings, rotated with a Hadamard transform, came out as "a sphere, as promised". Switching to a UMAP projection of the same photos (hue is a fourth UMAP component, brightness is density), and then to the same photos embedded with **CLIP ViT-L/14**, turned the sphere into something that looked like a nebula.
+
+![Embeddings Explorer showing the same photos projected with CLIP ViT-L/14 as a colourful UMAP cloud](/blog/events/clickhouse-amsterdam-meetup-2026/embeddings-explorer-clip-vit-l14.jpg)
+
+*The same 99 million photos, embedded with CLIP ViT-L/14 and projected with UMAP in the Embeddings Explorer.*
+
+### Storing embeddings efficiently
+
+The most practical section of the talk was about storage. Most modern embedding models produce unit-normalised vectors, so L2 distance, cosine distance and dot product rank results the same way. Raw data should use a 16-bit type at most: "Do not use Float64 or Float32. ClickHouse provides [BFloat16](https://clickhouse.com/docs/sql-reference/data-types/float)." The example was `Qwen3-Embedding-8B` (4096 dimensions) on 37.8M Hacker News comments:
+
+| What | Size |
+|---|---|
+| The whole table without embeddings | 12 GB |
+| Embeddings in Float64 | 1.24 TB |
+| Embeddings in Float32 | 620 GB |
+| Embeddings in BFloat16 | 310 GB |
+
+"In most cases you will store further quantized data!" Quantization can go as low as 1–4 bits per dimension, and dimensionality reduction still gives good search results with 384 of the original 4096 dimensions. At 2 bits and 384 dimensions, the same comments take **3.6 GB**.
+
+![Slide: How to store embeddings efficiently? Use BFloat16, not Float64 or Float32; Qwen3-8B embeddings on 37.8M comments take 1.24 TB in Float64 and 310 GB in BFloat16](/blog/events/clickhouse-amsterdam-meetup-2026/store-embeddings-efficiently-bfloat16.jpg)
+
+*From 1.24 TB to 310 GB just by choosing BFloat16, before any quantization.*
+
+The ClickHouse building blocks he showed for that:
+
+- **`randomHadamardTransform`**: a deterministic, norm-preserving random rotation. Applied before quantization, it spreads information evenly across coordinates and improves search quality; truncated, it acts as a Johnson–Lindenstrauss random projection. It shipped in [ClickHouse 26.7](https://clickhouse.com/blog/clickhouse-release-26-07).
+- **Int8 quantization** with `quantizeBFloat16ToInt8` and `dequantizeInt8ToBFloat16`: half the storage of BFloat16, using a lookup table that assumes Gaussian-distributed coordinates.
+- **The [QBit data type](https://clickhouse.com/docs/sql-reference/data-types/qbit)**: a bit-sliced layout where you choose at query time how many of the most significant bits to read (say, 10 of 16), and with strided storage how many leading dimensions to read, using functions such as `L2DistanceTransposed`. Alexey's recall heatmaps showed the trade-off between bits, dimensions and Recall@100.
+
+As a bonus, ClickHouse also supports [vector similarity indexes](https://clickhouse.com/docs/engines/table-engines/mergetree-family/annindexes) (HNSW) for fast in-memory similarity search, "often you don't need it, as QBit solves the problem perfectly", plus ready-made quantization codecs such as RaBitQ and Turboquant.
+
+My take: for fintech teams that need to join transactional data with similarity search (fraud pattern matching, anomaly detection, deduplication), the argument for doing both in one engine is now mostly about cost, and the cost argument is storage: pick BFloat16, rotate, quantize, and decide precision at query time.
 
 ## The Venue: Adyen's Amsterdam Office
 
-The evening took place at **Adyen's Amsterdam office** at Simon Carmiggeltstraat 6-50, 1011 DK Amsterdam. Adyen provided food and drinks, and the space had exactly the right atmosphere for technical conversation — open, well-lit, and designed for people who'd rather be coding than small-talking.
+The evening took place on a high floor of **Adyen's Amsterdam office**, with the Muziekgebouw visible through the windows behind the stage. Adyen provided food and drinks, and the room was set up with round tables, two large screens and the yellow ClickHouse "The leading database for AI" banner.
 
-**Important note for international visitors:** Adyen requires all visitors to bring a valid photo ID (passport/ID card) to enter the building. Show it at reception and you'll be escorted to the top floor.
+**Important note for visitors:** Adyen requires all visitors to bring a valid photo ID (passport or ID card) to enter the building. You show it at reception and get a visitor sticker.
 
 ## On AI in Fintech
 
-What struck me most about the evening — and what I think the broader industry needs to hear — is that **AI in fintech is moving from experimentation to production, and the rules of engagement have changed.**
+What struck me most about the evening is that **AI in fintech is moving from experimentation to production, and the rules of engagement have changed.**
 
-In the chatbot world, you can afford to be conversational and creative. In fintech, every agent decision has a dollar value attached. The autonomous fee agent Iftach described isn't "nice to have" — it directly impacts revenue and customer trust. A hallucinated fee calculation is a customer complaint, a compliance report, and a potential chargeback.
+In the chatbot world, you can afford to be conversational and creative. In fintech, every agent decision has a value attached. A wrong fee match is, in Iftach's words on the slide, a compliance risk, not a quality-of-analysis question.
 
-This is why the "skills first" approach matters. You don't ship an agent harness and then figure out the guardrails. You start with the constraints — auditability, predictability, routing logic — and design the agent around what *must* be deterministic.
+This is why the "skills first, structure later" sequence matters. You ship the skill to learn what the workflow really is; then you move routing, guardrails and audit records into code, and prove with a golden baseline that nothing changed.
 
 ## Why This Matters for Fintech Builders
 
 The themes from this meetup echo across every fintech stack I work with:
 
-1. **Determinism is a feature, not a limitation** — The best AI systems know when to stop being creative and fall back to code.
-2. **Observability can't be bolted on** — Agent decisions need traceable paths from input to output. In regulated environments, this isn't optional.
-3. **Vector + analytics = the new full-stack** — Teams that can join traditional business intelligence with AI-powered similarity search are already a full architectural cycle ahead of competitors still running batch jobs.
-4. **Production is not a research paper** — The gap between "works on my laptop" and "handles 236 attendees' worth of real-time transactions" is where agents either thrive or fail.
+1. **Determinism is a feature, not a limitation**: the best AI systems know when to stop being creative and fall back to code.
+2. **Observability can't be bolted on**: agent decisions need traceable paths from input to output. Typed tools that return the SQL and rows make the audit trail a by-product.
+3. **Vector + analytics = the new full stack**: teams that can join traditional business intelligence with similarity search in one database avoid running a second system.
+4. **Production is not a research paper**: per-token API pricing that is fine for a prototype "does not survive 100 million rows".
 
 ## Related Content
 
+- [ClickHouse Open House Amsterdam 2025: Picnic and Langfuse](/blog/clickhouse-open-house-amsterdam-2025-picnic-langfuse/)
+- [ClickHouse full-text search with the text index](/blog/clickhouse-full-text-search-text-index/)
 - [Context Architecture for AI Agents](/blog/context-architecture-ai-agents-accuracy-2026/)
 - [Agentic AI in Enterprise Kubernetes](/blog/agentic-ai-enterprise-kubernetes/)
-- [Multi-Tenant GPUs on Bare Metal at KubeCon](/blog/kubecon-2026-talk-multi-tenant-gpus-recap/)
 - [OWASP Top 10 for LLM Applications](/blog/owasp-top-10-llm-applications-2025-security-guide/)
 
 <BlogPromoCard />

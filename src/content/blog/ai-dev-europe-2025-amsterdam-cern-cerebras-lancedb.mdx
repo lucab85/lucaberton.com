@@ -4,13 +4,13 @@ seoTitle: "AI_dev Europe 2025: CERN, Cerebras, LanceDB, deepset"
 snippet: "AI_dev Europe 2025 at RAI Amsterdam: CERN's MLOps platform, five Cerebras inference lessons, LanceDB's multimodal lakehouse and Neo4j graph agents."
 description: "My notes from AI_dev Europe 2025 in Amsterdam: open source AI keynotes, AI and MLOps at CERN, deepset on context engineering, Cerebras inference, LanceDB, Neo4j."
 publishDate: "2026-10-03"
-lastModified: "2026-10-03"
+lastModified: "2026-10-04"
 image:
   src: "/blog/thumbnails/ai-dev-europe-2025-amsterdam-cern-cerebras-lancedb.jpg"
   alt: "Luca Berton in the AI_dev Europe 2025 auditorium at RAI Amsterdam, with the Pillars of Open AI Development slide on stage"
 category: "AI"
 author: "Luca Berton"
-tags: ["AI_dev", "Open Source AI", "MLOps", "CERN", "Cerebras", "LanceDB", "deepset", "Haystack", "Context Engineering", "GraphRAG", "Neo4j", "AI Inference", "Linux Foundation", "Amsterdam"]
+tags: ["AI_dev", "Open Source AI", "MLOps", "CERN", "Cerebras", "LanceDB", "deepset", "Haystack", "Context Engineering", "GraphRAG", "Neo4j", "AI Inference", "Linux Foundation", "Amsterdam", "CRIU", "GPU Checkpointing", "KServe", "vLLM", "Elyra", "Container Plumbing Days"]
 draft: false
 ---
 
@@ -178,9 +178,111 @@ The structured branch has three sub-agents. A conversational **User Intent Agent
 
 My take: having agents propose the schema while a person approves the plan is a sensible division of labour. Schema design is where GraphRAG projects usually go wrong, and the critic loop plus the approval step make that decision visible. The query side is covered in my hands-on post on the [Neo4j vector index for GraphRAG](/blog/neo4j-vector-index-graphrag/). Neo4j's own roadmap from earlier that year is in my [GraphSummit Amsterdam 2025 recap](/blog/neo4j-graphsummit-amsterdam-2025/).
 
+## Afternoon: Container Plumbing Days next door
+
+After lunch I walked over to room D202, where **Container Plumbing Days 2025** ran a half-day track in the same building that afternoon ([schedule](https://containerplumbingdays2025.sched.com/)). I caught two of its talks: one about container images, and one about checkpointing GPU training jobs.
+
+### skiff: what is filling up your container image?
+
+The first was a short talk on **skiff**. Its title slide called it an "OCI image analysis utility", and the closing slide simply said "Give it a try!" with a QR code and `github.com/dcermak/skiff`. The [skiff repository](https://github.com/dcermak/skiff) (Go, Apache-2.0) describes it as a simple tool to "uncover what consumes so much disk space in your container images". The README shows two commands: `skiff layers` lists every layer of an image with its uncompressed size and diff ID, and `skiff top` lists the ten largest files and the layer each one lives in.
+
+![skiff, OCI image analysis utility, title slide at Container Plumbing Days 2025 in Amsterdam](/blog/events/ai-dev-europe-2025-amsterdam-cern-cerebras-lancedb/ai-dev-2025-skiff-title.jpg)
+
+*The skiff title slide: an OCI image analysis utility.*
+
+My take: AI images are where this kind of tool pays off. A CUDA base image plus a deep learning framework gets big fast, and you need to know which layer holds what before you can slim it down. The usual first fix is a [multi-stage build](/blog/docker-multi-stage-build-tutorial/).
+
+### Checkpointing distributed training with CRIU
+
+Next, **Radostin Stoyanov** presented **"Enabling Secure Container Checkpointing for Distributed Model Training"**. His title slide introduced him as a PhD student in the Scientific Computing Group, working with Viktória Spišaková, Behouba Manassé and Adrian Reber, and supervised by Prof. Rodrigo Bruno and Prof. Wes Armour. It carried the logos of Masaryk University, Técnico Lisboa, the University of Oxford's Department of Engineering Science and Red Hat.
+
+The problem slide, "Challenges with Distributed Training", started from one line: a single GPU failure may require restarting the entire training job. The evidence came from cited papers:
+
+- **54 days of training, 466 job interruptions**, with about 78% of the unexpected interruptions attributed to hardware issues (citing the Llama 3 paper)
+- **3–23 hours** mean time between failures on older GPUs
+- an estimated monthly cost of up to a few million dollars, depending on job size
+- inefficient checkpointing, because checkpointing larger models means longer GPU idle times
+
+![Challenges with Distributed Training slide: 54 days training, 466 job interruptions, 3 to 23 hours MTBF on older GPUs, and checkpointing larger models leads to longer GPU idle times](/blog/events/ai-dev-europe-2025-amsterdam-cern-cerebras-lancedb/ai-dev-2025-criu-training-failures.jpg)
+
+*Why checkpointing matters: one GPU failure can restart the whole job.*
+
+An "Error Recovery Tradeoffs" slide then compared two approaches. **Model checkpoints** put error recovery in user code: you restart the training job, re-run the application code and pay potentially large job initialisation overheads. **Infrastructure checkpoints** recover transparently at system level: they enable checkpointing for every job without user code changes, and they support transparent job migration with existing cluster schedulers.
+
+The how was **CRIU with a CUDA plugin**. The diagram showed the container (application, ML framework, mapped CUDA libraries and driver) next to CRIU and its CUDA plugin, which talks to `cuda-checkpoint` and the NVIDIA driver. The sequence was lock (pause the devices), checkpoint the devices, then take the usual CPU checkpoint. The slide cited the paper [CRIUgpu: Transparent Checkpointing of GPU-Accelerated Workloads](https://arxiv.org/abs/2502.16631), whose abstract says the work was contributed upstream and released with CRIU 4.0. The [CUDA plugin README](https://github.com/checkpoint-restore/criu/tree/criu-dev/plugins/cuda) explains that on newer drivers it calls the CUDA driver API directly, and on older ones (such as r565 and r570) it falls back to the `cuda-checkpoint` utility.
+
+![Transparent GPU Checkpointing slide: CRIU with CUDA plugin, cuda-checkpoint and the NVIDIA driver, with the lock, checkpoint and CPU checkpoint sequence](/blog/events/ai-dev-europe-2025-amsterdam-cern-cerebras-lancedb/ai-dev-2025-criu-cuda-plugin.jpg)
+
+*CRIU's CUDA plugin: lock the GPUs, checkpoint the device state, then checkpoint the process.*
+
+Three more pieces filled the rest of the talk:
+
+- **Coordinated checkpointing.** On a Kubernetes node, the container runtime calls CRIU, and an action script (the `criu-coordinator` client) synchronises the pre-dump and post-dump steps with a `criu-coordinator` server. That way, several containers in one distributed job are checkpointed consistently.
+- **Built-in encryption for CRIU images.** At checkpoint time, CRIU generates a random key, encrypts the image data with ChaCha20-Poly1305 AEAD (256-bit key, 96-bit nonce, 128-bit authentication tag) and encrypts that key with the public key from an X.509 certificate. Restore needs the matching private key. Memory pages get AES-XTS (a 256-bit key plus a 256-bit tweak key, and a 128-bit IV).
+- **Evaluation with training workloads** on an NVIDIA H100 (PCIe 5.0, 80 GB HBM3). The charts went from BERT-B (110M) to Llama 3.1 (8B), and every model on them checkpointed and restored in roughly 30 seconds or less.
+
+![Evaluation with Training Workloads slide: lock plus checkpoint and restore times for BERT, GPT-2 and Llama models on an NVIDIA H100](/blog/events/ai-dev-europe-2025-amsterdam-cern-cerebras-lancedb/ai-dev-2025-criu-h100-evaluation.jpg)
+
+*Checkpoint and restore times on an H100, from BERT-B (110M) to Llama 3.1 (8B).*
+
+My take: this is the infrastructure version of the CERN lesson from the morning. If the platform can checkpoint and move a training job without the data scientists writing recovery code, GPU failures and preemption become a scheduling problem rather than a lost week. Encryption isn't optional either: a checkpoint is a full memory dump, with model weights, data and whatever credentials the process held.
+
+## Back at AI_dev: GPU kernel caches as OCI images
+
+At 15:40 I was back in an AI_dev breakout room for a session the schedule lists as [From Cold Start To Warp Speed: Triton Kernel Caching With OCI Container Images](https://aideveu2025.sched.com/event/25Tu4). I missed the title slide, so these notes start in the middle. The problem is JIT compilation: Triton and vLLM compile GPU kernels at runtime, and every new pod pays that cost again. The answer on the slides came in three parts:
+
+- **Model Cache Manager (MCM) – Warm.** `mcm warm --model facebook/opt-125m` precompiles the kernels in a vLLM container and writes JSON metadata alongside them for portability. The resulting cache directory held `metadata.json` and `torch_compile_cache`.
+- **MCM – Track.** A runtime tracker that monitors cache performance. `MCMTrackingCacheManager` drops in as a replacement for Triton's `CacheManager` through `triton.knobs.cache.manager_class`. A footnote said tracking works from torch 2.8.0 and Triton 3.4.0.
+- **Model Cache Vault (MCV).** It packages Triton and vLLM caches into OCI images and signs them with Sigstore Cosign. The slide's bullets: pre-built kernel caches mean faster cold starts and reproducible builds, it works with Docker, Podman, Kubernetes and CI/CD pipelines, it's "just another container image", and a **~2× speedup** was demonstrated in a Kubernetes deployment.
+
+On Kubernetes, the **GPU Kernel Manager (GKM)** slide showed the flow. You create a `GKMCache` custom resource that points at a cache image. The GKM node controller verifies the image signature and pins the resolved digest. The node agent watches the CRDs, runs preflight checks and extracts the cache onto the node, and the workload pod mounts it through a CSI volume (`csi.gkm.io`). The two bullets underneath: simplify the deployment and management of model kernels in Kubernetes, and accelerate model startup time.
+
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 my-6">
+
+![GPU Kernel Manager slide at AI_dev Europe 2025: a GKMCache custom resource, a node controller that verifies the image signature, a node agent that extracts the cache, and a pod mounting it through a CSI volume](/blog/events/ai-dev-europe-2025-amsterdam-cern-cerebras-lancedb/ai-dev-2025-gkm-kernel-manager.jpg)
+
+![Model Cache Vault slide at AI_dev Europe 2025: packages Triton and vLLM caches into OCI images signed with Sigstore Cosign, with a 2x speedup demonstrated in Kubernetes](/blog/events/ai-dev-europe-2025-amsterdam-cern-cerebras-lancedb/ai-dev-2025-model-cache-vault.jpg)
+
+</div>
+
+*GKM distributes signed kernel-cache images across nodes. MCV builds and extracts them.*
+
+Both projects live in the [GKM repository](https://github.com/redhat-et/GKM) under Red Hat Emerging Technologies (Apache-2.0), with MCV in its `mcv/` directory. The README describes GKM as "a Kubernetes Operator that propagates GPU Kernel Caches across Kubernetes Nodes". It has moved on since this talk: GKM now extracts the cache into a PersistentVolumeClaim that the pod mounts, and the CSI approach is described as the original design. It also notes that the node needs the same GPU the cache was generated on, and it puts the gain at up to half of the pod start-up time.
+
+My take: treating kernel caches as signed OCI artifacts is the right idea. Platform teams already know how to mirror, sign, scan and garbage-collect images, so a cache becomes one more artifact in the [signing pipeline](/blog/container-image-signing-verification-pipeline/) instead of a new kind of state on the node.
+
+## Elyra, KServe and vLLM: one pipeline from notebook to endpoint
+
+The last session I attended was **"Streamlining AI Pipelines with Elyra: From Development to Inference with KServe and vLLM"** by **Ritesh Shah** (Senior Principal Architect, Red Hat), at 16:15 in the same room ([session page](https://aideveu2025.sched.com/event/25TuJ)).
+
+His "High Level Architecture" slide put a data scientist on the left working in **Elyra**'s pipeline editor in Jupyter. The pipeline output went to a **model registry**, **Tekton Triggers** and **Tekton** handled CI/CD, **KServe** served the model with **vLLM**, and a monitoring box looped back to the data scientist, all on Kubernetes and OpenShift. [Elyra](https://github.com/elyra-ai/elyra) is a set of AI-centric extensions for JupyterLab, with a visual pipeline editor that runs pipelines on Kubeflow Pipelines or Apache Airflow.
+
+The "Elyra Visual Editor Example" was a binary image classifier on a cats-and-dogs dataset. The nodes downloaded and prepared the dataset, created a convolutional neural network, trained and evaluated it, then uploaded the pipeline artefacts to an S3 bucket and the model in OpenVINO format, before deleting the temporary artefacts.
+
+For serving, a "Model Deployment with vLLM" screen deployed `Granite-8b-code-instruct-128k` with a vLLM serving runtime labelled "vLLM-RHOAI 2.16". A side panel listed the runtime's predefined arguments: `--port=8080`, `--model=/mnt/models`, `--served-model-name={{.Name}}`, `--distributed-executor-backend=mp` and `--max-model-len=6144`. It noted that you override one by specifying a new value in the "Additional serving runtime arguments" field.
+
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 my-6">
+
+![High Level Architecture slide: a data scientist using the Elyra pipeline editor, a model registry, Tekton Triggers and Tekton for CI/CD, KServe with vLLM for model serving, and monitoring](/blog/events/ai-dev-europe-2025-amsterdam-cern-cerebras-lancedb/ai-dev-2025-elyra-architecture.jpg)
+
+![Model Deployment with vLLM screen: Granite-8b-code-instruct-128k with a vLLM serving runtime and its predefined arguments, including max-model-len 6144](/blog/events/ai-dev-europe-2025-amsterdam-cern-cerebras-lancedb/ai-dev-2025-elyra-vllm-deployment.jpg)
+
+</div>
+
+*From the Elyra pipeline to a KServe and vLLM endpoint, with Tekton in between.*
+
+The closing "MLOps Best Practice and Advantages" slide summed it up:
+
+- use data science pipelines (Elyra and Kubeflow) for experimentation and training, and Tekton for CI/CD deployment of models
+- separate concerns: data scientists own experimentation, feature engineering and training logic, while DevOps and ML engineers manage deployment, scaling and runtime monitoring with KServe, Tekton and OpenShift or Kubernetes
+- automate the whole process, from code commit to a monitored model deployment
+- version every artefact (code, data and the trained model) to make runs reproducible
+
+My take: the split between "data scientists own the pipeline" and "platform engineers own serving" is what makes this stack work in practice. The [KServe](https://github.com/kserve/kserve) and [vLLM](https://github.com/vllm-project/vllm) side is covered in my post on [model serving with vLLM on OpenShift AI](/blog/openshift-ai-model-serving-vllm/), and the trigger side in [Tekton Triggers with a GitHub webhook](/blog/tekton-triggers-eventlistener-github-webhook/).
+
 ## Takeaways
 
-AI_dev was short and dense. The talks I'll remember shared a theme: **the model was rarely the hard part**. CERN's wins were GPU partitioning and NUMA pinning. Cerebras' were HTTP/2, routing and bot defence. deepset's was deciding what goes into the context. LanceDB's was getting rid of five copies of the same data, and Neo4j's was agreeing on a schema before building the graph. That's a platform engineering agenda, and it fit well after the three Open Source Summit days that came before it.
+AI_dev was short and dense. The talks I'll remember shared a theme: **the model was rarely the hard part**. CERN's wins were GPU partitioning and NUMA pinning. Cerebras' were HTTP/2, routing and bot defence. deepset's was deciding what goes into the context. LanceDB's was getting rid of five copies of the same data, and Neo4j's was agreeing on a schema before building the graph. The afternoon added three more: checkpointing GPU jobs without touching user code, shipping kernel caches as signed images, and handing a trained model from Elyra to KServe and vLLM through CI/CD. That's a platform engineering agenda, and it fit well after the three Open Source Summit days that came before it.
 
 ## Related
 

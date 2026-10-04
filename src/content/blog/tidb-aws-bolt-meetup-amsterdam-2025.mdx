@@ -1,0 +1,162 @@
+---
+title: "TiDB, AWS and Bolt Meetup Amsterdam 2025"
+seoTitle: "TiDB Vector Search, Bolt and Concurrency: Amsterdam 2025"
+snippet: "Two Amsterdam database evenings, late 2025: TiDB vector and full-text search, Bolt on the TiKV in-memory engine, and a tour of dirty writes, MVCC, 2PL and SSI."
+description: "Notes from a TiDB × AWS meetup with Bolt in Amsterdam (26 Nov 2025) and a database concurrency talk (4 Dec 2025), checked against TiDB and PostgreSQL docs."
+publishDate: "2026-10-04"
+lastModified: "2026-10-04"
+image:
+  src: "/blog/thumbnails/tidb-aws-bolt-meetup-amsterdam-2025.jpg"
+  alt: "A TiDB speaker presenting a Fulltext search slide about hybrid search with vector and full-text retrieval feeding a reranker"
+category: "database"
+author: "Luca Berton"
+tags: ["TiDB", "TiKV", "PingCAP", "AWS", "Kiro", "Bolt", "Vector Search", "Full-Text Search", "MVCC", "PostgreSQL", "MySQL", "Concurrency", "Isolation Levels", "Amsterdam", "Meetup"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Two database evenings in Amsterdam, eight days apart, ended up fitting together well. On Wednesday **26 November 2025** I went to a meetup with AWS, PingCAP and Bolt, held in an AWS meeting space (the security posters on the wall carried Amazon branding). It covered TiDB's vector index and full-text search, and then Bolt's talk **"Building Bolt with TiDB"**. On Thursday **4 December 2025** I went to another database meetup in the city centre. The first talk there was a clear walk through concurrency anomalies and the four usual ways databases deal with them.
+
+This is a throwback built from my photos. The talk content below comes from the slides. Where I add background, I've checked it against the [TiDB docs](https://docs.pingcap.com/) and the [PostgreSQL docs](https://www.postgresql.org/docs/current/transaction-iso.html) and link to them.
+
+## 26 November: AWS opens with a TiDB-backed TODO app
+
+The AWS speaker opened with an architecture diagram titled **"TODO App AWS Architecture"**. It had an ALB and ACM at the edge, two Fargate services in private subnets, Cognito for sign-in, and Secrets Manager, ECR and CloudWatch underneath. The database was **TiDB Cloud** rather than an AWS service. The browser had tabs open for Kiro, the TiDB MCP Server and the AWS Knowledge MCP Server, and the diagram was a PNG from a "generated-diagrams" folder. I've cropped out the address bar.
+
+![The AWS speaker at the lectern next to a TODO App AWS Architecture diagram: Fargate 1 and Fargate 2 in private subnets, Cognito, Secrets Manager, ECR, CloudWatch and TiDB Cloud](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/kiro-todo-app-aws-architecture.jpg)
+
+*A TODO app on Fargate with TiDB Cloud as the database, with the AWS speaker at the lectern.*
+
+He followed with the Kiro pricing page: **"Get started with Kiro for free"**, and a line saying startups could apply for up to a year's worth of Kiro Pro+ credits. The tiers on screen that evening were Free at $0, Pro at $20, Pro+ at $40 and Power at $200 per month. Pricing pages change, so treat those as a snapshot from November 2025.
+
+## About PingCAP
+
+The TiDB talk began with the company slide. PingCAP is "the company behind TiDB", founded in 2015, with an open-source culture, "strong investors" and more than 500 employees. The world map marked Silicon Valley, Amsterdam, Beijing, Tokyo, Shanghai and Singapore.
+
+![The About PingCAP slide: the company behind TiDB, founded in 2015, global, open source culture, strong investors, 500+ employees, with a world map marking offices including Amsterdam](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/about-pingcap.jpg)
+
+*PingCAP's introduction, with Amsterdam on the map.*
+
+## Vector index in TiDB
+
+The first technical slide was **"Vector Index in TiDB"**. The index uses **HNSW** (Hierarchical Navigable Small World). It needs a cluster with **TiFlash nodes**, and TiFlash has to be active for the table. The example DDL declared the index inline:
+
+```sql
+CREATE TABLE foo (
+    id        INT PRIMARY KEY,
+    embedding VECTOR(5),
+    VECTOR INDEX idx_embedding ((VEC_COSINE_DISTANCE(embedding)))
+);
+```
+
+![The Vector Index in TiDB slide: this uses HNSW, requires a cluster with TiFlash nodes and TiFlash active for the table, with a CREATE TABLE example declaring a VECTOR INDEX on VEC_COSINE_DISTANCE(embedding)](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/tidb-vector-index-hnsw.jpg)
+
+*The vector index slide: HNSW, built on TiFlash.*
+
+The [vector search index docs](https://docs.pingcap.com/tidb/stable/vector-search-index/) say the same thing and add a few limits worth knowing before you design a schema. HNSW is currently the only supported algorithm. TiFlash nodes have to be deployed in advance. You must specify a distance function when you create the index, and only `VEC_COSINE_DISTANCE()` and `VEC_L2_DISTANCE()` are supported. You can also add the index to an existing table with `CREATE VECTOR INDEX … USING HNSW` or `ALTER TABLE … ADD VECTOR INDEX`.
+
+**My take:** having the index live on the columnar TiFlash replicas, not the row store, is a sensible split. Vector scans are analytical-shaped work. Keeping them off TiKV protects the transactional path that your application's writes depend on. It does mean that "add vector search" is also a capacity-planning conversation about TiFlash.
+
+## Full-text and hybrid search
+
+Next came **"Fulltext search"**. According to the slide, it was already available in select TiDB Cloud Serverless regions and would be released more widely. It allows **hybrid search**: a user query goes to vector search for semantic similarity and to full-text search for keyword relevance, each returns its top K, and a **reranker** merges them into a final top K.
+
+![The Fulltext search slide: already available on select TiDB Cloud Serverless regions, will be released more widely, allows hybrid search, with a diagram of a user query going to vector search and full-text search, then a reranker](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/tidb-fulltext-hybrid-search.jpg)
+
+*Hybrid search: vector and keyword retrieval, merged by a reranker.*
+
+The current [full-text search guide](https://docs.pingcap.com/tidbcloud/vector-search-full-text-search-sql/) still describes the feature as early-stage and limited to certain TiDB Cloud tiers and regions. It also mentions a multilingual parser that handles English, Chinese, Japanese and Korean in the same table. I've compared a similar feature on another engine in [ClickHouse full-text search with the text index](/blog/clickhouse-full-text-search-text-index/).
+
+The TiDB part ended with **"Try it for yourself!"** and a link to [TiDB Labs](https://labs.tidb.io). The labs on the slide included building simple vector search applications in a Jupyter notebook, RAG and Text2SQL apps with OpenAI or Amazon Bedrock, and using TiDB as unified storage for AI apps.
+
+## Building Bolt with TiDB
+
+The second half belonged to Bolt. The title slide read **"Building Bolt with TiDB: How Bolt Serves Millions of Customers Globally with TiDB"**, by **Leandro Morgado, Senior DBRE**, dated Amsterdam, 2025.11.26.
+
+My photos only cover a small part of the talk: the title, one technical slide and the Q&A. That technical slide is worth looking at closely. It was about the **TiKV MVCC In-Memory Engine (IME)**:
+
+- **When to enable it?** With a long `tidb_gc_life_time` (hours), with workloads that have many updates and deletes (for example, queues), and bearing in mind that it **only speeds up reads**.
+- **How to spot it in `EXPLAIN`:** `total_keys` (versions scanned) much greater than `total_process_keys` (versions processed). The example `scan_detail` on the slide showed `total_process_keys: 10` against `total_keys: 35231`.
+
+![Leandro Morgado presenting the TiKV MVCC In-Memory Engine slide: when to enable it, long tidb_gc_life_time, workloads with many updates and deletes such as queues, only speeds up reads, and EXPLAIN total_keys versus total_process_keys](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/tikv-mvcc-in-memory-engine.jpg)
+
+*Bolt's slide on when the TiKV in-memory engine helps: about 35,000 versions scanned to process 10 keys.*
+
+The [TiKV MVCC In-Memory Engine docs](https://docs.pingcap.com/tidb/stable/tikv-in-memory-engine/) match the slide. IME speeds up queries that have to scan a large number of MVCC historical versions, meaning `total_keys` is much greater than the processed keys. The docs give the same two scenarios: frequently updated or deleted records, and a longer `tidb_gc_life_time`. Their FAQ also says plainly that it only speeds up read requests that scan many MVCC versions.
+
+**My take:** this is the kind of slide I find most useful from a production team. A queue table in an MVCC database builds up dead versions faster than garbage collection removes them. The query plan looks fine, but the scan detail tells a different story. Comparing "versions scanned" with "versions processed" is a check you can run against your own slow query log tomorrow, on TiDB or anything else built on MVCC.
+
+![Luca Berton taking a selfie in the audience during the Q&A, with Bolt's Thank you, Q and A slide on the screens behind](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/bolt-qa-selfie.jpg)
+
+*Q&A after the Bolt talk.*
+
+## 4 December: concurrency anomalies, from dirty writes to SSI
+
+Eight days later I was at another database meetup in central Amsterdam. My photos don't show who organised it, so I'll stick to the talks. The first was by **José María Muñoz Rey, Backend Engineer** (as on his closing slide). It walked through concurrency problems using one running example: an `Events` table with a row for "Best Concert Ever", where `tickets_sold` is 9 and `max_tickets_to_sell` is 10. There's one ticket left and two buyers.
+
+### The anomalies
+
+**Dirty write.** A and B both buy the last ticket. A assigns the ticket to itself, B assigns it to itself and overwrites A, and then both update the counter from 9 to 10. Both buyers get a confirmation, but the ticket ends up belonging to B. Then the slide asked: "And what about the tickets_sold counter?"
+
+**Lost update.** A reads 9, B reads 9, and both write 9 + 1 = 10. Two tickets are sold, but the counter only goes up by one.
+
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 my-6">
+
+![The Dirty Write slide: A and B confirmed the ticket, it ended being assigned to B, what happened, a Dirty Write, and what about the tickets_sold counter](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/dirty-write-slide.jpg)
+
+![The Lost updates slide: an Events table with Best Concert Ever, tickets_sold 9 and max_tickets_to_sell 10, where A and B both read 9 and both execute 9 + 1 = 10](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/lost-updates-slide.jpg)
+
+</div>
+
+*Two buyers, one ticket left: the dirty write and the lost update.*
+
+### The solutions
+
+The talk then covered the solutions, each with the database it's most associated with:
+
+- **Multi-version concurrency control (MVCC)**, shown with the PostgreSQL elephant. It implements snapshot isolation / repeatable reads. A transaction only sees data from older transactions, transactions get incremental transaction IDs, and each row records the transaction that changed it. Useful against dirty reads and read skew.
+- **Two-phase locking (2PL)**, shown with the MySQL and SQL Server logos. This is pessimistic concurrency: locks manage data access, in shared mode (reads can share) and exclusive mode (writes can't). Performance is "bad in general, but useful for high concurrency in a single object". Useful against dirty writes and write skew.
+- **Serializable snapshot isolation (SSI)**, shown with the PostgreSQL elephant again. This is optimistic: it waits until the operation completes and then checks for conflicts, detecting writes to rows that were read earlier ("soft locks over data range"). Good for many transactions that don't touch the same data, bad for low cardinality combined with slow transactions, and "useful for every problem".
+- **Atomic write operations**, the first item on the summary slide.
+
+![The Multi-version concurrency control slide with the PostgreSQL elephant: implements snapshot isolation or repeatable reads, a transaction only sees data from older transactions, incremental transaction IDs, useful for dirty reads and read skew](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/mvcc-postgres-slide.jpg)
+
+*MVCC, with PostgreSQL as the example.*
+
+<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 my-6">
+
+![The Two phase locking slide with MySQL and SQL Server logos: pessimistic concurrency with shared and exclusive lock modes, bad performance in general but useful for high concurrency on a single object, useful for dirty writes and write skews](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/two-phase-locking-slide.jpg)
+
+![The Serializable snapshot isolation slide with the PostgreSQL elephant: optimistic concurrency that checks conflicts at completion, detects writes in rows previously read, good for many non-overlapping transactions, bad for low cardinality with slow transactions](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/ssi-slide.jpg)
+
+</div>
+
+*Pessimistic 2PL and optimistic SSI, side by side.*
+
+![The Summary of Solutions slide: atomic write operations, multi-version concurrency control, two phase locking and serializable snapshot isolation](/blog/events/tidb-aws-bolt-meetup-amsterdam-2025/summary-of-solutions.jpg)
+
+*The four options on one slide.*
+
+The [PostgreSQL transaction isolation docs](https://www.postgresql.org/docs/current/transaction-iso.html) are the best companion to this talk. They confirm that PostgreSQL's Repeatable Read is implemented as snapshot isolation and its Serializable level as Serializable Snapshot Isolation. They also explain that you can request all four standard isolation levels, but only three are actually implemented, because Read Uncommitted behaves like Read Committed. That matters for the lost-update example. Under Repeatable Read, if a concurrent transaction has already committed an update to the same row, PostgreSQL rolls the second transaction back with `could not serialize access due to concurrent update`. It doesn't silently overwrite. Your application has to catch that and retry.
+
+**My take:** the slide labels are a simplification, and that's fine for a meetup talk. MySQL's InnoDB is also a [multi-version storage engine](https://dev.mysql.com/doc/refman/8.4/en/innodb-multi-versioning.html), so the 2PL logo really refers to how it handles locking reads and writes. For the ticket example in practice, I'd reach for the cheapest fix first: an atomic `UPDATE events SET tickets_sold = tickets_sold + 1 WHERE id = 1 AND tickets_sold < max_tickets_to_sell`, then check the affected row count. Use SSI or explicit locks when the invariant spans more than one row.
+
+### TiDB online DDL and ClickHouse
+
+The second talk of the evening was about schema changes in TiDB. I only photographed its closing slide. It credited **"Online, Asynchronous Schema Change in F1"** by Google as the inspiration (StateNone → DeleteOnly → WriteOnly…), and pointed to TiDB's original DDL design doc, github.com/pingcap/tidb and TiDBCloud.com. The [TiDB DDL introduction](https://docs.pingcap.com/tidb/stable/ddl-introduction/) describes the same progression for adding an index: absent → delete only → write only → write reorg → public. That's how TiDB runs DDL online and asynchronously without blocking DML in other sessions.
+
+The evening finished with a ClickHouse talk. Its slide pointed to github.com/clickhouse/clickhouse and to the paper "ClickHouse - Lightning Fast Analytics for Everyone". My photos only show its title slide, so for ClickHouse internals see my posts from the [ClickHouse Open House Amsterdam 2025](/blog/clickhouse-open-house-amsterdam-2025-picnic-langfuse/).
+
+## What connects the two evenings
+
+MVCC was the thread through both nights. On 26 November it came up as an operational problem: Bolt's slide on TiKV keeping too many versions for queue-like tables. On 4 December it was a correctness tool: the way PostgreSQL gives each transaction a consistent snapshot. Same mechanism, two very different costs. If you run a database at scale, you need to understand both.
+
+## Related
+
+- [PostgreSQL Meetup Amsterdam 2025: Mastodon, CNPG, Indexes](/blog/postgresql-user-meetup-amsterdam-2025/)
+- [ClickHouse Open House Amsterdam 2025: Picnic and Langfuse](/blog/clickhouse-open-house-amsterdam-2025-picnic-langfuse/)
+- [ClickHouse Full-Text Search: Text Index and Tokenizers](/blog/clickhouse-full-text-search-text-index/)
+- [Vector Databases on Kubernetes: Qdrant vs Milvus vs pgvector](/blog/vector-database-kubernetes-qdrant-milvus-pgvector-2026/)
+
+<BlogPromoCard />

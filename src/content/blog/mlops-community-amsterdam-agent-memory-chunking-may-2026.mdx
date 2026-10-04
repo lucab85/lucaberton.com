@@ -1,0 +1,108 @@
+---
+title: "MLOps Community Amsterdam: Agent Memory and Chunking"
+seoTitle: "Agent Memory, Chunking and Recall@10: MLOps Amsterdam"
+snippet: "MLOps Community Amsterdam, 7 May 2026: Qdrant on token cost and chunking, Nextcloud memory with verify-on-read, and LangWatch on agent evals."
+description: "My recap of the MLOps Community Amsterdam evening on agent memory: Qdrant's chunking and Recall@10 results, a stale-index war story, and LangWatch evals."
+publishDate: "2026-10-05"
+lastModified: "2026-10-05"
+image:
+  src: "/blog/thumbnails/mlops-community-amsterdam-agent-memory-chunking-may-2026.jpg"
+  alt: "A Qdrant speaker presenting The Effects of Chunking Methods, a Recall@10 bar chart, at MLOps Community Amsterdam"
+category: "AI"
+author: "Luca Berton"
+tags: ["MLOps", "AI Agents", "Agent Memory", "Qdrant", "RAG", "Chunking", "MCP", "Evaluation", "Amsterdam"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+On Thursday 7 May 2026, after a day at DevWorld, I went to an **MLOps Community Amsterdam** evening about memory for AI agents. This is a different evening from the [AI sovereignty and GPT-NL special](/blog/mlops-community-amsterdam-ai-sovereignty-gpt-nl-2026/) I wrote up before. The opening slides described the community as part of 75k members worldwide, with chapters in 35 cities and 150+ events.
+
+The agenda slide listed three talks, a panel and networking:
+
+- 6:25 to 7:00 PM: Ewa Szyszka, Qdrant, a deep dive into memory architecture, retrieval quality and evaluation in production AI systems.
+- 7:00 to 7:20 PM: Chris Coutinho, Booking.com, "Memory for humans and agents: Nextcloud + MCP + Qdrant".
+- 7:40 to 8:00 PM: Aryan Sharma, LangWatch, "Your Agent passes every eval and still breaks in production".
+- Then a panel with audience Q&A, and networking.
+
+![The Agenda slide for the MLOps Community Amsterdam evening, with a presenter holding a microphone next to the screen](/blog/events/mlops-community-amsterdam-agent-memory-chunking-may-2026/agenda.jpg)
+
+*The agenda slide.*
+
+## Qdrant: the silent tax on every AI agent
+
+The first talk was titled "The silent tax on every AI agent". The argument on the slides was about tokens. A chart compared tokens needed per correct answer against corpus size on three benchmarks (SWE-bench Lite, LongMemEval and FinanceBench). Long-context with caching and grep-style retrieval climbed with the corpus, while dense-vector and the Qdrant composition conditions stayed roughly flat.
+
+![A slide titled Tokens per Correct Answer versus Corpus Size with three log-log charts, with the Qdrant speaker next to it](/blog/events/mlops-community-amsterdam-agent-memory-chunking-may-2026/tokens-corpus.jpg)
+
+*Tokens per correct answer versus corpus size, on three benchmarks.*
+
+The speaker also covered what each Qdrant primitive contributes to recall, and what a single agent call would cost with several large models for a 200k-token context and 20k output tokens. These are vendor benchmarks, so treat them as the vendor's own measurements.
+
+### Chunking methods and Recall@10
+
+The slide I found most useful was "The Effects of Chunking Methods": chunking strategy impact on Recall@10 at a 200k corpus size, per benchmark, against a fixed-window 350-token baseline.
+
+![A bar chart slide, The Effects of Chunking Methods, comparing chunking strategies on Recall@10 for SWE-bench Lite, LongMemEval and FinanceBench](/blog/events/mlops-community-amsterdam-agent-memory-chunking-may-2026/chunking-recall.jpg)
+
+*Chunking strategies compared on Recall@10, with a fixed 350-token window as the dashed baseline.*
+
+On the slide, function-level AST chunking led on SWE-bench Lite, and Chonkie semantic chunking led LongMemEval and tied for the lead on FinanceBench. Several strategies fell below the fixed-window baseline on a given benchmark. My take: this matches my experience, which is that the best chunker depends on the corpus type, so measure it on your own data before committing. A following slide checked model sensitivity across three embedding families and reported the same corpus-size trend.
+
+## Chris Coutinho (Booking.com): memory for humans and agents
+
+The second talk was about Nextcloud, MCP and Qdrant. The slide said "I had everything in Nextcloud. I couldn't find anything", then added semantic search through Qdrant, and then noted that agents generating documents made finding them the next bottleneck. The talk framed memory as four flavours.
+
+![A slide titled Four flavors of memory: working, episodic, semantic and procedural, with the speaker pointing at it](/blog/events/mlops-community-amsterdam-agent-memory-chunking-may-2026/four-memory-flavors.jpg)
+
+*Four flavours of memory: working, episodic, semantic, procedural.*
+
+- **Working**: what is in the prompt right now, volatile.
+- **Episodic**: what happened, such as conversations and events.
+- **Semantic**: what is true, such as facts and preferences.
+- **Procedural**: how to do something, such as scripts and playbooks.
+
+The slide's point was that Nextcloud is already your episodic and semantic memory, so the agent inherits a year of you. A "Why Qdrant" slide listed a Rust core with predictable latency, payload filtering for multi-tenancy, and hybrid sparse and dense search.
+
+### Cliff versus slope
+
+In a demo called "read the shape", two query results were plotted by rank. A real match showed a cliff between ranks 4 and 5, while no match showed a smooth slope. The slide's advice: watch the shape, not the top score.
+
+![A line chart slide, Cliff vs. slope, comparing score by rank for a real-match query and a no-match query](/blog/events/mlops-community-amsterdam-agent-memory-chunking-may-2026/cliff-vs-slope.jpg)
+
+*Cliff versus slope: the score distribution says more than the top score.*
+
+### The stale index and verify-on-read
+
+A war story from preparing the talk: the speaker deleted a note and re-ran the query that had surfaced it. The note came back as the top result with score 0.7, all seven chunks ranked above any other document. In the slide's words, Nextcloud said the note did not exist, Qdrant said it was the best match in the corpus, and both were telling the truth about their own state.
+
+![A War story slide titled The stale index, describing a deleted note that still ranked first in Qdrant](/blog/events/mlops-community-amsterdam-agent-memory-chunking-may-2026/stale-index.jpg)
+
+*The stale index: a deleted note still came back as the top result.*
+
+The fix, on a later slide, was verify-on-read. Every search verifies sources before returning, which costs one Nextcloud round trip per note result, and webhooks still prune the index in the background. Ghost evictions become an observable signal. The slide reported that a re-test the day before the talk showed the deleted note gone six seconds after deletion. The closing line was the one I wrote down.
+
+![A closing slide: Agents don't need bigger context windows. They need a librarian. And the librarian needs to know what's been removed from the shelves.](/blog/events/mlops-community-amsterdam-agent-memory-chunking-may-2026/librarian.jpg)
+
+*"Agents don't need bigger context windows. They need a librarian."*
+
+My take: this is the failure mode I would test first in any RAG system. An index is a cache, and caches need invalidation, especially when deletion is a compliance requirement.
+
+## LangWatch: when every eval passes
+
+The third talk, by Aryan Sharma of LangWatch, was about scenario testing for agents. One slide showed a suite of 15 scenarios with a 53% pass rate on day one, captioned "every red tile is a bug I would've shipped", and red-team scenarios such as prompt injection that caught real failures.
+
+![A slide showing a grid of 15 red and green scenario tiles titled red green red green red ship, with the speaker holding a microphone](/blog/events/mlops-community-amsterdam-agent-memory-chunking-may-2026/langwatch-scenarios.jpg)
+
+*A scenario suite where the red tiles are the bugs that would have shipped.*
+
+The QR codes in the slides pointed to LangWatch's open-source scenario repository on GitHub.
+
+## Related
+
+- [MLOps Community Amsterdam: AI Sovereignty and GPT-NL](/blog/mlops-community-amsterdam-ai-sovereignty-gpt-nl-2026/)
+- [MLOps Community Amsterdam, July 2025: Agents in Production](/blog/mlops-community-amsterdam-july-2025/)
+- [Vector Databases on Kubernetes: Qdrant vs Milvus vs pgvector](/blog/vector-database-kubernetes-qdrant-milvus-pgvector-2026/)
+- [AI Security Night Amsterdam: Breaching LLM-Powered Apps](/blog/snyk-ai-security-meetup-amsterdam-2026/)
+
+<BlogPromoCard />

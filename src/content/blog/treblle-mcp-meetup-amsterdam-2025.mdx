@@ -1,0 +1,90 @@
+---
+title: "Treblle MCP Meetup Amsterdam 2025: To MCP or Not"
+seoTitle: "Treblle MCP Meetup Amsterdam 2025: To MCP or Not"
+snippet: "Treblle's 'To MCP or not to MCP' meetup at ML6 Amsterdam: ClickHouse on MCP in production, Cloudflare on remote servers, ML6 on Agent2Agent."
+description: "My recap of Treblle's 'To MCP or not to MCP' meetup at ML6 in Amsterdam, 20 May 2025: three talks on MCP in production, remote servers and A2A."
+publishDate: "2026-10-05"
+lastModified: "2026-10-05"
+image:
+  src: "/blog/thumbnails/treblle-mcp-meetup-amsterdam-2025.jpg"
+  alt: "A speaker presenting 'Living with MCP in production' at Treblle's MCP meetup at ML6 in Amsterdam, next to a Treblle API Intelligence Platform banner"
+category: "AI"
+author: "Luca Berton"
+tags: ["MCP", "Model Context Protocol", "Treblle", "ClickHouse", "Cloudflare", "A2A", "AI Agents", "Meetup", "Amsterdam"]
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+On Tuesday 20 May 2025 I went to **"To MCP or not to MCP"**, an evening organised by Treblle for the Push to Main Amsterdam group (APIs and system internals). It took place at ML6 on the Geldersekade, in a bright top-floor room with a Treblle banner next to the screen. The listing promised three 20-minute talks about the Model Context Protocol, which Anthropic introduced in November 2024.
+
+This is a throwback post. I took the photos and recordings of the talks that evening, and what follows comes from them plus the official event page. The names below are the speakers listed there.
+
+![Stage at the Treblle MCP meetup at ML6 in Amsterdam, with a speaker at the podium and a Treblle API Intelligence Platform banner on the right](/blog/events/treblle-mcp-meetup-amsterdam-2025/venue-ml6-stage.jpg)
+
+*The room at ML6 before the first talk, with the Treblle banner on the right.*
+
+## What MCP is, in one paragraph
+
+According to [modelcontextprotocol.io](https://modelcontextprotocol.io/docs/getting-started/intro), MCP is an open-source standard for connecting AI applications to external systems: data sources, tools and workflows. The site's own analogy is a USB-C port for AI applications, and the Cloudflare talk used the same picture. A host such as Claude talks to MCP servers, and each server fronts something upstream such as a calendar, Gmail or Slack.
+
+## Treblle opens the evening
+
+Treblle describes itself on [treblle.com](https://treblle.com) as a runtime intelligence platform for API visibility. The banner and the opening slide listed the pieces: API Intelligence, Security, Analytics, Governance with customizable Spectral rules, auto-generated API documentation with OpenAPI support, and an AI-powered API assistant.
+
+![Treblle slide titled Treblle Helps Organizations Figure Out Their APIs, with API Security and an API assistant among its icons](/blog/events/treblle-mcp-meetup-amsterdam-2025/treblle-intro-slide.jpg)
+
+*Treblle's introduction slide: the platform covers the whole API lifecycle across different teams.*
+
+## ClickHouse: Running MCP in Production
+
+The first talk I recorded was Dmitry Pavlov (Director of Engineering, ClickHouse) on lessons learned from running MCP in production. Its on-screen title was "Living with MCP in production".
+
+![Title slide of the ClickHouse talk, Living with MCP in production: Lessons learned, at Treblle's MCP meetup](/blog/events/treblle-mcp-meetup-amsterdam-2025/mcp-in-production-talk.jpg)
+
+*The opening slide of the ClickHouse talk: "Living with MCP in production, Lessons learned".*
+
+The setup, as the talk described it: ClickHouse's internal data warehouse is fed by cloud-provider costs, the CRM and other systems, processed with dbt and Airflow into data marts, which teams query through a BI tool. The team wanted an agent that could answer questions over it.
+
+- **First attempt:** they connected the open-source ClickHouse MCP server, which exposes tools to run queries, list databases and list tables ([project on GitHub](https://github.com/ClickHouse/mcp-clickhouse), Apache-2.0). According to the speaker, on its own it did not work at all, because the agent had no context about how the data was built.
+- **What fixed it:** adding more context sources. The slide below shows the architecture: the data warehouse, a data warehouse wiki, the dbt GitHub repository, a dictionary of columns plus the current date, and LibreChat running on their own EC2 machine, with Anthropic's model behind it. A GitHub MCP server gave the agent the dbt repo, so it could trace how a figure such as revenue is calculated.
+- **Why LibreChat:** the speaker called it an open-source chat UI that works with many models and, as he put it, solves the authentication problem so everyone in the company can use the agent from a web interface.
+- **Live demos:** with no hints about the schema, the agent was asked for the safest place in New York City according to the police department data, and which stocks depend on weather. He pointed out that the agent sometimes performs a join in memory rather than in the database, which is the expensive way round.
+- **Roadmap:** an MCP endpoint for every ClickHouse Cloud service, next to the existing SQL and HTTP query endpoints, so customers can connect Claude or LibreChat to their own database.
+
+![Slide showing a ClickHouse data warehouse connected through MCP servers to LibreChat and Anthropic, with a wiki, a dbt repository and a column dictionary as context](/blog/events/treblle-mcp-meetup-amsterdam-2025/clickhouse-slide.jpg)
+
+*Architecture slide: warehouse, wiki, dbt repo and column dictionary feeding the agent through MCP servers.*
+
+My take: the lesson that stuck with me is that a database MCP server alone gives an agent tables but not meaning. The wiki, the dbt lineage and the column descriptions are what turn it into something you can ask about revenue. That matches what I see when teams wire agents to internal platforms.
+
+## Cloudflare: building and hosting remote MCP servers
+
+Melody Huang (Solutions Architect, Cloudflare) covered best practices for building an MCP server and hosting a remote one on Cloudflare. From the recording:
+
+- Local MCP servers are limited, so Cloudflare pitches hosting them remotely on Workers. The current guidance is in the [Cloudflare docs](https://developers.cloudflare.com/agents/guides/remote-mcp-server/), which describe remote servers over Streamable HTTP with optional OAuth.
+- Their OAuth library handles authentication and authorisation, which she said is the hard part when a server reaches a sensitive service such as a payments account.
+- Cloudflare had published its own remote servers for documentation, observability, Radar and Logpush.
+- Best practices: do not wrap your API schemas one to one, build specialised servers around jobs to be done, keep servers narrow so a compromise has a smaller blast radius, write detailed tool descriptions, and ship evaluation tests with every server so regressions show up when models change.
+
+The "fewer, more specialised tools" advice is one I would repeat to anyone designing agent tooling.
+
+## ML6: Diving into the Agent2Agent protocol
+
+The last talk was Titus Naber (Data Engineer, ML6) on the Agent2Agent (A2A) protocol. He walked from chatbots to agentic workflows to autonomous agents, using ML6's internal "virtual tumor board" demo, where agents with different specialities, such as genetics and clinical trials, discuss a case. His challenges: evaluating a multi-agent system is hard, results are not repeatable, and state management gets harder. He then showed Google's sample A2A UI connecting to agents through their agent cards.
+
+According to [a2a-protocol.org](https://a2a-protocol.org/latest/), A2A is an open standard for communication between AI agents, and it complements MCP rather than replacing it: MCP connects an agent to its tools, A2A lets agents discover each other and delegate tasks.
+
+## Closing: APIs still underneath
+
+Treblle closed the evening with a reminder that whether you build MCP servers or connect agents over A2A, you still build on APIs, and APIs need observability. That is the case for this meetup being hosted by an API platform company, and I agree with the framing: MCP servers are mostly thin layers over APIs that already exist.
+
+## Related
+
+- [A2A Python SDK tutorial](/blog/a2a-python-sdk-tutorial/)
+- [AICamp A2A protocol deep search in Amsterdam](/blog/aicamp-a2a-protocol-deep-search-amsterdam/)
+- [ClickHouse Open House Amsterdam 2025](/blog/clickhouse-open-house-amsterdam-2025-picnic-langfuse/)
+- [Cloudflare Founders and Developers Meetup Amsterdam 2025](/blog/cloudflare-developers-meetup-amsterdam-2025/)
+- [AgntCon and MCPCon Europe 2026: agents in production](/blog/agntcon-mcpcon-europe-2026-recap-agents-in-production/)
+
+<BlogPromoCard />

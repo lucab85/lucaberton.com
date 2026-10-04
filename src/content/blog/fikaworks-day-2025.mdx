@@ -109,9 +109,22 @@ My take: this is the path I see in many teams. A pipeline starts as one big pod.
 
 In my session **"How to Write a Technical Book and Sell Worldwide"**, I shared my journey from platform engineer to **six-time published author** with leading publishers including **Apress (Springer Nature)**, **BPB**, and **Packt Publishing**.
 
-### What We Covered
+### How the session actually ran
 
-Ever thought about writing a tech book but didn't know where to start? Here's what I walked the audience through:
+I kept it interactive, because everyone was heading for lunch and I wanted a conversation rather than a lecture. There was a single slide, with the covers of my books, and I brought a printed copy so people could handle a real book instead of looking at thumbnails. Most of the time went on audience questions. What I said, in short:
+
+- **Where it started.** Years of consulting for large companies left me keeping an archive of what was relevant. That became a blog during the pandemic, plus a YouTube channel (I was deep into Ansible then). Packing the blog posts into a book looked easy and was a lesson in how much more a book needs. The first one was *Ansible for VMware by Example*, and it is still one of my best sellers, because VMware is still everywhere in regulated enterprises such as banks, insurers and airlines, where Ansible is used a lot.
+- **Traditional publishers.** I work with Apress (Springer Nature, a global team based in New York) and BPB (based in New Delhi). In both cases there is one editor and one project manager from the moment you send a book outline, which is essentially a table of contents with titles and subtitles. You then write chapter by chapter in a shared document, the outline can still change, and the closer you get to production the more reviewers and layout rules come in.
+- **What editors changed in my writing.** For every chapter I got feedback. They asked me to explain code line by line for a beginner and to state the intent of each snippet, because for me the code was "self-explanatory". They also pushed me towards more inclusive wording (allow list and deny list, "we" instead of "you"). The first Leanpub manuscript was copied from my blog; the publisher had me write about half of it again and add new sections.
+- **Self-publishing.** I also use Leanpub and Amazon KDP, which has print on demand. Amazon's royalty share is around 70%, but nobody validates the text, so quality is on you. The upside is speed: you can update whenever you like, and I mentioned an author who publishes a new edition every year. A traditional publication cycle is closer to three years. I use both, because they reach different readers.
+- **Why would a publisher pick an unknown author?** Publishers are open to proposals. Send the outline and explain why you are the right person. Writing is also a way to think: some of the Kubernetes material in *Kubernetes Recipes* covered topics I did not fully understand when I started, so I built and tested them in a lab. And if you suffer from imposter syndrome, as I did, send the proposal anyway.
+- **Money.** I was honest that I am not getting rich from royalties. Most technical authors write to build authority and a personal brand and to open doors to consulting, speaking and rooms where you can talk at management level and at engineer level.
+
+I also said I had just finished another manuscript, hoped for December. The recording of the last audience question (about expanding the community) is too garbled for me to summarise, so I leave it out.
+
+### The outline I prepared
+
+Ever thought about writing a tech book but didn't know where to start? This is the outline I prepared for the session; the discussion above covered most of it, in the order the audience asked:
 
 #### 1. **Finding Your Topic**
 - How to identify compelling subjects that publishers want
@@ -155,6 +168,22 @@ For independent professionals, writing a technical book is more than just sharin
 - **Authority Building**: Being a published author instantly elevates your credibility
 - **Network Growth**: Books connect you with readers, clients, and collaborators worldwide
 
+## Afternoon: Kubernetes and local AI on tiny edge devices
+
+After lunch I sat in on a talk by two speakers who split it between Kairos and Cluster API. I could not read their names on any slide, so I leave them unnamed. They began by showing what an "edge device" can be: a single-board computer such as a Raspberry Pi, an ARM or x86 box, an MRI machine, a satellite or a drone.
+
+**Trade-offs.** They organised the talk around the BLERP framework from the Edge AI and Vision Alliance, which lists five trade-offs for edge AI: bandwidth, latency, economics (or energy), reliability and privacy. Their examples were practical. Keep traffic low by shipping pre-built images and only the delta. Do inference next to the data, for instance on a single-board system watching wildlife in a forest with no network. Edge nodes do not need to be highly available, but they must be reliable. And because the device sits somewhere you cannot reach, whoever has physical access must not be able to compromise the data or steal the hardware.
+
+**Why classic bare-metal provisioning does not fit.** The standard flow they described: rack the machine, register it in asset management, associate a machine template, let Cluster API create a node, install the OS and Kubernetes, then deploy the workload. Metal3 does this on Kubernetes, with Ironic talking to the board management controller, writing an image to disk (a `dd`-style write, not an install) and rebooting. That breaks down on single-board computers, which have no BMC. It also does not understand immutable operating systems, which need partitions for A/B rollback and, when a TPM is present, a way to write encryption keys. One speaker presented his own project, Beskar7 (named after the Mandalorian metal), a Cluster API infrastructure provider for bare-metal immutable systems. It deliberately covers only the infrastructure contract, because the control plane is baked into the image. He said it works against BMCs through Redfish, with custom resources for physical hosts, machines and clusters, and it supports Kairos first, plus Flatcar and Leap Micro. He said he had meant to open-source it on stage and found it was already public.
+
+**The building blocks.** Kubernetes here was k0s, a lightweight distribution whose controller needs no kubelet ports of its own and can use something other than etcd. The OS was Kairos, an immutable, container-based Linux (a CNCF sandbox project): you define it with a Dockerfile and YAML, turn it into a bootable ISO, USB or raw/cloud image, and get atomic upgrades with automatic fallback, factory reset and peer-to-peer cluster enrolment, so three devices can decide among themselves which is the control plane. Inference ran on LocalAI, which is built on llama.cpp so it can run on CPU as well as GPU, and which exposes an OpenAI-compatible API. A model you trained on your own data never leaves the device.
+
+**The demo.** The plan was to flash a machine and let it install itself, zero-touch, the way you would hand a data scientist a box and say "plug it in". The speaker said he had tried to prepare it on the train the day before, with USB sticks and a small device on his lap, which drew some looks. The live install ran in the background while he showed a pre-built version: the device advertised itself on the network (`ai.local`), served a ChatGPT-style chat UI with the model already baked into the image, and was slow, as expected on such a small box, but capable. For real workloads you would pick the right hardware, for example an NVIDIA board. Afterwards a VM booted by the same flow came up fully configured, and `k9s` showed an ordinary Kubernetes cluster.
+
+In the Q&A they covered the model types LocalAI supports (chat, image generation if you have a strong GPU, text to speech), why you pre-load models at the edge, how Kairos applies cloud-config with its own implementation rather than cloud-init, and the air-gap catch: you must put every container image inside the OS image. They also explained that nodes can be assigned control-plane or worker roles in advance or negotiate them peer to peer.
+
+My take: the point I would carry into client work is that an edge fleet should be treated as appliances. Build the image in CI, bake in the control plane and the model, upgrade atomically and roll back, and never patch in place. The BLERP list is a useful review checklist for any edge AI design, and it explains why a standard cloud-style bare-metal pipeline is the wrong tool for a Raspberry Pi in a field.
+
 ## About FikaWorks Day
 
 FikaWorks Day is an annual gathering where the community builds the agenda together. The 2025 edition featured:
@@ -172,7 +201,7 @@ The board covered what independent consultants actually deal with: which certifi
 
 ### Closing: a book raffle
 
-Fittingly for a day where I talked about writing books, the programme ended with a book raffle "@16:45 - before closing remarks". The slide introduced **From Cloud Native to AI Native: Catching the Next Wave of Innovation** by **Pini Reznik** and **Michael Müller**. Pini explained that it follows *Cloud Native Transformation*, the book he co-wrote about five or six years earlier. The new one is about the transformation process itself: what it takes to actually finish a cloud native transformation, and then move on to AI native. He described it as full of patterns drawn from their own experience, written for the change agents who bring new technology into organisations. Copies of the new book sat on the stage stool next to a copy of my own **Kubernetes Recipes**.
+Fittingly for a day where I talked about writing books, the programme ended with a book raffle "@16:45 - before closing remarks". The slide introduced **From Cloud Native to AI Native: Catching the Next Wave of Innovation** by **Pini Reznik** and **Michael Müller**. Pini explained that it follows *Cloud Native Transformation*, the book he co-wrote about five or six years earlier. The new one is about the transformation process itself: what it takes to actually finish a cloud native transformation, and then move on to AI native. He described it as full of patterns drawn from their own experience, written for the change agents who bring new technology into organisations. Before the raffle I recorded a short video with Pini and Michael, and my copy came back signed; they stressed that the book helps companies make the move to AI in the right way, and Pini added that it is a collection of stories and experience from decades in the field. Pini also said the new book is built around six modes of operation in a transformation, and is aimed at change agents and consultants. Copies of the new book sat on the stage stool next to a copy of my own **Kubernetes Recipes**.
 
 <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 my-6">
 

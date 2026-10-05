@@ -115,3 +115,17 @@ export async function eventTopicLinksFor(entry: CollectionEntry<'blog'>): Promis
 }
 
 export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** First candidate within the SEO title limit (validate-seo-fixes: <= 60). */
+export function fitTitle(...candidates: string[]): string {
+  return candidates.find((c) => c.length <= 60) ?? candidates[candidates.length - 1].slice(0, 60);
+}
+
+/** First candidate within the meta description window (120–160), else the first <= 160. */
+export function fitDescription(...candidates: string[]): string {
+  return (
+    candidates.find((c) => c.length >= 120 && c.length <= 160) ??
+    candidates.find((c) => c.length <= 160) ??
+    candidates[candidates.length - 1].slice(0, 160)
+  );
+}

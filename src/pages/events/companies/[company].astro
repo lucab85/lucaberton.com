@@ -1,0 +1,81 @@
+---
+import Layout from "@layouts/Layout.astro";
+import Container from "@components/container.astro";
+import Breadcrumb from "@components/Breadcrumb.astro";
+import EventPostList from "@components/EventPostList.astro";
+import BlogPromoCard from "@components/BlogPromoCard.astro";
+import { companyHubs, topicHubs, plural } from "@utils/eventGraph";
+import { eventTopics } from "@utils/eventTopics";
+
+export async function getStaticPaths() {
+  const hubs = await companyHubs();
+  return [...hubs].map(([company, hub]) => ({ params: { company }, props: hub }));
+}
+
+const { company } = Astro.params;
+const { name, posts } = Astro.props;
+
+const events = new Set(posts.map((p) => p.data.event.name));
+const cities = [...new Set(posts.map((p) => p.data.event.city).filter(Boolean))];
+const years = posts.map((p) => p.data.event.startDate.slice(0, 4)).sort();
+const span = years[0] === years[years.length - 1] ? years[0] : `${years[0]}–${years[years.length - 1]}`;
+
+const hubs = await topicHubs();
+const tc = new Map<string, number>();
+for (const p of posts) for (const t of p.data.event.topics) if (hubs.has(t)) tc.set(t, (tc.get(t) ?? 0) + 1);
+const topics = [...tc].sort((a, b) => b[1] - a[1]).slice(0, 8);
+
+const title = `${name} at Tech Events: Talks and Booths, ${span}`;
+const description = `${name} at ${events.size} conferences and meetups${cities.length ? ` in ${cities.slice(0, 3).join(", ")}` : ""}: Luca Berton's notes on the talks, demos and conversations.`.slice(0, 160);
+const url = `https://lucaberton.com/events/companies/${company}/`;
+const schema = {
+  "@context": "https://schema.org",
+  "@type": "CollectionPage",
+  "@id": url,
+  name: title,
+  description,
+  url,
+  about: { "@type": "Organization", name },
+  isPartOf: { "@type": "WebSite", "@id": "https://lucaberton.com/#website" },
+  mainEntity: {
+    "@type": "ItemList",
+    numberOfItems: posts.length,
+    itemListElement: posts.slice(0, 20).map((p, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      url: `https://lucaberton.com/blog/${p.slug}/`,
+    })),
+  },
+};
+---
+
+<Layout title={title} description={description}>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
+  <Breadcrumb items={[{ name: "Events", url: "/events/" }, { name: "Companies", url: "/events/#companies" }, { name }]} />
+  <Container>
+    <div class="mx-auto max-w-3xl">
+      <h1 class="mt-12 text-4xl font-extrabold tracking-tight text-gray-900">{name} at tech events</h1>
+      <p class="mt-3 text-sm font-semibold uppercase tracking-wider text-gray-500">
+        {plural(posts.length, "write-up")} · {plural(events.size, "event")} · {span}
+      </p>
+      <p class="mt-6 text-lg leading-8 text-gray-700">
+        Every event write-up on this site where {name} spoke, hosted, sponsored or was interviewed,
+        newest first. Each post covers what was presented, in my own words, with photos of the slides.
+      </p>
+
+      {topics.length > 0 && (
+        <div class="mt-6 flex flex-wrap gap-2">
+          {topics.map(([s, n]) => (
+            <a href={`/events/topics/${s}/`} class="rounded-full border border-gray-200 px-3 py-1 text-sm font-medium text-gray-800 hover:border-blue-400">
+              {eventTopics[s].label} ({n})
+            </a>
+          ))}
+        </div>
+      )}
+
+      <EventPostList posts={posts} />
+
+      <div class="mt-12"><BlogPromoCard variant="newsletter" /></div>
+    </div>
+  </Container>
+</Layout>

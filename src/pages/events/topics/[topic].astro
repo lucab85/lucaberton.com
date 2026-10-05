@@ -1,0 +1,147 @@
+---
+import { getCollection } from "astro:content";
+import Layout from "@layouts/Layout.astro";
+import Container from "@components/container.astro";
+import Breadcrumb from "@components/Breadcrumb.astro";
+import EventPostList from "@components/EventPostList.astro";
+import BlogPromoCard from "@components/BlogPromoCard.astro";
+import { topicHubs, companyHubs, slugify, plural } from "@utils/eventGraph";
+import { eventTopics, eventOffers, topicElsewhere } from "@utils/eventTopics";
+
+export async function getStaticPaths() {
+  const hubs = await topicHubs();
+  return [...hubs].map(([topic, posts]) => ({ params: { topic }, props: { posts } }));
+}
+
+const { topic } = Astro.params;
+const { posts } = Astro.props;
+const t = eventTopics[topic!];
+const offer = t.offer ? eventOffers[t.offer] : undefined;
+const elsewhere = topicElsewhere[topic!] ?? [];
+
+const allBlog = await getCollection("blog", ({ data }) => !data.draft);
+const guides = t.guides
+  .map((s) => allBlog.find((p) => p.slug === s))
+  .filter((p): p is NonNullable<typeof p> => !!p);
+
+const events = new Set(posts.map((p) => p.data.event.name));
+const years = posts.map((p) => p.data.event.startDate.slice(0, 4)).sort();
+const span = years[0] === years[years.length - 1] ? years[0] : `${years[0]}–${years[years.length - 1]}`;
+
+// Companies that appear on this topic and have their own hub
+const companies = await companyHubs();
+const companyCounts = new Map<string, number>();
+for (const p of posts) for (const c of p.data.event.companies) {
+  const s = slugify(c);
+  if (companies.has(s)) companyCounts.set(s, (companyCounts.get(s) ?? 0) + 1);
+}
+const topCompanies = [...companyCounts].sort((a, b) => b[1] - a[1]).slice(0, 12);
+
+// Neighbouring topics: those that co-occur most with this one
+const hubs = await topicHubs();
+const co = new Map<string, number>();
+for (const p of posts) for (const o of p.data.event.topics) {
+  if (o !== topic && hubs.has(o)) co.set(o, (co.get(o) ?? 0) + 1);
+}
+const related = [...co].sort((a, b) => b[1] - a[1]).slice(0, 6);
+
+const title = `${t.label} at Tech Events: Notes From ${plural(events.size, "Event")}`;
+const description = `${t.label} at tech conferences and meetups, ${span}: ${posts.length} event write-ups by Luca Berton with the talks, demos and takeaways.`.slice(0, 160);
+const url = `https://lucaberton.com/events/topics/${topic}/`;
+const schema = {
+  "@context": "https://schema.org",
+  "@type": "CollectionPage",
+  "@id": url,
+  name: title,
+  description,
+  url,
+  about: { "@type": "Thing", name: t.label },
+  isPartOf: { "@type": "WebSite", "@id": "https://lucaberton.com/#website" },
+  mainEntity: {
+    "@type": "ItemList",
+    numberOfItems: posts.length,
+    itemListElement: posts.slice(0, 20).map((p, i) => ({
+      "@type": "ListItem",
+      position: i + 1,
+      url: `https://lucaberton.com/blog/${p.slug}/`,
+    })),
+  },
+};
+---
+
+<Layout title={title} description={description}>
+  <script type="application/ld+json" set:html={JSON.stringify(schema)} />
+  <Breadcrumb items={[{ name: "Events", url: "/events/" }, { name: "Topics", url: "/events/#topics" }, { name: t.label }]} />
+  <Container>
+    <div class="mx-auto max-w-3xl">
+      <h1 class="mt-12 text-4xl font-extrabold tracking-tight text-gray-900">{t.label} at tech events</h1>
+      <p class="mt-3 text-sm font-semibold uppercase tracking-wider text-gray-500">
+        {plural(posts.length, "write-up")} · {plural(events.size, "event")} · {span}
+      </p>
+      {t.intro && <p class="mt-6 text-lg leading-8 text-gray-700">{t.intro}</p>}
+
+      {(guides.length > 0 || offer || elsewhere.length > 0) && (
+        <aside class="mt-8 rounded-xl border border-blue-100 bg-blue-50/50 p-6">
+          <p class="text-sm font-bold uppercase tracking-wider text-blue-700">Go deeper</p>
+          {guides.length > 0 && (
+            <ul class="mt-3 space-y-2">
+              {guides.map((g) => (
+                <li><a href={`/blog/${g.slug}/`} class="font-semibold text-gray-900 hover:text-blue-600">{g.data.title}</a></li>
+              ))}
+            </ul>
+          )}
+          {elsewhere.length > 0 && (
+            <ul class="mt-3 space-y-2">
+              {elsewhere.map((l) => (
+                <li><a href={l.href} class="font-semibold text-gray-900 hover:text-blue-600">{l.label} ↗</a></li>
+              ))}
+            </ul>
+          )}
+          {offer && (
+            <div class="mt-5 border-t border-blue-100 pt-5">
+              <p class="text-gray-700">{offer.blurb}</p>
+              <a
+                href={offer.href}
+                class="mt-3 inline-flex items-center rounded-lg bg-blue-600 px-5 py-2.5 font-semibold text-white hover:bg-blue-500"
+                data-track-event="consulting_cta_click"
+                data-tp-target-offer={offer.targetOffer}
+                data-tp-cta-position="related_offer"
+                data-tp-cta-variant="event_topic_hub"
+              >{offer.label} →</a>
+            </div>
+          )}
+        </aside>
+      )}
+
+      <EventPostList posts={posts} />
+
+      {topCompanies.length > 0 && (
+        <section class="mt-12">
+          <h2 class="text-xl font-extrabold text-gray-900">Companies on this topic</h2>
+          <div class="mt-4 flex flex-wrap gap-2">
+            {topCompanies.map(([s, n]) => (
+              <a href={`/events/companies/${s}/`} class="rounded-full bg-gray-100 px-3 py-1 text-sm font-medium text-gray-800 hover:bg-gray-200">
+                {companies.get(s)!.name} ({n})
+              </a>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {related.length > 0 && (
+        <section class="mt-10">
+          <h2 class="text-xl font-extrabold text-gray-900">Related topics</h2>
+          <div class="mt-4 flex flex-wrap gap-2">
+            {related.map(([s]) => (
+              <a href={`/events/topics/${s}/`} class="rounded-full border border-gray-200 px-3 py-1 text-sm font-medium text-gray-800 hover:border-blue-400">
+                {eventTopics[s].label}
+              </a>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {!offer && <div class="mt-12"><BlogPromoCard variant="newsletter" /></div>}
+    </div>
+  </Container>
+</Layout>

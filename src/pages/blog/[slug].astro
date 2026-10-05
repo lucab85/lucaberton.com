@@ -15,6 +15,9 @@ import { getReadingTime } from "@utils/readingTime";
 import { isBootcampRelevant } from "@utils/serviceMatches";
 import { topicCluster } from "@utils/topicCluster";
 import { getBlogConsultingCta } from "@utils/blogConsultingCtas";
+import { eventTopicLinksFor } from "@utils/eventGraph";
+import EventContextBox from "@components/EventContextBox.astro";
+import relatedIndex from "../../data/related.json";
 
 // Generate a new path for every collection entry
 export async function getStaticPaths() {
@@ -61,10 +64,18 @@ const readingTime = getReadingTime(entry.body || '');
 
 // Get related posts (same category, excluding current)
 const allPosts = await getCollection("blog", ({ data }) => !data.draft);
-const relatedPosts = allPosts
-  .filter(p => p.slug !== entry.slug && p.data.category === entry.data.category)
-  .sort((a, b) => new Date(b.data.publishDate).getTime() - new Date(a.data.publishDate).getTime())
-  .slice(0, 4);
+// Content-similar posts (TF-IDF, scripts/build-related.cjs), falling back to
+// the newest posts in the same category for anything not in related.json.
+const bySlug = new Map(allPosts.map((p) => [p.slug, p]));
+const similar = ((relatedIndex as Record<string, string[]>)[entry?.slug ?? ""] ?? [])
+  .map((s) => bySlug.get(s))
+  .filter((p): p is NonNullable<typeof p> => !!p);
+const relatedPosts = [
+  ...similar,
+  ...allPosts
+    .filter(p => p.slug !== entry?.slug && p.data.category === entry?.data.category && !similar.includes(p))
+    .sort((a, b) => new Date(b.data.publishDate).getTime() - new Date(a.data.publishDate).getTime()),
+].slice(0, 4);
 
 // VideoObject structured data — emit one per YouTube embed found in body so
 // posts using <YouTube id="..." /> directly (not just video: frontmatter) are
@@ -137,6 +148,23 @@ const blogSchema = {
   "articleSection": entry.data.category,
   "keywords": entry.data.tags?.join(", ") || ""
 };
+
+// Event recaps: the article is *about* the event (not the event page itself,
+// so no top-level Event entity that would compete with the organiser's page).
+const ev = entry?.data.event;
+if (ev && !ev.series) {
+  (blogSchema as Record<string, unknown>).about = {
+    "@type": "Event",
+    "name": ev.name,
+    "startDate": ev.startDate,
+    ...(ev.endDate ? { "endDate": ev.endDate } : {}),
+    "eventAttendanceMode": "https://schema.org/OfflineEventAttendanceMode",
+    ...(ev.city ? { "location": { "@type": "Place", "name": ev.venue || ev.city, "address": { "@type": "PostalAddress", "addressLocality": ev.city, ...(ev.country ? { "addressCountry": ev.country } : {}) } } } : {}),
+    ...(ev.organizer ? { "organizer": { "@type": "Organization", "name": ev.organizer } } : {}),
+    ...(ev.url ? { "url": ev.url } : {}),
+  };
+}
+const eventTopicLinks = entry ? await eventTopicLinksFor(entry) : undefined;
 
 // FAQPage structured data — emitted only when the post defines `faq` frontmatter.
 // The same entries are rendered visibly below the article (Google requires FAQ
@@ -321,6 +349,10 @@ const pageCluster = topicCluster(entry.data.category || "", entry.data.tags || [
     " id="article-content">
       <Content />
     </div>
+
+    {eventTopicLinks && entry?.data.event && (
+      <EventContextBox event={entry.data.event} ctx={eventTopicLinks} showOffer={!consultingOffer} />
+    )}
     <script is:inline>
       // Runs while the page is still parsing, before first paint: thumbnail,
       // title, first paragraph, then Udienza.

@@ -1,0 +1,151 @@
+---
+title: "GPUs and LLM Inference: Lessons From 40+ Conference Talks"
+seoTitle: "GPUs and LLM Inference: Lessons From 40+ Conference Talks"
+snippet: "What 43 event write-ups taught me about GPU sharing, multi-tenancy, KV-cache routing, cost per token and sovereign AI factories, plus a Monday checklist."
+description: "What 43 event write-ups taught me about GPU sharing, multi-tenancy, KV-cache routing, cost per token and sovereign AI factories, plus a Monday checklist."
+publishDate: "2026-10-05"
+lastModified: "2026-10-05"
+image:
+  src: "/blog/thumbnails/gpu-infrastructure-llm-inference-lessons-from-conference-talks.jpg"
+  alt: "Slide from a KubeCon London 2025 talk comparing time-slicing and MPS GPU sharing on latency, throughput and GPU usage"
+tags: ["GPU", "LLM Inference", "vLLM", "llm-d", "DRA", "Kubernetes", "Platform Engineering", "Sovereign AI", "KubeCon", "Red Hat Summit"]
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Over the last two years I have written up 43 events that touched GPU infrastructure or LLM inference: KubeCon in London, Amsterdam and Yokohama, Red Hat Summit and Tech Day, community meetups in the Netherlands, World Summit AI, and a few RISC-V floors. Read one at a time, each post is a snapshot. Read together, they show a handful of patterns that repeat across vendors, years and countries.
+
+This piece is organised by theme, not by event. Every number below comes from a post I already published, and I keep the hedges those posts use: where a figure is a vendor claim or a speaker's claim, I say so. On a few of these stages I was the speaker, and I say that where it applies. Everywhere else I was in the audience or covering the event as media.
+
+## 1. GPU sharing moved from node settings to claims
+
+At KubeCon London in April 2025, the AI co-located day had a talk on Dynamic Resource Allocation (DRA) with NVIDIA's GPU driver. The slides described the four API objects (ResourceClaim, ResourceClaimTemplate, DeviceClass and ResourceSlice) and showed driver examples for GPU sharing and MIG. My take at the time was that DRA moves sharing from node-level configuration to something a workload can ask for. The details are in [the DRA and CERN Kubeflow post](/blog/kubecon-europe-2025-london-dra-gpu-sharing-and-cern-kubeflow/). The same day, CERN's Kubeflow roadmap slide listed DRA and MPS next to its existing MIG setup as the way to improve GPU sharing.
+
+The next day, a benchmarking session showed what sharing costs. According to the slide in [the Triton benchmarking post](/blog/kubecon-europe-2025-london-triton-gpu-benchmarking/), both time-slicing and MPS roughly doubled GPU usage (about 21% to 45% for time-slicing, about 20% to 34% for MPS) with no visible hit to latency or throughput on that workload. The strategies differed in isolation and startup time: MPS took 6 seconds to start against 1 second for time-slicing, and it had limited fault isolation. At the Dutch Cloud Native meetup a week later, an AWS speaker called MIG the safer option for isolation ([Hoofddorp recap](/blog/dutch-cloud-native-kubecon-recap-nutanix-nkp-aws-triton-2025/)).
+
+What changed in 2026 is the status of the API. At the Cloud Native Telecom Meetup in Japan, the slides showed DRA going from the 2020 design to GA, and used it for network devices too, through DRANET ([telecom meetup post](/blog/cloud-native-telecom-meetup-japan-2026/)). The old device plugin model, the slides said, cannot express "a GPU with at least 40 GB of memory" or NUMA locality. At KubeCon Europe 2026 a CNCF slide listed NVIDIA's DRA driver contribution ([KubeCon Europe 2026 recap](/blog/kubecon-europe-2026-recap-week-in-photos/)), and the OpenShift AI 3.x upgrade session listed DRA among the new features ([OpenShift AI 3.x upgrade](/blog/openshift-ai-upgrade-rhoai-3x-summit-2026/)). In Yokohama, the CNCF briefing presented HAMi, a GPU virtualisation project that "slices physical accelerators with hard runtime isolation", as newly incubating ([CNCF Japan briefing](/blog/kubecon-japan-2026-cncf-japan-briefing/)).
+
+The telecom meetup slides put DRA's graduation to stable in v1.34, which matches the [Kubernetes v1.34 release blog](https://kubernetes.io/blog/2025/09/01/kubernetes-v1-34-dra-updates/); the London slides predate it and still show the beta API versions, so check field names against the docs for your cluster version before you copy a manifest.
+
+**Takeaway:** pick the sharing mode by the isolation you need, not by the benchmark that looks best. Time-slicing and MPS are cheap but soft. MIG costs you flexibility and buys you a boundary. Then express the choice as a claim, not as a node label.
+
+## 2. Multi-tenancy is where GPU platforms succeed or fail
+
+This is the theme I know first-hand, because I gave talks on it. At Red Hat Summit 2026 I presented "GPUs Take Flight" on safety-first multi-tenant GPU platforms on bare metal OpenShift AI ([my Summit session](/blog/gpus-take-flight-red-hat-summit-2026/)). The slide that drew the most questions was about fairness: per-tenant GPU caps as hard quotas, a PriorityClass order of training, serving, batch and interactive, an explicit preemption posture, and the KAI Scheduler for GPU-aware placement. The argument was that contention is inevitable, so make it deterministic. Each tenant also got a GitOps bootstrap bundle with a namespace, RBAC, a NetworkPolicy and quotas. I gave the same experience report at KubeCon Europe 2026 and at the first Platform Engineering Meetup NL in Amsterdam ([KubeCon Europe 2026](/blog/kubecon-europe-2026/), [Platform Engineering Meetup NL](/blog/platform-engineering-meetup-nl-xebia-amsterdam-gpu-openshift/)). Those two posts carry the abstract, which promised patterns that push utilisation from 30% to 80%+. Treat that as the abstract's promise, not a measured result from the slides.
+
+Other speakers arrived at the same shape. In the KubeCon Japan keynotes, Preferred Networks explained why it picked namespace isolation plus dedicated nodes as a hybrid, and what it then had to build: hierarchical tenants, per-tenant controller scoping, quota with Kueue and a rule that a job starts all at once so partial starts do not leave pods idle ([Japan keynotes](/blog/kubecon-japan-2026-ai-platform-keynotes/)). CERN's platform in 2025 gave each user a personal profile with a quota of one GPU and 30 GB of block storage, with larger team profiles on request.
+
+SoftBank added a twist. Its keynote slide said an AI agent spins up multiple pods to run parallel inferences. My take in that post was that this looks more like a batch scheduler than a web service, and that quotas assuming one request per pod will break first.
+
+**Takeaway:** choosing namespaces is the easy decision. The work is the hierarchy, admission policy, quota, gang scheduling and the preemption rules, and all of it should be in Git.
+
+## 3. Scheduling and utilisation: tune before you buy
+
+The loudest 2026 message from Japan was that more GPUs is not the first answer. In [Tuning Kubernetes for AI](/blog/kubecon-japan-2026-tuning-kubernetes-for-ai/), one keynote speaker said that AI workloads bring differentiated hardware, different traffic patterns and different security requirements, so you tune the platform. Another, from Fujitsu, named GPU, memory and electricity as the cost drivers, and moved the argument from CPU-based to GPU-centric infrastructure. Fujitsu's abstract proposed composable disaggregated infrastructure, which also showed up as the CoHDI sandbox project and in a photonics partnership ([CNCF Japan briefing](/blog/kubecon-japan-2026-cncf-japan-briefing/), [photonic networks](/blog/kubecon-japan-2026-photonic-networks/)). I was cautious about it in the briefing post: composable GPUs are still a niche idea.
+
+This is a place where sources pull in different directions. Pete Cheslock of the vLLM and llm-d communities told me at Red Hat Summit 2026 that his bet was simple: more GPUs means better token throughput ([Pete Cheslock](/blog/pete-cheslock-vllm-llmd-inference-summit-2026/)). A Red Hat Tech Day lab in June said something more careful. Adding GPUs improves throughput, but not necessarily P95 and P99 latency, because of KV cache misses across isolated replicas ([Tech Day Netherlands](/blog/red-hat-tech-day-netherlands-2026-agentic-ai-harness-engineering/)). I read these as compatible. Capacity is necessary, and the scheduling and routing layer decides how much of it you can use.
+
+Not all the bottlenecks are inside the GPU either. In my photonic networks post from Yokohama I wrote that model files of 30 GB and more strain electrical interconnects, and that interconnect bandwidth per accelerator belongs on the watch-list next to accelerator count.
+
+**Takeaway:** measure utilisation and tail latency per tenant before you request more hardware. If you cannot explain where the current GPUs are idle, a bigger order will not fix it.
+
+## 4. Inference serving stacks are layers, not products
+
+The stacks I saw were consistently layered, with an engine at the bottom and an orchestration layer above it.
+
+In April 2025, AWS showed Triton on EKS with Karpenter. The queue time of requests was exposed as a custom metric and drove a Horizontal Pod Autoscaler (the speaker mentioned a 10 millisecond threshold), and pending pods made Karpenter add GPU nodes. Queue time drives replicas and replicas drive nodes ([Hoofddorp recap](/blog/dutch-cloud-native-kubecon-recap-nutanix-nkp-aws-triton-2025/)). The same talk spent real time on cold starts, because Triton images, backends and models are big. The recommendations were SOCI lazy image loading, multi-stage builds and pre-pulled Bottlerocket volume snapshots.
+
+The cold-start problem returned in October 2025. At the Dutch Cloud Native meetup, a slide titled "Spegel + KServe" listed packaging models as OCI artifacts, mounting them with OCI volumes, letting containerd cache them and letting Spegel share them between nodes ([Spegel and Dash0 meetups](/blog/dutch-cloud-native-ai-spegel-dash0-2025/)).
+
+By mid-2026 the serving story was Red Hat's stack. A Tech Day slide said "vLLM makes one replica fast, llm-d makes many replicas efficient", and showed a model-as-a-service gateway on top of llm-d on top of vLLM replicas ([Tech Day Netherlands](/blog/red-hat-tech-day-netherlands-2026-agentic-ai-harness-engineering/)). A vLLM deep dive covered continuous batching versus static batching and distributed inference ([vLLM optimizations](/blog/vllm-inference-optimizations-red-hat-openshift-ai-tech-day-2026/)). The platform layer was described as IT serving common models centrally from a shared pool of GPUs, with subscription tiers and API keys ([Model-as-a-Service with llm-d](/blog/red-hat-ai-model-as-a-service-llm-d-maas-platform-2026/)). One consequence that matters operationally: the OpenShift AI 3.x upgrade session said KServe Serverless and ModelMesh were removed, and that unconverted models return HTTP 503 after the upgrade ([OpenShift AI 3.x upgrade](/blog/openshift-ai-upgrade-rhoai-3x-summit-2026/)).
+
+Cerebras had a useful warning for any serving stack at AI_dev Europe 2025. The speaker said optimising the forward pass barely moved end-to-end time to first token, and that HTTP/2 on the origin, more edge presence and less gateway overhead together cut it roughly in half ([AI_dev Europe 2025](/blog/ai-dev-europe-2025-amsterdam-cern-cerebras-lancedb/)).
+
+**Takeaway:** treat time to first token as a system metric. Scale on queue time or token throughput, not CPU, and plan for model download time as part of every scale-up.
+
+## 5. KV cache and routing are the new cost lever
+
+Nothing I saw in 2026 landed as hard as the llm-d session at Red Hat Summit. The presenter showed a 10K token prompt on a Qwen3-32B instance at 4.3 seconds for a cold start and 0.6 seconds warm, a 7x difference, and a price of $0.30 versus $3.00 per million tokens for cached versus uncached tokens. The catch: this works on one pod and breaks on two, because standard load balancers are not cache-aware. llm-d routes by prefix, in a precise mode with KV events and an approximate mode with an in-memory trie ([llm-d KV-cache routing](/blog/llmd-kv-cache-routing-summit-2026/)). In the benchmark shown (16 H100 GPUs, Qwen3-32B, 150 simulated enterprise customers), precise scheduling was presented as 57x faster than naive scheduling with 2x the throughput of load-aware scheduling. Those are the session's figures for one workload that fit within cache capacity, not a general promise.
+
+The same idea showed up in smaller stories. The Summit day one keynote claimed a one-year improvement of three times more output tokens and ten times faster time to first token for vLLM plus llm-d ([Summit keynote](/blog/red-hat-summit-2026-day-one-keynote-metal-to-agents-tokens/)). In Yokohama a keynote clip said that, because of caching and routing, llm-d can deliver many times better performance from the same models than blind load balancing ([Tuning Kubernetes for AI](/blog/kubecon-japan-2026-tuning-kubernetes-for-ai/)). A year earlier, the Cerebras talk had listed prompt-cache-aware sticky routing as part of a scaling inference pipeline. And llm-d maintainer Sally O'Malley described it as engine-agnostic, covering NVIDIA, AMD, Google TPU and Intel HPU backends, built on Gateway API and CRDs ([Sally O'Malley](/blog/sally-omalley-llmd-maintainer-summit-2026/)).
+
+**Takeaway:** if you run several vLLM replicas behind a plain Service, you are probably recomputing prefill that another replica already did. Measure your cache hit rate first.
+
+## 6. Cost per token is a measurement problem
+
+Several sessions treated the token as the unit that matters, and they came at it from different directions.
+
+The Summit keynote stated on stage that per-token prices fall 75 to 90 percent a year while consumption can rise over 500 percent, and that reasoning models use 10 to 20 times more tokens than standard ones. Its conclusion was to move from token consumer to token provider where self-hosting makes sense ([Summit keynote](/blog/red-hat-summit-2026-day-one-keynote-metal-to-agents-tokens/)). Pete Cheslock described the same shift from the field: the same teams that were doing RAG a year earlier were now running their own inference and training their own models.
+
+At the telecom meetup in Japan, the AITRA project showed per-workload energy accounting with joules per token as the first metric. Its lab result was that the same 27B model at fp8 measured 14% cheaper per token than at bf16, and the slide said that efficiency "has to be measured, not assumed" ([telecom meetup](/blog/cloud-native-telecom-meetup-japan-2026/)). The KubeCon London benchmarking talk had listed the metrics a year earlier: time to first token, inter-token latency, request latency and throughput, with p99, p90 and p75 aggregations.
+
+Vendor claims need the same care. At World Summit AI 2025, a Groq slide claimed 12x economic efficiency and 75% lower running cost, and I noted that the slide did not show the workload behind them ([World Summit AI 2025](/blog/world-summit-ai-2025-amsterdam-recap/)). The same event's capex keynote slide, sourced to McKinsey, gave a $3 trillion to $8 trillion range for AI-related data-centre investment by 2030. My conclusion was that utilisation is an engineering responsibility, not only a finance one.
+
+**Takeaway:** put a tokens and joules view next to your GPU dashboards, and benchmark every vendor claim against your own workload and latency target.
+
+## 7. Sovereign AI factories and portability
+
+The sovereignty argument changed shape between 2025 and 2026. At AI Salon Amsterdam in June 2025, a Nebius speaker argued that supercomputers are static, often single tenant and quickly obsolete, and that an AI factory should be multi-tenant, continuously refreshed and have a platform on top. I called the multi-tenant and refresh points fair engineering ones, while noting the speaker was a vendor ([AI Salon June 2025](/blog/ai-salon-amsterdam-june-2025/)). In October, "sovereign" and "metal-to-model" were on stands from very different vendors at World Summit AI.
+
+In 2026 the argument got concrete. At Summit, Red Hat and MetaX showed a sovereign stack of OpenShift AI, Red Hat AI Inference Server and MetaX GPUs, with the presenters claiming that Qwen and DeepSeek account for nearly 30% of global token usage ([Digital Sovereign AI session](/blog/asia-shaping-ai-red-hat-summit-2026/)). In Yokohama, one interviewee described the AI conformance framework as portability between AI cloud providers ([open source AI building blocks](/blog/kubecon-japan-2026-open-source-ai-building-blocks/)). The Red Hat and NVIDIA AI Factory session added confidential compute and a threat model whose principle was "If it is shared, it is vulnerable" ([AI Factory session](/blog/red-hat-nvidia-ai-factory-summit-2026/)), and Tech Day covered Intel TDX Connect for extending the boundary to the GPU.
+
+**Takeaway:** keep the orchestration and routing layer portable, and keep the hardware choice swappable. That is the practical form of sovereignty I saw.
+
+## What I'd do on Monday
+
+1. Write down, per tenant, the GPU cap, the priority class and who can preempt whom. If any of the three is missing, you have implicit rules.
+2. Benchmark with a repeatable tool, and track tail latency and time to first token, not only throughput.
+3. Check your KV-cache hit rate across replicas. If you scale out behind a cache-blind balancer, try cache-aware routing on one workload first.
+4. Measure model and image start-up time, and fix it with lazy loading or node-local caching before buying more GPUs.
+5. Add tokens and energy per workload to your dashboards, so cost per token is a number someone owns.
+6. Check the Kubernetes version and API status of DRA for your cluster, and read the driver README before copying manifests.
+7. Inventory your KServe Serverless and ModelMesh models before any OpenShift AI 3.x upgrade.
+
+<BlogPromoCard variant="newsletter" />
+
+## Sources
+
+**2025**
+
+- [KubeCon London 2025: DRA GPU Sharing and CERN Kubeflow](/blog/kubecon-europe-2025-london-dra-gpu-sharing-and-cern-kubeflow/)
+- [Benchmarking GPU Workloads on Kubernetes with Triton](/blog/kubecon-europe-2025-london-triton-gpu-benchmarking/)
+- [Dutch Cloud Native Recap: Nutanix NKP and AWS Triton](/blog/dutch-cloud-native-kubecon-recap-nutanix-nkp-aws-triton-2025/)
+- [AI Salon Amsterdam June 2025](/blog/ai-salon-amsterdam-june-2025/)
+- [AI_dev Europe 2025 Amsterdam](/blog/ai-dev-europe-2025-amsterdam-cern-cerebras-lancedb/)
+- [World Summit AI 2025 Amsterdam](/blog/world-summit-ai-2025-amsterdam-recap/)
+- [Dutch Cloud Native and AI: Spegel and Dash0](/blog/dutch-cloud-native-ai-spegel-dash0-2025/)
+
+**2026**
+
+- [KubeCon Europe 2026: my talk announcement](/blog/kubecon-europe-2026/)
+- [KubeCon Europe 2026 recap](/blog/kubecon-europe-2026-recap-week-in-photos/)
+- [Platform Engineering Meetup NL](/blog/platform-engineering-meetup-nl-xebia-amsterdam-gpu-openshift/)
+- [GPUs Take Flight at Red Hat Summit 2026](/blog/gpus-take-flight-red-hat-summit-2026/)
+- [llm-d KV-cache routing at Summit 2026](/blog/llmd-kv-cache-routing-summit-2026/)
+- [Pete Cheslock on vLLM and llm-d](/blog/pete-cheslock-vllm-llmd-inference-summit-2026/)
+- [Sally O'Malley on llm-d](/blog/sally-omalley-llmd-maintainer-summit-2026/)
+- [Summit 2026 day one keynote](/blog/red-hat-summit-2026-day-one-keynote-metal-to-agents-tokens/)
+- [Building Digital Sovereign AI](/blog/asia-shaping-ai-red-hat-summit-2026/)
+- [Red Hat NVIDIA AI Factory](/blog/red-hat-nvidia-ai-factory-summit-2026/)
+- [Upgrading to OpenShift AI 3.x](/blog/openshift-ai-upgrade-rhoai-3x-summit-2026/)
+- [Red Hat Tech Day Netherlands 2026](/blog/red-hat-tech-day-netherlands-2026-agentic-ai-harness-engineering/)
+- [vLLM inference optimizations](/blog/vllm-inference-optimizations-red-hat-openshift-ai-tech-day-2026/)
+- [Red Hat AI Model-as-a-Service with llm-d](/blog/red-hat-ai-model-as-a-service-llm-d-maas-platform-2026/)
+- [Cloud Native Telecom Meetup Japan 2026](/blog/cloud-native-telecom-meetup-japan-2026/)
+- [KubeCon Japan 2026 keynotes](/blog/kubecon-japan-2026-ai-platform-keynotes/)
+- [KubeCon Japan 2026 CNCF briefing](/blog/kubecon-japan-2026-cncf-japan-briefing/)
+- [Tuning Kubernetes for AI](/blog/kubecon-japan-2026-tuning-kubernetes-for-ai/)
+- [Photonic networks](/blog/kubecon-japan-2026-photonic-networks/)
+- [Open source building blocks for AI platforms](/blog/kubecon-japan-2026-open-source-ai-building-blocks/)
+
+## Related
+
+- [GPU topic hub: all GPU infrastructure talks](/events/topics/gpu-infrastructure/)
+- [LLM inference topic hub](/events/topics/llm-inference/)
+- [GPU Sharing on Kubernetes: MIG vs MPS vs Time-Slicing](/blog/gpu-sharing-kubernetes-mig-mps-time-slicing-2026/)
+- [AI Model Serving on K8s: vLLM vs Triton vs NIM (2026)](/blog/ai-model-serving-kubernetes-vllm-triton-nim-2026/)
+- [llm-d: Kubernetes-Native Distributed Inference at Scale](/blog/llm-d-kubernetes-native-distributed-inference/)
+- [Benchmark vLLM with GuideLLM Against Latency SLOs](/blog/guidellm-vllm-benchmark-slo-kubernetes/)

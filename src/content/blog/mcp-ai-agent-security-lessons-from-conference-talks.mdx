@@ -1,0 +1,163 @@
+---
+title: "MCP and AI Agent Security: What 50+ Talks Taught Me"
+seoTitle: "MCP and AI Agent Security: Lessons from 50+ Talks"
+snippet: "What I learned about MCP and AI agent security from 55 event write-ups, 2024 to 2026: tool poisoning, identity, guardrails, skills supply chain, observability."
+description: "A synthesis of MCP and AI agent security from conferences and meetups, 2024 to 2026: protocol shifts, tool poisoning, agent identity, gateways and governance."
+publishDate: "2026-10-05"
+lastModified: "2026-10-05"
+category: "AI"
+tags: ["MCP", "AI security", "AI agents", "prompt injection", "agent identity", "guardrails", "agent skills", "AgentOps", "conferences"]
+author: "Luca Berton"
+draft: false
+image:
+  src: "/blog/thumbnails/mcp-ai-agent-security-lessons-from-conference-talks.jpg"
+  alt: "Key takeaways slide from a Snyk talk: agent skills are a software supply chain, the agent is the social engineer, scan your skills today"
+---
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+Between July 2024 and September 2026 I wrote up 55 events that touched on the Model Context Protocol or on AI security: meetups in Amsterdam, Red Hat Summit, DevWorld, KubeCon Japan, and the two days of AGNTCon + MCPCon Europe. I attended these as an audience member or media partner, never as a speaker. Read one at a time, each post is a snapshot. Read in date order, they show a field that changed its mind several times in two years.
+
+This post is the synthesis. I grouped it by theme, not by event, and every claim comes from a write-up I already published, so I keep the speakers' hedges. Where a number is a vendor figure or a slide figure, I say so.
+
+## 1. MCP went from a wild west to default plumbing
+
+In May 2025, at the first AI Native Netherlands meetup, a speaker polled the room: only a minority had implemented an MCP server, but many had been asked to. The talk was framed as a Wild West story, and it said MCP was a sign of progress, not the end state. The same speaker counted three competing protocols in the space: MCP, Google's Agent2Agent and IBM's ACP. See [the re:cinq write-up](/blog/re-cinq-ai-native-meetup-amsterdam-may-2025/).
+
+A week earlier, at the Treblle meetup, ML6 presented A2A as a complement, not a replacement: MCP connects an agent to its tools, A2A lets agents discover each other and delegate. That framing is the one that survived. Two months later a startup talk at MLOps Community Amsterdam pitched Pebbling, a peer-to-peer agent identity and messaging protocol, as more secure than A2A. I noted in the write-up that I would want a threat model and independent review before trusting it with money or regulated data ([MLOps Community, July 2025](/blog/mlops-community-amsterdam-july-2025/)).
+
+By September 2026 the tone was different. At AGNTCon + MCPCon Europe, the keynote slide from the 2026 AAIF Member Pulse Survey (n=186) said 89% of respondents use or evaluate MCP, 81% have agents in production and 60% run multi-agent systems ([agents in production recap](/blog/agntcon-mcpcon-europe-2026-recap-agents-in-production/)). The 2026-07-28 spec revision made the core stateless: no handshake, no sessions, any request on any instance behind a plain load balancer. Shaun Smith showed the new version at 50.8% of tool calls over a seven-day window, with big differences per client, from 100% for one chat UI to 0% for one CLI ([Day 2](/blog/agntcon-mcpcon-europe-day2-2026/)). The takeaways post reports that A2A joined MCP under the Agentic AI Foundation ([key takeaways](/blog/agntcon-mcpcon-europe-2026-recap-takeaways/)), and the foundation launched a vendor-neutral MCPA certification ([MCPA](/blog/mcpa-certification-agntcon-2026/)).
+
+What changed: in 2025 the argument was whether to adopt MCP. In 2026 it was how to run it. What did not change: the security conversation stayed one step behind the adoption curve.
+
+**Takeaway:** pin your SDK and spec version on purpose. The protocol now moves on a twice-yearly cadence, and Sarah Young told a 2025 room her own MCP blog post was out of date a week later.
+
+## 2. MCP server flaws are old attacks in a new place
+
+The most concrete security list I heard came in May 2025, from the Wild West talk. The slides named four risks: command injection leading to remote code execution, tool poisoning, the rug pull (a tool you approved changes behaviour later), and cross-server tool shadowing. According to the speaker, a vendor study found 43% of the servers and tools it checked had command injection flaws. Of the vendors told, 30% fixed the problem, 45% called it theoretical or acceptable, and 25% did not answer. I have not checked that study myself. The slide also quoted the protocol text that authorisation was optional, and almost nobody in the room had implemented it ([re:cinq](/blog/re-cinq-ai-native-meetup-amsterdam-may-2025/)).
+
+A few weeks later Sarah Young of Microsoft put the same list in a more sober frame at Global AI Utrecht. Her position: tool poisoning is indirect prompt injection under a new name, and the rug pull is the classic supply-chain pattern, which she had not seen much in the wild. She added a gap I still think about: the server runs with one identity and all its permissions, and the protocol did not yet let you scope what each tool can reach ([Global AI Utrecht](/blog/global-ai-utrecht-sarah-young-ai-security-2025/)). She was explicit that she was not telling people to avoid MCP, only to add compensating controls.
+
+The builders gave the practical advice. In the Treblle session, Cloudflare's guidance was to avoid wrapping an API one to one, build narrow servers around jobs to be done so a compromise has a smaller blast radius, write detailed tool descriptions and ship evaluation tests with every server ([Treblle](/blog/treblle-mcp-meetup-amsterdam-2025/)). A year later, Red Hat's RHEL MCP servers shipped read-only by default, with an optional guarded command execution mode: a gatekeeper model reviews proposed scripts, a human approves changes through an MCP Apps UI where the client supports it, and `systemd-run` limits permissions where possible ([Red Hat Summit 2026](/blog/ai-powered-rhel-mcp-servers-summit-2026/)).
+
+**Takeaway:** treat tool descriptions as untrusted input, start servers read-only, and make write access a deliberate second step with a human in it.
+
+## 3. Prompt injection: from filters on the model to hooks on the tool call
+
+In September 2024, ML6 at the Google Cloud User Group framed guardrails as filters around a RAG application. The vulnerability list was prompt injection and jailbreaking, and my own sorting afterwards was: injection and PII checks on the input, content filtering and redaction on the output, and separate controls on what retrieval can read ([Google Cloud User Group](/blog/google-cloud-user-group-amsterdam-bunq-ml6-guardrails-2024/)). The CIO & CISO Inspired Summit in May 2024 had the same shape at a different level: a control matrix with threat vectors on the rows, including prompt injection, insecure plugins and excessive agency ([CIO & CISO Inspired Summit](/blog/cio-ciso-inspired-summit-2024/)).
+
+By late 2025 the examples were hands-on. At a Platform Engineering Amsterdam meetup, a pen-testing talk mapped web attacks onto LLM apps: command injection becomes prompt injection, and a web app with too many database rights becomes excessive agency. In its lab, a chatbot ran a query that returned unhashed passwords. The recommended fixes were least privilege, no dynamic code execution, and sandboxed execution for generated code ([Platform Engineering Amsterdam](/blog/platform-engineering-amsterdam-meetups-2025/)). At the n8n meetup in December, a "Hack my Chat" demo put guardrails between the chat input and the agent: rule-based checks and AI-based ones such as a jailbreak detector. The presenter said the agent became much harder to hack, but not impossible ([n8n Amsterdam](/blog/n8n-meetup-amsterdam-multi-agent-marketing-guardrails-2025/)).
+
+In 2026 the centre of gravity moved to deterministic hooks. At the Claude Code meetup, a diagram showed several sessions sending tool calls through hooks to a central policy server holding 200+ policies ([Claude Code Meetup](/blog/claude-code-meetup-amsterdam-2026/)). At the Cursor evening, hooks came out of enterprise customers with bespoke security needs, and the examples were logging every prompt and scanning prompts for API keys ([Evening with Cursor](/blog/evening-with-cursor-advanced-workflows-ai-house-amsterdam-2026/)). The Red Hat and NVIDIA session covered NeMo Guardrails as a Kubernetes-native service and the Garak scanner for automated red teaming ([Red Hat NVIDIA AI Factory](/blog/red-hat-nvidia-ai-factory-summit-2026/)).
+
+**Where sources agree and differ:** nobody claimed a filter is a full defence. The n8n speaker and Sarah Young both said injection filters need constant updating because the attacks are non-deterministic. The shift is where the control sits. A script that blocks a secret before it reaches a model is easier to audit than a policy written inside a prompt.
+
+**Takeaway:** put cheap deterministic checks first, an LLM judge second, and least-privilege tools underneath both.
+
+## 4. Agent identity: unsolved one day, "solved" the next
+
+This is the theme where my sources disagree most, and the disagreement is the interesting part.
+
+In June 2025, Sarah Young said keys are the enemy: identity is the new perimeter, managed identities beat keys, and Microsoft had just announced Entra Agent ID, a separate identity type that is neither human nor machine ([Global AI Utrecht](/blog/global-ai-utrecht-sarah-young-ai-security-2025/)). In November, at Apidays, a speaker from EnableU said agents now impersonate humans with ordinary API keys. In his words, authentication is easy, authorisation is harder, and identifying "is this an agent?" is hardest ([Apidays Amsterdam](/blog/apidays-amsterdam-2025/)).
+
+On 16 September 2026, at the AGNTCon Preday, Postman's speaker called agent identity "an unsolved operational problem". Agents acting for a user exchange credentials across shared infrastructure and invoke other agents recursively, which he said leads to untrustworthy delegation chains. His slide moved the gateway question from "is this client allowed to call this endpoint" to "is this agent allowed to take this action, with this tool, using this identity, in this context" ([AGNTCon Preday](/blog/agntcon-preday-amsterdam-2026/)).
+
+The next day, my Day 2 post listed "agent identity is solved" for at least one vendor, Solo.io, with patterns others can follow. That is my own summary line and it overstates what the sessions showed; the identity breakout itself was about authentication versus authorisation and patterns for Kubernetes and service meshes ([Day 2](/blog/agntcon-mcpcon-europe-day2-2026/)). The Day 1 post is more careful. David Soria Parra's "what's next" slides listed workload identity federation for agents, ID-JAG and RFC 8693 token exchange for delegation, and optional DPoP. An AuthZed session showed Zanzibar-style relationship checks, which I read as an agent acting for a person inheriting exactly that person's access at each tool call ([Day 1](/blog/agntcon-mcpcon-europe-2026/)).
+
+Red Hat's AgentOps material landed on similar building blocks: SPIFFE/SPIRE for workload identity, OAuth2 token exchange for delegation and an MCP gateway for tool governance, with "hardcoded keys are unacceptable in production" as the rule ([AgentOps lab](/blog/red-hat-summit-2026-agentops-production-lab/)). Their OpenShell sandbox has the agent call an inference endpoint and the proxy injects the real key server-side, so the agent never holds it ([Red Hat Tech Day](/blog/red-hat-tech-day-netherlands-2026-agentic-ai-harness-engineering/)). Even at the plainer end, an Elastic talk in January said to treat MCP API keys like service-account credentials: scope them and rotate them ([AI Native Netherlands at Elastic](/blog/ai-native-netherlands-elastic-agentic-workflows-amsterdam-2026/)).
+
+**Takeaway:** the working pattern is short-lived, per-agent workload identity, delegation by token exchange, and a check at each tool call. If a vendor says it is solved, ask what it does about delegation chains.
+
+## 5. Gateways: reuse what you have, but know its limit
+
+The most repeated practical answer for MCP security was a gateway. At SREday in November 2025, a Microsoft speaker put an MCP server behind Azure API Management with a subscription key and private endpoints, and said security that is "like a YOLO" is fine for a hobby, not for a bank ([SREday Amsterdam](/blog/sreday-amsterdam-2025-q4/)). The day before, Axway's Apidays workshop showed the full MCP lifecycle behind its AI gateway: key, marketplace entry, documentation, usage analytics. I wrote then that an API key on the server says nothing about which tool an agent may call ([Apidays Amsterdam](/blog/apidays-amsterdam-2025/)).
+
+In June 2026, Gravitee at PlatformCon London argued agent traffic is just API and event-stream traffic with a different consumer, so existing API governance extends to MCP, LLM and agent-to-agent calls ([Gravitee](/blog/gravitee-securing-agentic-ai-traffic-platformcon-2026/)). Three months later, Postman's speaker argued almost the opposite: gateways were designed two decades before the agentic era, because reverse proxies assume deterministic clients and pre-determined routes ([AGNTCon Preday](/blog/agntcon-preday-amsterdam-2026/)). ABN AMRO's Apidays talk offered the caution that sits between them: a gateway validates tokens and rate limits but does not understand payloads, so object-level authorisation has to live in the service that owns the data ([Apidays Amsterdam](/blog/apidays-amsterdam-2025/)).
+
+At AGNTCon the gateway pattern showed up as agentgateway and Agent Router, both AAIF projects, though the survey slide said 15% of respondents named agentgateway among the tools they use or evaluate, so it is not universal ([agents in production recap](/blog/agntcon-mcpcon-europe-2026-recap-agents-in-production/)).
+
+**Takeaway:** both camps are right. Put MCP behind the gateway you already run for keys, rate limits and audit, then add tool-level policy that a classic gateway cannot express.
+
+## 6. Skills, models and sandboxes: assume the component is hostile
+
+The supply-chain story arrived late and fast. At the Preday, Snyk's speaker opened with OpenClaw, an assistant that installs skills from a public registry with no review and no signing, where every skill inherits the agent's shell, filesystem, network and messaging access. He cited 1,493,492 skills on one registry and noted that npm took 10 years to pass a million packages. His list of why it is worse than npm: higher privilege, injection that evades code scanners, untracked skill directories and no lockfiles. His summary was that agent skills are a software supply chain ([AGNTCon Preday](/blog/agntcon-preday-amsterdam-2026/)). That echoed the rug pull from the 2025 MCP talks, now with a file format instead of a protocol.
+
+In May 2026 a Checkmarx keynote at DevWorld asked whether AI scanning is enough, and answered no on its own. Its three closing questions included "do we know what AI is in our codebase", covering LLMs, agent frameworks, MCP servers and open-source models, and it argued for an AI-SBOM ([Checkmarx at DevWorld](/blog/checkmarx-devworld-2026-ai-application-security/)). Its remediation funnel and model pricing figures are vendor material, so I would not quote them as benchmarks.
+
+The response from the platform side was isolation. Red Hat and NVIDIA showed OpenShell on OpenShift, where outbound traffic goes through a proxy and each new connection needs explicit approval, with the agent running as an unprivileged user ([Red Hat NVIDIA AI Factory](/blog/red-hat-nvidia-ai-factory-summit-2026/)). At Tech Day Netherlands the same idea ran as 40+ OpenClaw pods, each in its own sandbox, backed by plain RHEL and OpenShift controls such as SELinux, seccomp and network policy ([Red Hat Tech Day](/blog/red-hat-tech-day-netherlands-2026-agentic-ai-harness-engineering/)). LangChain's talk at the KubeCon meetup in Amsterdam covered giving agents power without handing them the keys to production ([Qodo and LangChain at KubeCon](/blog/qodo-community-meetup-kubecon-amsterdam-2026/)). KubeCon Japan added the cost side: more isolation means more overhead, and the hybrid approach of namespaces plus dedicated tools means you build the remaining policy and quota controls yourself ([KubeCon Japan 2026](/blog/kubecon-japan-2026-security-isolation-sovereign-ai/)).
+
+**Takeaway:** inventory every skill, server and model your agents can load, scan them, and run the agent where a compromised skill has nowhere to go.
+
+## 7. Governance and observability: the part that decides production
+
+The numbers behind this theme are slide figures, not mine. In the Red Hat AgentOps lab, a slide cited 82% of tech executives planning to integrate agents within one to three years while under 10% had production-grade deployments (Capgemini, 2025, per the slide). The lab's illustration was a trace of one request: a single 200 OK hid more than a dozen tool calls, several model invocations and authorisation checks, which plain HTTP monitoring misses ([AgentOps lab](/blog/red-hat-summit-2026-agentops-production-lab/)).
+
+In May 2026, SRE NL and Coralogix asked "Who's watching the agents?" The speaker's line was that we see production in detail and barely see the agent that helped build it. He proposed five questions: cost, quality, flow, security and outcome, and said that without answers you do not have agent observability. The approach was shared OpenTelemetry instrumentation across Claude Code, Gemini CLI, Codex CLI and custom agents ([SRE NL](/blog/sre-nl-whos-watching-agents-miro-amsterdam-2026/)).
+
+At AGNTCon, an attendee told me every talk ended in the same place: "we need to be able to manage the agents". Traefik described a Sovereign Trust Plane that writes every allow and deny decision to an evidence layer ([Day 1](/blog/agntcon-mcpcon-europe-2026/), [Day 2](/blog/agntcon-mcpcon-europe-day2-2026/)).
+
+One thread ran against the novelty. Sarah Young's 2025 message was to do the basics, because attackers look for a hard-coded key, an open API or an admin account without MFA. Wiz Club in July 2026 listed five basics: reduce attack surface, patch faster, address legacy systems, tighten identity and access, prepare for incidents. The speakers framed AI as shortening the window in which each one matters ([Wiz Club Amsterdam](/blog/wiz-club-amsterdam-2026-cloud-ai-security/)).
+
+**Takeaway:** instrument agents like services before you give them more autonomy, and log denials as carefully as approvals.
+
+## What I'd do on Monday
+
+1. List every MCP server and skill your agents can load, with an owner for each. Scan the skills.
+2. Start new MCP servers read-only, narrow and job-shaped. Treat tool descriptions as untrusted input.
+3. Replace long-lived keys with short-lived per-agent credentials, and decide where delegation is checked.
+4. Put MCP traffic behind the gateway you already run, then write tool-level policy on top.
+5. Add deterministic hooks for secrets and dangerous commands before you add another LLM judge.
+6. Run agents that execute code in a sandbox with egress approval.
+7. Emit agent traces through OpenTelemetry and answer the cost, quality, flow, security and outcome questions.
+8. Fix the basics first: MFA, patching, exposed APIs, object-level authorisation.
+
+## Sources
+
+**2024**
+
+- [CIO & CISO Inspired Summit 2024](/blog/cio-ciso-inspired-summit-2024/)
+- [Google Cloud User Group Amsterdam: bunq and ML6 Guardrails](/blog/google-cloud-user-group-amsterdam-bunq-ml6-guardrails-2024/)
+
+**2025**
+
+- [Responsible AI and Anyshift at a Mollie Meetup](/blog/mollie-responsible-ai-anyshift-meetup-amsterdam-2025/)
+- [re:cinq AI Native Meetup 2025: MCP Security Wild West](/blog/re-cinq-ai-native-meetup-amsterdam-may-2025/)
+- [Treblle MCP Meetup Amsterdam 2025: To MCP or Not](/blog/treblle-mcp-meetup-amsterdam-2025/)
+- [Sarah Young on AI Security: Global AI Utrecht 2025](/blog/global-ai-utrecht-sarah-young-ai-security-2025/)
+- [MLOps Community Amsterdam, July 2025: Agents in Production](/blog/mlops-community-amsterdam-july-2025/)
+- [Platform Engineering Amsterdam Meetups, Autumn 2025](/blog/platform-engineering-amsterdam-meetups-2025/)
+- [Apidays Amsterdam 2025: MCP, API Security, Terraform](/blog/apidays-amsterdam-2025/)
+- [SREday Amsterdam 2025 Q4: Observability, MCP, ClickStack](/blog/sreday-amsterdam-2025-q4/)
+- [n8n Amsterdam: Eight Agents on TV and Guardrails](/blog/n8n-meetup-amsterdam-multi-agent-marketing-guardrails-2025/)
+
+**2026**
+
+- [AI Native Netherlands at Elastic: Agents, MCP, Workflows](/blog/ai-native-netherlands-elastic-agentic-workflows-amsterdam-2026/)
+- [Claude Code Meetup Amsterdam 2026: Hooks, Skills, Agents](/blog/claude-code-meetup-amsterdam-2026/)
+- [Nick Miller (Cursor) at AI House: Advanced Workflows](/blog/evening-with-cursor-advanced-workflows-ai-house-amsterdam-2026/)
+- [Building Autonomous Systems: KubeCon Meetup](/blog/qodo-community-meetup-kubecon-amsterdam-2026/)
+- [Checkmarx at DevWorld 2026: AI Is Not Enough for AppSec](/blog/checkmarx-devworld-2026-ai-application-security/)
+- [AI-Powered RHEL Management with MCP Servers at Red Hat](/blog/ai-powered-rhel-mcp-servers-summit-2026/)
+- [Red Hat NVIDIA AI Factory: OpenShift Sandboxed Containers](/blog/red-hat-nvidia-ai-factory-summit-2026/)
+- [AgentOps in Production: Hands-On Lab at Red Hat Summit 2026](/blog/red-hat-summit-2026-agentops-production-lab/)
+- [Who's Watching the Agents? AI Observability Meetup](/blog/sre-nl-whos-watching-agents-miro-amsterdam-2026/)
+- [Red Hat Tech Day Netherlands 2026: Harness Engineering](/blog/red-hat-tech-day-netherlands-2026-agentic-ai-harness-engineering/)
+- [Securing Agentic AI Traffic: Gravitee at PlatformCon 2026](/blog/gravitee-securing-agentic-ai-traffic-platformcon-2026/)
+- [Wiz Club Amsterdam 2026: Machine-Speed Cloud and AI Security](/blog/wiz-club-amsterdam-2026-cloud-ai-security/)
+- [Security, Isolation and Sovereign AI on Kubernetes (KubeCon Japan 2026)](/blog/kubecon-japan-2026-security-isolation-sovereign-ai/)
+- [AGNTCon Preday: Agentic AI in the Wild](/blog/agntcon-preday-amsterdam-2026/)
+- [AGNTCon + MCPCon Europe 2026: Two Days of Real Agentic AI](/blog/agntcon-mcpcon-europe-2026/)
+- [AGNTCon Day 2: Stateless MCP, Agent Identity, Multi-Agent](/blog/agntcon-mcpcon-europe-day2-2026/)
+- [AGNTCon + MCPCon Europe 2026 Recap: Agents, MCP, and Production Reality](/blog/agntcon-mcpcon-europe-2026-recap-agents-in-production/)
+- [AGNTCon + MCPCon 2026: Key Takeaways](/blog/agntcon-mcpcon-europe-2026-recap-takeaways/)
+- [MCPA Certification at AGNTCon + MCPCon Europe](/blog/mcpa-certification-agntcon-2026/)
+
+<BlogPromoCard variant="newsletter" />
+
+## Related
+
+- [MCP event topic hub](/events/topics/mcp/)
+- [AI security event topic hub](/events/topics/ai-security/)
+- [OWASP Top 10 for LLM Applications 2025: security guide](/blog/owasp-top-10-llm-applications-2025-security-guide/)
+- [AI agent guardrails for production](/blog/ai-agent-guardrails-production/)
+- [Claude Code PreToolUse hooks for policy guardrails](/blog/claude-code-pretooluse-hooks-policy-guardrails/)
+- [A2A and the Agentic AI Foundation](/blog/a2a-aaif-2026/)

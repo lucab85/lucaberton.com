@@ -1,0 +1,67 @@
+---
+import Layout from "@layouts/Layout.astro";
+import Container from "@components/container.astro";
+import Breadcrumb from "@components/Breadcrumb.astro";
+import { getEventPosts } from "@utils/eventGraph";
+
+// One index page, no per-person pages: names appear only as already published
+// in the write-ups (speakers, panelists, interviewees).
+const posts = await getEventPosts();
+const people = new Map<string, { company?: string; posts: { slug: string; title: string; event: string; year: string }[] }>();
+for (const p of posts) {
+  for (const s of p.data.event.speakers) {
+    const key = s.name.trim();
+    if (!people.has(key)) people.set(key, { company: s.company, posts: [] });
+    const e = people.get(key)!;
+    if (!e.company && s.company) e.company = s.company;
+    if (!e.posts.some((x) => x.slug === p.slug)) {
+      e.posts.push({ slug: p.slug, title: p.data.title, event: p.data.event.name, year: p.data.event.startDate.slice(0, 4) });
+    }
+  }
+}
+const sortKey = (n: string) => (n.split(/\s+/).slice(-1)[0] || n).toLowerCase();
+const list = [...people].sort((a, b) => sortKey(a[0]).localeCompare(sortKey(b[0])));
+const letters = new Map<string, typeof list>();
+for (const item of list) {
+  const l = sortKey(item[0])[0]?.toUpperCase() ?? "#";
+  const k = /[A-Z]/.test(l) ? l : "#";
+  if (!letters.has(k)) letters.set(k, []);
+  letters.get(k)!.push(item);
+}
+
+const title = `Speaker index: ${people.size} speakers from ${posts.length} event write-ups`;
+const description = `Speakers, panelists and interviewees from the conferences and meetups Luca Berton has written up, with links to each talk summary.`;
+---
+
+<Layout title={title} description={description}>
+  <Breadcrumb items={[{ name: "Events", url: "/events/" }, { name: "Speakers" }]} />
+  <Container>
+    <div class="mx-auto max-w-3xl">
+      <h1 class="mt-12 text-4xl font-extrabold tracking-tight text-gray-900">Speaker index</h1>
+      <p class="mt-6 text-lg leading-8 text-gray-700">
+        Everyone named as a speaker, panelist or interviewee in my <a href="/events/" class="font-semibold text-blue-600 hover:underline">event write-ups</a>,
+        by surname, with the posts that cover their talks. Names and companies are as given in each post.
+      </p>
+      <nav class="mt-6 flex flex-wrap gap-2 text-sm font-semibold">
+        {[...letters.keys()].map((l) => <a href={`#letter-${l}`} class="rounded bg-gray-100 px-2 py-1 hover:bg-gray-200">{l}</a>)}
+      </nav>
+      {[...letters].map(([l, items]) => (
+        <section id={`letter-${l}`} class="mt-10">
+          <h2 class="text-2xl font-extrabold text-gray-900 border-b border-gray-100 pb-2">{l}</h2>
+          <ul class="mt-4 space-y-3">
+            {items.map(([name, e]) => (
+              <li>
+                <span class="font-semibold text-gray-900">{name}</span>{e.company && <span class="text-gray-500">, {e.company}</span>}
+                <ul class="ml-4 mt-1 list-disc text-sm">
+                  {e.posts.map((x) => (
+                    <li><a href={`/blog/${x.slug}/`} class="text-blue-600 hover:underline">{x.title}</a> <span class="text-gray-500">({x.event}, {x.year})</span></li>
+                  ))}
+                </ul>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
+  </Container>
+</Layout>

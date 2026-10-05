@@ -24,6 +24,25 @@ const blogCollection = defineCollection({
       question: z.string(),
       answer: z.string(),
     })).optional(),
+    // Event recaps: structured facts about the event the post covers. Drives
+    // the /events/ topic and company hubs and the Event JSON-LD. Only facts
+    // stated in the post itself (see src/utils/eventTopics.ts for topic slugs).
+    event: z.object({
+      name: z.string(),
+      startDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+      endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+      dateApprox: z.boolean().optional(),
+      city: z.string().optional(),
+      country: z.string().length(2).optional(),
+      venue: z.string().optional(),
+      organizer: z.string().optional(),
+      url: z.string().url().optional(),
+      role: z.enum(['attendee', 'speaker', 'mc', 'media', 'volunteer', 'exhibitor', 'organizer']).default('attendee'),
+      series: z.boolean().optional(),
+      companies: z.array(z.string()).default([]),
+      speakers: z.array(z.object({ name: z.string(), company: z.string().optional() })).default([]),
+      topics: z.array(z.string()).default([]),
+    }).optional(),
   }),
 });
 

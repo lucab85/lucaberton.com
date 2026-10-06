@@ -2,13 +2,13 @@
 draft: false
 title: "Claude Code: Complete Guide to Hooks, MCP, and the SDK"
 seoTitle: "Claude Code Complete Guide: Hooks & MCP (2026)"
-snippet: "Deep dive into Claude Code — the AI coding assistant built on tool use. Covers context management, Plan and Thinking modes, custom commands, MCP server."
-description: "Comprehensive guide to Claude Code covering how tool use works under the hood, context management with Claude. Deep dive into Claude Code — the AI coding."
+snippet: "Deep dive into Claude Code: context, Plan mode, hooks, MCP, SDK, and practical environment variables for web search, subagents, concurrency, and runtime guardrails."
+description: "Comprehensive Claude Code guide covering tool use, context management, hooks, MCP, SDK, and environment variables for web search limits, subagents, concurrency, and runtime guardrails."
 image:
   src: "/blog/thumbnails/claude-code-complete-guide-hooks-mcp-sdk-2026.jpg"
   alt: "Claude Code Complete Guide Hooks MCP SDK 2026"
 publishDate: "2026-04-10"
-lastModified: "2026-07-01"
+lastModified: "2026-10-06"
 author: "Luca Berton"
 category: "AI"
 tags: ["Claude Code", "Anthropic", "AI", "Developer Tools", "MCP", "Coding Assistant", "Hooks", "SDK"]
@@ -42,11 +42,11 @@ Claude's advantage over other models is superior tool use capabilities — it is
 
 Too much irrelevant context decreases performance. Too little context means Claude misses important details. Getting this right is critical.
 
-### Claude.md Files
+### CLAUDE.md Files
 
-The `/init` command analyzes your entire codebase and creates a `Claude.md` file with a project summary, architecture overview, and key file references. This file is included in every request.
+The `/init` command analyzes your entire codebase and creates a `CLAUDE.md` file with a project summary, architecture overview, and key file references. This file is included in every request.
 
-Three levels of Claude.md files:
+Three levels of CLAUDE.md files:
 
 - **Project level** — shared with your team, committed to source control
 - **Local level** — personal instructions, not committed (`.claude/settings.local.json`)
@@ -54,11 +54,11 @@ Three levels of Claude.md files:
 
 ### The @ Symbol
 
-Use `@filename` to mention specific files in your requests. This provides targeted context instead of forcing Claude to search the codebase. For critical files like database schemas, reference them in Claude.md so they are always available.
+Use `@filename` to mention specific files in your requests. This provides targeted context instead of forcing Claude to search the codebase. For critical files like database schemas, reference them in CLAUDE.md so they are always available.
 
 ### Memory Mode
 
-Type `#` followed by a natural language instruction to edit Claude.md files. For example: `# Always run tests after modifying API endpoints`. This builds up institutional knowledge over time.
+Type `#` followed by a natural language instruction to edit CLAUDE.md files. For example: `# Always run tests after modifying API endpoints`. This builds up institutional knowledge over time.
 
 ## Plan Mode and Thinking Mode
 
@@ -234,6 +234,73 @@ Long conversations accumulate noise. Use these techniques to stay focused:
 | **Clear** | Delete all history | Switching to unrelated tasks |
 
 The **Compact** command is particularly powerful — it summarizes the entire conversation while preserving Claude's learned knowledge about the current task.
+
+## Runtime Guardrails: Claude Code Environment Variables Worth Knowing
+
+Claude Code has two different kinds of limits that are easy to confuse:
+
+- **Account usage limits** control how much Claude usage your plan allows over rolling session and weekly windows.
+- **Runtime guardrails** control what one Claude Code process can do: how many web searches it can make, how many tools or subagents can run in parallel, how deep subagents can nest, and how long MCP calls stay in the foreground.
+
+The second category is configured with environment variables. These are especially useful for long-running research, CI jobs, and heavily agentic workflows where a bad loop can consume a surprising amount of time and context.
+
+### The WebSearch session cap
+
+Since Claude Code v2.1.212, built-in WebSearch calls are capped at **200 per session** by default. I raised mine to **1000** for research-heavy sessions:
+
+```bash
+export CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION=1000
+claude
+```
+
+`CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION` accepts a positive whole number. You can raise the cap, but you cannot disable it entirely. Once the limit is reached, later WebSearch calls return a notice telling Claude to continue with the information already collected instead of performing another search.
+
+That makes the variable useful for deep-research sessions and subagent-heavy workflows, but raising it should be intentional. A higher ceiling does not make searches free: it simply allows a session to keep searching longer before the guardrail stops it.
+
+This runtime cap is separate from the [Claude Code session and weekly usage limits](/blog/claude-code-usage-limits-explained/) shown in the Claude Usage screen.
+
+### High-value Claude Code runtime variables
+
+| Variable | Default | What it controls |
+|---|---:|---|
+| `CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION` | `200` | Total built-in WebSearch calls allowed in one session. Requires v2.1.212+. |
+| `CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY` | `10` | Maximum number of read-only tools and subagents that can execute in parallel. |
+| `CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS` | `20` | Maximum number of subagents running at once before new spawns are refused. Requires v2.1.217+. |
+| `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH` | `3` | Maximum nesting depth below the main conversation. Set `1` to prevent subagents from spawning subagents. |
+| `CLAUDE_CODE_MAX_TURNS` | unset | Caps agentic turns when no explicit `--max-turns` value is passed. The CLI flag takes precedence. |
+| `CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS` | `120000` | Moves a still-running MCP call to a background task after the configured delay. Set `0` to disable automatic backgrounding. |
+| `CLAUDE_CODE_DISABLE_WEB_FETCH` | off | Set `1` to disable WebFetch while leaving WebSearch available. Requires v2.1.285+. |
+| `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` | unset | Triggers auto-compaction earlier at a percentage from 1–100. It can lower the threshold, not raise it above Claude Code's default. |
+
+One variable to avoid copying from older examples is `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`. It previously limited total subagent spawns, but it was removed in v2.1.224 and is now a no-op. Use the concurrent-subagent and spawn-depth controls instead.
+
+### A practical configuration for research-heavy sessions
+
+For a session that needs more web research while keeping parallelism under control:
+
+```bash
+export CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION=1000
+export CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY=6
+export CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=8
+export CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=2
+
+claude
+```
+
+My persistent user-level configuration lives in `~/.claude/settings.json`. You can also scope the same variables to a project with `.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_MAX_WEB_SEARCHES_PER_SESSION": "1000",
+    "CLAUDE_CODE_MAX_TOOL_USE_CONCURRENCY": "6",
+    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "8",
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "2"
+  }
+}
+```
+
+I use `1000` as a personal ceiling for research-heavy sessions; the official default remains `200`. Use user-level settings for personal defaults and project settings when the whole team should inherit the same guardrails. For the complete and version-specific list, use Anthropic's [Claude Code environment variable reference](https://code.claude.com/docs/en/env-vars).
 
 ## My Take
 

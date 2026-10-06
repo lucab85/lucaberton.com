@@ -12,6 +12,8 @@ test.describe('contextual affiliate cards', () => {
   const placements = [
     { post: '/blog/connecting-hermes-agent-to-discord/', company: 'racknerd', offerId: 'racknerd_vps_4gb' },
     { post: '/blog/hermes-agent-troubleshooting/', company: 'racknerd', offerId: 'racknerd_vps_4gb' },
+    { post: '/blog/openclaw-vps-deployment-always-on-ai-agent/', company: 'racknerd', offerId: 'racknerd_vps_4gb' },
+    { post: '/blog/k3s-vs-k8s-2026/', company: 'racknerd', offerId: 'racknerd_vps_4gb' },
     { post: '/blog/google-stitch-pomelli-opal-whisk-ai-tools-2026/', company: 'atoms', offerId: 'atoms_luca10' },
     { post: '/blog/proteinlens-vibe-coding-on-azure/', company: 'atoms', offerId: 'atoms_luca10' },
     { post: '/blog/underrated-ai-tools-wispr-flow-alternatives-2026/', company: 'pocket', offerId: 'pocket_launch' },

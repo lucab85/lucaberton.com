@@ -7,7 +7,11 @@
  *
  * Source: scripts/assets/agntcon-na-2026-artwork.png (the campaign artwork,
  * with the date corrected to the official Oct 22–23, 2026 and the venue to the
- * San Jose McEnery Convention Center, per aaif.io).
+ * San Jose McEnery Convention Center, per aaif.io). It still shows the old
+ * LUCA25 offer, so the offer panel is redrawn first (Montserrat, matching the
+ * artwork) into scripts/assets/agntcon-na-2026-artwork-luca475.png, the
+ * $475 registration with code LUCA_475 that the Linux Foundation switched
+ * all codes to in October 2026. Every output below is cut from that file.
  *
  * Output, in static/promo/agntcon-na-2026/ (served at lucaberton.com/promo/...):
  *   wide.webp / wide.jpg       1200x300 CSS strip at 2x (2400x600 px), composed
@@ -24,9 +28,46 @@ import { chromium } from '@playwright/test';
 import sharp from 'sharp';
 
 const ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), '..');
-const SRC = path.join(ROOT, 'scripts', 'assets', 'agntcon-na-2026-artwork.png');
+const ORIGINAL = path.join(ROOT, 'scripts', 'assets', 'agntcon-na-2026-artwork.png');
+const SRC = path.join(ROOT, 'scripts', 'assets', 'agntcon-na-2026-artwork-luca475.png');
 const OUT = path.join(ROOT, 'static', 'promo', 'agntcon-na-2026');
 fs.mkdirSync(OUT, { recursive: true });
+
+const OFFER = { lead: 'REGISTER FOR', price: '$475', accent: 'ONLY', sub: 'WITH CODE', code: 'LUCA_475' };
+
+const browser = await chromium.launch();
+
+// The offer panel (rounded gradient border) at 50,704 992x196: keep the border,
+// repaint the inside with the artwork's own left-to-right navy, redraw the text.
+{
+  const [L, T, W, H] = [50, 704, 992, 196];
+  const page = await browser.newPage({ viewport: { width: W, height: H } });
+  await page.setContent(`<!doctype html><html><head><meta charset="utf-8"><style>
+    html,body{margin:0;background:transparent}
+    .p{position:relative;width:${W}px;height:${H}px;font-family:Montserrat,sans-serif;color:#f4f6fa}
+    .in{position:absolute;inset:9px;border-radius:18px;
+        background:linear-gradient(90deg,rgb(6,12,16) 0%,rgb(7,13,21) 42%,rgb(4,17,30) 70%,rgb(4,19,34) 100%)}
+    .lead{position:absolute;left:44px;top:34px;font-weight:700;font-size:25px;letter-spacing:2.5px}
+    .price{position:absolute;left:38px;top:58px;font-weight:800;font-size:100px;line-height:1;letter-spacing:-2px;
+           background:linear-gradient(180deg,#2bb4ff,#2a9dfd);-webkit-background-clip:text;color:transparent}
+    .accent{position:absolute;left:292px;top:80px;font-weight:800;font-size:46px;line-height:1;
+            background:linear-gradient(90deg,#3ca9fd,#8441fc);-webkit-background-clip:text;color:transparent}
+    .sub{position:absolute;left:296px;top:132px;font-weight:500;font-size:22px;letter-spacing:2.5px}
+    .rule{position:absolute;left:478px;top:58px;width:2px;height:82px;background:#767d81}
+    .code{position:absolute;left:510px;top:37px;width:446px;height:122px;border-radius:12px;background:#fefefe;
+          display:flex;align-items:center;justify-content:center;font-weight:800;font-size:70px;color:#0b0b0f}
+  </style></head><body><div class="p"><div class="in"></div>
+    <div class="lead">${OFFER.lead}</div><div class="price">${OFFER.price}</div>
+    <div class="accent">${OFFER.accent}</div><div class="sub">${OFFER.sub}</div>
+    <div class="rule"></div><div class="code">${OFFER.code}</div>
+  </div></body></html>`, { waitUntil: 'load' });
+  if (!(await page.evaluate(() => document.fonts.check('800 70px Montserrat')))) {
+    throw new Error('Montserrat is not installed; the redrawn panel would not match the artwork');
+  }
+  const panel = await page.locator('.p').screenshot({ type: 'png', omitBackground: true });
+  await page.close();
+  await sharp(ORIGINAL).composite([{ input: panel, left: L, top: T }]).png().toFile(SRC);
+}
 
 // Regions of the 1672x941 artwork, in source pixels: left, top, width, height.
 const REGIONS = {
@@ -80,7 +121,6 @@ const html = `<!doctype html><html><head><meta charset="utf-8"><style>
   <img class="code" src="${img.code}"><img class="cta" src="${img.cta}">
 </div></body></html>`;
 
-const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1200, height: 300 }, deviceScaleFactor: 2 });
 await page.setContent(html, { waitUntil: 'load' });
 const wide = await page.locator('.b').screenshot({ type: 'png' });

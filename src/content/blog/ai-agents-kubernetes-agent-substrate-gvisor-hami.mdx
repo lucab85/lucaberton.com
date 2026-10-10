@@ -1,0 +1,97 @@
+---
+title: "AI Agents at Scale on Kubernetes: Agent Substrate and HAMi"
+seoTitle: "AI Agents at Scale on Kubernetes: Agent Substrate, HAMi"
+snippet: "Why AI agents strain Kubernetes, and the CNCF projects closing the gap: Agent Substrate for density, gVisor for isolation, HAMi and DRA for GPU sharing."
+description: "Why AI agents strain Kubernetes, and the CNCF projects closing the gap: Agent Substrate for density, gVisor for isolation, HAMi and DRA for GPU sharing."
+publishDate: "2026-10-10"
+lastModified: "2026-10-10"
+image:
+  src: "/blog/thumbnails/ai-agents-kubernetes-agent-substrate-gvisor-hami.jpg"
+  alt: "AI Agents at Scale on Kubernetes: Agent Substrate and HAMi"
+tags: ["Kubernetes", "AI agents", "CNCF", "GPU", "cloud native", "Open Source Summit"]
+category: "AI"
+author: "Luca Berton"
+draft: false
+---
+
+At Open Source Summit Europe 2026 in Prague, I asked CNCF's Bob Killen and Daniel Krook what is changing fastest in cloud native. Their answer was AI agents, and they explained it with two numbers:
+
+- **One human action can fan out into about 20 agent requests.**
+- **Agents need responses in under 200 milliseconds, while Kubernetes guarantees a new pod in about a second.**
+
+That gap is the reason a new layer of projects is arriving at the CNCF. The full conversation is in my [interview with Bob Killen and Daniel Krook](/blog/oss-europe-2026-cncf-bob-killen-daniel-krook-interview/). This article goes one level deeper into three of the projects they mentioned, using their public documentation: **Agent Substrate** for density, **gVisor** for isolation, and **HAMi** with Kubernetes **DRA** for sharing GPUs.
+
+## The problem: agents are bursty, idle and untrusted
+
+A typical microservice runs all the time and handles many requests. A typical agent does the opposite:
+
+- It is **idle most of the time**, waiting for a user, a tool call or an event. The Agent Substrate proposal says agents spend "up to 90%+ of their time idle".
+- It is **bursty**: when it wakes up, it must respond fast.
+- It runs **code it generated itself**, so it is untrusted by design and needs a stronger boundary than a shared kernel.
+
+If you give every agent its own always-on pod, you pay for 90% idle capacity. If you start a pod per request, you miss the latency budget. Neither works at fleet scale.
+
+## Agent Substrate: many agents, few pods
+
+**Agent Substrate** was submitted to the CNCF sandbox by engineers from Google, including Tim Hockin, in September 2026. Its [sandbox application](https://github.com/cncf/sandbox/issues/523) passed the TOC vote on 28 September 2026. It is Apache 2.0 licensed.
+
+How it works, according to the application:
+
+- It **maps a large set of "actors" (agents) onto a smaller set of ready "workers"** (Kubernetes pods), with create, destroy, suspend and resume operations for each actor.
+- Idle actors are **checkpointed** and resumed on demand, using **gVisor process snapshots** or **microVM memory snapshots** (Kata Containers or Cloud Hypervisor). The goal is sub-second suspend and resume.
+- The stated targets are **30x to 100x density** through worker multiplexing, and **sub-100 ms p95 activation latency** through tiered snapshot caching.
+- Kubernetes still provides the infrastructure and the worker lifecycle. Agent Substrate adds the actor layer on top.
+
+In other words, it treats agents like serverless functions with memory: run a burst, suspend, resume later exactly where they left off.
+
+## Sandboxing is necessary, not sufficient
+
+Agent Substrate complements **agent-sandbox**, the Kubernetes SIG project for running isolated agent workloads with strong identity, persistent storage and lifecycle management through a custom resource. In a CNCF blog post titled [Why sandboxing your agent is not enough](https://www.cncf.io/blog/2026/07/07/why-sandboxing-your-agent-is-not-enough/), Lin Sun put the relationship in one line:
+
+> "Sandboxing your agents is necessary, but not sufficient."
+
+Sandboxing answers "is it safe?". Substrate answers "is it economically viable at a thousand agents?". You need both.
+
+## gVisor: the isolation boundary
+
+**gVisor** has isolated containers for years by running an application kernel in user space, so that the workload's system calls never reach the host kernel directly. As Bob and Daniel pointed out in Prague, it is now being extended specifically for agents. In Agent Substrate it does two jobs: it is the security boundary, and its process snapshots make fast suspend and resume possible.
+
+For workloads that need a full VM boundary, the same architecture supports microVMs through Kata Containers or Cloud Hypervisor. The trade-offs between the two are worth understanding. The [Kata at Scale session from Edera](/blog/oss-europe-2026-isolating-ai-agents-edera-coder-openbao/) in Prague was about exactly that, and I cover the runtime side in [Kata Containers 4.0 for AI agent sandboxing](/blog/kata-containers-4-0-ai-agent-sandboxing-rust-runtime/).
+
+## Identity: who is this agent acting for?
+
+Isolation does not tell you *who* an agent is or *on whose behalf* it acts. In the interview, the CNCF team pointed to **SPIFFE and SPIRE** for machine identity, tied to the authenticated user who started the request, and to NVIDIA's **OpenShell** for declaring what an agent can and cannot do. The [AWS keynote on trusted agentic workloads](/blog/oss-europe-2026-trusted-agentic-workloads-cedar-dogwood/) added policy engines like Cedar and Dogwood on top. A complete agent platform has all four: identity, policy, limits and audit.
+
+## HAMi and DRA: stop giving every request a whole GPU
+
+The last piece is the hardware. Agents that call local models compete for scarce accelerators, and "one pod, one GPU" wastes most of each card.
+
+**HAMi** (heterogeneous AI computing virtualisation middleware) lets workloads request **fractions of a GPU**: a specific amount of memory and a compute percentage. The CNCF TOC accepted it as an incubating project in July 2026.
+
+The question many teams ask is whether Kubernetes **Dynamic Resource Allocation (DRA)**, GA since Kubernetes 1.34, makes HAMi unnecessary. A [CNCF blog post by Mesut Oezdil](https://www.cncf.io/blog/2026/08/07/does-kubernetes-dra-replace-hami/) gives a clear answer: no. DRA replaces HAMi's *scheduling* layer, so fractional requests are now visible to the scheduler natively. But DRA does not *enforce* the limits inside the container. HAMi-core still does that, by intercepting CUDA calls at runtime. In the author's words:
+
+> "DRA closed the gap, HAMi kept the muscle."
+
+The practical architecture is to run both: DRA for scheduling, HAMi-core for enforcement. Note the current limits mentioned in that post. DRA mode needs Kubernetes 1.34 or later with consumable capacity (on by default since 1.36), it is mature for NVIDIA only so far, and the two HAMi modes cannot coexist in one cluster.
+
+## A reference picture
+
+Putting the pieces together, an agent platform on Kubernetes in late 2026 looks like this:
+
+| Layer | Job | Projects |
+|---|---|---|
+| Density | Multiplex many idle agents onto few warm pods | Agent Substrate |
+| Isolation | Contain untrusted, self-generated code | gVisor, Kata Containers, agent-sandbox |
+| Identity | Prove who the agent is and who it acts for | SPIFFE/SPIRE |
+| Policy | Decide what it may do, and in which order | OpenShell, Cedar, Dogwood |
+| Accelerators | Share GPUs safely and fairly | DRA, HAMi |
+| Inference | Serve the models agents call | vLLM, [llm-d](/blog/llm-d-cncf-kubernetes-distributed-inference-2026/) |
+
+## What I would do now
+
+1. **Measure agent idle time.** If your agents are idle 90% of the time, as Agent Substrate assumes, always-on pods are your biggest cost leak.
+2. **Pick an isolation boundary deliberately.** gVisor for density and fast snapshots, microVMs where you need a hardware-virtualised boundary. Do not run agent-generated code in plain containers.
+3. **Plan for DRA.** If you are on Kubernetes 1.34 or later, start moving GPU requests to DRA claims, and keep runtime enforcement (HAMi-core) for hard limits.
+4. **Follow the CNCF reference architectures.** As Bob and Daniel said, there is no single stack yet. End-user reference architectures are the best guide to what works.
+
+More from Prague: [all my Open Source Summit Europe 2026 coverage](/blog/open-source-summit-europe-2026-prague-coverage-guide/) and [AI agent guardrails in production](/blog/ai-agent-guardrails-production/).

@@ -1,0 +1,115 @@
+---
+title: "Migrating from HashiCorp Vault to OpenBao in 2026"
+seoTitle: "Migrating from HashiCorp Vault to OpenBao in 2026"
+snippet: "A practical guide to moving from HashiCorp Vault to OpenBao: the in-place path for Vault CE, the export path for Enterprise, and what breaks on cutover."
+description: "A practical guide to moving from HashiCorp Vault to OpenBao: the in-place path for Vault CE, the export path for Enterprise, and what breaks on cutover."
+publishDate: "2026-10-11"
+lastModified: "2026-10-11"
+image:
+  src: "/blog/thumbnails/migrate-hashicorp-vault-to-openbao-2026.jpg"
+  alt: "Migrating from HashiCorp Vault to OpenBao in 2026"
+tags: ["OpenBao", "HashiCorp Vault", "secrets management", "security", "Kubernetes", "Open Source Summit"]
+category: "DevOps"
+author: "Luca Berton"
+draft: false
+---
+
+At Open Source Summit Europe 2026 in Prague, the **OpenBao** crew in their green hoodies were one of the most visible groups around the OpenSSF area. The question I heard most often near them was not "what is OpenBao?" any more. It was **"how do we move from Vault?"**
+
+![Luca Berton with Marcin Czupryniak, Andrii Fedorchuk and Toni Tauro of OpenBao in Prague](/blog/events/open-source-summit-2026/oss-eu-2026-openbao-toni-tauro.jpg)
+*With Marcin Czupryniak, Andrii Fedorchuk, and Toni Tauro (Adfinis, OpenBao committer) at Open Source Summit Europe 2026.*
+
+This guide answers that question based on OpenBao's official documentation and public migration experience. It is not a replacement for testing in your own environment, but it will tell you which path you are on and where the traps are.
+
+## Why teams are moving
+
+**OpenBao** is the community fork of HashiCorp Vault, created after HashiCorp moved Vault to the Business Source License. It is open source under MPL 2.0, governed as an **OpenSSF** project, and has been adding features of its own. OpenBao 2.6, for example, added [per-namespace sealing](https://openssf.org/blog/2026/08/06/announcing-openbao-v2-6/) for multi-tenant deployments.
+
+The usual reasons I hear from clients:
+
+- **Licensing and governance.** Security-critical infrastructure under open governance, without a single vendor able to change the terms. That is the [neutral governance](/blog/oss-europe-2026-foundations-governance-cncf-opensearch-almalinux/) argument from Prague, applied to secrets.
+- **Cost.** Teams on Vault Enterprise for one or two features look for an open alternative.
+- **Sovereignty.** European organisations want to run and audit the whole stack themselves.
+
+## Step 1: find out which path you are on
+
+There are two very different migrations, depending on what you run today.
+
+| You run | Path | Effort |
+|---|---|---|
+| Vault Community Edition 1.14.x on Raft storage, with Shamir unseal | Official in-place migration | Low to medium |
+| Vault Enterprise, newer Vault CE, other storage backends, or auto-unseal | Export configuration and data, import into a new OpenBao cluster | Medium to high |
+
+OpenBao was forked from **Vault 1.14**. Features HashiCorp added after that are not automatically in OpenBao, and some Enterprise-only features (Performance Replication, Sentinel) do not exist in it. Audit what you actually use before you choose.
+
+## Path A: in-place migration from Vault CE
+
+OpenBao's [official in-place migration guide](https://openbao.org/docs/guides/migration/) has a narrow scope, and it is explicit about it:
+
+- Tested only against **Vault 1.14.1**. In the guide's words: "Newer versions are untested and unsupported."
+- Target **OpenBao 2.2.0 or later**.
+- **Raft storage only**, and **Shamir unseal only** (no auto-unseal).
+- No Vault Enterprise.
+
+The procedure is a rolling replacement of the cluster:
+
+1. **Back up.** Take a Raft snapshot or an atomic filesystem snapshot.
+2. **Install OpenBao** with an equivalent configuration, using a separate storage path. That makes rollback possible.
+3. **Upgrade followers first.** For each follower: stop Vault, start OpenBao, join the cluster, unseal, and confirm it is a voter again.
+4. **Move the leader last.** Force a leader step-down, then upgrade the former leader like the followers.
+
+Things to check afterwards:
+
+- **Plugins.** OpenBao ships with fewer plugins than Vault. Plugins that are not available are skipped and must be disabled manually, so inventory them first.
+- **Tokens.** New tokens use OpenBao's shorter format. Existing Vault tokens remain valid until their TTL expires, so do not hard-code token formats in your tooling.
+- **Audit logs.** Fix file ownership so the OpenBao process can write to the audit files.
+
+## Path B: export and import (Enterprise and everything else)
+
+If you are on Vault Enterprise or outside the narrow in-place scope, you build a new OpenBao cluster and move the content. The consultancy Digitalis published a useful write-up and an open source [vault-migration-tool](https://digitalis.io/post/migrating-from-hashicorp-vault-enterprise-to-openbao-or-free-vault) for this. Its key insight is one I agree with completely:
+
+> "The hard part is not the KV data. It is the auth methods, policies, roles and engine configuration that nobody has in Terraform."
+
+What has to move:
+
+- **Auth methods**: OIDC, AppRole, LDAP, Kubernetes and cloud auth, with their roles.
+- **ACL policies.**
+- **Secrets engine configuration**: PKI issuers, transit keys, database roles.
+- **Audit devices.**
+- **KV data.**
+
+What cannot move, by design:
+
+- Active **tokens and leases**, **AppRole secret IDs**, and similar credentials. **Every client re-authenticates after cutover.** Plan that as an application-by-application change, not a big bang.
+- **Sentinel policies**, which have to be rewritten as ACL policies or moved to an external policy engine such as OPA.
+
+The safe sequence:
+
+1. **Export** the configuration to reviewable files (JSON or HCL), and commit them to Git. You should have had this anyway.
+2. **Dry-run** the import against the new OpenBao cluster.
+3. **Import** idempotently, so re-running is safe.
+4. **Migrate applications one at a time**, re-pointing each to OpenBao and re-authenticating.
+5. **Run both clusters in parallel** until the last client has moved, then decommission Vault.
+
+## Kubernetes integrations
+
+Because OpenBao keeps the Vault API, most Kubernetes tooling keeps working once you point it at the new address. That includes the **External Secrets Operator** (see my guide to [External Secrets Operator with Vault](/blog/external-secrets-operator-kubernetes-vault-2026/)), the agent injector pattern, and Terraform providers. Test every integration anyway, especially anything that parses token formats or depends on Enterprise-only endpoints.
+
+## Use the migration to improve your design
+
+A migration is the best moment to fix what has grown untidy:
+
+1. **Put all configuration in code.** If the migration needed an export tool, your Vault configuration was not in Git. Fix that permanently.
+2. **Shorten credential lifetimes.** Move from long-lived static secrets to dynamic secrets and short-lived tokens where you can.
+3. **Add workload identity.** Pair OpenBao with SPIFFE/SPIRE so services and AI agents authenticate with an identity instead of a stored secret. Toni Tauro has spoken about sovereign workload identity with exactly this combination.
+4. **Isolate tenants.** If you serve multiple teams or customers, look at OpenBao namespaces and per-namespace sealing.
+
+![Luca Berton with Alex Scheel and Toni Tauro at the OpenSSF area in Prague](/blog/events/open-source-summit-2026/oss-eu-2026-openbao-alex-scheel.jpg)
+*With Alex Scheel and Toni Tauro on the Thursday of Open Source Summit Europe.*
+
+## Further reading
+
+- [Isolating AI Agents: Edera, Coder and OpenBao](/blog/oss-europe-2026-isolating-ai-agents-edera-coder-openbao/), my Prague notes on secrets for AI agents.
+- [Secrets management for AI agents with Alex Scheel](/blog/openbao-alex-scheel-secrets-management-ai-agents-platformcon-2026/).
+- [Christian Gafner of Adfinis at the OpenBao Summit](/blog/christian-gafner-adfinis-openbao-summit-2026/).
+- [Open Source Summit Europe 2026: Complete Prague Guide](/blog/open-source-summit-europe-2026-prague-coverage-guide/).

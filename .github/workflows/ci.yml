@@ -95,6 +95,9 @@ jobs:
       - name: Validate social card (OG image / link preview)
         run: node scripts/validate-social-card.cjs
 
+      - name: Validate Vercel routing (redirects + headers)
+        run: node scripts/build-vercel-config.cjs
+
       - name: Upload site artifact
         uses: actions/upload-artifact@v6
         with:
@@ -174,6 +177,10 @@ jobs:
       - name: Pull Vercel project settings
         run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
 
+      # static/_redirects + static/_headers + meta-refresh stubs -> vercel.json
+      - name: Generate Vercel redirects and headers
+        run: node scripts/build-vercel-config.cjs --write
+
       # public/ is already built; turn `vercel build` into a pure packaging step
       # (no install, no astro build) that applies vercel.json redirects/routing.
       - name: Package prebuilt output
@@ -187,6 +194,19 @@ jobs:
         run: |
           url=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
           echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      # Cloudflare caches HTML at the edge for a day (Cache Rule on the zone), so
+      # every deploy must purge it or new/changed pages stay stale until expiry.
+      - name: Purge Cloudflare cache
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: b824c8bb5f1d780184d3c663970586f7
+        run: |
+          sleep 15  # let the production alias settle on Vercel's edge first
+          curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/purge_cache" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}' | jq -e '.success'
 
   indexnow:
     name: Submit to IndexNow

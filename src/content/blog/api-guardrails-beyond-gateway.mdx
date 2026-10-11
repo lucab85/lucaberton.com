@@ -1,0 +1,213 @@
+---
+draft: false
+title: "Your API Guardrails Shouldn't Depend on Your Gateway"
+seoTitle: "API Guardrails Beyond Kong, Apigee, Tyk and Curity"
+snippet: "Define API security and governance independently of the gateway, then enforce and verify consistent guardrails across Kong, Apigee, Tyk and Curity."
+image:
+  src: "/blog/thumbnails/enterprise-api-gateway-kubernetes-comparison-2026.jpg"
+  alt: "API gateway architecture illustrating consistent API security controls"
+publishDate: "2026-10-10"
+lastModified: "2026-10-10"
+author: "Luca Berton"
+category: "Platform Engineering"
+tags: ["API Security", "API Governance", "API Gateway", "Kong", "Apigee", "Tyk", "Curity"]
+---
+
+Every organization eventually makes a decision about its API gateway.
+
+Some teams choose **Kong** for flexibility and extensibility. Others invest in **Google Apigee** for API management and governance. **Tyk** appeals to teams seeking a flexible API management platform. **Curity** often enters the architecture conversation when OAuth, identity, token validation, and API security become central concerns.
+
+These technologies have different strengths, operating models, and integration patterns. They are not identical products: Curity is primarily an identity and API security platform that can work alongside API gateways.
+
+But they all bring us to a more important question:
+
+**Should the security and governance of an API depend on the gateway technology sitting in front of it?**
+
+My answer is no.
+
+An API should not become less secure, less observable, or less governed simply because it moves between gateways, clouds, or runtime environments.
+
+**The gateway is an enforcement point. It should not be the only place where the organization's security expectations are defined.**
+
+## Don't Confuse Kubernetes Gateway API with API Guardrails
+
+The term *Gateway API* can make this discussion unnecessarily confusing.
+
+[Kubernetes Gateway API](https://gateway-api.sigs.k8s.io/) provides a standardized way to describe parts of infrastructure networking, including gateways, listeners, and routing traffic to workloads.
+
+That is useful **infrastructure plumbing**. It is not the same as defining an organization's complete API security and governance model.
+
+When I talk about gateways here, I mean the **API management and API security layer** represented by Kong, Apigee, Tyk, and identity-focused integrations such as Curity. These systems help organizations control access, validate credentials, enforce traffic policies, and observe API requests.
+
+Kubernetes Gateway API may be part of how that infrastructure is configured. But an HTTP route is not a substitute for a policy explaining who may invoke an operation, which permissions are required, and how you prove the control is working.
+
+**Infrastructure determines how traffic reaches an API. API guardrails determine under what conditions that traffic should be accepted.**
+
+Both matter. They solve different problems.
+
+## The Problem with Gateway-Centric Governance
+
+Imagine an enterprise running hundreds of APIs across several business units.
+
+One team uses Kong. Another uses Apigee. An acquired company has standardized on Tyk. Meanwhile, the security architecture relies on Curity for identity and token services.
+
+Each team might have made a reasonable technology choice.
+
+The trouble starts when every team independently decides what a secure API looks like.
+
+One team requires OAuth access tokens. Another accepts API keys for sensitive operations. One product applies strict traffic limits; another exposes a sensitive endpoint without them. Some APIs validate token audiences and scopes correctly, while others only verify that a token exists.
+
+The organization now has **multiple definitions of API security**.
+
+This is not fundamentally a gateway problem. It is a governance problem.
+
+And replacing every gateway with the same product does not automatically solve it. You can standardize the technology and still implement inconsistent policies.
+
+## Define the Guardrails Before Choosing Enforcement Technology
+
+A better approach starts with the API itself.
+
+Before configuring a gateway, define the security and operational outcomes every exposed API must meet.
+
+| Guardrail area | API-level requirement |
+|---|---|
+| Identity and access | Which callers can access the API? What token issuer, audience, scopes, and permissions are required? |
+| Traffic protection | What rate limits, quotas, request-size limits, and abuse controls apply? |
+| Contract integrity | Which operations, payloads, schemas, and input constraints are accepted? |
+| Observability | Which correlation IDs, security events, logs, metrics, and traces must be produced? |
+| Lifecycle governance | Who owns the API? How is it classified, versioned, reviewed, deprecated, and retired? |
+
+These are **API-level requirements**, not product-specific configuration instructions.
+
+Their intent should stay consistent whether enforcement happens through Kong plugins, Apigee proxy policies, Tyk policies, a Curity-backed identity architecture, application code, or some combination.
+
+Not every gateway has identical features. And not every authorization decision belongs at the gateway: decisions involving business context, object ownership, or transaction state often belong in the application.
+
+The goal is not to force every control into one technology. It is to make sure the control has an explicit owner and an enforceable outcome.
+
+## Policy Intent Should Be Portable, Even When Configuration Isn't
+
+Consider an API that exposes customer financial information.
+
+Its requirements might be:
+
+- Every request must carry a valid access token issued by a trusted authorization server.
+- The token must have the correct audience for this API.
+- Sensitive operations require explicitly defined scopes or permissions.
+- Requests must comply with traffic limits appropriate to their risk.
+- Security-relevant decisions must be auditable.
+- Object-level access must be checked by the service when it depends on business data.
+
+Now imagine moving that API from Apigee to Kong or Tyk.
+
+The gateway configuration will change. The plugins, policy syntax, lifecycle tooling, and available integrations may change too. Curity or another authorization server may remain part of the identity architecture across all those deployments.
+
+**The API's security contract should not change merely because the enforcement mechanism changes.**
+
+This is policy portability, not configuration portability.
+
+It is an important distinction. Two gateways can accept seemingly equivalent configuration and still behave differently under failure conditions, rate-limit bursts, token errors, or policy precedence rules. The right test is **equivalent security behavior**, not matching YAML.
+
+## Guardrails as Code, Not Documentation Nobody Reads
+
+Traditional API governance often lives in architecture documents, internal standards, and wiki pages.
+
+Those documents describe what teams should do. They do not reliably demonstrate that teams actually do it.
+
+API guardrails become more valuable when they are **machine-readable, testable, and integrated into delivery workflows**.
+
+A practical implementation might use an OpenAPI contract, API ownership metadata, risk classification, and policy assertions. For example, an API classified as sensitive could be required to declare:
+
+- An approved authentication and authorization model.
+- Required scopes and intended token audience.
+- A traffic and abuse-protection baseline.
+- Ownership, classification, and lifecycle metadata.
+- Security logging and evidence requirements.
+
+The delivery workflow can evaluate those requirements before deployment. Gateway-specific automation can translate the relevant controls into Kong, Apigee, or Tyk configuration, with Curity providing identity capabilities where applicable.
+
+But generating configuration is not proof of enforcement.
+
+A mature approach separates three things:
+
+1. **Policy definition:** What must be true for this API?
+2. **Policy implementation:** Where and how is each requirement enforced?
+3. **Policy verification:** Can we prove the deployed API satisfies it?
+
+The third step is frequently overlooked.
+
+A successful deployment tells you that configuration was accepted. A verification test tells you whether an invalid token is rejected, an insufficient scope is denied, or an abusive request is throttled as intended.
+
+For higher-risk APIs, those checks should be repeated continuously, not only during initial release.
+
+## Central Governance Without One Central Gateway
+
+Platform teams sometimes respond to fragmented API security by forcing every application onto a single gateway.
+
+There may be sound reasons to standardize: supportability, cost, operational skills, and consolidation all matter.
+
+But **consistent governance does not always require identical runtime technology**.
+
+A federated model can work when responsibilities are clear:
+
+- **Security and architecture teams** define the minimum guardrails and exception process.
+- **API owners** classify their APIs and specify operation-level access requirements.
+- **Platform teams** provide supported enforcement patterns and automation for each approved gateway.
+- **Delivery pipelines and runtime tests** collect evidence that the required controls are active.
+
+This model does not mean allowing arbitrary gateways without limits. It means supporting a deliberate set of technologies under a common, testable security baseline.
+
+Teams keep implementation flexibility without inventing their own definition of API safety.
+
+## A Gateway Migration Should Not Be a Security Redesign
+
+Here is a useful test of API governance maturity:
+
+*What happens to our security requirements if we replace the API gateway tomorrow?*
+
+If every control must be rediscovered and redefined, governance is probably coupled too tightly to its current implementation.
+
+In a healthier architecture, the API's requirements remain stable. The team maps them to the target platform, identifies feature gaps, and tests that the new enforcement behaves as intended.
+
+That migration still takes real engineering work. Some controls may require a different integration, a compensating measure, or application-level enforcement.
+
+But the team is **implementing an existing security contract**, not deciding from scratch what secure access means.
+
+This reduces migration risk and makes long-term architecture decisions less dependent on vendor-specific policy formats.
+
+## The Real Architectural Boundary Is the API
+
+We spend a lot of time discussing ingress controllers, Gateway API implementations, API management platforms, service meshes, and identity providers.
+
+Those conversations are necessary, but they can distract from the thing we are actually protecting: **the API**.
+
+An API has consumers, operations, data classifications, authorization requirements, operational expectations, and an owner.
+
+Those attributes should drive its guardrails.
+
+The gateway enforces some requirements. The identity platform supports others. The application makes business-context decisions. Automated delivery and verification processes connect the pieces.
+
+No single gateway should be mistaken for the entire API security architecture.
+
+## Final Thoughts
+
+Kong, Apigee, Tyk, and Curity-integrated architectures can all have a place in an enterprise API landscape.
+
+The objective should not be to make every environment look identical. It should be to make **required security and governance outcomes consistent**.
+
+Kubernetes Gateway API can standardize parts of networking configuration. API management products can enforce traffic and security policies. Identity platforms can establish trusted authentication and token-based access.
+
+But an organization's API guardrails should exist **above those implementation choices**.
+
+Define them at the API level. Automate them wherever possible. Enforce them through the right technologies. Verify them continuously.
+
+**Choose the gateway that fits your architecture. Don't let the gateway define your security standards.**
+
+Because gateways will change.
+
+**Your API guardrails should survive those changes.**
+
+## Related Reading
+
+- [Enterprise API Gateways on Kubernetes](/blog/enterprise-api-gateway-kubernetes-comparison-2026/)
+- [API Validation with Postman](/blog/api-validation-with-postman/)

@@ -1,0 +1,92 @@
+---
+title: "WPE WebKit's New WPEPlatform API: A Migration Guide"
+seoTitle: "WPE WebKit WPEPlatform API: Embedded Migration Guide"
+snippet: "WPE WebKit 2.54 makes WPEPlatform the default and deprecates libwpe. What changes for embedded Linux products, the new API, and how to plan the migration."
+description: "WPE WebKit 2.54 makes WPEPlatform the default and deprecates libwpe. What changes for embedded Linux products, the new API, and how to plan the migration."
+publishDate: "2026-10-11"
+lastModified: "2026-10-11"
+image:
+  src: "/blog/thumbnails/wpe-webkit-wpeplatform-api-migration-embedded.jpg"
+  alt: "WPE WebKit's New WPEPlatform API: A Migration Guide"
+tags: ["Embedded Linux", "WebKit", "Wayland", "Linux", "open source", "Open Source Summit"]
+category: "Open Source"
+author: "Luca Berton"
+draft: false
+---
+
+If you ship a device with a web-based UI on embedded Linux, such as a set-top box, an infotainment screen, a kiosk or an industrial HMI, there is a good chance it runs **WPE WebKit**. And in 2026 the way WPE integrates with your platform has changed.
+
+At Open Source Summit Europe 2026 in Prague, I met **Mario Sánchez Prada** of **Igalia** at their booth, right after his session on writing a launcher for embedded devices with the new **WPEPlatform** API. I covered the embedded track in [Embedded Linux in Prague](/blog/oss-europe-2026-embedded-linux-ti-igalia-risc-v/). This guide explains what changed and how to plan a migration, based on Igalia's public engineering posts.
+
+![Luca Berton at the Igalia booth at Open Source Summit Europe 2026](/blog/events/open-source-summit-2026/oss-eu-2026-igalia-booth.jpg)
+*At the Igalia booth in Prague.*
+
+## What WPE WebKit is
+
+WPE is the WebKit port designed for embedded devices. Unlike WebKitGTK it does not depend on a desktop toolkit. You bring your own platform integration, and WPE renders web content into it with hardware acceleration.
+
+Until now, that integration went through **libwpe** plus a separately loaded **backend** library, most often **wpebackend-fdo**, and reference launchers such as **Cog**.
+
+## What WPEPlatform changes
+
+**WPEPlatform** is the new platform API that replaces that stack. Its history, according to Igalia:
+
+- It was introduced in **WPE WebKit 2.50**.
+- With **2.54**, it is the stable, default platform integration API, and the old libwpe-based API is deprecated.
+
+The big simplification is described well in an Igalia [post on the WPE Platform API](https://blogs.igalia.com/llepage/the-wpe-platform-api/) from July 2026:
+
+> "What used to be a shared library exposing five libwpe interfaces is now just three plain GObject classes."
+
+Those three classes are:
+
+| Class | Role |
+|---|---|
+| `WPEDisplay` | The connection to the native graphics system, and the factory for windows and views |
+| `WPEToplevel` | The equivalent of a native window. It translates native events into WPE events |
+| `WPEView` | Receives rendered frames (`WPEBuffer`) and presents them on screen |
+
+WPE also ships **built-in support for Wayland, DRM/KMS and headless rendering**, so for the most common targets you no longer need an external backend library at all. For other platforms, you implement those three classes yourself, and the examples show it working with GLFW. The same pattern applies to SDL, Qt or raw X11.
+
+## Zero-copy rendering with DMA-BUF
+
+Performance is where embedded teams will feel the change. WPEPlatform transfers rendered frames as **DMA-BUF** buffers when a DRM device is available. Frames are imported as an EGLImage and composited without the CPU touching the pixels. When no DRM device is available, a **shared-memory fallback** copies frames between GPU and CPU instead.
+
+On a low-power SoC, the difference between zero-copy and copying every frame can decide whether an animated UI is smooth or janky.
+
+## What the new API looks like
+
+Igalia's Kate Lee published an example of a small browser built on the new API, with a [custom HTML context menu](https://blogs.igalia.com/klee/building-a-custom-html-context-menu-with-the-new-wpeplatform-api/). Getting the view from a `WebKitWebView` and making its window fullscreen looks like this:
+
+```cpp
+auto* webView = WEBKIT_WEB_VIEW(g_object_new(WEBKIT_TYPE_WEB_VIEW,
+    "web-context", webContext,
+    "network-session", networkSession, nullptr));
+auto* wpeView = webkit_web_view_get_wpe_view(webView);
+wpe_toplevel_fullscreen(wpe_view_get_toplevel(wpeView));
+```
+
+Window management, such as fullscreen, maximise, resize and title, is now part of the unified API instead of something every backend reimplements. Because it is GObject-based, it is also easier to use from other languages through GObject Introspection.
+
+## The ecosystem is already moving
+
+Embedded build systems are switching. In August 2026, a patch for the **ptxdist** build system proposed switching its WPE WebKit package to WPE Platform and dropping libwpe, wpebackend-fdo and Cog. Expect Yocto layers and other distributions to follow. If your product depends on the old packages from your build system, check its roadmap now.
+
+## How to plan your migration
+
+1. **Inventory your integration.** Which backend do you use (wpebackend-fdo, a vendor backend, a custom one)? Do you use Cog, or your own launcher?
+2. **Check your target.** If you are on Wayland, DRM/KMS or headless, the built-in support may replace your backend entirely. That is the easiest case.
+3. **Port custom backends to the three classes.** If you wrote your own backend, map it to `WPEDisplay`, `WPEToplevel` and `WPEView`. The structure is simpler than the old five interfaces.
+4. **Verify zero-copy.** Confirm that DMA-BUF is used on your hardware, and measure frame times before and after. A silent fallback to shared memory is the most likely performance regression.
+5. **Retire Cog-specific glue.** If you relied on Cog as your launcher, move to your own small launcher on the new API. Mario's session in Prague was exactly that example.
+6. **Plan for long product lifetimes.** Embedded products ship for years. Migrate while the deprecated API still works, not after it is removed.
+
+## Why this is a good open source story
+
+I like this change because it is a rare example of a mature project replacing a foundational API and making things simpler rather than more complicated. It is also the kind of story [Udienza](https://www.udienza.com/) exists for: a real constraint, a design decision, and something other teams can reuse.
+
+## More from Prague
+
+- [Embedded Linux in Prague: TI, Igalia WPE and RISC-V](/blog/oss-europe-2026-embedded-linux-ti-igalia-risc-v/)
+- [People I Met at Open Source Summit Europe 2026](/blog/oss-europe-2026-people-i-met-prague/)
+- [Open Source Summit Europe 2026: Complete Prague Guide](/blog/open-source-summit-europe-2026-prague-coverage-guide/)

@@ -195,6 +195,19 @@ jobs:
           url=$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
+      # Cloudflare caches HTML at the edge for a day (Cache Rule on the zone), so
+      # every deploy must purge it or new/changed pages stay stale until expiry.
+      - name: Purge Cloudflare cache
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ZONE_ID: b824c8bb5f1d780184d3c663970586f7
+        run: |
+          sleep 15  # let the production alias settle on Vercel's edge first
+          curl -fsS -X POST "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/purge_cache" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{"purge_everything":true}' | jq -e '.success'
+
   indexnow:
     name: Submit to IndexNow
     needs: deploy

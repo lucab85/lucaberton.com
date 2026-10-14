@@ -12,9 +12,9 @@ import { topicCluster } from "../utils/topicCluster";
 
 export const sales = {
   kit: {
-    checkoutUrl: "",
-    price: "€49",
-    currency: "EUR",
+    checkoutUrl: "https://lucaberton.gumroad.com/l/Production-AI-Platform-Kit",
+    price: "$49",
+    currency: "USD", // Gumroad charges in USD
     name: "Production AI Platform Kit",
     page: "/production-ai-kit/",
   },

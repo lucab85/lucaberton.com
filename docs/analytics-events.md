@@ -136,6 +136,22 @@ contents. The validator fails on offers or variants in that file that are not
 in the taxonomy, on keys that are not real post slugs, and on `ctaHref` /
 `secondaryHref` values that are not pages on this site.
 
+## Paid offers (kit and expert call)
+
+`src/data/sales.ts` holds the checkout link for the Production AI Platform
+Kit and the booking link for the paid 1:1 call. Empty link = offer hidden.
+Both use `consulting_cta_click`:
+
+| CTA | `target_offer` | `cta_position` | `cta_variant` |
+|---|---|---|---|
+| Kit card on AI/platform posts (`SalesOffers.astro`) | `production_ai_kit` | `post_conclusion` | `kit_card` |
+| Buy button, hero of `/production-ai-kit/` | `production_ai_kit` | `hero` | `kit_checkout_hero` |
+| Buy button, bottom of `/production-ai-kit/` | `production_ai_kit` | `post_conclusion` | `kit_checkout_footer` |
+| Paid call card on every post (`SalesOffers.astro`) | `expert_call` | `post_conclusion` | `expert_call_card` |
+
+Purchases and paid bookings complete on the shop and on Cal.com, so the
+conversion itself is counted there, not in GA4.
+
 ## Calendly booking flow
 
 Every `calendly.com/lucaberton` link on the site opens as a Calendly popup

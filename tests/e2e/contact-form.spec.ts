@@ -4,7 +4,8 @@ import { test, expect, type Page } from '@playwright/test';
  * /contact/ form (src/components/contactform.astro): an accepted submission is
  * a consulting lead and must fire the contact_form_submit key event (with
  * first-touch attribution, no form content); a rejected submission must keep
- * what the visitor typed and fire nothing. Web3Forms is mocked.
+ * what the visitor typed and fire nothing; a scripted submission (no input
+ * events, or within 2 s of page load) is never sent. Web3Forms is mocked.
  */
 
 type TrackedEvent = { event: string } & Record<string, unknown>;
@@ -33,6 +34,7 @@ async function fillAndSubmit(page: Page) {
   await page.locator('#contact-email').fill('ada@example.com');
   await page.locator('#contact-subject').fill('AI platform assessment');
   await page.locator('#contact-message').fill('We would like to review our GPU platform.');
+  await page.waitForTimeout(2100); // the spam trap drops submissions in the first 2 s
   await page.locator('#contact-form button[type="submit"]').click();
 }
 
@@ -67,6 +69,29 @@ test.describe('contact form lead tracking', () => {
     await expect(page.locator('#result')).toHaveText('Invalid access key');
     await expect(page.locator('#contact-name')).toHaveValue('Ada Lovelace');
     await expect(page.locator('#contact-message')).toHaveValue('We would like to review our GPU platform.');
+    expect(events.map((e) => e.event)).not.toContain('contact_form_submit');
+  });
+
+  test('scripted submission without input events is dropped silently', async ({ page }) => {
+    const events = await recordEvents(page);
+    let sent = 0;
+    await page.route('https://api.web3forms.com/submit', (route) => {
+      sent += 1;
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ success: true, message: 'Form submitted successfully' }) });
+    });
+    await page.goto('/contact/', { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(2100);
+    // A bot sets values directly: no input events fire.
+    await page.evaluate(() => {
+      (document.querySelector('#contact-name') as HTMLInputElement).value = 'Bot';
+      (document.querySelector('#contact-email') as HTMLInputElement).value = 'bot@example.com';
+      (document.querySelector('#contact-subject') as HTMLInputElement).value = 'Buy now';
+      (document.querySelector('#contact-message') as HTMLTextAreaElement).value = 'Spam spam spam spam.';
+    });
+    await page.locator('#contact-form button[type="submit"]').click();
+
+    await expect(page.locator('#result')).toHaveText('Thanks, your message has been sent.');
+    expect(sent).toBe(0);
     expect(events.map((e) => e.event)).not.toContain('contact_form_submit');
   });
 });

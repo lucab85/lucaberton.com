@@ -7,6 +7,8 @@
  * Tracking attributes use the quoted data-* keys ConversionTracker reads, so
  * scripts/validate-analytics.cjs checks their values statically.
  */
+import { sales, claudePackLive } from '../data/sales';
+
 export interface TopicBanner {
   emoji: string;
   headline: string;
@@ -30,6 +32,26 @@ const MASTERCLASS: TopicBanner = {
   gradientFrom: 'indigo-600',
   gradientVia: 'purple-600',
   gradientTo: 'pink-600',
+};
+
+// Own product for Claude Code readers (B2C developers): shown on claude_code
+// pages while the pack is on sale, instead of the Udemy Masterclass.
+const CLAUDE_PACK: TopicBanner = {
+  emoji: '🛡️',
+  headline: 'Claude Code Guardrails Pack',
+  description: 'Tested hooks, a doctor script for ECONNRESET and auth errors, and a troubleshooting playbook.',
+  linkText: `Get it for ${sales.claudePack.price}`,
+  linkUrl: sales.claudePack.page,
+  external: false,
+  gradientFrom: 'indigo-600',
+  gradientVia: 'purple-600',
+  gradientTo: 'pink-600',
+  trackingAttrs: {
+    'data-track-event': 'consulting_cta_click',
+    'data-tp-target-offer': 'claude_code_guardrails_pack',
+    'data-tp-cta-position': 'top_banner',
+    'data-tp-cta-variant': 'banner_claude_pack',
+  },
 };
 
 const AGENT_PLATFORM: TopicBanner = {
@@ -118,5 +140,6 @@ const BY_CLUSTER: Record<string, TopicBanner> = {
 /** Banner for a page: blog posts pass their cluster; other pages keep the Masterclass. */
 export function bannerFor(cluster?: string): TopicBanner {
   if (!cluster) return MASTERCLASS;
+  if (cluster === 'claude_code' && claudePackLive) return CLAUDE_PACK;
   return BY_CLUSTER[cluster] ?? NEWSLETTER;
 }

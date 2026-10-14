@@ -148,6 +148,10 @@ Both use `consulting_cta_click`:
 | Buy button, hero of `/production-ai-kit/` | `production_ai_kit` | `hero` | `kit_checkout_hero` |
 | Buy button, bottom of `/production-ai-kit/` | `production_ai_kit` | `post_conclusion` | `kit_checkout_footer` |
 | Pack card on Claude Code posts (`SalesOffers.astro`) | `claude_code_guardrails_pack` | `post_conclusion` | `claude_pack_card` |
+| Top strip on claude_code pages (`topicBanners.ts`) | `claude_code_guardrails_pack` | `top_banner` | `banner_claude_pack` |
+| Strip after the first paragraph (`ProductStrip.astro`) | `claude_code_guardrails_pack` | `inline` | `claude_pack_strip` |
+| Banner before the second H2 (`ProductBanner.astro`) | `claude_code_guardrails_pack` / `production_ai_kit` | `inline_25` | `claude_pack_inline_*` / `kit_inline` |
+| Bottom bar on claude_code pages (`StickyCta.astro`) | `claude_code_guardrails_pack` | `sticky_bar` | `claude_pack_sticky` |
 | Buy buttons on `/claude-code-guardrails-pack/` | `claude_code_guardrails_pack` | `hero` / `post_conclusion` | `claude_pack_checkout_hero` / `claude_pack_checkout_footer` |
 | Paid call card on every post (`SalesOffers.astro`) | `expert_call` | `post_conclusion` | `expert_call_card` |
 

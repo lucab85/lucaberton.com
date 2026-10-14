@@ -14,12 +14,14 @@ export const sales = {
   kit: {
     checkoutUrl: "",
     price: "€49",
+    currency: "EUR",
     name: "Production AI Platform Kit",
     page: "/production-ai-kit/",
   },
   claudePack: {
-    checkoutUrl: "",
-    price: "€19",
+    checkoutUrl: "https://lucaberton.gumroad.com/l/Claude-Code-Guardrails-Pack",
+    price: "$19",
+    currency: "USD", // Gumroad charges in USD
     name: "Claude Code Guardrails Pack",
     page: "/claude-code-guardrails-pack/",
   },

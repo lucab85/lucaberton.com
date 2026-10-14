@@ -34,7 +34,9 @@ test.describe('contextual affiliate cards', () => {
 });
 
 test.describe('time-boxed promo cards', () => {
-  for (const post of ['/blog/nordic-apis-summit-2026-stockholm/', '/blog/nordic-apis-2026-api-guardrails-multi-tenant-ai/']) {
+  // The talk recap (nordic-apis-2026-api-guardrails-multi-tenant-ai) dropped the
+  // card once the summit started; only the event overview still carries it.
+  for (const post of ['/blog/nordic-apis-summit-2026-stockholm/']) {
     test(`Nordic APIs partner card on ${post}`, async ({ page }) => {
       await page.goto(post, { waitUntil: 'domcontentloaded' });
       const card = page.locator('a[data-track-event="affiliate_click"][data-tp-offer-id="nordic_apis_summit_2026"]');

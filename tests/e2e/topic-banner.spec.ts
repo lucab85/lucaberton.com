@@ -4,7 +4,8 @@ import { test, expect, type Page } from '@playwright/test';
  * Site-wide announcement banner chosen by the page's topic cluster
  * (src/utils/topicBanners.ts): consulting offers for leader-intent clusters
  * (same tab, consulting_cta_click), the newsletter for engineer clusters,
- * the Claude Code Masterclass for Claude Code posts and non-blog pages.
+ * the Claude Code Guardrails Pack for Claude Code posts while it is on sale
+ * (src/data/sales.ts), and the Claude Code Masterclass on non-blog pages.
  */
 
 // AnnouncementBanner root: a direct <body> child with the gradient background.
@@ -22,11 +23,14 @@ test.describe('topic-aware announcement banner', () => {
     await expect(link).not.toHaveAttribute('target', '_blank');
   });
 
-  test('Claude Code posts keep the Masterclass', async ({ page }) => {
+  test('Claude Code posts sell the Guardrails Pack, tracked, same tab', async ({ page }) => {
     await page.goto('/blog/claude-code-econnreset-fix/', { waitUntil: 'domcontentloaded' });
     const link = banner(page);
-    await expect(link).toHaveAttribute('href', /udemy\.com\/course\/claude-code-masterclass/);
-    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('href', '/claude-code-guardrails-pack/');
+    await expect(link).toHaveAttribute('data-track-event', 'consulting_cta_click');
+    await expect(link).toHaveAttribute('data-tp-target-offer', 'claude_code_guardrails_pack');
+    await expect(link).toHaveAttribute('data-tp-cta-position', 'top_banner');
+    await expect(link).not.toHaveAttribute('target', '_blank');
   });
 
   test('DevOps posts offer the newsletter', async ({ page }) => {

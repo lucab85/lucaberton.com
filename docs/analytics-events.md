@@ -138,8 +138,8 @@ in the taxonomy, on keys that are not real post slugs, and on `ctaHref` /
 
 ## Paid offers (kit and expert call)
 
-`src/data/sales.ts` holds the checkout link for the Production AI Platform
-Kit and the booking link for the paid 1:1 call. Empty link = offer hidden.
+`src/data/sales.ts` holds the checkout links for the Production AI Platform
+Kit and the Claude Code Guardrails Pack, and the booking link for the paid 1:1 call. Empty link = offer hidden.
 Both use `consulting_cta_click`:
 
 | CTA | `target_offer` | `cta_position` | `cta_variant` |
@@ -147,6 +147,8 @@ Both use `consulting_cta_click`:
 | Kit card on AI/platform posts (`SalesOffers.astro`) | `production_ai_kit` | `post_conclusion` | `kit_card` |
 | Buy button, hero of `/production-ai-kit/` | `production_ai_kit` | `hero` | `kit_checkout_hero` |
 | Buy button, bottom of `/production-ai-kit/` | `production_ai_kit` | `post_conclusion` | `kit_checkout_footer` |
+| Pack card on Claude Code posts (`SalesOffers.astro`) | `claude_code_guardrails_pack` | `post_conclusion` | `claude_pack_card` |
+| Buy buttons on `/claude-code-guardrails-pack/` | `claude_code_guardrails_pack` | `hero` / `post_conclusion` | `claude_pack_checkout_hero` / `claude_pack_checkout_footer` |
 | Paid call card on every post (`SalesOffers.astro`) | `expert_call` | `post_conclusion` | `expert_call_card` |
 
 Purchases and paid bookings complete on the shop and on Cal.com, so the

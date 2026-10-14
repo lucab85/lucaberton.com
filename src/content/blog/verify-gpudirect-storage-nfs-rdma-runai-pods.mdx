@@ -1,0 +1,244 @@
+---
+draft: false
+title: "Prove GPUDirect Storage Works on NFS over RDMA"
+seoTitle: "Verify GPUDirect Storage on NFS over RDMA in Kubernetes Pods"
+snippet: "How to prove GDS is really moving data over NFS over RDMA instead of silently falling back, and why Run:ai pods still showed NFS as unsupported."
+description: "Verify GPUDirect Storage on NFS over RDMA with gdscheck, gdsio and nvidia-fs stats, then fix Run:ai pods that report NFS unsupported: NVIDIA_GDS and SCC."
+publishDate: "2026-10-14"
+lastModified: "2026-10-14"
+category: "AI"
+author: "Luca Berton"
+tags: ["nvidia", "gds", "gpudirect-storage", "nfs", "rdma", "run-ai", "openshift", "kubernetes", "troubleshooting", "storage"]
+image:
+  src: "/blog/thumbnails/nvidia-gpu-operator-gds-gpudirect-storage.jpg"
+  alt: "Verifying GPUDirect Storage over NFS over RDMA on Kubernetes GPU nodes"
+faq:
+  - question: 'How do I know GPUDirect Storage is not silently falling back to compatibility mode?'
+    answer: 'Run gdsio with CUFILE_ALLOW_COMPAT_MODE=false so a non-GDS path fails instead of falling back, and check /proc/driver/nvidia-fs/stats: the read and write counters must show n=64 ok=64 err=0 for a 64 MiB test with 1 MiB I/O.'
+  - question: 'Why does gdscheck report NFS as unsupported inside a Run:ai or restricted pod when it works in a root test pod?'
+    answer: 'The NVIDIA Container Toolkit only injects the GPUDirect Storage device nodes (/dev/nvidia-fs*) when the container sets NVIDIA_GDS=enabled. Without them, gdscheck reports every filesystem as unsupported and cuFile falls back to compatibility mode. The workload also needs a security context that lets it open those device nodes.'
+  - question: 'Does a pod need hostNetwork for GPUDirect Storage over NFS over RDMA?'
+    answer: 'No. The NFS over RDMA mount is made by the host kernel and only bind-mounted into the pod, so hostNetwork is not a factor.'
+---
+
+import BlogPromoCard from '../../components/BlogPromoCard.astro';
+
+In [part one](/blog/fix-nfs-rdma-gds-rpcrdma-nvfs-hooks/) the problem was the kernel: `rpcrdma.ko` built without the nvfs DMA hooks, so GPUDirect Storage (GDS) over NFS over RDMA could never take the direct path. Once that was fixed, two new questions came up on the same platform:
+
+1. **How do you prove GDS is actually moving the data**, rather than quietly falling back to bounce buffers through the CPU?
+2. **Why did training jobs launched from Run:ai still report `NFS: Unsupported`**, when a hand-made test pod on the same node reported `Supported`?
+
+This post covers both, including the exact validation procedure we used to sign off the node-level path.
+
+## The platform
+
+| Component | Version |
+|---|---|
+| GPU | NVIDIA H200 NVL |
+| Server | Dell PowerEdge XE7740 |
+| OS | RHEL 9.6 (kernel 5.14.0-570), OpenShift |
+| Driver | NVIDIA open kernel driver, CUDA 13.0 |
+| GDS | 1.15.1.6 (nvidia_fs 2.27, libcufile 2.12) |
+| Storage | NFSv3 over RDMA from a scale-out NAS |
+| Scheduler | NVIDIA Run:ai for training workloads |
+
+## Why "it runs" proves nothing
+
+cuFile is designed to keep working when the direct path isn't available. With `properties.use_compat_mode: true`, which is how this node's `cufile.json` was configured, any I/O that can't go GPU-direct falls back to POSIX reads and writes through system memory. The application doesn't get an error. It just gets slower, and nobody notices until a training job is mysteriously I/O-bound.
+
+So "the job ran" tells you nothing about whether GDS was used. You have to force the direct path and count the I/O.
+
+## Step 1: check the mount and the platform
+
+First, confirm the dataset really is mounted over RDMA:
+
+```bash
+mount | grep ' /data '
+```
+
+```text
+nfs-server.example.internal:/export/project-001 on /data type nfs
+  (rw,relatime,vers=3,rsize=131072,wsize=524288,hard,proto=rdma,port=20049,
+   timeo=600,retrans=2,sec=sys,...)
+```
+
+You want `proto=rdma` and port `20049`, the standard NFS over RDMA port. A `proto=tcp` mount can never use GDS.
+
+Then run `gdscheck` in platform mode:
+
+```bash
+TOOLS=/usr/local/cuda/gds/tools   # wherever your GDS tools are installed
+"$TOOLS/gdscheck" -p
+```
+
+The line that matters is in the driver configuration:
+
+```text
+NFS                : Supported
+...
+Userspace RDMA     : Unsupported
+--Mellanox PeerDirect : Disabled
+--rdma library        : Not Loaded (libcufile_rdma.so)
+--rdma devices        : Not configured
+```
+
+**`NFS : Supported` is the green light.** The userspace RDMA lines look alarming but are expected for this path: kernel-space NFS over RDMA does not use `libcufile_rdma.so` at all (part one explains why). Likewise, the RDMA shared device plugin that exposes RDMA devices to pods is unrelated to `libcufile_rdma.so`, so there's no need to configure it for this path.
+
+Two platform lines are worth noting for later:
+
+```text
+Found ACS enabled for switch ...
+IOMMU: Pass-through or enabled
+WARN: GDS is not guaranteed to work functionally or in a performant way with iommu=on/pt
+```
+
+PCIe ACS and the IOMMU affect *how fast* peer-to-peer DMA is, not *whether* it works here. Treat them as a performance topic, and benchmark before and after changing either. Functional validation comes first.
+
+## Step 2: force the direct path and count the I/O
+
+This is the procedure that settled it. It turns on the nvidia-fs driver's I/O counters, disables compatibility mode for the test run only, writes and reads 64 MiB from the GPU, and then reads the counters:
+
+```bash
+TOOLS=/usr/local/cuda/gds/tools
+TESTFILE=/data/gds-validation.bin
+WRITELOG=/tmp/gds-validation-write.log
+READLOG=/tmp/gds-validation-read.log
+
+rm -f "$TESTFILE" "$WRITELOG" "$READLOG"
+env | grep '^CUFILE_' || true
+mount | grep ' /data '
+"$TOOLS/gdscheck" -p
+
+echo 1 > /sys/module/nvidia_fs/parameters/rw_stats_enabled
+
+echo "=== WRITE TEST ==="
+echo 1 > /proc/driver/nvidia-fs/stats
+CUFILE_ALLOW_COMPAT_MODE=false CUFILE_FORCE_COMPAT_MODE=false \
+CUFILE_LOGGING_LEVEL=TRACE CUFILE_LOGFILE_PATH="$WRITELOG" \
+  "$TOOLS/gdsio" -x 0 -d 0 -s 64M -i 1M -f "$TESTFILE" -I 1
+grep -E 'IO stats|Writes|Mmap|Bar1-map|Error|Ops' /proc/driver/nvidia-fs/stats
+
+echo "=== READ TEST ==="
+echo 1 > /proc/driver/nvidia-fs/stats
+CUFILE_ALLOW_COMPAT_MODE=false CUFILE_FORCE_COMPAT_MODE=false \
+CUFILE_LOGGING_LEVEL=TRACE CUFILE_LOGFILE_PATH="$READLOG" \
+  "$TOOLS/gdsio" -x 0 -d 0 -s 64M -i 1M -f "$TESTFILE" -I 0
+grep -E 'IO stats|Reads|Mmap|Bar1-map|Error|Ops' /proc/driver/nvidia-fs/stats
+
+echo 0 > /sys/module/nvidia_fs/parameters/rw_stats_enabled
+rm -f "$TESTFILE"
+```
+
+What each piece does:
+
+| Piece | Purpose |
+|---|---|
+| `rw_stats_enabled` = 1 | Turns on per-I/O counters in the nvidia-fs driver |
+| `echo 1 > /proc/driver/nvidia-fs/stats` | Resets the counters, so each test starts from zero |
+| `CUFILE_ALLOW_COMPAT_MODE=false` | The key setting: if the direct path is unavailable, the test **fails** instead of quietly falling back |
+| `CUFILE_LOGGING_LEVEL=TRACE` | A full cuFile trace in a separate log file per test, for support cases |
+| `gdsio -x 0` | Transfer type 0 is GPU direct (reported as `XferType: GPUD`) |
+| `-d 0 -s 64M -i 1M` | GPU 0, a 64 MiB file, 1 MiB per I/O: exactly 64 operations |
+| `-I 1` / `-I 0` | Write test / read test |
+
+### What success looks like
+
+- `gdscheck -p` reports `NFS : Supported`
+- Write counters: `n=64 ok=64 err=0 writeMiB=64 io_state_err=0`
+- Read counters: `n=64 ok=64 err=0 readMiB=64 io_state_err=0`
+- The `Error` line is all zeros
+- `Ops: Read=0 Write=0` **after** the run is expected: that line only counts operations in flight
+
+Our run, trimmed:
+
+```text
+IoType: WRITE XferType: GPUD Threads: 1 DataSetSize: 65536/65536(KiB) IOSize: 1024(KiB)
+  Throughput: 0.659276 GiB/sec, Avg_Latency: 1449.718750 usecs ops: 64
+Writes : n=64 ok=64 err=0 writeMiB=64 io_state_err=0 pg-cache=0 pg-cache-fail=0 pg-cache-eio=0
+Bar1-map : n=1 ok=1 err=0 free=1 callbacks=0 active=0 delay-frees=0
+Error  : cpu-gpu-pages=0 sg-ext=0 dma-map=0 dma-ref=0
+
+IoType: READ XferType: GPUD Threads: 1 DataSetSize: 65536/65536(KiB) IOSize: 1024(KiB)
+  Throughput: 1.014396 GiB/sec, Avg_Latency: 820.000000 usecs ops: 64
+Reads  : n=64 ok=64 err=0 readMiB=64 io_state_err=0
+Error  : cpu-gpu-pages=0 sg-ext=0 dma-map=0 dma-ref=0
+```
+
+All 64 writes and 64 reads went through nvidia-fs, with compatibility mode disabled and zero errors. The GPU's BAR1 mapping succeeded once and was released. **GDS over NFS over RDMA was operational at the kernel level.**
+
+Don't read the throughput as a benchmark. This is one thread, one GPU and 64 MiB: a functional proof. For performance, scale up threads, file size and I/O depth with `gdsio`, then look at the ACS and IOMMU warnings above. The driver's own `Bandwidth` counter can read 0 on a run this short; the operation counts are what prove the path.
+
+## Step 3: the training pods still said "Unsupported"
+
+With the node verified, we moved to real training workloads launched through Run:ai, and `gdscheck` inside those pods reported `NFS : Unsupported`. Same node, same mount, same GPU.
+
+Our first suspects were the OpenShift Security Context Constraints (SCC): perhaps the Run:ai workloads needed `allowHostNetwork: true`, or `IPC_LOCK` in `allowedCapabilities`. The real difference was elsewhere:
+
+- **The manual test pod ran as root under a permissive security context**, so it could see and open the nvidia-fs device nodes directly.
+- **A restricted workload only receives the devices the NVIDIA Container Toolkit injects.** Per the [Container Toolkit release notes](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/release-notes.html), the GPUDirect Storage devices (`/dev/nvidia-fs*`) are injected **only when the container sets `NVIDIA_GDS=enabled`**.
+- **Without those device nodes, `gdscheck` reports every filesystem as unsupported**, and cuFile falls back to compatibility mode, silently as usual.
+- **`hostNetwork` is not a factor.** The NFS over RDMA mount is made by the host kernel and only bind-mounted into the pod. The pod never touches the RDMA network itself.
+
+So a Run:ai workload needs two things:
+
+1. **The `NVIDIA_GDS=enabled` environment variable** on the workload, set in the Run:ai workload or the template it inherits from:
+
+   ```yaml
+   env:
+     - name: NVIDIA_GDS
+       value: "enabled"
+   ```
+
+2. **A security context that lets the workload open the injected device nodes.** On OpenShift, that means the SCC Run:ai assigns to its workload pods.
+
+Both are configured on the Run:ai side, which is where we took it next.
+
+## A checklist for the "works in my pod, not in theirs" case
+
+Compare a pod that works with one that doesn't. These five checks find the difference quickly:
+
+```bash
+NS=my-project
+POD=my-training-pod-0
+
+# 1. Which SCC did the pod actually get?
+oc -n "$NS" get pod "$POD" -o jsonpath='{.metadata.annotations.openshift\.io/scc}{"\n"}'
+
+# 2. Is GDS requested from the Container Toolkit?
+oc -n "$NS" exec "$POD" -- env | grep '^NVIDIA_GDS='
+
+# 3. Were the GDS device nodes injected?
+oc -n "$NS" exec "$POD" -- sh -c 'ls -l /dev/nvidia-fs*'
+
+# 4. What does cuFile think of the filesystem?
+oc -n "$NS" exec "$POD" -- sh -c '/usr/local/cuda/gds/tools/gdscheck -p | grep -E "^ *NFS"'
+
+# 5. What did the scheduler actually render?
+oc -n "$NS" get pod "$POD" -o yaml > rendered-pod.yaml
+```
+
+If check 3 finds no `/dev/nvidia-fs*` devices, stop debugging the network and storage: the container never received GDS. If you open a support case, attach the SCC, the rendered workload spec, and `gdscheck -p` plus `ls -l /dev/nvidia-fs*` from both the working pod and the failing one. That one comparison answers most of the questions support will ask.
+
+## Status
+
+The node-level path, NFS over RDMA with GDS through nvidia-fs, is verified with the procedure above. Enabling it for scheduled workloads is a workload configuration change (`NVIDIA_GDS` plus the SCC), and that work sits with the Run:ai side of the platform. I'll update this post once training jobs run with GDS end to end.
+
+## Key takeaways
+
+- **cuFile falls back silently.** Validate with `CUFILE_ALLOW_COMPAT_MODE=false` and the nvidia-fs counters, never with "the job finished".
+- **`NFS : Supported` in `gdscheck -p` is the node-level green light.** Userspace RDMA showing as unsupported is expected for kernel NFS over RDMA.
+- **64 of 64 operations, zero errors** is a clean functional pass. Benchmark separately.
+- **Containers only get GDS if they ask for it:** `NVIDIA_GDS=enabled`, plus a security context that can open `/dev/nvidia-fs*`.
+- **Don't chase `hostNetwork`.** The mount belongs to the host kernel.
+
+If you're building a GPU platform where storage throughput decides training time, this is the kind of work I do in [AI integration consulting](/services/ai-integration/).
+
+<BlogPromoCard />
+
+## Related
+
+- [Fix NFS over RDMA: When libcufile_rdma.so Is Not Your Problem](/blog/fix-nfs-rdma-gds-rpcrdma-nvfs-hooks/) (part one)
+- [GPUDirect Storage with the NVIDIA GPU Operator](/blog/nvidia-gpu-operator-gds-gpudirect-storage/)
+- [Dell PowerScale + NVIDIA GPUDirect Storage Guide](/blog/how-dell-powerscale-nvidia-gpudirect-storage/)
+- [Run:ai Topology-Aware Scheduling for GPU Workloads](/blog/nvidia-run-ai-topology-aware-scheduling-gpu-placement-2026/)
+- [Multi-Tenant GPU Orchestration on OpenShift AI](/blog/lessons-learned-multi-tenant-gpus-openshift-ai/)

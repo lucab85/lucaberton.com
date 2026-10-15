@@ -15,6 +15,16 @@ export interface ServiceMatch {
 
 export const serviceMatches: ServiceMatch[] = [
   {
+    // Listed first so it wins ties on GPU-hardware posts: it is the only
+    // fixed-fee, fixed-scope offer and the only one aimed at a buying decision
+    // rather than at work already under way.
+    keywords: ['gpu', 'nvidia', 'infiniband', 'slurm', 'nccl', 'dcgm', 'hpc', 'datacenter', 'liquid-cooling', 'cluster'],
+    title: 'GPU Cluster Design Review',
+    description: 'Ordering rack-scale GPU hardware? Get an independent review of the fabric, management plane and operations before the deposit becomes non-refundable.',
+    url: '/services/gpu-cluster-review/',
+    icon: '🛡️',
+  },
+  {
     keywords: ['ai', 'ml', 'gpu', 'llm', 'rag', 'instructlab', 'rhel-ai', 'openshift-ai', 'mlops', 'deep-learning', 'fine-tuning', 'inference'],
     title: 'AI Integration & GPU Platforms',
     description: 'Need help deploying AI/ML platforms? Get expert consulting on OpenShift AI, GPU orchestration, and MLOps.',

@@ -18,6 +18,9 @@ const blogCollection = defineCollection({
     publishDate: z.string().transform(str => new Date(str)),
     lastModified: z.string().optional(),
     author: z.string().default('Luca Berton'),
+    // Force the affiliate disclosure on. Normally unnecessary: the blog
+    // template detects affiliate links in the post body by itself.
+    affiliate: z.boolean().optional(),
     category: z.string(),
     tags: z.array(z.string()),
     faq: z.array(z.object({

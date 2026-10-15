@@ -27,7 +27,7 @@ const MASTERCLASS: TopicBanner = {
   headline: 'Claude Code Masterclass',
   description: 'Learn AI-assisted development on Udemy — plus the companion book on Leanpub & Amazon.',
   linkText: 'Start Learning',
-  linkUrl: 'https://www.udemy.com/course/claude-code-masterclass-ai-coding/',
+  linkUrl: 'https://www.udemy.com/course/claude-code-masterclass-ai-coding/?referralCode=23465B09E0849B8FD7A0',
   external: true,
   gradientFrom: 'indigo-600',
   gradientVia: 'purple-600',

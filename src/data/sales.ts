@@ -22,6 +22,9 @@ export const sales = {
     checkoutUrl: "https://lucaberton.gumroad.com/l/Claude-Code-Guardrails-Pack",
     price: "$19",
     currency: "USD", // Gumroad charges in USD
+    // Team licence (up to 20 developers), sold as a version of the same Gumroad
+    // product. Leave empty until that version exists on Gumroad.
+    teamPrice: "",
     name: "Claude Code Guardrails Pack",
     page: "/claude-code-guardrails-pack/",
   },

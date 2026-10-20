@@ -13,7 +13,7 @@ custom images (book covers, photos) are left alone.
 import os, re, glob, textwrap
 from PIL import Image, ImageDraw, ImageFont
 
-ROOT = "/tmp/lucarepo"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BLOG = os.path.join(ROOT, "src/content/blog")
 IMG_DIR = os.path.join(ROOT, "static/blog/thumbnails")
 FD = "/usr/share/fonts/truetype/dejavu/"
@@ -88,6 +88,13 @@ def make_card(title, category):
     d.text((x, H-78), cat_label, font=font(20, False), fill=MUTE)
     d.text((W-70, H-78), "lucaberton.com", font=font(20, False), fill=MUTE, anchor="ra")
     return img
+
+# The card design now lives in og_card.py (Luca's photo, the site's fonts).
+# This script keeps its entry point and file selection; make_card is replaced.
+import sys  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from og_card import make_card  # noqa: E402,F811
+
 
 def main():
     count = skip = fail = 0

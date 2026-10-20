@@ -1,0 +1,212 @@
+---
+title: "Nordic APIs 2026 Day 2: A Valid JWT Is Not Trust"
+seoTitle: "Nordic APIs Summit 2026 Day 2 Recap: Shared Signals, Arazzo"
+snippet: "Shared Signals and CAEP for revoking JWTs in flight, Arazzo workflows for agents, and my own talk: my notes from day 2 of Nordic APIs Summit in Stockholm."
+description: "Notes from Nordic APIs Summit 2026 day 2 in Stockholm: Shared Signals Framework and CAEP at the API gateway, a live Keycloak demo, Arazzo and API standards."
+publishDate: "2026-10-14"
+lastModified: "2026-10-14"
+image:
+  src: "/blog/thumbnails/nordic-apis-summit-2026-day-2-recap.jpg"
+  alt: "Nordic APIs 2026 Day 2: A Valid JWT Is Not Trust"
+category: "Conferences"
+author: "Luca Berton"
+tags: ["Nordic APIs", "API", "AI agents", "API security", "OAuth", "Identity", "Keycloak", "OpenAPI", "Stockholm", "Conference"]
+draft: false
+event:
+  name: "Nordic APIs Summit 2026"
+  startDate: "2026-10-12"
+  endDate: "2026-10-14"
+  city: "Stockholm"
+  country: "SE"
+  venue: "Clarion Hotel Stockholm"
+  organizer: "Nordic APIs"
+  url: "https://nordicapis.com/events/platform-summit-2026/"
+  role: "speaker"
+  companies: ["Nordic APIs", "MaintainX", "WunderGraph", "Identity Tailor", "TM Forum", "Open Empower"]
+  speakers:
+    - name: "Ahmet Soormally"
+      company: "WunderGraph"
+    - name: "Adrien Poupa"
+      company: "MaintainX"
+    - name: "Saif Kurdi-Teylouni"
+      company: "MaintainX"
+    - name: "Thomas Darimont"
+      company: "Identity Tailor"
+    - name: "Lorna Mitchell"
+      company: "TM Forum"
+  topics: ["apis", "ai-agents", "cloud-native-security", "ai-security"]
+---
+
+import BlogPromoCard from "../../components/BlogPromoCard.astro";
+
+![Luca Berton in a full Bankettsalen at the end of Nordic APIs Summit 2026](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-luca-closing.jpg)
+
+[Day 1](/blog/nordic-apis-summit-2026-day-1-recap/) of **Nordic APIs Summit 2026** was about *who* is calling your API: agent identity, Client ID Metadata Documents, delegation. Day 2 asked the follow-up question that most of us skip: **once you have issued a token, how long do you keep trusting it?** The answer from the best talk of the day was a slide I'll quote for a while: *a valid JWT proves who issued it, not whether to trust it now.*
+
+Wednesday was also the day of my own session. Here are my notes from the second summit day at the Clarion Hotel Stockholm, built, as on day 1, from my photos of the slides. Where I quote something, it is what was on the slide.
+
+## Opening keynote: MCP tools on top of a typed API
+
+The day opened in Bankettsalen with *Rethinking MCP Tools: A Better Way to Connect AI to Enterprise Data with MaintainX*, given by **Ahmet Soormally** (WunderGraph) with **Adrien Poupa** and **Saif Kurdi-Teylouni** (MaintainX, an Autodesk company).
+
+![MaintainX: maintenance and asset management software, and why GraphQL](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-maintainx-graphql.jpg)
+
+MaintainX makes maintenance and asset management software (CMMS/EAM): work orders, asset status history, and physical assets tracked "from purchase through operation to decommissioning". Their slide gave two reasons for GraphQL: *clients need different views of connected data*, and *a typed schema supports API evolution*. Both matter when the client is an agent. This was the same thread as WunderGraph's lightning demo on day 1, where letting a model wander a GraphQL schema on its own was 54x more expensive than routing the prompt to a predefined capability. The keynote was the customer side of that story.
+
+The opening block finished with a panel on *Designing for the Agentic Experience* (Gertrude Chilufya of Reframe Tech, Erik Wilde of the OpenAPI Initiative, Kin Lane, and Daniel Kocot of adorsys).
+
+## My session: the guardrails live in the platform
+
+At 12:50 I gave **The API Guardrails Behind Safe Multi-Tenant AI Platforms** in the Production Agent Systems track, between Natalia Venditto (Adobe) on *The Agent Harness: Your New API Gateway* and Thomas Darimont on JWT trust. My argument was that the guardrails that matter for AI agents don't live in the agent, they live in the platform underneath it: six platform decisions (run it, see it, prove it), and a legal-research agent built twice, once as a script and once on a private platform, with only one of the two able to ship.
+
+The full write-up, the speaker material and the free 90-minute lab are in my [Nordic APIs 2026 talk recap](/blog/nordic-apis-2026-api-guardrails-multi-tenant-ai/). The track order worked well: I ended on "the model proposes, a constrained system decides", and the next speaker spent twenty minutes on how a constrained system finds out that it should stop trusting a caller.
+
+## Thomas Darimont: Your JWT is valid. Should your API still trust it?
+
+**Thomas Darimont** (Identity Tailor) took the 13:10 slot with the most practical identity talk of the summit. The problem is one every API team has: a client calls with a valid JWT and gets `200 OK`. Then something happens. The laptop is compromised, the user is disabled, the session is killed. The JWT is still valid until it expires, and every API that only checks the signature keeps saying yes.
+
+### The Shared Signals Framework at a glance
+
+The fix is the **OpenID Shared Signals Framework (SSF)**: a transmitter (an IdP, EDR, MDM or SaaS app) sends signed security events to a receiver (an API gateway, a resource server, or another IdP).
+
+![Shared Signals Framework at a glance: transmitter, receiver and the RFCs underneath](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-ssf-at-a-glance.jpg)
+
+The building blocks are all standards:
+
+| Standard | What it does |
+|----------|--------------|
+| RFC 8417, Security Event Token (SET) | A signed JWT that carries events about a subject |
+| RFC 8935 and RFC 8936 | Push and poll delivery over HTTP, with acknowledgement |
+| RFC 9493, Subject Identifiers | Who the event is about: user, session, device, tenant, IP address and more |
+| OpenID CAEP and RISC 1.0 Final | The event types for sessions, accounts and credentials |
+
+Stream management (configure, status, verify) runs alongside delivery. Here is what a decoded CAEP `session-revoked` event looks like:
+
+![Anatomy of a decoded session-revoked SET](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-session-revoked-set.jpg)
+
+The `sub_id` says *who* (matched against the token's `iss` and `sub`), `events` says *what*, `jti` is the unique ID for dropping duplicates and replays, and the JWS signature is verified against the transmitter's JWKS. In the example the `reason_admin` is "Device flagged by EDR".
+
+### Bringing signals to APIs
+
+The architecture slide shows where everything fits. Endpoint security (EDR, MDM), the risk engine (SIEM, UEBA) and identity governance (HR, IGA) feed signals into the authorization server. The authorization server issues JWTs, receives the upstream signals, and **transmits SETs towards the APIs**. The API gateway is an SSF receiver that keeps revocation state, and backend APIs can run their own receiver for domain rules.
+
+![Example architecture: signals into the auth server, SETs to the API gateway](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-ssf-example-architecture.jpg)
+
+There are three places to enforce, and each has a limit:
+
+![Three enforcement points: IdP, gateway and service](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-ssf-enforcement-points.jpg)
+
+| Where | What it does | Strength | Limit |
+|-------|--------------|----------|-------|
+| At the IdP | Ends sessions, revokes refresh tokens, refuses new tokens | One source of truth | Issued JWTs keep working |
+| At the gateway | Keeps revocation state and rejects matching tokens | Immediate, central enforcement | Knows tokens, not business rules |
+| In the service | Applies domain rules, e.g. block payouts, allow reads | Fine-grained decisions | Each service needs a receiver |
+
+His summary: *in practice, combine them. The IdP transmits, the gateway enforces, services refine.*
+
+The detail that makes this work is matching an event to the tokens already in flight. An `iss_sub` subject maps to the token's `iss` and `sub` and revokes by user. A session maps to the `sid` claim. A device maps to a custom claim such as `device_id`. The gateway keeps a small state table, and the rule is simple: **reject if the token's `iat` is before the event.** Tokens issued after re-authentication pass, and entries can be dropped once the longest token lifetime has passed.
+
+![Matching events to tokens in flight, and the rule for revocations](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-ssf-matching-tokens.jpg)
+
+Put together, a compromised laptop plays out in six steps:
+
+![A compromised laptop, step by step](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-ssf-compromised-laptop.jpg)
+
+1. The client calls the API with a valid JWT: `200 OK`
+2. EDR flags the laptop and sends a SET to the OAuth authorization server
+3. The authorization server ends the session and emits a CAEP `session-revoked` event
+4. The gateway verifies the SET and marks the session revoked
+5. The next call with the same JWT gets `401 invalid_token`
+6. Refresh fails, and the user signs in again from a compliant device
+
+### What you can use today
+
+This isn't a spec waiting for products. His slide of building blocks, with JVM examples:
+
+![Building blocks available today, e.g. for the JVM](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-ssf-building-blocks.jpg)
+
+- **Keycloak 26.7 SSF Transmitter** (experimental): emits CAEP events via push or poll, enabled with `--features=preview,ssf`
+- **Keycloak SSF Receiver** (planned, proof of concept available): ingests CAEP and RISC from upstream
+- **Quarkus SSF Receiver Extension** (Quarkiverse, available): `quarkus-openid-ssf-receiver` verifies SETs and calls your handler
+- **Spring Boot Receiver Starter** ([easyssf.org](https://easyssf.org/), available): verifies SETs and wires Spring Security
+
+The footnote is the important part: *a receiver is just HTTPS plus JWT validation*, so any gateway or framework can implement one. The slide also listed other SSF transmitter implementations (Okta, Omnissa, SailPoint) and hosted test endpoints at caep.dev. easyssf covers Spring Boot, Quarkus, plain Java and ASP.NET Core, is tested with the OpenID conformance suite, and "Rust and Golang support" is "coming soon".
+
+### The live demo
+
+The demo setup used the phantom token pattern. The API client holds only an opaque access token. The gateway swaps it for an internal JWT for the backend APIs and acts as the SSF receiver, with a cache of revoked `sub` and `sid` values. Keycloak is the authorization server and SSF transmitter. The internal JWT is a lightweight access token: minimal data, no PII, just the `sid`.
+
+![Demo: token handling with shared signals](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-ssf-demo-architecture.jpg)
+
+He then ran it live from an HTTP client file against Docker Compose. A Keycloak admin deleted the user session, Keycloak pushed the SET to the gateway's `/ssf/events` endpoint, the proxy logged *"SSF receiver: session revoked"*, and the next call with the same access token came back `401` with `session_revoked`.
+
+![The live demo: Keycloak pushes the SET and the gateway logs the revoked session](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-ssf-keycloak-demo.jpg)
+
+### Before production, and the takeaways
+
+![Design decisions before production](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-ssf-design-decisions.jpg)
+
+| Topic | Recommendation |
+|-------|----------------|
+| Delivery | Push for low latency; poll when receivers sit behind firewalls |
+| SET validation | Verify the signature via JWKS, plus `iss`, `aud` and `jti` |
+| Replays and ordering | Deduplicate by `jti`; compare event time with token `iat` |
+| Stream health | Use SSF verification events; decide fail-open or fail-closed |
+| Scaling out | Share revocation state across all gateway nodes |
+| State lifetime | Expire entries after the longest access token lifetime |
+
+![Key takeaways](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-ssf-key-takeaways.jpg)
+
+1. **A valid JWT proves who issued it, not whether to trust it now.**
+2. **SSF and CAEP turn context changes into signed, standard events.**
+3. **Enforce at the gateway, refine in services, revoke at the IdP.**
+
+This is the missing half of the day 1 identity story. Jonas Iggbom said on Tuesday that you cannot audit, rate-limit or revoke an agent you can't identify. Thomas showed how to actually revoke it, in seconds, without waiting for a token to expire. For agents that make hundreds of calls a minute, a 15-minute token lifetime means hundreds of calls after you've decided to stop trusting them. A shared revocation cache at the gateway is the same control point I argued for in my own talk.
+
+## Lorna Mitchell: API standards for AI agents
+
+At 13:50 **Lorna Mitchell** (TM Forum) opened the Emerging Agentic Architecture block with *API Standards for AI Agents*. Her first message was the opposite of hype: **existing, boring technology is a massive multiplier**, starting with HTTP standards.
+
+![Existing, boring technology is a massive multiplier](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-boring-technology.jpg)
+
+Her case for industry standards was about shared meaning. Competitors become collaborators and provide rich, reusable contexts:
+
+![Industry Standards: Shared Meaning](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-industry-standards.jpg)
+
+- **Vocabulary**: "product" means the same everywhere
+- **Data model**: the domain, already modelled
+- **Scenarios**: common use cases, written down
+- **Best practice**: encoded for reuse, not rediscovered
+
+An agent that calls ten telecom APIs gains a lot when "product" means the same thing in all ten.
+
+Then came **Arazzo**, the OpenAPI Initiative's workflow specification, under the headline *Workflows, Not Endpoints*: **don't make the agent guess which call comes next.** Arazzo links operations across one or more APIs, writes down the sequencing, inputs and outputs, and builds on your `operationId`s, so the basics come first.
+
+![Arazzo: workflows, not endpoints](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-arazzo-workflows.jpg)
+
+This connects to two numbers from day 1: 70% of MCP tools don't tell the agent what to do after an error, and a model left to explore a schema was 54x more expensive than a predefined capability. Arazzo is the standards answer to both: describe the workflow once, in the contract, instead of letting every agent rediscover it with your tokens.
+
+## Closing: the recordings are coming
+
+The afternoon finished in Bankettsalen with the closing keynotes on the agenda: Sam Prodger (Gravitee) on *Why Are We Still Governing AI Like Software?*, and Kin Lane on *The Agent Hype is at Odds with Your API Foundation*. Then came the closing remarks. Two practical notes from the final slides:
+
+![After the Conference: all sessions on YouTube next month](/blog/events/nordic-apis-summit-2026/nordic-apis-2026-after-the-conference.jpg)
+
+- **All speaker sessions will be on the Nordic APIs YouTube channel next month.** If you missed a talk (or mine), subscribe to [@nordicapis](https://www.youtube.com/@nordicapis).
+- **Nordic APIs is looking for blog authors.** Ideas go to [nordicapis.com/create-with-us](https://nordicapis.com/create-with-us/).
+
+## Three days in Stockholm: what I'm taking home
+
+Taken together, the UnConference and the two summit days gave a clear picture of what an API needs before agents call it:
+
+1. **Know the caller.** Agent identity first: CIMD, key binding, `act` claims and per-agent policy ([day 1](/blog/nordic-apis-summit-2026-day-1-recap/)).
+2. **Keep checking the trust.** A token is a snapshot. Shared Signals and CAEP let the gateway stop trusting a token the moment the context changes.
+3. **Write the workflow down.** Arazzo, typed schemas and predefined capabilities stop agents from guessing, and guessing is slow, expensive and risky.
+4. **Prefer boring standards.** HTTP, OAuth, JWT, OpenAPI and industry data models already solve most of the problem. Almost nothing on the slides this week needed a new protocol.
+5. **Put the control point in the platform.** Gateways that hold revocation state, budgets and policy are where guardrails can actually be enforced, which was the core of [my talk](/blog/nordic-apis-2026-api-guardrails-multi-tenant-ai/).
+
+Thank you to Nordic APIs and Curity for a well-run event, and to everyone who came to Bankettsalen at 12:50.
+
+For more, see my [Nordic APIs Summit 2026 preview](/blog/nordic-apis-summit-2026-stockholm/), my notes on [MCP and AI agent security from conference talks](/blog/mcp-ai-agent-security-lessons-from-conference-talks/), my [guide to Keycloak on Kubernetes](/blog/keycloak-identity-access-management-kubernetes-2026/), and [AI agent guardrails in production](/blog/ai-agent-guardrails-production/).
+
+<BlogPromoCard />

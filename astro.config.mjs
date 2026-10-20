@@ -14,6 +14,11 @@ import { fileURLToPath } from "node:url";
 // flag "Noindex page in sitemap". Scanning the source keeps this list in sync
 // automatically as stubs are added/removed (the old hardcoded allowlist drifted
 // and leaked 78 stubs into the sitemap).
+// Product pages are noindex until their checkout link is set in src/data/sales.ts.
+const salesSource = fs.readFileSync(fileURLToPath(new URL("./src/data/sales.ts", import.meta.url)), "utf8");
+const kitLive = /\bkit:\s*\{\s*checkoutUrl:\s*"https:\/\//.test(salesSource);
+const claudePackLive = /\bclaudePack:\s*\{\s*checkoutUrl:\s*"https:\/\//.test(salesSource);
+
 const stubBlogSlugs = (() => {
   const blogPagesDir = fileURLToPath(new URL("./src/pages/blog/", import.meta.url));
   const slugs = new Set();
@@ -89,6 +94,8 @@ export default defineConfig({
         // Noindex conversion-confirmation redirect targets (Kit/Calendly)
         if (page.includes('/newsletter-thank-you')) return false;
         if (page.includes('/call-booked')) return false;
+        if (!kitLive && page.includes('/production-ai-kit')) return false;
+        if (!claudePackLive && page.includes('/claude-code-guardrails-pack')) return false;
         if (page.includes('?ref=')) return false;
         if (page.includes('?utm_')) return false;
 

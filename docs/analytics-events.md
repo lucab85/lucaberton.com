@@ -49,9 +49,10 @@ visitor.
 - **Linux Foundation:** evergreen Awin tracking uses advertiser ID `85919`
   with publisher ID `1937397`. Current tracked offer:
   `offer_id=linux_foundation_training`, `company=linux_foundation`.
-  The Oct 28–29, 2026 Halloween flash promo (35% off sitewide, personal code
-  `TREATS35LUCA`) is tracked as `offer_id=lf_halloween_2026_treats35luca`
-  from the sitewide banner (`src/components/LfHalloweenBanner.astro`).
+  Sponsored banner campaigns (`src/components/PromoBanner.astro`) take their
+  `company` and `offer_id` from `tracking` in `static/promo/promos.json`
+  (docs/promo-banners.md); the Oct 28–29, 2026 Halloween flash promo is
+  `offer_id=lf_halloween_2026_treats35luca`.
   Use the supplied Awin creative/link for evergreen Linux/Kubernetes training
   placements. Do not reuse expired campaign codes (for example the September
   2026 promo codes) unless a current partner email explicitly reactivates them.

@@ -16,8 +16,8 @@ export const GET: APIRoute = async () => {
     .map(
       (post) => `    <item>
       <title>${escXml(post.data.title)}</title>
-      <link>${site}/blog/${post.slug}/</link>
-      <guid isPermaLink="true">${site}/blog/${post.slug}/</guid>
+      <link>${site}/blog/${post.id}/</link>
+      <guid isPermaLink="true">${site}/blog/${post.id}/</guid>
       <description>${escXml(post.data.snippet ?? "")}</description>
       <pubDate>${new Date(post.data.publishDate).toUTCString()}</pubDate>
       <author>luca@lucaberton.com (Luca Berton)</author>

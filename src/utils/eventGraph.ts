@@ -97,7 +97,7 @@ export async function eventTopicLinksFor(entry: CollectionEntry<'blog'>): Promis
   const posts = await getEventPosts();
   const siblings = ev.series
     ? []
-    : posts.filter((p) => p.slug !== entry.slug && p.data.event.name === ev.name).slice(0, 8);
+    : posts.filter((p) => p.id !== entry.id && p.data.event.name === ev.name).slice(0, 8);
   const th = await topicHubs();
   const topics = ev.topics
     .filter((t) => th.has(t))
@@ -108,8 +108,8 @@ export async function eventTopicLinksFor(entry: CollectionEntry<'blog'>): Promis
     .map((s) => ({ slug: s, name: ch.get(s)!.name, count: ch.get(s)!.posts.length }));
   // Guides and offer come from the post's most central topic that defines them
   const all = await getCollection('blog', ({ data }) => !data.draft);
-  const guideSlugs = [...new Set(ev.topics.flatMap((t) => eventTopics[t]?.guides ?? []))].filter((s) => s !== entry.slug);
-  const guides = guideSlugs.map((s) => all.find((p) => p.slug === s)).filter((p): p is CollectionEntry<'blog'> => !!p).slice(0, 3);
+  const guideSlugs = [...new Set(ev.topics.flatMap((t) => eventTopics[t]?.guides ?? []))].filter((s) => s !== entry.id);
+  const guides = guideSlugs.map((s) => all.find((p) => p.id === s)).filter((p): p is CollectionEntry<'blog'> => !!p).slice(0, 3);
   const offerKey = ev.topics.map((t) => eventTopics[t]?.offer).find(Boolean);
   return { siblings, topics, companies, guides, offer: offerKey ? eventOffers[offerKey] : undefined };
 }

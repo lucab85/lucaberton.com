@@ -20,7 +20,7 @@ function Category({ title, lastPost }: CategoryProps) {
         <h2>{title}</h2>
       </a>
       <div className="my-1 flex gap-1">
-        <a href={`/blog/${lastPost?.slug}/`} className="text-sm">
+        <a href={`/blog/${lastPost?.id}/`} className="text-sm">
           <b>Latest post</b>: {lastPost?.data.title}
         </a>
       </div>

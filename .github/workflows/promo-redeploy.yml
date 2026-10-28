@@ -1,0 +1,64 @@
+name: Promo redeploy
+
+# Rebuilds Luca's other sites when the sponsored banner config changes, so
+# each picks up the new campaign from lucaberton.com/promo/promos.json.
+# It first waits for this site's own deploy (CI/CD) to serve the new file.
+#
+# Secrets (Settings > Secrets and variables > Actions):
+#   PROMO_DEPLOY_HOOKS    Vercel deploy hook URLs, one per line: udienza.com,
+#                         ansiblepilot.com, ansiblebyexample.com, openempower.com,
+#                         copypastelearn.com, terraformpilot.com
+#   PROMO_DISPATCH_TOKEN  a token allowed to run workflows on
+#                         greg4fun/kubernetesrecipes.github.io (Actions: write)
+# A missing secret skips that step with a warning.
+
+on:
+  push:
+    branches: [main]
+    paths: [static/promo/promos.json]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promo-redeploy
+  cancel-in-progress: true
+
+jobs:
+  redeploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Wait until lucaberton.com serves this promos.json
+        run: |
+          want=$(jq -S . static/promo/promos.json | sha256sum | cut -d' ' -f1)
+          for i in $(seq 1 60); do
+            got=$(curl -fsSL -H 'Cache-Control: no-cache' "https://lucaberton.com/promo/promos.json?t=$(date +%s)" | jq -S . 2>/dev/null | sha256sum | cut -d' ' -f1)
+            if [ "$got" = "$want" ]; then echo "Live after $i check(s)"; exit 0; fi
+            sleep 60
+          done
+          echo "::error::lucaberton.com did not serve the new promos.json within 60 minutes"
+          exit 1
+
+      - name: Rebuild the Vercel sites
+        env:
+          HOOKS: ${{ secrets.PROMO_DEPLOY_HOOKS }}
+        run: |
+          if [ -z "$HOOKS" ]; then echo "::warning::PROMO_DEPLOY_HOOKS is not set: redeploy the Vercel sites by hand"; exit 0; fi
+          n=0; failed=0
+          while read -r url; do
+            [ -z "$url" ] && continue
+            n=$((n + 1))
+            if curl -fsS -X POST "$url" -o /dev/null; then echo "hook $n triggered"; else echo "::error::hook $n failed"; failed=1; fi
+          done <<< "$HOOKS"
+          exit $failed
+
+      - name: Rebuild kubernetes.recipes (GitHub Pages)
+        env:
+          GH_TOKEN: ${{ secrets.PROMO_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "::warning::PROMO_DISPATCH_TOKEN is not set: run 'Deploy to GitHub Pages' on kubernetes.recipes by hand"; exit 0; fi
+          gh workflow run astro.yaml --repo greg4fun/kubernetesrecipes.github.io --ref main

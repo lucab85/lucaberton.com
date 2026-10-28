@@ -25,7 +25,7 @@ export async function GET() {
     const ytIdRegex = /(?:<YouTube\s+id=["']|youtube\.com\/watch\?v=|youtube-nocookie\.com\/embed\/|youtube\.com\/embed\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/g;
     const urlTags = posts.map(post => {
       const video = (post.data as any).video;
-      const postUrl = `${siteUrl}/blog/${post.slug}/`;
+      const postUrl = `${siteUrl}/blog/${post.id}/`;
       const bodyContent = post.body ?? '';
       const isoDate = new Date(post.data.publishDate).toISOString();
 

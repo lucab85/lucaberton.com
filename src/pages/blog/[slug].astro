@@ -1,5 +1,5 @@
 ---
-import { getCollection } from "astro:content";
+import { getCollection, render } from "astro:content";
 import Layout from "@layouts/Layout.astro";
 import Container from "@components/container.astro";
 import Breadcrumb from "@components/Breadcrumb.astro";
@@ -30,7 +30,7 @@ import relatedIndex from "../../data/related.json";
 export async function getStaticPaths() {
   const blogEntries = await getCollection("blog", ({ data }) => !data.draft);
   const paths = blogEntries.map((entry) => ({
-    params: { slug: entry.slug },
+    params: { slug: entry.id },
     props: { entry },
   }));
   
@@ -64,7 +64,7 @@ if (redirect) {
 }
 
 // Get the entry directly from the prop on render
-const { Content, headings } = await entry.render();
+const { Content, headings } = await render(entry);
 
 // Calculate reading time from raw body
 const readingTime = getReadingTime(entry.body || '');
@@ -81,14 +81,14 @@ const updatedDate = (() => {
 const allPosts = await getCollection("blog", ({ data }) => !data.draft);
 // Content-similar posts (TF-IDF, scripts/build-related.cjs), falling back to
 // the newest posts in the same category for anything not in related.json.
-const bySlug = new Map(allPosts.map((p) => [p.slug, p]));
-const similar = ((relatedIndex as Record<string, string[]>)[entry?.slug ?? ""] ?? [])
+const bySlug = new Map(allPosts.map((p) => [p.id, p]));
+const similar = ((relatedIndex as Record<string, string[]>)[entry?.id ?? ""] ?? [])
   .map((s) => bySlug.get(s))
   .filter((p): p is NonNullable<typeof p> => !!p);
 const relatedPosts = [
   ...similar,
   ...allPosts
-    .filter(p => p.slug !== entry?.slug && p.data.category === entry?.data.category && !similar.includes(p))
+    .filter(p => p.id !== entry?.id && p.data.category === entry?.data.category && !similar.includes(p))
     .sort((a, b) => new Date(b.data.publishDate).getTime() - new Date(a.data.publishDate).getTime()),
 ].slice(0, 4);
 
@@ -164,8 +164,8 @@ const blogSchema = {
   "datePublished": entry.data.publishDate,
   "dateModified": entry.data.lastModified || entry.data.publishDate,
   "image": entry.data.image?.src ? `https://lucaberton.com${entry.data.image.src}` : "https://lucaberton.com/opengraph.jpg",
-  "url": `https://lucaberton.com/blog/${entry.slug}/`,
-  "mainEntityOfPage": { "@type": "WebPage", "@id": `https://lucaberton.com/blog/${entry.slug}/` },
+  "url": `https://lucaberton.com/blog/${entry.id}/`,
+  "mainEntityOfPage": { "@type": "WebPage", "@id": `https://lucaberton.com/blog/${entry.id}/` },
   "articleSection": entry.data.category,
   "keywords": entry.data.tags?.join(", ") || ""
 };
@@ -201,11 +201,11 @@ const faqSchema = faqItems.length > 0 ? {
   })),
 } : null;
 
-const postUrl = `https://lucaberton.com/blog/${entry.slug}/`;
+const postUrl = `https://lucaberton.com/blog/${entry.id}/`;
 // Generated cards (/blog/thumbnails/) only repeat the title: keep them for
 // social previews, show a hero only for real photos and artwork.
 const hasImage = Boolean(entry.data.image?.src) && !entry.data.image.src.startsWith('/blog/thumbnails/');
-const consultingOffer = getBlogConsultingCta(entry.slug);
+const consultingOffer = getBlogConsultingCta(entry.id);
 const pageCluster = topicCluster(entry.data.category || "", entry.data.tags || []);
 const inlineProduct = productFor(entry.data.category || "", entry.data.tags || []);
 ---
@@ -360,7 +360,7 @@ const inlineProduct = productFor(entry.data.category || "", entry.data.tags || [
          script below to right after the article's first paragraph. -->
     <div id="udienza-slot">
       {inlineProduct === "claudePack" ? (
-        <ProductStrip slug={entry.slug} />
+        <ProductStrip slug={entry.id} />
       ) : (
         <UdienzaBanner placement="blog_top" eager />
       )}
@@ -430,7 +430,7 @@ const inlineProduct = productFor(entry.data.category || "", entry.data.tags || [
          before lower-priority monetization. -->
     {inlineProduct && (
       <div id="promo-product" class="hidden">
-        <ProductBanner category={entry.data.category || ""} tags={entry.data.tags || []} slug={entry.slug} />
+        <ProductBanner category={entry.data.category || ""} tags={entry.data.tags || []} slug={entry.id} />
       </div>
     )}
 
@@ -482,7 +482,7 @@ const inlineProduct = productFor(entry.data.category || "", entry.data.tags || [
       <ShareButtons title={entry.data.title} url={postUrl} />
 
       <!-- Paid offers: hidden until their links are set in src/data/sales.ts -->
-      <SalesOffers category={entry.data.category || ""} tags={entry.data.tags || []} slug={entry.slug} />
+      <SalesOffers category={entry.data.category || ""} tags={entry.data.tags || []} slug={entry.id} />
 
       <!-- Service promotion. Configured enterprise pages skip it: the topic
            match is "AI Integration & GPU Platforms" for most of them, which is
@@ -516,7 +516,7 @@ const inlineProduct = productFor(entry.data.category || "", entry.data.tags || [
       <AuthorBox />
 
       <!-- Most read this week (src/data/most-read.json, refreshed from GA4) -->
-      <MostRead currentSlug={entry.slug} />
+      <MostRead currentSlug={entry.id} />
     </footer>
   </article>
 
@@ -526,7 +526,7 @@ const inlineProduct = productFor(entry.data.category || "", entry.data.tags || [
       <h2 class="text-xl font-extrabold text-gray-900 mb-6 uppercase tracking-wider text-center">Related Articles</h2>
       <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-5">
         {relatedPosts.map((post) => (
-          <a href={`/blog/${post.slug}/`} class="group block">
+          <a href={`/blog/${post.id}/`} class="group block">
             <article class="rounded-xl overflow-hidden border border-gray-100 hover:border-blue-400 hover:shadow-xl transition-all h-full flex flex-col bg-white">
               {post.data.image?.src && (
                 <img

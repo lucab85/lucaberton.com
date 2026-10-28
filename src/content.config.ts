@@ -1,8 +1,14 @@
-// 1. Import utilities from `astro:content`
-import { z, defineCollection } from 'astro:content';
+// 1. Import utilities. Since Astro 6 every collection needs a loader and
+//    lives in src/content.config.ts; `z` comes from astro/zod.
+import { defineCollection } from 'astro:content';
+import { glob } from 'astro/loaders';
+import { z } from 'astro/zod';
 
 // 2. Define your collection(s)
 const blogCollection = defineCollection({
+  // IDs are the slugified file paths, the same values as the old `slug`, so
+  // every /blog/<id>/ URL stays as it was.
+  loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/blog' }),
   schema: z.object({
     draft: z.boolean(),
     title: z.string(),
@@ -50,6 +56,9 @@ const blogCollection = defineCollection({
 });
 
 const teamCollection = defineCollection({
+  // IDs are the slugified file paths, the same values as the old `slug`, so
+  // every /blog/<id>/ URL stays as it was.
+  loader: glob({ pattern: '**/*.{md,mdx}', base: './src/content/team' }),
   schema: z.object({
     draft: z.boolean(),
     name: z.string(),
@@ -63,7 +72,6 @@ const teamCollection = defineCollection({
 });
 
 // 3. Export a single `collections` object to register your collection(s)
-//    This key should match your collection directory name in "src/content"
 export const collections = {
   'blog': blogCollection,
   'team': teamCollection,

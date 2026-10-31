@@ -2,16 +2,20 @@
 /**
  * KubeCon + CloudNativeCon North America 2026 banners (code LUCA20)
  * -----------------------------------------------------------------
- * The Linux Foundation sent a code (20% off, not valid on academic passes) but
- * no artwork, so this set is drawn from scratch in the site's own fonts
- * (Bricolage Grotesque and Inter, scripts/assets/fonts) with text only: no CNCF
- * or KubeCon logos. Event facts from the official register page: Salt Palace
- * Convention Center, Salt Lake City, November 9–12, 2026.
+ * Source: scripts/assets/kubecon-na-2026-artwork.png, the official 1200x630
+ * event artwork (Salt Lake City, November 9–12, 2026). The Linux Foundation's
+ * offer is 20% off registration with code LUCA20 (not valid on academic passes).
+ * Colours are sampled from the artwork: sky #113e82, mountains #d62293, bee
+ * #fef35c, ink #031323. Text is Inter (scripts/assets/fonts), close to the
+ * artwork's bold geometric caps.
  *
  * Output, in static/promo/kubecon-na-2026/ (served at lucaberton.com/promo/...):
- *   wide.webp / wide.jpg            1200x300 CSS strip at 2x (2400x600 px)
- *   card-{800,1200,1600}.webp       the 16:9 card, for phones
- *   card.jpg                        1600 px JPEG fallback
+ *   wide.webp / wide.jpg     1200x300 CSS strip at 2x (2400x600 px): an offer
+ *                            panel in the artwork's sky, then the artwork itself
+ *                            at its native height (600 px)
+ *   card-{800,1200}.webp     the artwork with the hashtag line replaced by the
+ *                            offer, for phones
+ *   card.jpg                 1200 px JPEG fallback
  *
  * Usage: node scripts/generate-kubecon-na-2026-banners.mjs
  * (REPO_ROOT=<repo> lets a copy of this script run from another directory.)
@@ -22,96 +26,85 @@ import { chromium } from '@playwright/test';
 import sharp from 'sharp';
 
 const ROOT = process.env.REPO_ROOT ?? path.join(path.dirname(new URL(import.meta.url).pathname), '..');
-const FONTS = path.join(ROOT, 'scripts', 'assets', 'fonts');
+const ART = path.join(ROOT, 'scripts', 'assets', 'kubecon-na-2026-artwork.png');
+const FONT = path.join(ROOT, 'scripts', 'assets', 'fonts', 'Inter-Variable.ttf');
 const OUT = path.join(ROOT, 'static', 'promo', 'kubecon-na-2026');
 fs.mkdirSync(OUT, { recursive: true });
+for (const f of fs.readdirSync(OUT)) fs.rmSync(path.join(OUT, f)); // drop sizes this version no longer makes
 
 const CODE = 'LUCA20';
-const font = (family, file) =>
-  `@font-face{font-family:${family};font-weight:100 900;src:url(data:font/ttf;base64,${fs
-    .readFileSync(path.join(FONTS, file))
-    .toString('base64')})}`;
-const fontFace = font('Bricolage', 'BricolageGrotesque-Variable.ttf') + font('Inter', 'Inter-Variable.ttf');
-
-// The Wasatch range behind Salt Lake City, as a flat silhouette along the bottom.
-const mountains = (w, h, y) => `<svg class="mt" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">
-  <path d="M0 ${h} L0 ${y + 40} L${w * 0.08} ${y + 10} L${w * 0.15} ${y + 34} L${w * 0.24} ${y - 18} L${w * 0.31} ${y + 22}
-    L${w * 0.4} ${y - 4} L${w * 0.47} ${y + 30} L${w * 0.58} ${y - 30} L${w * 0.66} ${y + 18} L${w * 0.74} ${y - 2}
-    L${w * 0.83} ${y + 28} L${w * 0.91} ${y - 14} L${w} ${y + 20} L${w} ${h} Z" fill="rgba(120,160,255,.10)"/>
-  <path d="M0 ${h} L0 ${y + 70} L${w * 0.12} ${y + 44} L${w * 0.2} ${y + 66} L${w * 0.33} ${y + 30} L${w * 0.45} ${y + 62}
-    L${w * 0.55} ${y + 40} L${w * 0.68} ${y + 70} L${w * 0.79} ${y + 36} L${w * 0.9} ${y + 60} L${w} ${y + 46} L${w} ${h} Z"
-    fill="rgba(120,160,255,.08)"/></svg>`;
+const SKY = '#113e82';
+const PINK = '#d62293';
+const BEE = '#fef35c';
+const INK = '#031323';
+const art = `data:image/png;base64,${fs.readFileSync(ART).toString('base64')}`;
+const fontFace = `@font-face{font-family:Inter;font-weight:100 900;src:url(data:font/ttf;base64,${fs
+  .readFileSync(FONT)
+  .toString('base64')})}`;
 
 const base = `${fontFace}
   html,body{margin:0}
-  .b{position:relative;overflow:hidden;color:#fff;font-family:Inter,sans-serif;
-     background:radial-gradient(120% 140% at 0% 0%,#1d3f8f 0%,#0f2456 45%,#0a1633 100%)}
-  .mt{position:absolute;left:0;bottom:0;width:100%;height:100%}
-  .eyebrow{font-weight:700;letter-spacing:.18em;color:#9dbcff;text-transform:uppercase}
-  .title{font-family:Bricolage,sans-serif;font-weight:800;line-height:1;letter-spacing:-.01em}
-  .where{font-weight:500;color:#d3defa}
-  .pct{font-family:Bricolage,sans-serif;font-weight:800;line-height:.9;letter-spacing:-.02em;
-       background:linear-gradient(90deg,#5ea8ff,#b18cff);-webkit-background-clip:text;color:transparent;
-       padding:.15em .05em;margin:-.15em -.05em} /* room for the glyphs that rise above a .9 line box */
-  .codebox{background:#fff;color:#0a1633;border-radius:14px;text-align:center}
-  .codebox small{display:block;font-weight:700;letter-spacing:.2em;color:#4a5b85;text-transform:uppercase}
-  .codebox b{display:block;font-family:Bricolage,sans-serif;font-weight:800;line-height:1}
-  .cta{display:inline-block;background:#326ce5;color:#fff;font-weight:700;border-radius:999px}`;
+  .b{position:relative;overflow:hidden;background:${SKY};color:#fff;font-family:Inter,sans-serif}
+  .star{position:absolute;border-radius:50%;background:#fff}
+  .pct{font-weight:800;line-height:1;letter-spacing:-.01em;color:${BEE};white-space:nowrap}
+  .code{display:inline-flex;align-items:center;background:#fff;color:${INK};border-radius:12px}
+  .code small{font-weight:700;letter-spacing:.14em;color:${SKY};text-transform:uppercase;line-height:1.15}
+  .code b{font-weight:800;line-height:1;letter-spacing:.01em}
+  .cta{display:inline-block;background:${PINK};color:#fff;font-weight:700;border-radius:999px;white-space:nowrap}`;
 
-const WIDE = `<div class="b" style="width:1200px;height:300px">${mountains(1200, 300, 205)}
-  <div style="position:absolute;left:52px;top:58px;width:520px">
-    <div class="eyebrow" style="font-size:15px">KubeCon + CloudNativeCon</div>
-    <div class="title" style="font-size:54px;margin-top:12px">North America 2026</div>
-    <div class="where" style="font-size:22px;margin-top:16px">Salt Lake City · November 9–12</div>
-  </div>
-  <div style="position:absolute;left:600px;top:66px;width:270px;text-align:center">
-    <div class="pct" style="font-size:104px">20%</div>
-    <div class="where" style="font-size:20px;margin-top:8px;font-weight:600">off your registration</div>
-  </div>
-  <div style="position:absolute;right:52px;top:48px;width:250px;text-align:center">
-    <div class="codebox" style="padding:16px 0 18px"><small style="font-size:13px">Use code</small>
-      <b style="font-size:56px;margin-top:6px">${CODE}</b></div>
-    <div class="cta" style="font-size:19px;padding:12px 26px;margin-top:18px">Register now →</div>
+// A few stars like the artwork's, for the panel that extends its sky.
+const stars = (list) => list.map(([x, y, r]) => `<div class="star" style="left:${x}px;top:${y}px;width:${r}px;height:${r}px"></div>`).join('');
+
+const ART_W = (1200 * 300) / 630; // the artwork at the strip's height
+const PANEL = 1200 - ART_W;
+const WIDE = `<div class="b" style="width:1200px;height:300px">
+  ${stars([[560, 30, 5], [470, 262, 4], [598, 150, 3], [330, 272, 5], [24, 268, 4], [250, 18, 4]])}
+  <img src="${art}" style="position:absolute;right:0;top:0;height:300px;width:${ART_W}px">
+  <div style="position:absolute;left:${PANEL - 1}px;top:0;width:26px;height:300px;background:linear-gradient(90deg,${SKY},rgba(17,62,130,0))"></div>
+  <div style="position:absolute;left:44px;top:40px;width:${PANEL - 70}px">
+    <div style="font-weight:700;font-size:14px;letter-spacing:.16em;text-transform:uppercase;color:#e4f6ff">Save on your KubeCon pass</div>
+    <div class="pct" style="font-size:86px;margin-top:14px">20% OFF</div>
+    <div style="display:flex;align-items:center;gap:16px;margin-top:22px">
+      <div class="code" style="gap:14px;padding:10px 18px 10px 16px">
+        <small style="font-size:12px">Use<br>code</small><b style="font-size:42px">${CODE}</b></div>
+      <div class="cta" style="font-size:18px;padding:13px 22px">Register now →</div>
+    </div>
   </div></div>`;
 
-const CARD = `<div class="b" style="width:1600px;height:900px">${mountains(1600, 900, 700)}
-  <div style="position:absolute;left:110px;top:100px;right:110px">
-    <div class="eyebrow" style="font-size:34px">KubeCon + CloudNativeCon</div>
-    <div class="title" style="font-size:118px;margin-top:22px">North America 2026</div>
-    <div class="where" style="font-size:46px;margin-top:30px">Salt Lake City · November 9–12</div>
-  </div>
-  <div style="position:absolute;left:110px;top:470px">
-    <div class="pct" style="font-size:196px">20% OFF</div>
-    <div class="where" style="font-size:40px;margin-top:18px;font-weight:600">your registration</div>
-  </div>
-  <div style="position:absolute;right:110px;top:470px;width:470px;text-align:center">
-    <div class="codebox" style="padding:30px 0 34px;border-radius:24px"><small style="font-size:26px">Use code</small>
-      <b style="font-size:108px;margin-top:10px">${CODE}</b></div>
-    <div class="cta" style="font-size:38px;padding:22px 52px;margin-top:34px">Register now →</div>
+// The card is the artwork itself. Its hashtag line (#KubeCon #CloudNativeCon,
+// x 62–505, y 152–182) sits on flat sky: cover it and put the offer there.
+const CARD = `<div class="b" style="width:1200px;height:630px">
+  <img src="${art}" style="position:absolute;left:0;top:0;width:1200px;height:630px">
+  <div style="position:absolute;left:50px;top:142px;width:480px;height:52px;background:${SKY}"></div>
+  <div style="position:absolute;left:62px;top:158px">
+    <div style="display:flex;align-items:center;gap:22px">
+      <div class="pct" style="font-size:64px">20% OFF</div>
+      <div class="code" style="gap:12px;padding:8px 18px 8px 14px">
+        <small style="font-size:12px">Use<br>code</small><b style="font-size:44px">${CODE}</b></div>
+    </div>
+    <div class="cta" style="font-size:22px;padding:11px 24px;margin-top:16px">Register now →</div>
   </div></div>`;
 
 const browser = await chromium.launch();
-async function render(html, width, height) {
-  const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: 2 });
+async function render(html, width, height, scale) {
+  const page = await browser.newPage({ viewport: { width, height }, deviceScaleFactor: scale });
   await page.setContent(`<!doctype html><html><head><meta charset="utf-8"><style>${base}</style></head><body>${html}</body></html>`, {
     waitUntil: 'load',
   });
   await page.evaluate(() => document.fonts.ready);
-  for (const f of ['800 40px Bricolage', '700 20px Inter']) {
-    if (!(await page.evaluate((spec) => document.fonts.check(spec), f))) throw new Error(`${f} did not load`);
-  }
+  if (!(await page.evaluate(() => document.fonts.check('800 40px Inter')))) throw new Error('Inter did not load');
   const png = await page.locator('.b').screenshot({ type: 'png' });
   await page.close();
   return png;
 }
 
-const wide = await render(WIDE, 1200, 300); // 2400x600
-const card = await sharp(await render(CARD, 1600, 900)).resize({ width: 1600 }).toBuffer(); // 1600x900
+const wide = await render(WIDE, 1200, 300, 2); // 2400x600
+const card = await render(CARD, 1200, 630, 1); // the artwork's native 1200x630
 await browser.close();
 
 await sharp(wide).jpeg({ quality: 88, mozjpeg: true }).toFile(path.join(OUT, 'wide.jpg'));
 await sharp(wide).webp({ quality: 88 }).toFile(path.join(OUT, 'wide.webp'));
-for (const w of [800, 1200, 1600]) {
+for (const w of [800, 1200]) {
   await sharp(card).resize({ width: w }).webp({ quality: 86 }).toFile(path.join(OUT, `card-${w}.webp`));
 }
 await sharp(card).jpeg({ quality: 86, mozjpeg: true }).toFile(path.join(OUT, 'card.jpg'));

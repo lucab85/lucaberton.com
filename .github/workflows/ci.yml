@@ -1,9 +1,10 @@
 # Single CI/CD pipeline for the Astro site (GitHub Actions only).
 #
-# Sequential, no duplicated work, build runs ONCE:
-#   check-links -> build (+ SEO validation) -> e2e -> deploy -> {indexnow, lighthouse} in parallel
+# No duplicated work, build runs ONCE:
+#   {check-links, build (+ SEO validation) -> e2e} -> deploy -> {indexnow, lighthouse}
 #
-# - Runs on every PR (check-links -> build -> e2e) as a pre-merge gate.
+# - Runs on every PR (check-links alongside build -> e2e) as a pre-merge gate.
+#   The link audit no longer delays the build; deploy waits for both.
 # - On push to main it continues through deploy + post-deploy notifications.
 # - SEO validation (scripts/validate-seo-fixes.cjs) runs on the built public/ in
 #   the build job, gating the deploy. The git pre-commit hook runs the same
@@ -11,6 +12,8 @@
 #   broken local images, orphan pages (incl. /talk/), draft filters, meta/title
 #   length, and (built-only) that the sitemap excludes meta-refresh redirect stubs.
 # - E2E and Lighthouse reuse the single build artifact (no rebuilds).
+# - E2E and deploy use sparse checkouts: they get the site from the artifact and
+#   never need static/ (~500 MB of images), which made every full checkout ~25 s.
 # - Caching: pnpm store (setup action), Astro asset cache, Playwright browsers.
 # - IndexNow: submits changed URLs on each deploy; submits all sitemap URLs when
 #   layouts/components change or when no changed files are detected.
@@ -61,10 +64,10 @@ jobs:
 
   build:
     name: Build
-    needs: check-links
     runs-on: ubuntu-latest
-    # ~2,300 pages: rendering takes ~3 min, but astro-compress (html-minifier-terser
-    # over every HTML file) takes ~14 min, so the job runs ~20 min end to end.
+    # ~2,300 pages: rendering takes ~1 min and scripts/minify-html.cjs well under
+    # a minute (it replaced astro-compress, whose html-minifier-terser pass took
+    # ~11 min). The headroom is for a cold image cache.
     timeout-minutes: 40
     steps:
       - name: Checkout
@@ -111,8 +114,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Checkout
+      # astro preview loads astro.config.mjs, which reads src/; the tests and the
+      # setup action live in tests/ and .github/. Root files are always included.
+      - name: Checkout (sparse)
         uses: actions/checkout@v5
+        with:
+          sparse-checkout: |
+            .github
+            scripts
+            src
+            tests
 
       - name: Setup project
         uses: ./.github/actions/setup
@@ -150,7 +161,7 @@ jobs:
 
   deploy:
     name: Deploy to Vercel
-    needs: e2e
+    needs: [check-links, e2e]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -162,8 +173,18 @@ jobs:
       VERCEL_PROJECT_ID: prj_HaJY8aCMHfdpwPQDihJLX4nZCASW
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
     steps:
-      - name: Checkout
+      # build-vercel-config.cjs only reads public/ (artifact), static/_redirects,
+      # static/_headers and vercel.json.
+      - name: Checkout (sparse)
         uses: actions/checkout@v5
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/*/
+            /scripts/
+            /static/_redirects
+            /static/_headers
 
       - name: Download site artifact
         uses: actions/download-artifact@v7

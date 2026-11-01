@@ -203,17 +203,8 @@ export default defineConfig({
       }
     }),
     icon(),
-    (await import("astro-compress")).default({
-      CSS: true,  // Astro-compress for minify
-      HTML: {
-        "html-minifier-terser": {
-          removeAttributeQuotes: true,
-        },
-      },
-      Image: false,
-      JavaScript: true,
-      SVG: true,
-    }),
+    // HTML is minified after the build by scripts/minify-html.cjs (minify-html,
+    // seconds) instead of astro-compress (html-minifier-terser, ~11 min in CI).
   ],
   vite: {
     plugins: [tailwindcss()],

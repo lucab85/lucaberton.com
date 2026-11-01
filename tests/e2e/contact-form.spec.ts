@@ -29,13 +29,17 @@ async function recordEvents(page: Page): Promise<TrackedEvent[]> {
   return recorded;
 }
 
+// Locate the submit button by role and label rather than by markup: the HTML
+// minifier drops type="submit", which is the default for a <button> in a form.
+const submitButton = (page: Page) => page.locator('#contact-form').getByRole('button', { name: 'Send Message' });
+
 async function fillAndSubmit(page: Page) {
   await page.locator('#contact-name').fill('Ada Lovelace');
   await page.locator('#contact-email').fill('ada@example.com');
   await page.locator('#contact-subject').fill('AI platform assessment');
   await page.locator('#contact-message').fill('We would like to review our GPU platform.');
   await page.waitForTimeout(2100); // the spam trap drops submissions in the first 2 s
-  await page.locator('#contact-form button[type="submit"]').click();
+  await submitButton(page).click();
 }
 
 test.describe('contact form lead tracking', () => {
@@ -88,7 +92,7 @@ test.describe('contact form lead tracking', () => {
       (document.querySelector('#contact-subject') as HTMLInputElement).value = 'Buy now';
       (document.querySelector('#contact-message') as HTMLTextAreaElement).value = 'Spam spam spam spam.';
     });
-    await page.locator('#contact-form button[type="submit"]').click();
+    await submitButton(page).click();
 
     await expect(page.locator('#result')).toHaveText('Thanks, your message has been sent.');
     expect(sent).toBe(0);

@@ -1,93 +1,112 @@
 ---
 draft: false
 title: "Docker Container Exit Code 137 (Killed) — Fix Guide"
-snippet: "Debug Docker exit code 137. OOM killed, resource limits, and external signals stopping your container. Practical guide with examples and production-ready."
-description: "Debug Docker exit code 137. OOM killed, resource limits, and external signals stopping your container. Practical guide with examples and production-ready."
+seoTitle: "Docker Exit Code 137: OOMKilled or SIGKILL? How to Fix It"
+snippet: "Docker exit code 137 means the container got SIGKILL (128+9), usually from the OOM killer. Check OOMKilled with docker inspect, then raise memory or fix it."
+description: "Docker exit code 137 explained: SIGKILL (128+9) from the OOM killer, docker stop timeouts or docker kill. How to confirm the cause and fix each one."
 image:
   src: "/blog/thumbnails/docker-error-signal-killed-137.jpg"
   alt: "Docker Container Exit Code 137 (Killed) — Fix Guide"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-11-02"
 author: "Luca Berton"
 category: "DevOps"
 tags: ["Docker", "Troubleshooting", "Error Fix", "Containers", "DevOps"]
 ---
 
-If you hit `exit code 137` in Docker, here is the fix.
+If you hit `exit code 137` in Docker, the container was killed with `SIGKILL`. Here is how to find out what killed it, and how to stop it from happening again.
 
-## The Error
+## What Exit Code 137 Means
+
+When a container's main process dies from a signal, Docker reports 128 plus the signal number. Signal 9 is `SIGKILL`, so 128 + 9 = 137.
 
 ```
-exit code 137
+Exited (137) 5 seconds ago
 ```
 
-This error occurs when Docker encounters a problem with your container, image, or daemon configuration. Below is a systematic approach to diagnose and fix it.
+`SIGKILL` cannot be caught or handled. Something outside your app ended it. In practice there are three suspects:
 
-## Quick Fix
+1. **The OOM killer**: the container went over its memory limit, or the host ran out of memory. This is the most common cause.
+2. **A `docker stop` that timed out**: Docker sends `SIGTERM`, waits 10 seconds by default, then sends `SIGKILL`.
+3. **`docker kill`**: a script, an orchestrator, or a person killed it on purpose.
+
+## Step 1: Check Whether It Was OOMKilled
 
 ```bash
-# Check Docker daemon status
-sudo systemctl status docker
-
-# View container logs for details
-docker logs <container-name> 2>&1 | tail -50
-
-# Check system resources
-docker system df
-df -h /var/lib/docker
+docker inspect <container> --format '{{.State.OOMKilled}} {{.State.ExitCode}}'
+# true 137   -> killed for using too much memory
+# false 137  -> killed by a signal, not by the memory limit
 ```
 
-## Root Cause Analysis
-
-This error typically has one of these causes:
-
-1. **Configuration issue** — Docker or container settings are incorrect
-2. **Resource constraint** — disk space, memory, or CPU limits reached
-3. **Permission problem** — user, SELinux, or filesystem permissions
-4. **Version incompatibility** — Docker version vs image requirements
-
-## Step-by-Step Fix
-
-### Step 1: Gather Information
+The kernel logs every OOM kill, so check the host too:
 
 ```bash
-# Docker version and info
-docker version
-docker info
-
-# System resources
-free -h
-df -h
+sudo dmesg -T | grep -i -E 'killed process|out of memory'
+sudo journalctl -k --since "1 hour ago" | grep -i oom
 ```
 
-### Step 2: Apply the Fix
-
-The specific fix depends on the root cause identified above. Check the Docker logs for detailed error messages:
+Then watch memory use against the limit, and listen for OOM events:
 
 ```bash
-# Docker daemon logs
-sudo journalctl -u docker --since "1 hour ago" --no-pager
-
-# Container-specific logs
-docker inspect <container> --format='{{.State.Error}}'
+docker stats <container>
+docker events --filter event=oom
 ```
 
-### Step 3: Verify
+## Step 2: Fix It by Cause
+
+### OOMKilled: give it more memory, or make it use less
 
 ```bash
-# Test the fix
-docker run --rm hello-world
+# Current limit in bytes (0 means no limit)
+docker inspect <container> --format '{{.HostConfig.Memory}}'
 
-# Verify no errors in logs
-docker events --since 5m
+# Run with a higher limit
+docker run --memory=2g --memory-swap=2g myimage
+```
+
+In Docker Compose:
+
+```yaml
+services:
+  app:
+    image: myimage
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+```
+
+If memory keeps climbing until the kill, a bigger limit only buys time. Look for the leak. For JVM apps, size the heap to the container, for example with `-XX:MaxRAMPercentage=75.0`.
+
+On Docker Desktop, the VM itself has a memory cap. On macOS, raise it under **Settings → Resources**. With the WSL 2 backend on Windows, set it in `.wslconfig`.
+
+### Killed after docker stop: handle SIGTERM
+
+If `OOMKilled` is `false` and the exit came right after a `docker stop`, your app ignored `SIGTERM` and Docker escalated to `SIGKILL`.
+
+- Use the exec form in your Dockerfile: `CMD ["node", "server.js"]`, not `CMD node server.js`. The shell form runs your app under `/bin/sh`, which does not pass signals on.
+- Add `--init` (or `init: true` in Compose) so a tiny init process forwards signals and reaps zombies.
+- If a clean shutdown really takes longer, raise the grace period: `docker stop -t 30 <container>`, or `stop_grace_period: 30s` in Compose.
+
+### Killed by docker kill or an orchestrator
+
+Run `docker events --since 1h` and look for `kill` events. Then check your health checks and restart tooling. In Kubernetes, `kubectl describe pod` shows `Reason: OOMKilled` with `Exit Code: 137` when the pod hit its memory limit. See [Kubernetes requests vs limits](/blog/kubernetes-resource-limits-requests-best-practices-2026/) and [Fix Kubernetes OOMKilled](/blog/fix-kubernetes-oomkilled-error/).
+
+## Step 3: Verify
+
+Run the workload again and keep an eye on it:
+
+```bash
+docker stats <container>
+docker inspect <container> --format '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}'
 ```
 
 ## Prevention
 
+- Set a memory limit on every container, sized from real `docker stats` numbers.
+- Alert when a container gets close to its memory limit, not only when the host does.
+- Handle `SIGTERM` in your app, and use the exec form for `CMD` and `ENTRYPOINT`.
 - Keep Docker updated: `sudo dnf update docker-ce`
-- Monitor disk space: set alerts at 80% utilization
-- Use resource limits: `--memory` and `--cpus` flags
-- Regular cleanup: `docker system prune --all --volumes`
 
 ## Related Guides
 

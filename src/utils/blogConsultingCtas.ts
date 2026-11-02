@@ -19,7 +19,10 @@ export interface BlogConsultingOffer {
  * Explicit enterprise-conversion overrides for the highest-value organic
  * landing pages. Keep this list intentionally small: broad topic matching
  * remains in serviceMatches.ts, while these messages bridge a specific
- * technical problem to an organization-level assessment.
+ * technical problem to an organization-level assessment. Assessments are
+ * sold and delivered by Open Empower, so those CTAs link to openempower.com
+ * (the old /production-ai-assessment/ and /ai-readiness-assessment/ pages
+ * 301 there). target_offer keeps naming the offer the copy pitches.
  */
 export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
   'claude-code-econnreset-fix': {
@@ -27,7 +30,7 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     body:
       'Repeated failures across managed laptops, VPNs, proxies, or corporate networks are usually an environment-design problem, not a one-machine problem.',
     ctaLabel: 'Assess Your AI Developer Platform →',
-    ctaHref: '/production-ai-assessment/',
+    ctaHref: 'https://www.openempower.com/services/assessment',
     targetOffer: 'ai_developer_platform_assessment',
     ctaVariant: 'corporate_network_problem',
     benefits: ['Network', 'Identity', 'Security', 'Developer access'],
@@ -53,7 +56,7 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     body:
       'Production agents introduce provider failover, secrets, observability, permissions, and operational reliability.',
     ctaLabel: 'Assess Your Agent Platform →',
-    ctaHref: '/production-ai-assessment/',
+    ctaHref: 'https://www.openempower.com/services/assessment',
     targetOffer: 'agent_platform_assessment',
     ctaVariant: 'agent_reliability_problem',
     benefits: ['Reliability', 'Secrets', 'Observability', 'Failover'],
@@ -66,7 +69,7 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     body:
       'A running VM is only the first step. Production AI needs identity, monitoring, resilience, governance, and cost controls.',
     ctaLabel: 'Assess Your Production Architecture →',
-    ctaHref: '/production-ai-assessment/',
+    ctaHref: 'https://www.openempower.com/services/assessment',
     targetOffer: 'agent_platform_assessment',
     ctaVariant: 'prototype_to_production',
     benefits: ['Architecture', 'Security', 'Monitoring', 'Resilience'],
@@ -79,7 +82,7 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     body:
       'Scaling AI coding across an organization requires company, team, and repository-level standards plus security and tool-access controls.',
     ctaLabel: 'Review Your AI Coding Governance →',
-    ctaHref: '/ai-readiness-assessment/',
+    ctaHref: 'https://www.openempower.com/services/assessment',
     targetOffer: 'ai_developer_governance',
     ctaVariant: 'repo_to_org_governance',
     benefits: ['Policy', 'MCP access', 'Security', 'Review gates'],
@@ -118,7 +121,7 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     body:
       'Agent identity, MCP governance, permissions, observability, and reliability become platform concerns at production scale.',
     ctaLabel: 'Assess Your Agent Platform Readiness →',
-    ctaHref: '/production-ai-assessment/',
+    ctaHref: 'https://www.openempower.com/services/assessment',
     targetOffer: 'agent_platform_readiness',
     ctaVariant: 'europe_agent_readiness',
     benefits: ['MCP', 'Identity', 'Observability', 'Governance'],
@@ -131,7 +134,7 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     body:
       'At team scale, AI-assisted development becomes a standards, security, review, and delivery-governance problem.',
     ctaLabel: 'Assess Your AI Development Workflow →',
-    ctaHref: '/ai-readiness-assessment/',
+    ctaHref: 'https://www.openempower.com/services/assessment',
     targetOffer: 'ai_software_delivery_assessment',
     ctaVariant: 'developer_to_team_scale',
     benefits: ['Standards', 'Security', 'Review', 'Delivery'],
@@ -144,7 +147,7 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     body:
       'Once agents can reach internal tools and systems, identity, permissions, secrets, and trust boundaries become architecture concerns.',
     ctaLabel: 'Review Your Agent Access Model →',
-    ctaHref: '/ai-readiness-assessment/',
+    ctaHref: 'https://www.openempower.com/services/assessment',
     targetOffer: 'agent_identity_governance_review',
     ctaVariant: 'agent_permissions_boundary',
     benefits: ['Identity', 'Permissions', 'Secrets', 'Trust boundaries'],
@@ -157,7 +160,7 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     body:
       'SSO, IAM roles, onboarding, account boundaries, and developer access should be designed before inconsistencies become security debt.',
     ctaLabel: 'Review Your Cloud Platform →',
-    ctaHref: '/production-ai-assessment/',
+    ctaHref: 'https://www.openempower.com/services/assessment',
     targetOffer: 'cloud_platform_assessment',
     ctaVariant: 'aws_access_standardization',
     benefits: ['SSO', 'IAM', 'Roles', 'Developer access'],

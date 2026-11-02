@@ -261,17 +261,21 @@ test.describe('Contextual consulting CTA (blogConsultingCtas.ts)', () => {
 
   test('configured post gets one mid-article card with its offer, and the click is tracked', async ({ page }) => {
     const events = await recordEvents(page);
+    // The assessment lives on openempower.com; stub it so the suite stays offline.
+    await page.route('https://www.openempower.com/**', (route) =>
+      route.fulfill({ status: 200, contentType: 'text/html', body: '<!doctype html><title>Open Empower</title>' }),
+    );
     await page.goto(CONFIGURED_POST, { waitUntil: 'domcontentloaded' });
 
     const link = page.locator(CARD_LINK);
     await expect(link).toHaveCount(1); // injected once; the hidden source is removed
-    await expect(link).toHaveAttribute('href', '/production-ai-assessment/');
+    await expect(link).toHaveAttribute('href', 'https://www.openempower.com/services/assessment');
     await expect(link).toHaveAttribute('data-tp-target-offer', 'agent_platform_assessment');
     await expect(link).toHaveAttribute('data-tp-cta-position', 'inline_50');
     await expect(page.locator('article aside', { has: page.locator(CARD_LINK) })).toBeVisible();
 
     await link.dispatchEvent('click');
-    await page.waitForURL(/\/production-ai-assessment\/$/);
+    await page.waitForURL(/openempower\.com\/services\/assessment$/);
     const click = events.find((e) => e.event === 'consulting_cta_click');
     expect(click?.target_offer).toBe('agent_platform_assessment');
     expect(click?.cta_position).toBe('inline_50');

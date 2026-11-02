@@ -3,6 +3,7 @@
  * (src/utils/topicCluster.ts) so the most valuable strip on the page offers
  * the reader's next step instead of one global promotion. Order of priority:
  * consulting (engineering leaders) > newsletter (engineers) > own courses.
+ * Consulting offers link to Open Empower (openempower.com) in the same tab.
  *
  * Tracking attributes use the quoted data-* keys ConversionTracker reads, so
  * scripts/validate-analytics.cjs checks their values statically.
@@ -59,7 +60,7 @@ const AGENT_PLATFORM: TopicBanner = {
   headline: 'Running agents for a team, not just yourself?',
   description: 'Get an independent review of identity, secrets, failover, observability and governance.',
   linkText: 'Assess your agent platform',
-  linkUrl: '/production-ai-assessment/',
+  linkUrl: 'https://www.openempower.com/services/assessment',
   external: false,
   gradientFrom: 'cyan-600',
   gradientVia: 'blue-600',
@@ -76,8 +77,8 @@ const PRODUCTION_AI: TopicBanner = {
   emoji: '🚀',
   headline: 'Taking AI from prototype to production?',
   description: 'Find the architecture, GPU, security and governance gaps before they become incidents.',
-  linkText: 'Get a Production AI Readiness Assessment',
-  linkUrl: '/production-ai-assessment/',
+  linkText: 'Get an AI Readiness Assessment',
+  linkUrl: 'https://www.openempower.com/services/assessment',
   external: false,
   gradientFrom: 'cyan-600',
   gradientVia: 'blue-600',

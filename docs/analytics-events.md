@@ -65,7 +65,7 @@ visitor.
 | `booking_start` | Calendly scheduler actually opened — popup init, or native-navigation fallback (`booking_source`) | `booking_type`, `booking_source` | micro-conversion |
 | `booked_call` | Calendly confirmed the booking: `calendly.event_scheduled` postMessage from the popup (`src/components/CalendlyPopup.astro`, works on the free plan) — or `/call-booked/` viewed via the paid-plan success redirect | `booking_type`, `booking_source` | **key event** |
 | `contact_form_submit` | business inquiry form accepted by Web3Forms (`data.success`) — `form_id=contact` on `/contact/`, `form_id=partnership` on `/partner-with-luca/` | `form_id` | **key event** |
-| `assessment_submit` | Production AI Readiness Check on `/production-ai-assessment/` (`src/components/react/ProductionReadinessCheck.tsx`) — email submitted to unlock the category gap map | `target_offer` | **key event** |
+| `assessment_submit` | Not emitted since Nov 2026: the Production AI Readiness Check left the site when `/production-ai-assessment/` started to 301 to openempower.com. Kept so historical GA4 data keeps its name | `target_offer` | key event (historical) |
 | `email_signup_start` | newsletter CTA/form opened | `form_id` | micro-conversion |
 | `email_signup` | `/newsletter-thank-you/` viewed (Kit success redirect) | `form_id` | **key event** |
 | `bootcamp_click` | link toward `/ai-platform-engineer-bootcamp/` (auto) | `cta_variant` | micro-conversion |
@@ -74,8 +74,8 @@ visitor.
 | `affiliate_click` | outbound affiliate/partner CTA clicked — one event for ALL partners | `company`, `offer_id`, `offer_type`, `cta_position`, `cta_variant`, `destination_url` | key event (lowest priority) |
 
 CTA clicks are operational metrics; `booked_call`, `contact_form_submit`,
-`assessment_submit`, `email_signup`, and `bootcamp_application_submitted` are
-the numbers to quote as "conversions".
+`email_signup`, and `bootcamp_application_submitted` are the numbers to quote
+as "conversions" (`assessment_submit` until Nov 2, 2026).
 
 ## Shared parameters (every event)
 
@@ -93,19 +93,22 @@ the numbers to quote as "conversions".
 `post_solution`, `post_conclusion`, `sidebar`, `sticky_bar`, `related_offer`,
 `unlabeled` (auto-tracked Calendly link outside an article body — annotate it).
 
-## Production AI Readiness Check
+## Buyer pages live on openempower.com
 
-`/production-ai-assessment/` embeds a free, 8-question self-serve check
-(`src/components/react/ProductionReadinessCheck.tsx`, one question per
-diagnostic area already on the page) as the middle step between "read the
-page" and "book a call": the score and tier are free, the category gap map
-and top-3 actions are gated behind an email (submitted to Web3Forms).
-`assessment_submit` (`target_offer=production_ai_assessment`) fires ONLY on
-a confirmed Web3Forms success — a rejected or failed submission keeps the
-user on the email step with a retry and two honest fallbacks (a tracked
-"book a call directly" link, and "Continue without confirmation" to see the
-report without counting it as a captured lead). The report's CTA into
-Calendly is a normal `consulting_cta_click`.
+Since Nov 2026 each of Luca's sites has one role: lucaberton.com is the person
+and AI-coding content, and Open Empower (https://www.openempower.com/) takes
+all buyer intent. `/production-ai-assessment/` and `/ai-readiness-assessment/`
+301 to `https://www.openempower.com/services/assessment` (`static/_redirects`;
+`scripts/validate-seo-fixes.cjs` keeps the redirects and forbids links to the
+old paths). `/services/` is the "Work with Luca" page that hands buyers to
+Open Empower. Assessment CTAs (`blogConsultingCtas.ts`, `topicBanners.ts`,
+`eventTopics.ts`, `OffersStrip.astro`) link straight to openempower.com and
+keep their `target_offer`, so GA4 reports stay comparable; `destination_url`
+shows the new target. New offers: `open_empower_services` (Open Empower's
+services overview). The conversion itself now happens on openempower.com and
+is counted in that site's GA4 property.
+
+## Programmatic events
 
 Programmatic events fired from JS/TSX (no HTML element to scan) use the same
 declarative names via `window.lucaTrack(name, params)` — the validator checks
@@ -117,8 +120,8 @@ sit outside this taxonomy.
 ## Consulting CTAs on high-traffic posts
 
 `src/utils/blogConsultingCtas.ts` holds one offer per post (keyed by slug):
-headline, body, benefit chips, `ctaLabel` / `ctaHref` (the assessment or
-readiness page), `targetOffer` and `ctaVariant` (the copy experiment name —
+headline, body, benefit chips, `ctaLabel` / `ctaHref` (Open Empower's
+assessment, or a page on this site), `targetOffer` and `ctaVariant` (the copy experiment name —
 never a layout word like `dark`). For a configured post,
 `src/pages/blog/[slug].astro` renders `BlogConsultationCta` with that offer
 and injects it mid-article (after the H2 at ~45% of the post's H2 count) with
@@ -188,6 +191,19 @@ Async success handlers: `window.lucaTrack(name, params)`.
 Confirmation pages: `data-track-pageview-event` on the `data-page-context`
 element (deduped per session against refreshes).
 
+## Local and test traffic
+
+`src/layouts/Layout.astro` sets `window.__lucaNoAnalytics` when the page runs
+on `localhost`, `127.0.0.1`, `0.0.0.0`, `::1` or `*.localhost`, or in an
+automated browser (`navigator.webdriver`, which Playwright sets). GA4 then gets
+`window['ga-disable-G-M9Q5F672JT'] = true` (Google's opt-out: gtag.js sends
+nothing), and PostHog, Microsoft Clarity and the LinkedIn tag do not load.
+ConversionTracker still pushes every event to `window.dataLayer`, which is
+what the E2E tests assert on. Before this, 205 of the 214
+`contact_form_submit` key events from Sep 28 to Oct 30, 2026 came from
+hostname `127.0.0.1` (E2E runs against `astro preview`); for reports covering
+that period, filter on hostname `lucaberton.com`.
+
 ## External setup (not in this repo)
 
 - **Kit**: set each form's success redirect to
@@ -199,7 +215,8 @@ element (deduped per session against refreshes).
   pageview as already counted for the session, so a redirect in the same tab
   does not double-count; a redirect opened in a *new* tab still would.
 - **GA4 admin**: mark the key events above as key events (`contact_form_submit`
-  was added 2026-09-27 — create it by name like the others); register custom
+  was added 2026-09-27 — create it by name like the others; `booked_call`
+  must be a key event too; `assessment_submit` no longer fires); register custom
   dimensions `topic_cluster`, `cta_position`, `cta_variant`, `target_offer`,
   `company`, `offer_id`, `page_type`, `original_landing_page`,
   `original_topic_cluster`, `booking_type`, `booking_source`,

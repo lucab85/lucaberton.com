@@ -96,6 +96,9 @@ const FORBIDDEN_LINK_PATTERNS = [
   "/services/kubernetes-containerization-workshops/",
   "/services/performance-optimization-custom-solutions/",
   "/blog/kcs_",
+  // 301 to openempower.com since Nov 2026 (buyer intent lives there).
+  "/production-ai-assessment/",
+  "/ai-readiness-assessment/",
 ];
 
 // Required 301 redirect source patterns in static/_redirects.
@@ -107,6 +110,8 @@ const REQUIRED_REDIRECTS = [
   "/services/platform-engineering",
   "/blog/categories/kcs",
   "/blog/categories/wordpress",
+  "/production-ai-assessment",
+  "/ai-readiness-assessment",
 ];
 
 const results = []; // { level: 'PASS'|'FAIL'|'WARN', check, detail }

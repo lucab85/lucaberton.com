@@ -2,18 +2,18 @@
 draft: false
 title: "Install kubectl on Ubuntu (Step-by-Step 2026)"
 seoTitle: "Install kubectl on Ubuntu: 3 Quick Methods (2026)"
-snippet: "Step-by-step guide to install kubectl on Ubuntu. Copy-paste commands, verify installation, and configure for production."
-description: "Install kubectl on Ubuntu: apt, direct download, snap. Verify installation and enable shell completion."
+snippet: "Install kubectl on Ubuntu with apt (pkgs.k8s.io), a direct download or snap. Copy-paste commands, checksum check, version skew, shell completion and fixes."
+description: "Install kubectl on Ubuntu: apt repository, direct download with checksum, or snap. Verify, enable completion, upgrade, and fix localhost:8080 refused."
 image:
   src: "/blog/thumbnails/install-kubectl-ubuntu.jpg"
   alt: "Install kubectl on Ubuntu"
 publishDate: "2026-04-04"
-lastModified: "2026-04-04"
+lastModified: "2026-11-02"
 author: "Luca Berton"
 category: "Platform Engineering"
 tags: ["kubectl", "Installation", "Ubuntu", "Tutorial", "DevOps"]
 ---
-Three methods to install kubectl on Ubuntu: apt repository (recommended), direct download, or snap. All tested and ready to use.
+Three ways to install kubectl on Ubuntu 24.04 and 22.04: the apt repository (recommended), a direct download, or snap. Pick one. All three end with the same `kubectl` binary.
 
 ## Method 1: APT Repository (Recommended)
 
@@ -28,12 +28,21 @@ sudo apt-get update
 sudo apt-get install -y kubectl
 ```
 
+`pkgs.k8s.io` has one repository per Kubernetes minor version. Change `v1.31` in both URLs to the minor version your cluster runs. On releases older than Ubuntu 22.04, `/etc/apt/keyrings` does not exist yet, so create it first with `sudo mkdir -p -m 755 /etc/apt/keyrings`.
+
 ## Method 2: Direct Download
 
 ```bash
+# Download the latest stable release (use arm64 instead of amd64 on ARM machines)
 curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+
+# Check the binary against its published checksum: expect "kubectl: OK"
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl.sha256"
+echo "$(cat kubectl.sha256)  kubectl" | sha256sum --check
+
+# Install and clean up
 sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-rm kubectl
+rm kubectl kubectl.sha256
 ```
 
 ## Method 3: Snap
@@ -49,14 +58,48 @@ kubectl version --client
 kubectl cluster-info  # If connected to a cluster
 ```
 
+## Match kubectl to Your Cluster
+
+kubectl is supported within one minor version of your cluster's API server. A v1.31 kubectl works with v1.30, v1.31 and v1.32 control planes. `kubectl version` prints both the client and the server version, so check it once you are connected.
+
 ## Enable Shell Completion
 
 ```bash
-# Bash
+# Bash (needs the bash-completion package)
+sudo apt-get install -y bash-completion
 echo 'source <(kubectl completion bash)' >> ~/.bashrc
 echo 'alias k=kubectl' >> ~/.bashrc
 echo 'complete -o default -F __start_kubectl k' >> ~/.bashrc
 source ~/.bashrc
+
+# Zsh
+echo 'source <(kubectl completion zsh)' >> ~/.zshrc
+```
+
+## Upgrade kubectl
+
+```bash
+# APT: latest patch release of your current minor version
+sudo apt-get update && sudo apt-get install --only-upgrade kubectl
+
+# Snap
+sudo snap refresh kubectl
+```
+
+To move APT to a new minor version, change the version in `/etc/apt/sources.list.d/kubernetes.list`, then run the upgrade again. For a direct download, repeat Method 2.
+
+## Troubleshooting
+
+- **`The connection to the server localhost:8080 was refused`**: kubectl is installed but has no kubeconfig. Copy your cluster's config to `~/.kube/config`, or point the `KUBECONFIG` variable at it.
+- **`E: Unable to locate package kubectl`**: the Kubernetes apt repository is missing, or you did not run `sudo apt-get update` after adding it.
+- **`kubectl: command not found` after a direct download**: check that `/usr/local/bin` is on your `PATH` with `which kubectl`.
+
+## Uninstall
+
+```bash
+sudo apt-get remove -y kubectl     # APT
+sudo snap remove kubectl           # Snap
+sudo rm /usr/local/bin/kubectl     # Direct download
 ```
 
 ## Related Resources

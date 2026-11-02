@@ -14,9 +14,9 @@ export interface EventOffer {
 
 export const eventOffers: Record<string, EventOffer> = {
   ai: {
-    label: 'Take the Production AI readiness check',
-    blurb: 'Moving from conference demos to production AI? Eight questions show where your platform, governance and operations stand.',
-    href: '/production-ai-assessment/',
+    label: 'Take the free AI readiness quick score',
+    blurb: 'Moving from conference demos to production AI? Ten questions on Open Empower show where your strategy, data, infrastructure and governance stand.',
+    href: 'https://www.openempower.com/services/assessment',
     targetOffer: 'production_ai_assessment',
   },
   gpu: {

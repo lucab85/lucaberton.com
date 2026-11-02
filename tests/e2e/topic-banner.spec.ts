@@ -3,7 +3,7 @@ import { test, expect, type Page } from '@playwright/test';
 /**
  * Site-wide announcement banner chosen by the page's topic cluster
  * (src/utils/topicBanners.ts): consulting offers for leader-intent clusters
- * (same tab, consulting_cta_click), the newsletter for engineer clusters,
+ * (Open Empower, same tab, consulting_cta_click), the newsletter for engineer clusters,
  * the Claude Code Guardrails Pack for Claude Code posts while it is on sale
  * (src/data/sales.ts), and the Claude Code Masterclass on non-blog pages.
  */
@@ -16,7 +16,7 @@ test.describe('topic-aware announcement banner', () => {
   test('agent posts pitch the agent platform assessment, tracked, same tab', async ({ page }) => {
     await page.goto('/blog/hermes-agent-oracle-cloud-free-tier-deployment/', { waitUntil: 'domcontentloaded' });
     const link = banner(page);
-    await expect(link).toHaveAttribute('href', '/production-ai-assessment/');
+    await expect(link).toHaveAttribute('href', 'https://www.openempower.com/services/assessment');
     await expect(link).toHaveAttribute('data-track-event', 'consulting_cta_click');
     await expect(link).toHaveAttribute('data-tp-target-offer', 'agent_platform_assessment');
     await expect(link).toHaveAttribute('data-tp-cta-position', 'top_banner');

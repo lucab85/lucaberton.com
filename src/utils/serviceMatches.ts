@@ -11,6 +11,8 @@ export interface ServiceMatch {
   description: string;
   url: string;
   icon: string;
+  /** target_offer for an off-site url (default: the url slugified). */
+  offer?: string;
 }
 
 export const serviceMatches: ServiceMatch[] = [
@@ -80,9 +82,10 @@ export const serviceMatches: ServiceMatch[] = [
   {
     keywords: ['ai', 'mlops', 'governance', 'strategy', 'platform-engineering'],
     title: 'AI Readiness Assessment',
-    description: 'What gets evaluated, how scoring works, and what a 30/60/90-day roadmap looks like.',
-    url: '/ai-readiness-assessment/',
+    description: 'Open Empower\'s fixed-fee assessment: infrastructure audit, AI gap analysis and a compliance roadmap in 2–6 weeks.',
+    url: 'https://www.openempower.com/services/assessment',
     icon: '📋',
+    offer: 'ai_readiness_assessment',
   },
   {
     keywords: ['mlops', 'governance', 'soc2', 'iso27001', 'ai', 'compliance'],

@@ -1,0 +1,54 @@
+name: Main health
+
+# Opens one issue labelled main-broken when CI/CD fails on main, comments on it
+# while main stays red, and closes it once main is green again. A failed run on
+# main means nothing reaches the site: on Nov 3, 2026, #338 merged with a red
+# Build (a 166-character snippet), its post answered 404 for six hours and every
+# later merge waited behind it, with only a red X on a commit to show for it.
+
+on:
+  workflow_run:
+    workflows: [CI/CD]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  issues: write
+  actions: read
+
+jobs:
+  report:
+    if: github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open, update or close the main-broken issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          TITLE: ${{ github.event.workflow_run.display_title }}
+        run: |
+          label=main-broken
+          open=$(gh issue list -R "$REPO" --label "$label" --state open --json number -q '.[0].number')
+          case "$CONCLUSION" in
+            success)
+              if [ -n "$open" ]; then gh issue close "$open" -R "$REPO" --comment "Deploying again: $RUN_URL"; fi
+              ;;
+            failure|timed_out)
+              failed=$(gh run view "$RUN_ID" -R "$REPO" --json jobs -q '[.jobs[] | select(.conclusion == "failure") | "- **\(.name)**: \([.steps[] | select(.conclusion == "failure") | .name] | join(", "))"] | join("\n")')
+              body="CI/CD failed on main at ${SHA:0:7} (\"$TITLE\"), so the site is not deploying: this commit and every later merge wait until main is green.
+
+          $failed
+
+          Run: $RUN_URL
+
+          Usual causes: the SEO validator in Build (a title, snippet or description over its limit), the image size guard in the internal link audit (photos over 1280 px), or a broken internal link. Fix it on a branch and merge; the next green run closes this issue."
+              gh label create "$label" -R "$REPO" --color b60205 --description "CI/CD is failing on main: nothing deploys" 2>/dev/null || true
+              if [ -n "$open" ]; then gh issue comment "$open" -R "$REPO" --body "$body"
+              else gh issue create -R "$REPO" --title "main is not deploying: CI/CD failed" --label "$label" --body "$body"; fi
+              ;;
+            *) echo "CI/CD ended as $CONCLUSION (cancelled or skipped runs are superseded): nothing to do" ;;
+          esac

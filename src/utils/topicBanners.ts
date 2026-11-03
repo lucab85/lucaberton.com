@@ -32,7 +32,7 @@ const MASTERCLASS: TopicBanner = {
   external: true,
   gradientFrom: 'indigo-600',
   gradientVia: 'purple-600',
-  gradientTo: 'pink-600',
+  gradientTo: 'pink-700',
 };
 
 // Own product for Claude Code readers (B2C developers): shown on claude_code
@@ -46,7 +46,7 @@ const CLAUDE_PACK: TopicBanner = {
   external: false,
   gradientFrom: 'indigo-600',
   gradientVia: 'purple-600',
-  gradientTo: 'pink-600',
+  gradientTo: 'pink-700',
   trackingAttrs: {
     'data-track-event': 'consulting_cta_click',
     'data-tp-target-offer': 'claude_code_guardrails_pack',
@@ -118,7 +118,7 @@ const NEWSLETTER: TopicBanner = {
   external: true,
   gradientFrom: 'indigo-600',
   gradientVia: 'purple-600',
-  gradientTo: 'pink-600',
+  gradientTo: 'pink-700',
   trackingAttrs: {
     'data-track-event': 'email_signup_start',
     'data-tp-form-id': 'kit_ce74a48bfa',

@@ -16,7 +16,9 @@
  *
  * Exit 0: no unaccepted quality findings. Exit 1: at least one.
  * Exit 2: more than half the scans failed, so the watch itself is broken.
- * Single scan failures (a slow page, a network blip) are retried once, then warned about.
+ * A page that fails to scan (Impeccable's fixed 30 s navigation timeout, a network blip)
+ * gets three tries, then a warning in the report. ansiblepilot.com/articles needs ~20 s even
+ * from Europe, so the slower runners sometimes miss it.
  *
  * Background: the Nov 3, 2026 audit took the eight sites from 1,579 findings
  * to 346, all style but one accepted layout choice. This keeps it that way.
@@ -99,7 +101,7 @@ for (const page of pages) {
   for (const viewport of VIEWPORTS) {
     scans++;
     let res = await detect(page.url, viewport);
-    if (res.error) res = await detect(page.url, viewport);
+    for (let attempt = 2; res.error && attempt <= 3; attempt++) res = await detect(page.url, viewport);
     if (res.error) {
       errors.push({ ...page, viewport, error: res.error });
       console.log(`::warning::Could not scan ${page.url} at ${viewport}: ${res.error}`);

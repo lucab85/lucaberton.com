@@ -1,0 +1,78 @@
+name: Design watch
+
+# Scans the key pages of Luca's eight sites with Impeccable (impeccable.style)
+# every day and fails when a live page has a readability or accessibility
+# problem: low contrast, undersized text, long lines, overflow and the like.
+# Style findings (gradient text, kicker labels, icon tiles…) are brand choices
+# and are only counted. It runs here because this repo is public, so the daily
+# scan costs no Actions minutes, and a build is not needed: it reads production.
+#
+# Pages: scripts/design-watch/urls.txt. Findings left on purpose:
+# scripts/design-watch/accepted.json. A failing scheduled run opens one issue
+# labelled design-watch (or updates it); the next clean run closes it.
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - scripts/design-watch/**
+      - .github/workflows/design-watch.yml
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: design-watch-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Scan the live sites
+        id: scan
+        run: |
+          export IMPECCABLE_BROWSER="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          echo "Chrome: $IMPECCABLE_BROWSER"
+          set +e
+          node scripts/design-watch/scan.mjs --report design-watch.md
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Open, update or close the design-watch issue
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          STATUS: ${{ steps.scan.outputs.status }}
+        run: |
+          label=design-watch
+          open=$(gh issue list --label "$label" --state open --json number -q '.[0].number')
+          if [ "$STATUS" = 1 ]; then
+            gh label create "$label" --color d93f0b --description "Readability problems found by the daily Impeccable scan" 2>/dev/null || true
+            if [ -n "$open" ]; then
+              gh issue edit "$open" --body-file design-watch.md
+            else
+              gh issue create --title "Design watch: readability problems on the live sites" --label "$label" --body-file design-watch.md
+            fi
+          elif [ "$STATUS" = 0 ] && [ -n "$open" ]; then
+            gh issue close "$open" --comment "Clean again: no quality findings in ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+
+      - name: Result
+        env:
+          STATUS: ${{ steps.scan.outputs.status }}
+        run: |
+          case "$STATUS" in
+            0) echo "No quality findings." ;;
+            1) echo "::error::Quality findings on the live sites: see the summary"; exit 1 ;;
+            *) echo "::error::Most scans failed: the design watch itself needs fixing"; exit 1 ;;
+          esac

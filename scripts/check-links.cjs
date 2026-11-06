@@ -35,7 +35,8 @@ function scanPages(dir, prefix = '') {
 scanPages(PAGES_DIR);
 
 // Static asset directories and non-post sub-routes under /blog/ — these are not blog posts
-const assetDirs = new Set(['events', 'proteinlens', 'openclaw', 'thumbnails', 'books', 'courses', 'conferences', 'categories', 'tags', 'search']);
+// ("all": the A–Z index, /blog/all/).
+const assetDirs = new Set(['events', 'proteinlens', 'openclaw', 'thumbnails', 'books', 'courses', 'conferences', 'categories', 'tags', 'search', 'all']);
 
 const linkRegex = /\]\(\/blog\/([a-zA-Z0-9_-]+)\//g;
 const hrefRegex = /href=["'`{]?\/blog\/([a-zA-Z0-9_-]+)\//g;

@@ -813,8 +813,8 @@ function checkBlogLinkTargets() {
       if (entry.isDirectory() && exists(path.join(blogPagesDir, entry.name, "index.astro"))) stubs.add(entry.name.toLowerCase());
     }
   }
-  // Non-post sub-routes and asset dirs under /blog/.
-  const skip = new Set(["categories", "tags", "search", "events", "proteinlens", "openclaw", "thumbnails", "books", "courses", "conferences"]);
+  // Non-post sub-routes and asset dirs under /blog/ ("all": the A–Z index, /blog/all/).
+  const skip = new Set(["categories", "tags", "search", "events", "proteinlens", "openclaw", "thumbnails", "books", "courses", "conferences", "all"]);
   const linkRe = /(?:\]\(|href=["'`])\/blog\/([A-Za-z0-9._-]+)\//g;
   let bad = 0;
   for (const fp of sourceScanFiles()) {

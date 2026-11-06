@@ -1,0 +1,130 @@
+name: Live watch
+
+# Checks the live sites against every rule learned so far:
+# - scripts/verify-live.mjs: titles, AI crawlers, llms.txt, one identity, GA4 IDs,
+#   share images, real publish dates, links between the sites, the A–Z index
+#   (linked from the home page HTML, under ~1,000 links a page, covering the
+#   sitemap), scripts blocked by the CSP, and, with a checkout, redirect rules,
+#   newest content live and deploy concurrency;
+# - scripts/live-watch/lighthouse.mjs: Lighthouse budgets (accessibility, best
+#   practices and SEO >= 90, no lazy-loaded LCP image; slow LCP render warns).
+#
+# When:
+# - after every green CI/CD run on main: lucaberton.com only, with its repo checks;
+# - daily and on demand: all eight sites. The other seven use their configs in
+#   scripts/live-watch/sites/ for the production checks. With a GROUP_REPOS_TOKEN
+#   secret (read-only "Contents" on the seven repos) each one is also checked out,
+#   so its own config and its repo checks are used.
+#
+# A failing run opens one issue labelled live-watch, or updates its body; the next
+# clean run closes it. It runs here because this repo is public: no Actions
+# minutes, and it keeps watching while the private repos' Actions are blocked by
+# billing (Oct 27 and Nov 6, 2026). Separate from CI/CD on purpose: a live check
+# failing must not look like "main is not deploying" (main-health.yml).
+
+on:
+  workflow_run:
+    workflows: [CI/CD]
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: '41 6 * * *'
+  workflow_dispatch:
+  pull_request: # proves changes to the watch itself on GitHub's runner; never touches the issue
+    paths:
+      - .github/workflows/live-watch.yml
+      - scripts/live-watch/**
+      - scripts/verify-live.mjs
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: live-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # commit ages for the newest-content check
+          filter: blob:none
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: verify-live
+        id: verify
+        env:
+          GROUP_REPOS_TOKEN: ${{ secrets.GROUP_REPOS_TOKEN }}
+          ALL_SITES: ${{ github.event_name != 'workflow_run' }}
+        run: |
+          set +e
+          status=0
+          echo "## Live watch, $(date -u +%F) ([run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}))" > report.md
+          check() { # name config repo-dir
+            out=$(node scripts/verify-live.mjs --config "$2" --repo "$3" --sample 20 2>&1); rc=$?
+            [ $rc -ne 0 ] && status=1
+            { echo; echo "### $1"; echo '```'; echo "$out" | grep -E '\[(FAIL|WARN)\]|PASSED|FAILED' | sed 's/^ *//' | head -40; echo '```'; } >> report.md
+          }
+          check lucaberton.com scripts/verify-live.config.json .
+          if [ "$ALL_SITES" = true ]; then
+            for cfg in scripts/live-watch/sites/*.json; do
+              name=$(basename "$cfg" .json)
+              dir=/tmp/no-checkout
+              repo=$(node -p "require('./$cfg').repo || ''")
+              if [ -n "$GROUP_REPOS_TOKEN" ] && [ -n "$repo" ]; then
+                dirs=$(node -p "const c=require('./$cfg'); ['scripts','.github','static',...(c.fresh||[]).map(f=>f.dir)].join(' ')")
+                if git clone -q --depth 50 --filter=blob:none --sparse "https://x-access-token:${GROUP_REPOS_TOKEN}@github.com/${repo}.git" "/tmp/$name" \
+                   && git -C "/tmp/$name" sparse-checkout set $dirs; then
+                  dir="/tmp/$name"
+                  [ -f "$dir/scripts/verify-live.config.json" ] && cfg="$dir/scripts/verify-live.config.json"
+                fi
+              fi
+              check "$name" "$cfg" "$dir"
+            done
+          fi
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
+      - name: Lighthouse budgets
+        id: lighthouse
+        run: |
+          export CHROME_PATH="$(command -v google-chrome || command -v chromium || command -v chromium-browser)"
+          only=""
+          if [ "${{ github.event_name }}" = workflow_run ]; then only="--only lucaberton.com"; fi
+          set +e
+          node scripts/live-watch/lighthouse.mjs $only --report lighthouse.md
+          echo "status=$?" >> "$GITHUB_OUTPUT"
+          { echo; cat lighthouse.md; } >> report.md
+
+      - name: Summary
+        if: always()
+        run: cat report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open, update or close the live-watch issue
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILED: ${{ steps.verify.outputs.status != '0' || steps.lighthouse.outputs.status != '0' }}
+        run: |
+          label=live-watch
+          open=$(gh issue list --label "$label" --state open --json number -q '.[0].number')
+          if [ "$FAILED" = true ]; then
+            gh label create "$label" --color d93f0b --description "A live site breaks a rule checked by verify-live or the Lighthouse budgets" 2>/dev/null || true
+            if [ -n "$open" ]; then gh issue edit "$open" --body-file report.md
+            else gh issue create --title "Live watch: a site breaks a checked rule" --label "$label" --body-file report.md; fi
+          elif [ -n "$open" ] && [ "${{ github.event_name }}" != workflow_run ]; then
+            gh issue close "$open" --comment "All checks pass again: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          fi
+
+      - name: Result
+        if: steps.verify.outputs.status != '0' || steps.lighthouse.outputs.status != '0'
+        run: |
+          echo "::error::A live site breaks a checked rule: see the summary and the live-watch issue"
+          exit 1

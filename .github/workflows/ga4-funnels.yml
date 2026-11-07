@@ -1,0 +1,50 @@
+name: GA4 funnels
+
+# Weekly funnel report (scripts/ga4-funnels.mjs): funnel steps and paid
+# clicks per property, last 7 days against the 7 before. Scheduled and
+# manual runs open a "GA4 funnels" issue (label ga4-funnels) and close the
+# previous one; pull requests only write the job summary.
+on:
+  pull_request:
+    paths: ["scripts/ga4-funnels.*", "scripts/ga4-auth.mjs", ".github/workflows/ga4-funnels.yml"]
+  schedule:
+    - cron: "23 6 * * 1" # Mondays 06:23 UTC, after the GA4 settings run
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ga4-funnels
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: scripts
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Build the report
+        shell: bash
+        env:
+          GA4_ADMIN_KEY: ${{ secrets.GA4_ADMIN_KEY }}
+        run: |
+          node scripts/ga4-funnels.mjs --out report.md
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Open this week's issue, close the previous one
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          label=ga4-funnels
+          gh label create "$label" --color 1d76db --description "Weekly GA4 funnel report" 2>/dev/null || true
+          old=$(gh issue list --label "$label" --state open --json number -q '.[].number')
+          title="GA4 funnels: $(sed -n '1s/^## GA4 funnels: //p' report.md)"
+          new=$(gh issue create --title "$title" --label "$label" --body-file report.md)
+          for n in $old; do gh issue close "$n" --comment "Superseded by $new"; done

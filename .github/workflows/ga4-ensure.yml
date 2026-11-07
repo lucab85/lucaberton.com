@@ -1,0 +1,44 @@
+name: GA4 settings
+
+# Keeps the key events and custom dimensions in scripts/ga4-ensure.config.json
+# on every GA4 property of the group (Google Analytics Admin API, service
+# account key in the GA4_ADMIN_KEY secret). Pull requests only read and
+# report; main, the weekly run and manual runs create what is missing.
+on:
+  pull_request:
+    paths: ["scripts/ga4-ensure.*", ".github/workflows/ga4-ensure.yml"]
+  push:
+    branches: [main]
+    paths: ["scripts/ga4-ensure.*", ".github/workflows/ga4-ensure.yml"]
+  schedule:
+    - cron: "17 5 * * 1" # Mondays 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ga4-ensure
+  cancel-in-progress: false
+
+jobs:
+  ensure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: scripts
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Apply GA4 settings (dry run on pull requests)
+        shell: bash
+        env:
+          GA4_ADMIN_KEY: ${{ secrets.GA4_ADMIN_KEY }}
+        run: |
+          mode=""
+          [ "${{ github.event_name }}" = pull_request ] && mode="--dry-run"
+          node scripts/ga4-ensure.mjs $mode 2>&1 | tee ga4.txt
+          status=${PIPESTATUS[0]}
+          { echo '### GA4 settings'; echo '```'; cat ga4.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          exit $status

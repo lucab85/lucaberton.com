@@ -6,7 +6,9 @@
  *   - every configured funnel (GA4 Data API runFunnelReport, open funnels,
  *     active users per step), for the last 7 complete days and the 7 before;
  *   - paid clicks (affiliate_click) by programme and offer, and by page,
- *     from the custom dimensions company / offer_id.
+ *     from the custom dimensions company / offer_id;
+ *   - with "returning": true, new vs returning users (GA4 newVsReturning),
+ *     for sites with accounts, where coming back is the point.
  * and prints one Markdown report (stdout, or --out <file>).
  *
  * Credentials: the same service account as ga4-ensure.mjs (GA4_ADMIN_KEY,
@@ -110,6 +112,25 @@ async function paidClicks(propertyId, dimensions, range, limit = 10) {
   }));
 }
 
+/** Active users split into new and returning, for one date range. */
+async function newVsReturning(propertyId, range) {
+  const res = await post(`v1beta/properties/${propertyId}:runReport`, {
+    dateRanges: [range],
+    dimensions: [{ name: "newVsReturning" }],
+    metrics: [{ name: "activeUsers" }, { name: "engagedSessions" }],
+  });
+  const out = { new: 0, returning: 0, returningEngaged: 0 };
+  for (const r of res.rows ?? []) {
+    const k = r.dimensionValues[0].value;
+    if (k === "new") out.new = Number(r.metricValues[0].value);
+    if (k === "returning") {
+      out.returning = Number(r.metricValues[0].value);
+      out.returningEngaged = Number(r.metricValues[1].value);
+    }
+  }
+  return out;
+}
+
 // ---------- report ----------
 
 const fmt = (n) => n.toLocaleString("en-US");
@@ -136,6 +157,15 @@ for (const prop of config.properties) {
       funnel.steps.forEach((s, i) => {
         out.push(`| ${i + 1}. ${s.name} | ${fmt(now[i])} | ${fmt(before[i])} | ${delta(now[i], before[i])} | ${i ? rate(now[i], now[0]) : ""} |`);
       });
+    }
+
+    if (prop.returning) {
+      const [now, before] = await Promise.all([newVsReturning(prop.id, current), newVsReturning(prop.id, previous)]);
+      out.push("", "**Returning users**", "", "| | This week | Previous week | Change |", "|---|--:|--:|--:|");
+      out.push(`| New users | ${fmt(now.new)} | ${fmt(before.new)} | ${delta(now.new, before.new)} |`);
+      out.push(`| Returning users | ${fmt(now.returning)} | ${fmt(before.returning)} | ${delta(now.returning, before.returning)} |`);
+      out.push(`| Returning share | ${rate(now.returning, now.new + now.returning)} | ${rate(before.returning, before.new + before.returning)} | |`);
+      out.push(`| Engaged sessions by returning users | ${fmt(now.returningEngaged)} | ${fmt(before.returningEngaged)} | ${delta(now.returningEngaged, before.returningEngaged)} |`);
     }
 
     if (prop.paidClicks !== false) {

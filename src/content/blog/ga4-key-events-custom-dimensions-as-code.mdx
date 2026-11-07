@@ -1,0 +1,224 @@
+---
+draft: false
+title: "GA4 Key Events and Custom Dimensions as Code"
+snippet: "Create GA4 key events and custom dimensions on every property from GitHub Actions with the Admin API, and avoid the three credential mix-ups I hit on the way."
+description: "Create GA4 key events and custom dimensions on every property from GitHub Actions with the Admin API, and avoid the three credential mix-ups I hit on the way."
+image:
+  src: "/blog/thumbnails/ga4-key-events-custom-dimensions-as-code.jpg"
+  alt: "GA4 key events and custom dimensions managed as code from GitHub Actions"
+publishDate: "2026-11-07"
+lastModified: "2026-11-07"
+category: "Automation"
+author: "Luca Berton"
+tags:
+  - "Google Analytics 4"
+  - "GA4 Admin API"
+  - "GitHub Actions"
+  - "gcloud"
+  - "Service Accounts"
+  - "Automation"
+---
+
+Today I added the same click event to four of my sites: `affiliate_click`, sent
+whenever a reader follows a paid link, with two parameters, `company` (Amazon,
+Udemy, the Linux Foundation…) and `offer_id` (which book, course or exam).
+
+The code was the easy part. Then GA4 has to be told about it, on every
+property:
+
+- mark `affiliate_click` as a **key event**, or it never shows up as a
+  conversion;
+- register `company` and `offer_id` as **event-scoped custom dimensions**, or
+  you can count clicks but not tell a Kubernetes exam from a book.
+
+That is three settings, four properties, twelve forms in the GA4 admin, and
+custom dimensions are **not retroactive**: a click that arrives before the
+dimension exists keeps its parameters out of your reports for good. Forget one
+property and you find out weeks later. So I moved the settings into a file and
+let GitHub Actions apply them.
+
+## What the script does
+
+`scripts/ga4-ensure.mjs` reads a config, and for each property calls the
+[Google Analytics Admin API](https://developers.google.com/analytics/devguides/config/admin/v1):
+
+- `GET properties/{id}/keyEvents` and `GET properties/{id}/customDimensions` to
+  see what exists;
+- `POST` to the same endpoints for whatever is missing.
+
+It never edits or deletes anything, so running it twice is harmless, and a
+setting someone removes by hand comes back on the next run. The config is the
+whole contract:
+
+```json
+{
+  "properties": [
+    { "name": "lucaberton.com", "id": "123456789" },
+    { "name": "kubernetes.recipes", "id": "234567890" }
+  ],
+  "keyEvents": [
+    {
+      "eventName": "affiliate_click",
+      "countingMethod": "ONCE_PER_EVENT",
+      "defaultValue": { "numericValue": 1, "currencyCode": "USD" }
+    }
+  ],
+  "customDimensions": [
+    { "parameterName": "company", "displayName": "Affiliate Company", "scope": "EVENT" },
+    { "parameterName": "offer_id", "displayName": "Affiliate Offer ID", "scope": "EVENT" }
+  ]
+}
+```
+
+Adding a site is one line. Adding a parameter to track is one object.
+
+There are no dependencies: a service account authenticates by signing a JWT
+with its private key and trading it for an access token, and Node's
+`node:crypto` does the signing.
+
+```js
+const signer = createSign("RSA-SHA256");
+signer.update(`${header}.${claims}`);
+const jwt = `${header}.${claims}.${signer.sign(key.private_key, "base64url")}`;
+
+const res = await fetch("https://oauth2.googleapis.com/token", {
+  method: "POST",
+  headers: { "content-type": "application/x-www-form-urlencoded" },
+  body: new URLSearchParams({
+    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    assertion: jwt,
+  }),
+});
+```
+
+The scope in the claims is `analytics.readonly` for a dry run and
+`analytics.edit` when it should create things.
+
+## The workflow
+
+```yaml
+on:
+  pull_request:
+    paths: ["scripts/ga4-ensure.*", ".github/workflows/ga4-ensure.yml"]
+  push:
+    branches: [main]
+    paths: ["scripts/ga4-ensure.*", ".github/workflows/ga4-ensure.yml"]
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+```
+
+A pull request that changes the config runs `--dry-run`: it reads every
+property and lists what is missing, without writing. The merge to `main`
+applies it. The Monday run catches drift, and `gh workflow run` covers
+"now, please". The output goes to the job summary, one line per setting: ✓
+present, + created, ✗ with the reason.
+
+## Three credentials that look right and are not
+
+The script needs one secret, `GA4_ADMIN_KEY`. Getting the right thing into it
+took three tries, and each wrong one is a plausible thing to download from the
+Google Cloud Console, so this is the part worth reading.
+
+**1. An API key.** "APIs & Services → Credentials → Create API key" gives you a
+39-character string starting with `AIza`. An API key only identifies a
+project. It does not identify a user or a robot, so it cannot change anyone's
+GA4 settings. The script now says so: *not valid JSON (39 characters; a
+service-account key is about 2,300)*.
+
+**2. An OAuth client secret.** "Create OAuth client ID" downloads
+`client_secret_<number>-<hash>.apps.googleusercontent.com.json`, which starts
+with `{"web": …}`. That is for apps where a person signs in through a browser.
+A scheduled job has nobody to click "Allow".
+
+**3. A service-account key.** This is the one. It comes from **IAM & Admin →
+Service Accounts**, not from the Credentials page, and the JSON starts with
+`"type": "service_account"` and contains `client_email` and `private_key`.
+
+The script checks for those fields before calling Google, so a wrong secret
+fails with a sentence that names the fix instead of a 401.
+
+## Creating the service account with gcloud
+
+```sh
+gcloud config set project <project-id>
+gcloud services enable analyticsadmin.googleapis.com
+gcloud iam service-accounts create ga4-admin --display-name="GA4 admin (GitHub Actions)"
+SA="ga4-admin@<project-id>.iam.gserviceaccount.com"
+gcloud iam service-accounts keys create /tmp/ga4-key.json --iam-account="$SA" \
+  && gh secret set GA4_ADMIN_KEY -R <owner>/<repo> < /tmp/ga4-key.json
+rm -f /tmp/ga4-key.json
+```
+
+Two details tripped me up here.
+
+**Project ID, not name, not number.** `gcloud projects list` shows three
+columns, and only one of them works everywhere. The name (`ga4-admin`) gets you
+*does not have permission to access projects instance … (or it may not
+exist)*. The number is accepted by `gcloud config set project` and by
+`gcloud services enable`, and then `gcloud iam service-accounts create` refuses
+it:
+
+```text
+ERROR: (gcloud.iam.service-accounts.create) The value of ``core/project''
+property is set to project number.To use this command, set ``--project'' flag
+to PROJECT ID or set ``core/project'' property to PROJECT ID.
+```
+
+Use the `PROJECT_ID` column (`ga4-admin-123456`, with the suffix).
+
+**Chain the secret to the key.** Without the `&&`, a failed `keys create` is
+followed by `gh secret set` happily reporting ✓ for whatever was, or wasn't,
+in that file. Set the secret from the file with `<`, so the multi-line JSON
+arrives whole, and delete the file right after.
+
+## GA4 access is not Cloud IAM
+
+The service account now exists, and it still can't see a single GA4 property:
+Google Analytics keeps its own user list. In GA4, go to **Admin → Account
+access management → + → Add users**, paste the service account's email, choose
+**Editor**, and untick the notification. Doing it at account level covers every
+property in that account. Until you do, every property answers 403, and the
+script says what to do about it. This is the first run after creating the key:
+
+```text
+✗ lucaberton.com (123456789)  403 The caller does not have permission. Add
+  ga4-admin@<project-id>.iam.gserviceaccount.com to this property's GA4 account
+  (Admin > Account access management) as Editor.
+```
+
+A 403 here is good news, in a way: Google accepted the key and issued a token.
+Only the GA4 side is missing.
+
+After adding the email as Editor, the next run:
+
+```text
+✓ lucaberton.com (123456789)  key event affiliate_click
+✓ lucaberton.com (123456789)  dimension company
+✓ lucaberton.com (123456789)  dimension offer_id
+…
++ ansiblepilot.com (456789012)  key event affiliate_click created
+✓ ansiblepilot.com (456789012)  dimension company
+✓ ansiblepilot.com (456789012)  dimension offer_id
+4 properties: 1 created, 0 missing, 0 errors
+```
+
+Three properties were already right, because I had set them up by hand
+earlier the same day. The fourth was missing its key event, which is exactly
+the kind of gap this exists to catch.
+
+## Keys or no keys
+
+A service-account key is a long-lived password in a file. Mine sits only in
+a GitHub secret, the service account can do nothing outside GA4, and it has
+no role in the Cloud project. If your organization blocks key creation
+(*"Service account key creation is disabled"*), the keyless route is Workload
+Identity Federation: GitHub Actions presents its own OIDC token and Google
+trades it for short-lived credentials. More setup, nothing to leak.
+
+## What it buys
+
+Four sites now report the same event, with the same two dimensions, under the
+same names. A fifth site is one line in a JSON file. And when a dimension
+disappears, because someone tidied up the admin or a property was recreated,
+the next Monday run puts it back before the gap matters.

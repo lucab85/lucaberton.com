@@ -9,10 +9,13 @@
  * or an installed Chrome) and npx; runs lighthouse@13 one page at a time.
  *
  * FAIL (exit 1):
- * - accessibility, best practices or SEO under 90;
+ * - accessibility or SEO under 90;
  * - the LCP element is an image with loading="lazy" (ansiblebyexample.com's top
  *   banner: LCP 7-8 s, fixed in #161).
  * WARN (reported, never fails the run):
+ * - best practices under 90, with the audits that cost points. From GitHub's US
+ *   runners analytics and embeds set third-party cookies that a European visitor
+ *   only gets after consent, so this is a choice to review, not a regression;
  * - performance under 50;
  * - LCP element render delay over 1.5 s: the element waited for JavaScript, e.g. a
  *   fade-in from opacity 0 (openempower.com's hero, LCP 9.1 s, fixed in #93) or
@@ -82,8 +85,14 @@ for (const p of pages) {
   const row = { ...p, perf: c('performance'), a11y: c('accessibility'), best: c('best-practices'), seo: c('seo'),
     lcp: a['largest-contentful-paint']?.displayValue || '-', delay: Math.round(renderDelay), cls };
   rows.push(row);
-  for (const [k, name] of [['a11y', 'accessibility'], ['best', 'best practices'], ['seo', 'SEO']]) {
+  for (const [k, name] of [['a11y', 'accessibility'], ['seo', 'SEO']]) {
     if (row[k] < 90) fails.push(`${p.url}: ${name} ${row[k]} (budget 90)`);
+  }
+  if (row.best < 90) {
+    const lost = d.categories['best-practices'].auditRefs
+      .filter((r) => r.weight > 0 && a[r.id] && a[r.id].score !== null && a[r.id].score < 1)
+      .map((r) => r.id);
+    warns.push(`${p.url}: best practices ${row.best} (${lost.join(', ')})`);
   }
   if (/^<img\b/i.test(node) && /loading\s*=\s*["']?lazy/i.test(node)) fails.push(`${p.url}: the LCP image is lazy-loaded (${node.slice(0, 90)})`);
   if (row.perf < 50) warns.push(`${p.url}: performance ${row.perf}`);

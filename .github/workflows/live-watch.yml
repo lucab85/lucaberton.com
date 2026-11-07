@@ -95,6 +95,27 @@ jobs:
           fi
           echo "status=$status" >> "$GITHUB_OUTPUT"
 
+      - name: Paid links (check-offers)
+        id: offers
+        env:
+          ALL_SITES: ${{ github.event_name != 'workflow_run' }}
+        run: |
+          set +e
+          status=0
+          offers() { # name config
+            out=$(node scripts/check-offers.mjs --config "$2" 2>&1); rc=$?
+            [ $rc -ne 0 ] && status=1
+            echo "=== $1"; echo "$out"
+            { echo; echo "### Paid links: $1"; echo '```'; echo "$out" | head -40; echo '```'; } >> report.md
+          }
+          offers lucaberton.com scripts/check-offers.config.json
+          if [ "$ALL_SITES" = true ]; then
+            for cfg in scripts/live-watch/offers/*.json; do offers "$(basename "$cfg" .json)" "$cfg"; done
+          fi
+          # A PR that adds an offer can't find it live before it deploys: report only.
+          [ "${{ github.event_name }}" = pull_request ] && status=0
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+
       - name: Lighthouse budgets
         id: lighthouse
         run: |
@@ -114,7 +135,7 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
-          FAILED: ${{ steps.verify.outputs.status != '0' || steps.lighthouse.outputs.status != '0' }}
+          FAILED: ${{ steps.verify.outputs.status != '0' || steps.offers.outputs.status != '0' || steps.lighthouse.outputs.status != '0' }}
         run: |
           label=live-watch
           open=$(gh issue list --label "$label" --state open --json number -q '.[0].number')
@@ -127,7 +148,7 @@ jobs:
           fi
 
       - name: Result
-        if: steps.verify.outputs.status != '0' || steps.lighthouse.outputs.status != '0'
+        if: steps.verify.outputs.status != '0' || steps.offers.outputs.status != '0' || steps.lighthouse.outputs.status != '0'
         run: |
           echo "::error::A live site breaks a checked rule: see the summary and the live-watch issue"
           exit 1

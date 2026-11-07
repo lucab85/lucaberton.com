@@ -33,6 +33,7 @@ export const AFFILIATE_LINK_PATTERNS: RegExp[] = [
   /\btry\.flatpay\.com\//i,                       // Flatpay referral
   /[?&]sca_ref=/i,                                  // Pocket and other SCA links
   /[?&]refcode=/i,                                  // generic refcode
+  /[?&]REFERRALCODE=/,                              // Hostinger referral
 ];
 
 /**

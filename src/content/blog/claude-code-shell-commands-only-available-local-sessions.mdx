@@ -1,0 +1,102 @@
+---
+draft: false
+title: "Claude Code: Shell Commands Only Available in Local Sessions"
+seoTitle: "Fix 'Shell commands are only available in local sessions'"
+snippet: "Typed a ! command in the Claude app or on claude.ai/code and got 'Shell commands are only available in local sessions'? Shell mode needs a terminal. What works."
+description: "Why Claude Code says 'Shell commands are only available in local sessions' on mobile and web, and how to run the command anyway: ask Claude, SSH, or teleport."
+image:
+  src: "/blog/thumbnails/claude-code-shell-commands-only-available-local-sessions.jpg"
+  alt: "Claude Code message: Shell commands are only available in local sessions"
+publishDate: "2026-11-12"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "Claude Code"
+  - "Remote Control"
+  - "Troubleshooting"
+  - "Developer Tools"
+  - "Mobile"
+---
+
+My Claude Code sessions run on a Linux server, started with `claude remote-control`, and I steer them from the Claude app on my Android phone. I started a line with `!` to run a command myself, and the app answered, twice:
+
+```text
+Shell commands are only available in local sessions.
+```
+
+The short answer: **`!` is shell mode, and shell mode only works where you type into Claude Code itself: a terminal.** The Claude app and claude.ai/code are windows on a session. They can send it messages, but they can't run a shell command for you. The command didn't run. You can still get it run: ask Claude to run it, or type it in a terminal on the machine where the session lives.
+
+## What `!` does in Claude Code
+
+In the Claude Code prompt, a line that starts with `!` is [shell mode](https://code.claude.com/docs/en/interactive-mode.md#shell-mode-with-prefix):
+
+```bash
+! git status
+! npm test
+```
+
+The command runs directly, without going through Claude. Claude Code adds the command and its output to the conversation, and Claude then responds to that output. Claude doesn't have to interpret or approve the command.
+
+That is handy at the keyboard. But it is a feature of the terminal interface, where the `claude` process reads your input.
+
+## Why the app says no
+
+The Claude app is, in the words of the docs, ["a client for Claude Code sessions rather than a place where code runs"](https://code.claude.com/docs/en/mobile.md). From the **Code** tab you reach two kinds of sessions, and neither one is a local session from the app's point of view:
+
+| Session | Where it runs | Shell mode from the app or claude.ai/code |
+|---|---|---|
+| [Remote Control](https://code.claude.com/docs/en/remote-control.md) | On your computer or server; the app is a window on it | No |
+| [Cloud session](https://code.claude.com/docs/en/claude-code-on-the-web.md) | On cloud infrastructure, Anthropic-managed by default | No |
+| Claude Code in your terminal | On your machine, and you type into it | Yes |
+
+The message is not printed by Claude Code on the server. I searched the two Claude Code builds installed on my server (v2.1.296 and v2.1.316) for it, and the text isn't there. So it is the app that refuses the line. My session never received it: it didn't run as a command, and it didn't reach Claude as a message.
+
+The [Remote Control docs](https://code.claude.com/docs/en/remote-control.md#authorize-a-connector-again-from-your-shell) describe a slightly different behavior: a line you send from mobile or web that starts with `!` "goes to Claude as a message and doesn't run in shell mode." Either way, the result is the same: no shell mode from the app.
+
+This is one of a few terminal-only features. The docs also list [local-only commands](https://code.claude.com/docs/en/remote-control.md#limitations), such as `/plugin` and `/resume`, that don't work from mobile or web. Text-output commands such as `/compact`, `/clear`, `/context` and `/usage` do work. So do `/model` and `/effort` when you pass the value as an argument, for example `/model sonnet`.
+
+## Fix 1: ask Claude to run it
+
+From the app, just say it:
+
+```text
+Run git status and show me the output.
+```
+
+Claude runs the command with its own shell tool, and the output lands in the conversation, much like `!` would. The differences are worth knowing:
+
+- **It goes through Claude.** Claude decides how to run it. If the exact command matters, give it in backticks.
+- **Permissions apply.** Depending on the session's permission mode, Claude may ask you to approve the command. Shell mode never asks, because you typed it yourself.
+- **The sandbox applies.** If you've enabled [sandboxing](https://code.claude.com/docs/en/sandboxing.md), it covers the commands Claude runs. Commands you type in shell mode run outside it, unless your session is one of those listed under strict sandbox mode.
+
+For most things, such as `git status`, a test run or a log tail, this is all you need.
+
+## Fix 2: Remote Control session, use the terminal on that machine
+
+A Remote Control session runs on your own machine, so a terminal there can still do what the app can't. It depends on how you started the session:
+
+- **Started in an interactive terminal** (`claude --remote-control`, or `/remote-control` in an open session): go back to that terminal and type the `!` command there. The terminal and the app share one conversation, so the output shows up on your phone too. If that machine is a server, the docs suggest starting `claude` inside `tmux` or `screen`, so you can reattach over SSH and keep the session running when you disconnect.
+- **Started in server mode** (`claude remote-control`, my case): there is no Claude Code prompt to type into. SSH to the machine and run the command in a normal shell. If Claude needs the output, paste it into the conversation.
+
+The same SSH route is how you get things done that the app can't show. One example from the docs: when a claude.ai connector needs to be authorized again, you run `claude mcp login` with the connector's name in a terminal on that machine, then open the link on your phone.
+
+## Fix 3: cloud session, pull it into your terminal
+
+A cloud session has no terminal of yours attached. To get shell mode, continue it locally with [teleport](https://code.claude.com/docs/en/claude-code-on-the-web.md#continue-a-cloud-session-in-your-terminal):
+
+```bash
+claude --teleport              # pick the session from a list
+claude --teleport <session-id> # or resume one directly
+```
+
+Run it from a checkout of the same repository. Teleport asks you to stash uncommitted changes first, and the session's branch must be pushed. Inside the cloud session, `/teleport` prints the exact command for that session.
+
+The terminal gets its own copy of the session. New work there stays local and doesn't appear in the cloud session. To keep steering it from your phone afterwards, start `/remote-control` in the local session.
+
+## Which one to use
+
+- **Quick check while away from the desk:** ask Claude to run it (Fix 1).
+- **The exact command matters, or it needs your own shell:** use a terminal on that machine (Fix 2).
+- **Cloud session you want to take over yourself:** teleport it (Fix 3).
+
+If you haven't set up Remote Control yet, or it says it's disabled by your organization's policy, start with [Claude Code Remote Control: Enable & Fix Policy Error](/blog/claude-code-remote-control-enable-2026/).

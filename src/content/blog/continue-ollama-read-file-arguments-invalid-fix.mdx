@@ -1,0 +1,137 @@
+---
+draft: false
+title: "Fix Continue + Ollama 'read_file' Invalid Arguments Error"
+seoTitle: "Continue + Ollama: read_file Arguments Were Invalid (Fix)"
+snippet: "Continue with a local Ollama model says read_file failed because the arguments were invalid (reading 'trim')? The model left out the file name. Here's the fix."
+description: "Fix Continue's 'read_file failed because the arguments were invalid' with Ollama: why local models drop the file name, which model to use, retries and @file."
+image:
+  src: "/blog/thumbnails/continue-ollama-read-file-arguments-invalid-fix.jpg"
+  alt: "Fixing the read_file invalid arguments error in Continue with a local Ollama model"
+publishDate: "2026-11-12"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "Continue"
+  - "Ollama"
+  - "Local LLM"
+  - "Troubleshooting"
+  - "Agents"
+  - "VS Code"
+---
+
+You are in Continue's Agent mode with a local Ollama model, you ask for a change, and instead of reading your file the agent stops with this:
+
+```text
+read_file failed because the arguments were invalid, with the following message: Cannot read properties of undefined (reading 'trim')
+
+Please try something else or request further instructions.
+```
+
+The short answer: this is not an Ollama bug, and nothing is wrong with your file. **The model called Continue's `read_file` tool without the file name.** That is the classic weak spot of local models: tool calling is less reliable. In my setup it happens with `gemma4:e4b`, the small Gemma 4 model, which is fast but imprecise with tools.
+
+## The exact error messages this covers
+
+- `read_file failed because the arguments were invalid, with the following message: Cannot read properties of undefined (reading 'trim')`
+- The same message for other file tools, for example `create_new_file failed because the arguments were invalid, with the following message: Cannot read properties of undefined (reading 'trim')`, reported in [Continue issue #12131](https://github.com/continuedev/continue/issues/12131).
+- A sibling from the same issue: ``edit_existing_file failed with the message: `filepath` and `changes` arguments are required to edit an existing file.``
+
+All of them end with "Please try something else or request further instructions."
+
+## What the error actually means
+
+Continue's `read_file` tool has one required argument, `filepath` ([definition](https://github.com/continuedev/continue/blob/main/core/tools/definitions/readFile.ts)). Before it runs a tool, Continue prepares its arguments. For `read_file` that means resolving the path, and the first line of the [path resolver](https://github.com/continuedev/continue/blob/main/core/util/pathResolver.ts) is `inputPath.trim()`.
+
+If the model's tool call has no `filepath` (it sent empty arguments, or used another name such as `path`), the value is `undefined`, and JavaScript throws `Cannot read properties of undefined (reading 'trim')`. Continue catches it, marks the tool call as invalid instead of running it, and [hands the message back to the model](https://github.com/continuedev/continue/blob/main/gui/src/redux/thunks/preprocessToolCallArgs.ts) as the tool's output: "*tool* failed because the arguments were invalid, with the following message: … Please try something else or request further instructions."
+
+So the error tells you about the model's tool call, not about Ollama, the file or your workspace.
+
+## Fix it in this order
+
+### 1. Use a model that is good at tools for Agent mode
+
+In Continue's model dropdown, at the bottom of the chat panel, switch Agent mode to a stronger tool caller. On my machine that is a Qwen 27B model running on a Mac mini, instead of the fast Gemma 4 E4B. Qwen is much more reliable with tools (it passed all the tool tests I ran with kagent), and it is slower.
+
+Two checks for any model you try:
+
+- **Does it support tool calling at all?** `ollama show <model>` lists the model's capabilities; you want `tools` among them. Ollama's `/api/show` endpoint returns the same list as `capabilities` ([API reference](https://docs.ollama.com/api-reference/show-model-details)).
+- **Does Continue know it?** Continue detects tool support for most Ollama models by itself. With a custom model name, declare it in `config.yaml`, as [Continue's Ollama guide](https://docs.continue.dev/customize/model-providers/top-level/ollama) shows:
+
+```yaml
+models:
+  - name: Qwen 27B (Agent)
+    provider: ollama
+    model: <your-qwen-model-tag>
+    capabilities:
+      - tool_use
+```
+
+[Continue's capabilities page](https://docs.continue.dev/customize/deep-dives/model-capabilities) adds that `tool_use` only switches on native tool calling: "The model must actually support tools for this to work."
+
+### 2. Retry the request
+
+If Qwen also misses a tool call now and then, retry. Continue sends the error back to the model, and the model usually corrects itself on the next attempt.
+
+### 3. The most reliable way: no tools at all
+
+Use Chat (`Cmd+L`, or `Ctrl+L` on Windows and Linux) and attach the files yourself with `@`, for example `@main.py`, or select code and press `Cmd+L`. The model gets the content directly, without having to "read" it through a tool, and that works fine with Gemma too.
+
+For changes, select the code and press `Cmd+I` (`Ctrl+I`): you describe the change, the model rewrites the selection, and no tool call is involved.
+
+### 4. Give the model enough context
+
+Continue sends a context size (`num_ctx`) with every Ollama request: the `contextLength` from your `config.yaml`, otherwise the model's own `num_ctx` parameter, otherwise 8,192 tokens ([source](https://github.com/continuedev/continue/blob/main/core/llm/llms/Ollama.ts)). Ollama's own documentation recommends [at least 64,000 tokens](https://docs.ollama.com/context-length) for agents and coding tools.
+
+If your machine has the memory, raise it in Continue. Setting `OLLAMA_CONTEXT_LENGTH` on the server is not enough, because Continue sends its own value with each request:
+
+```yaml
+models:
+  - name: Qwen 27B (Agent)
+    provider: ollama
+    model: <your-qwen-model-tag>
+    capabilities:
+      - tool_use
+    defaultCompletionOptions:
+      contextLength: 32768
+```
+
+Then check `ollama ps`: the `CONTEXT` column shows what the model got, and `PROCESSOR` shows whether it still fits on the GPU. If it spills to the CPU, go back down.
+
+## My split with local models
+
+- **Chat and `Cmd+I` with `@file`** work well and fast, Gemma included.
+- **Agent mode** only with Qwen, and expect the occasional retry.
+- **For long, multi-file tasks**, Claude stays clearly better.
+
+## FAQ
+
+**Is this an Ollama bug?**
+No. Ollama returns what the model generated. The message comes from Continue checking the tool call before running it.
+
+**Why does it talk about `trim`?**
+Because the first thing Continue does with the file path is `inputPath.trim()`. With no path in the tool call, there is nothing to trim.
+
+**Did it change my files?**
+No. The tool call is marked as failed instead of running, and `read_file` only reads anyway.
+
+**Will a bigger context fix it with Gemma 4 E4B?**
+It may help, but it doesn't make a small model a reliable tool caller. For tool-heavy work, use the stronger model, or skip tools with `@file`.
+
+## Key takeaways
+
+- "read_file failed because the arguments were invalid … (reading 'trim')" means the model called `read_file` without `filepath`.
+- It is a tool-calling problem of the model. Small local models such as `gemma4:e4b` hit it most.
+- Fix it in this order: a stronger tool-calling model for Agent mode (Qwen in my case), a retry, or no tools at all: Chat and `Cmd+I` with `@file`.
+- Give Agent mode a bigger `contextLength` in Continue if your memory allows.
+
+## Sources
+
+- Continue source: [`preprocessToolCallArgs.ts`](https://github.com/continuedev/continue/blob/main/gui/src/redux/thunks/preprocessToolCallArgs.ts), [`readFile.ts`](https://github.com/continuedev/continue/blob/main/core/tools/definitions/readFile.ts), [`pathResolver.ts`](https://github.com/continuedev/continue/blob/main/core/util/pathResolver.ts), [`Ollama.ts`](https://github.com/continuedev/continue/blob/main/core/llm/llms/Ollama.ts)
+- Continue docs: [Ollama](https://docs.continue.dev/customize/model-providers/top-level/ollama), [model capabilities](https://docs.continue.dev/customize/deep-dives/model-capabilities)
+- Ollama docs: [context length](https://docs.ollama.com/context-length), [show model details](https://docs.ollama.com/api-reference/show-model-details)
+- [Continue issue #12131: Qwen 3.5 and Gemma 4 can't call tools](https://github.com/continuedev/continue/issues/12131)
+
+## Related
+
+- [Local LLM with Ollama: AnythingLLM, Open WebUI and RAG](/blog/local-llm-ollama-anythingllm-open-webui-rag/)
+- [vLLM vs TGI vs Ollama 2026: LLM Inference Comparison](/blog/vllm-vs-tgi-vs-ollama-2026/)
+- [Granite Guardian on Ollama: Local LLM Guardrails](/blog/granite-guardian-ollama-local-llm-guardrails/)

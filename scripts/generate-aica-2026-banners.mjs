@@ -19,7 +19,7 @@
  *   aica-2026-share.png  the official share image, aica-summit.com/assets/media/aica-share.png
  *
  * DISCOUNT: the headline shows it only when set. The code's value isn't
- * published anywhere; set it (e.g. '20% OFF') once the organisers confirm it.
+ * published on the event pages; Luca confirmed 20% on Nov 13, 2026.
  *
  * Output, in static/promo/aica-2026/ (served at lucaberton.com/promo/...):
  *   wide.webp / wide.jpg     1200x300 CSS strip at 2x (2400x600 px)
@@ -41,7 +41,7 @@ fs.mkdirSync(OUT, { recursive: true });
 for (const f of fs.readdirSync(OUT)) fs.rmSync(path.join(OUT, f)); // drop sizes this version no longer makes
 
 const CODE = 'AICA20@';
-const DISCOUNT = null; // e.g. '20% OFF', once confirmed
+const DISCOUNT = '20% OFF'; // null shows "Save on your ticket" instead
 const PAPER = '#f7f7f7';
 const INK = '#0b0b0b';
 const ORANGE = '#e54f17';

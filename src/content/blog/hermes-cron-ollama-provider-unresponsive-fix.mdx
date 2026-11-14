@@ -40,7 +40,21 @@ API call #1: in=13460 out=119 latency=148.7s
 
 The answer was 119 tokens. But the request carried **13,460 tokens of input**: the system prompt, the memory and the tool definitions, before my question. On a local model, that prompt has to be processed on every fresh turn, and it took two and a half minutes for a two-sentence reply.
 
-A cron job is not one turn. It is dozens of tool calls, each one sending a growing history. At that speed a job that should take minutes takes hours, and the "5 stale attempts" check fires before it finishes. This is my reading of the log, not a measured profile, so I treat it as the first thing to test rather than a closed case.
+A cron job is not one turn. It is dozens of tool calls, each one sending a growing history. At that speed a job that should take minutes takes hours, and the "5 stale attempts" check fires before it finishes. This is my reading of the log, not a measured profile, so I treat it as the first thing to test rather than a closed case. The dashboard below shows the effect on the server.
+
+## The Grafana dashboard says the same thing
+
+My homelab dashboard shows the Mac mini over the last 12 hours:
+
+![Grafana homelab dashboard: GPU busy 99%, one model of 31.3 GiB in GPU memory, Ollama latency p50 13.5 minutes and p95 15 minutes](/blog/hermes-cron-ollama-provider-unresponsive-fix/grafana-gpu-saturated.jpg)
+
+- **GPU busy: 99%.** The GPU line in the "Busy because it is producing?" panel sits at the top for hours, so the model is working, not idle.
+- **One model in GPU memory:** `qwen3.8-hermes:latest`, 31.3 GiB.
+- **Ollama requests (5 min): 6.** Several requests were in flight at once on one server.
+- **Ollama latency over one hour: p50 13.5 minutes, p95 15 minutes.** A single request takes more than ten minutes.
+- **CPU busy: 5.98%, memory free: 45%, disk free: 224 GiB.** Nothing else on the Mac is short of resources.
+
+So the model is not stuck or broken. The GPU is saturated with long requests, and new ones queue behind them. That fits the 5 stale attempts: a request that waits 13 minutes gives Hermes nothing to read in time.
 
 ## Fix 1: pause the jobs from the terminal
 

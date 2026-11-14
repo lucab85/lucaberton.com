@@ -1,0 +1,102 @@
+---
+draft: false
+title: "MCP Server Behind Cloudflare Access: Fix 403 Forbidden"
+seoTitle: "MCP Server Behind Cloudflare Access Returns 403: Fix"
+snippet: "Your agent's MCP server returns HTTP 403 with a Cloudflare Access page, and 'retrying over SSE' fails too? It's Access, not the transport. Use a service token."
+description: "Fix 'Streamable HTTP rejected the initial connect (HTTP 403 ... Cloudflare Access)' for an MCP server: service tokens, Service Auth, headers, a private route."
+image:
+  src: "/blog/thumbnails/mcp-server-cloudflare-access-403-forbidden.jpg"
+  alt: "Fixing a 403 Forbidden from Cloudflare Access in front of an MCP server"
+publishDate: "2026-11-14"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "MCP"
+  - "Cloudflare"
+  - "Hermes Agent"
+  - "Troubleshooting"
+  - "Security"
+---
+
+I publish a self-hosted MCP server on its own hostname behind Cloudflare Access, so nobody reaches it without logging in. An agent on another machine, Hermes Agent, was configured to use it, and its log filled up with this:
+
+```text
+INFO httpx2: HTTP Request: POST https://mcp.example.com/mcp "HTTP/1.1 403 Forbidden"
+WARNING tools.mcp_tool: MCP server 'tools': Streamable HTTP rejected the initial connect (Server returned an error response (HTTP 403 from POST https://mcp.example.com/mcp: <!DOCTYPE html><html><head>…<title>Error ・ Cloudflare Access</title>…)) — retrying over SSE. If this connects, set `transport: sse` for this server in config.yaml to skip the failed attempt on future startups.
+INFO httpx2: HTTP Request: GET https://mcp.example.com/mcp "HTTP/1.1 403 Forbidden"
+```
+
+Every few minutes, the same burst of retries, the same 403.
+
+The short answer: **the MCP server never saw these requests.** The HTML page with the title "Error ・ Cloudflare Access" comes from Cloudflare, which rejected the agent because it had no Access credentials. The SSE retry, the `GET`, got the same 403, so `transport: sse` would change nothing. The transport isn't the problem; the missing credentials are.
+
+## Why Access says no
+
+Cloudflare Access protects a hostname with policies, usually "allow these people after they log in". A person in a browser gets the login page. An agent has no browser and no login, so its requests are refused.
+
+For machine clients, Access has [service tokens](https://developers.cloudflare.com/cloudflare-one/identity/service-tokens/): a client ID and secret that the client sends as two headers. Two details from Cloudflare's docs matter here:
+
+- The Access application needs a policy with the **Service Auth** action for the token. With an ordinary Allow policy, "Access will prompt for an identity provider login", which an agent can't do.
+- With the **strict service token authentication** setting, a failed request gets a 401 or 403 instead of a redirect to the login page. Organizations created on or after October 5, 2026 have it on by default.
+
+## Fix 1: send a service token
+
+1. In Cloudflare Zero Trust, create a service token and copy the client ID and secret.
+2. In the Access application that protects the MCP hostname, add a policy with the **Service Auth** action that includes that token.
+3. Send both headers from the agent.
+
+In Hermes Agent, `mcp_servers` entries take a `headers` mapping, and values can reference variables from `~/.hermes/.env` ([MCP config reference](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/reference/mcp-config-reference.md)), which keeps the secret out of `config.yaml`:
+
+```yaml
+# ~/.hermes/config.yaml
+mcp_servers:
+  tools:
+    url: "https://mcp.example.com/mcp"
+    headers:
+      CF-Access-Client-Id: "${CF_ACCESS_CLIENT_ID}"
+      CF-Access-Client-Secret: "${CF_ACCESS_CLIENT_SECRET}"
+```
+
+```bash
+# ~/.hermes/.env
+CF_ACCESS_CLIENT_ID=<client id>
+CF_ACCESS_CLIENT_SECRET=<client secret>
+```
+
+If a variable is missing from `.env`, Hermes doesn't send the literal `${...}`: it refuses to connect and names the variable in the server's status.
+
+Test the token with `curl` before restarting the agent:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://mcp.example.com/mcp \
+  -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+  -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
+```
+
+Without the headers you get the 403. With a working token the request reaches the MCP server, which may still reject an empty `POST` in its own way: anything other than the Cloudflare Access page means Access let you through.
+
+## Fix 2: don't go through the public hostname at all
+
+If the agent runs on the same machine as the MCP server, or on the same private network, it doesn't need the public hostname. On the server that hosts mine, the coding agent that runs there connects to the MCP server on loopback (`http://127.0.0.1:<port>/mcp`), and Access only protects the public route. A VPN or an SSH tunnel does the same from another machine.
+
+One rule if you do this: if the MCP server itself has no authentication, keep its port bound to `127.0.0.1` or the private network, never to `0.0.0.0`. Cloudflare Access was its only lock on the public side.
+
+## Fix 3: turn it off until it's fixed
+
+If the agent doesn't need that server right now, stop the reconnect noise:
+
+```yaml
+mcp_servers:
+  tools:
+    url: "https://mcp.example.com/mcp"
+    enabled: false
+```
+
+`enabled: false` skips the server entirely; set it back to `true` once the token works.
+
+## Related
+
+- [Hermes + Ollama: "Provider has been unresponsive"](/blog/hermes-agent-ollama-provider-unresponsive-stale-stream/)
+- [Hermes cron jobs: "the AI model service did not respond in time"](/blog/hermes-agent-cron-did-not-respond-in-time-fallback/)
+- [Hermes Agent troubleshooting: provider and gateway errors](/blog/hermes-agent-troubleshooting/)
+- [Claude Code enterprise setup: authentication and MCP](/blog/claude-code-enterprise-setup-authentication-mcp-guide/)

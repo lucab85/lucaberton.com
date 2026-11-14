@@ -1,0 +1,134 @@
+---
+draft: false
+title: "Hermes + Ollama: 'Provider Has Been Unresponsive' Fix"
+seoTitle: "Hermes Agent + Ollama: Provider Unresponsive, Stale Streams"
+snippet: "Hermes Agent with a local Ollama model says 'Provider has been unresponsive' after 5 stale attempts? The model is too slow, queued or wedged. Here's the fix."
+description: "Fix Hermes Agent's 'Provider has been unresponsive' and 'No response from provider for 900s' with Ollama: what the stale-stream limits mean and what to change."
+image:
+  src: "/blog/thumbnails/hermes-agent-ollama-provider-unresponsive-stale-stream.jpg"
+  alt: "Fixing Hermes Agent's provider unresponsive error with a local Ollama model"
+publishDate: "2026-11-14"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "Hermes Agent"
+  - "Ollama"
+  - "Local LLM"
+  - "Troubleshooting"
+  - "Agents"
+---
+
+I run Hermes Agent on an always-on Mac mini, with a local model served by Ollama on the same machine. Night after night my scheduled jobs failed, and chats with the agent ended the same way. First a series of warnings:
+
+```text
+⚠️ No response from provider for 900s (model: <local-model>, context: ~54,513 tokens). Reconnecting...
+```
+
+Then, after the fifth one:
+
+```text
+❌ custom rejected the request and retrying won't help: Provider has been unresponsive (no response received) for 5 consecutive stale attempts — aborting this call to avoid an indefinite stall. Switch models or start a new session, then retry.
+```
+
+In `~/.hermes/logs/agent.log` the same story looks like this:
+
+```text
+WARNING agent.chat_completion_helpers: Stream stale for 900s (threshold 900s) — no chunks received. model=<local-model> context=~38,770 tokens. Killing connection.
+ERROR agent.chat_completion_helpers: Streaming failed before delivery: Connection error.
+httpx.RemoteProtocolError: Server disconnected without sending a response.
+openai.APIConnectionError: Connection error.
+```
+
+The short answer: **Hermes waited 15 minutes for the first token, five times in a row, and then gave up on purpose.** The connection errors are Hermes killing the silent stream, not the cause. The cause is on the model side: Ollama is down, wedged, busy with another request, or simply too slow for the size of the prompt.
+
+## What the messages mean
+
+Hermes has a stale-stream detector: if a streamed response produces no chunks for too long, it kills the connection and retries. The limits are documented in the [configuration reference](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/configuration.md):
+
+- **Remote providers:** 180 seconds by default (`HERMES_STREAM_STALE_TIMEOUT`).
+- **Local providers** (Ollama, llama.cpp, oMLX): a 900-second ceiling, because a local model can stay silent for minutes while it reads a long prompt. You set it with `agent.local_stream_stale_timeout` in `config.yaml` or `HERMES_LOCAL_STREAM_STALE_TIMEOUT`. That's the "900s" in the messages.
+- **The circuit breaker:** after 5 consecutive stale kills with no completed response, Hermes aborts every call immediately instead of waiting another 15 minutes each time. That's "retrying won't help". The count is `HERMES_STREAM_STALE_GIVEUP` (default 5, `0` disables it). It resets on any completed response, a `/model` switch or a fallback activation.
+
+The [FAQ](https://hermes-agent.nousresearch.com/docs/reference/faq) still says that stale stream detection is disabled for local endpoints. My logs, and the configuration reference, show the 900-second ceiling: check your version's logs rather than the FAQ.
+
+## What was going on in my case
+
+The agent log had the numbers:
+
+- One call that did complete took **2,673 seconds** for 15,525 input tokens, 93% of them already cached, and 358 output tokens: 44 minutes for a short answer.
+- Other calls, with 38,770 and 54,513 tokens of context, never produced a first token within 900 seconds.
+- A delegated subagent was "waiting for stream response (725s, first_chunk)".
+- Nightly jobs, a subagent and a chat were all sending requests to the same model.
+
+That last point matters. [Ollama's FAQ](https://docs.ollama.com/faq) says each model processes one request at a time by default (`OLLAMA_NUM_PARALLEL`, default 1) and queues the others in order. A request waiting behind a 44-minute call gets no tokens either, and the stale detector can't tell a queue from a hang. So one slow call made every other session stale.
+
+## Step 1: check that Ollama itself answers
+
+Run these on the machine that runs Ollama:
+
+```bash
+ollama ps                                   # which models are loaded, and on CPU or GPU
+ollama list                                 # which models are installed
+curl -s http://127.0.0.1:11434/api/tags     # should return JSON
+```
+
+If `curl` fails, Ollama isn't running or crashed: restart it and look at its own log before touching Hermes. If it answers, time a small request on the same OpenAI-compatible endpoint Hermes uses:
+
+```bash
+time curl --max-time 600 http://127.0.0.1:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "<local-model>", "messages": [{"role": "user", "content": "Say hello"}], "stream": false}'
+```
+
+Do it while no Hermes job is running. If even this takes minutes, or hangs until you restart Ollama, the problem is the model or the server, not Hermes.
+
+## Step 2: make each request smaller and lonelier
+
+If Ollama answers but Hermes keeps timing out, the model is too slow for what Hermes sends it. Hermes sends its system prompt and every enabled tool's schema on every call, and the [Ollama guide](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/guides/local-ollama-setup.md) calls this prefill the main cost on slower hardware. What helps, from that guide and from my case:
+
+- **One request at a time.** Don't schedule cron jobs on top of each other or on top of the hours you chat with the agent, and avoid delegating to subagents on a single local model: every extra session waits in Ollama's queue.
+- **Trim the fixed prompt.** `hermes prompt-size` shows the byte breakdown of the system prompt and tool schemas. Disable the toolsets a job doesn't need with `hermes tools`, and remove unused skills with `hermes skills`.
+- **Keep the model loaded.** Ollama unloads an idle model after 5 minutes, so the next call pays a full reload first. Set `OLLAMA_KEEP_ALIVE=24h` in Ollama's environment.
+- **Make the context sizes match.** Hermes needs at least 64K tokens of context for agentic work, and Ollama's default is much smaller. Raise it with `OLLAMA_CONTEXT_LENGTH` or a Modelfile with `PARAMETER num_ctx`, and set the same value as Hermes' context length.
+- **Use a faster model.** A smaller model or a lighter quantization changes the prefill time more than any setting.
+
+## Step 3: if it's slow but working, raise the ceiling
+
+When the direct test shows the model does finish, just slower than 15 minutes for Hermes' prompt, you can give it more time:
+
+```yaml
+# ~/.hermes/config.yaml
+agent:
+  local_stream_stale_timeout: 1800
+```
+
+The cost: a server that really is wedged now takes 30 minutes to detect instead of 15, and five of them take two and a half hours. Fix the speed first, then raise the ceiling only as far as you need.
+
+## Step 4: give the agent somewhere else to go
+
+A local model will have bad nights. A fallback chain lets Hermes move to another provider instead of failing:
+
+```bash
+hermes fallback add      # pick a provider and model, same picker as `hermes model`
+hermes fallback list
+hermes fallback check    # verifies the chain
+```
+
+It ends up in `config.yaml` as a `fallback_providers` list. Scheduled jobs inherit it unless they are pinned to their own model: see [Hermes cron jobs: "did not respond in time"](/blog/hermes-agent-cron-did-not-respond-in-time-fallback/).
+
+## Side note: "bind [127.0.0.1]:11434: Address already in use"
+
+If you reach the Ollama box from a laptop through an SSH tunnel, this message means something on the laptop already listens on port 11434: a local Ollama, or an old tunnel. Find it with `lsof -nP -iTCP:11434 -sTCP:LISTEN`, or use another local port:
+
+```bash
+ssh -N -L 11435:127.0.0.1:11434 user@ollama-host   # the laptop uses http://127.0.0.1:11435
+```
+
+The agent on the Ollama machine keeps using 11434. Only the laptop's side of the tunnel changes.
+
+## Related
+
+- [Hermes Agent troubleshooting: provider and gateway errors](/blog/hermes-agent-troubleshooting/)
+- [Hermes cron jobs: "the AI model service did not respond in time"](/blog/hermes-agent-cron-did-not-respond-in-time-fallback/)
+- [MCP server behind Cloudflare Access: fix 403 Forbidden](/blog/mcp-server-cloudflare-access-403-forbidden/)
+- [What is Hermes Agent?](/blog/what-is-hermes-agent-nous-research/)

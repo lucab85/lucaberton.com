@@ -1,0 +1,109 @@
+---
+draft: false
+title: "Hermes Cron: 'AI Model Service Did Not Respond in Time'"
+seoTitle: "Hermes Cron Failed: Model Did Not Respond, No Backup"
+snippet: "Hermes cron job failed: 'the AI model service did not respond in time. No backup provider is configured'? Add a fallback chain, unpin the job, or pause it."
+description: "Fix Hermes Agent cron failures: 'did not respond in time', 'No backup provider is configured' and 'failed 19 runs in a row'. Fallbacks, cron.model, pausing."
+image:
+  src: "/blog/thumbnails/hermes-agent-cron-did-not-respond-in-time-fallback.jpg"
+  alt: "Fixing Hermes Agent cron jobs that fail because the model did not respond in time"
+publishDate: "2026-11-14"
+author: "Luca Berton"
+category: "AI"
+tags:
+  - "Hermes Agent"
+  - "Cron"
+  - "Local LLM"
+  - "Troubleshooting"
+  - "Agents"
+---
+
+My Hermes Agent runs a couple of nightly jobs on a local model. One morning the chat had two of these, one per job:
+
+```text
+Cronjob Response: <job name>
+(job_id: <job_id>)
+-------------
+
+⚠️ Cron '<job name>' failed: the AI model service did not respond in time. No backup provider is configured — add one with `hermes fallback add`, or set a cron-wide default via `cron.model` + `cron.model_provider` in config.yaml. It will run again at its next scheduled time; `hermes cron run <job_id>` tries now. Run log: `hermes cron runs <job_id>`.
+This job has failed 19 runs in a row — worth a review. Fix its prompt/config, or pause it with `hermes cron pause <job name>` (resume/remove also available) to stop the noise.
+```
+
+The short answer: **the job's model never answered, and Hermes had nowhere else to send it.** The message lists the three ways out itself: a fallback provider, a different model for cron jobs, or pausing the job until the model works again.
+
+## What the message means
+
+- **"did not respond in time":** the job's agent waited for the model and got nothing. Cron jobs stream like chats, so the same stale-stream limits apply: 180 seconds of silence for a remote provider, a 900-second ceiling for a local one. In my case it was the local model being too slow and too busy. The details are in [Hermes + Ollama: "Provider has been unresponsive"](/blog/hermes-agent-ollama-provider-unresponsive-stale-stream/).
+- **"No backup provider is configured":** Hermes prints this when there is no fallback chain. With a chain, it says "No backup provider succeeded either" instead (you can see both in [`cron/scheduler.py`](https://github.com/NousResearch/hermes-agent/blob/main/cron/scheduler.py)).
+- **"failed 19 runs in a row":** Hermes counts consecutive failures of a recurring job and adds the nudge. For a nightly job, 19 runs in a row is almost three weeks of nothing. That's worth noticing sooner than I did.
+
+## Step 1: read the run log and retry by hand
+
+```bash
+hermes cron runs <job_id>    # what happened in each run
+hermes cron run <job_id>     # run it now instead of waiting for the schedule
+```
+
+If the manual run fails the same way, fix the model first. With a local Ollama model, check that it answers and how fast before changing anything in Hermes (see [the Ollama article](/blog/hermes-agent-ollama-provider-unresponsive-stale-stream/)).
+
+## Step 2: add a fallback provider
+
+A fallback chain is the fix the message suggests first:
+
+```bash
+hermes fallback add      # same picker as `hermes model`
+hermes fallback list
+hermes fallback check    # verifies every entry
+```
+
+It is saved in `~/.hermes/config.yaml`:
+
+```yaml
+fallback_providers:
+  - provider: <provider>
+    model: <model>
+```
+
+Each entry needs both `provider` and `model`, or Hermes ignores it ([Fallback Providers](https://hermes-agent.nousresearch.com/docs/user-guide/features/fallback-providers)).
+
+## Step 3: check whether the job is pinned
+
+This one surprised me. Per the same page:
+
+- **Unpinned cron jobs** inherit the `fallback_providers` chain.
+- **A job pinned to its own provider, model or endpoint does not.** If that route fails, the run fails, fallback or not.
+
+To give all cron jobs a different model and keep the fallback, leave the jobs unpinned and set the cron-wide default the message mentions:
+
+```yaml
+cron:
+  model: <model>
+  model_provider: <provider>
+```
+
+To find and clear a per-job override:
+
+```bash
+hermes cron list
+hermes cron edit <job_id>
+```
+
+## Step 4: stop the noise while you fix it
+
+If the model will be down for a while, pause the job instead of collecting a failure every night:
+
+```bash
+hermes cron pause "<job name>"
+```
+
+`resume` and `remove` work the same way.
+
+## In my case
+
+The jobs were not broken; the model under them was. Two nightly jobs, a chat and a delegated subagent were all queued on one local model that needed up to 44 minutes for a single answer. So most of the fix is on the model side: one job at a time, a smaller prompt, and a fallback provider for the nights the local model can't keep up.
+
+## Related
+
+- [Hermes + Ollama: "Provider has been unresponsive"](/blog/hermes-agent-ollama-provider-unresponsive-stale-stream/)
+- [Hermes Agent troubleshooting: provider and gateway errors](/blog/hermes-agent-troubleshooting/)
+- [MCP server behind Cloudflare Access: fix 403 Forbidden](/blog/mcp-server-cloudflare-access-403-forbidden/)

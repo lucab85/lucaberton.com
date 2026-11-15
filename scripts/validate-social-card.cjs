@@ -14,17 +14,26 @@
  *   - twitter:card is missing or not summary_large_image
  *   - twitter:image missing
  *   - og:title / og:description / og:type missing
+ *   - the tags are not written the way WhatsApp's parser reads them:
+ *     <meta property="og:image" content="https://..."> inside <head>, with
+ *     quoted values. minify-html once shipped
+ *     <meta content=https://... property=og:image>: the generic checks above
+ *     passed, Facebook rendered the card, WhatsApp showed no image
+ *     (scripts/minify-html.cjs now quotes them; this keeps it that way)
+ *   - og:image heavier than 600 KB (warn above 300 KB): WhatsApp drops it
+ *   - og:image is SVG (no preview client renders it)
+ *   - og:image:width / og:image:height disagree with the real image (warn)
  *
  * Runs against the built site in ./public (Astro copies static/ -> public/,
  * so a real source asset that is missing from the build output is caught too).
  * Exits 1 on any FAIL-level check so it can gate the CI deploy.
  *
- * Usage:  node scripts/validate-social-card.cjs            (homepage contract — CI default)
+ * Usage:  node scripts/validate-social-card.cjs            (shared pages — CI default)
  *         node scripts/validate-social-card.cjs --all      (audit every indexable page)
+ *         node scripts/validate-social-card.cjs --dir out  (another build directory)
  *
- * Default scope is the homepage only. That is deliberate: the homepage is the
- * URL that gets pasted into WhatsApp/iMessage/LinkedIn, and it is the page
- * whose OG contract regressed. Blog posts currently have no OG tags (only the
+ * Default scope is the pages that get pasted into WhatsApp/iMessage/LinkedIn
+ * (SHARE_PAGES below: home, speaking, services, partner, media kit, about). Blog posts currently have no OG tags (only the
  * homepage Layout renders <SEO>); adding OG to BlogLayout is a separate task.
  * Run --all to audit the whole site once that lands — until then --all will
  * report every blog post as missing OG (expected, not a CI gate).
@@ -38,10 +47,25 @@ const fs = require("fs");
 const path = require("path");
 
 const ROOT = path.join(__dirname, "..");
-const PUBLIC_DIR = path.join(ROOT, "public");
+const dirIndex = process.argv.indexOf("--dir");
+const PUBLIC_DIR = dirIndex >= 0 ? path.resolve(process.argv[dirIndex + 1]) : path.join(ROOT, "public");
 
-// Homepage contract by default; --all audits every indexable page.
-const HOME_ONLY = !process.argv.includes("--all");
+// The pages people share by default; --all audits every indexable page.
+const ALL_PAGES = process.argv.includes("--all");
+const SHARE_PAGES = ["", "speaking/", "services/", "partner-with-luca/", "media-kit/", "about/"];
+
+const MAX_IMAGE_BYTES = 600 * 1024;
+const WARN_IMAGE_BYTES = 300 * 1024;
+// Tags whose form is checked (see the header): the ones a preview is built from.
+const FORM_KEYS = [
+  ["og:title", "property"],
+  ["og:description", "property"],
+  ["og:image", "property"],
+  ["og:url", "property"],
+  ["og:type", "property"],
+  ["twitter:card", "name"],
+  ["twitter:image", "name"],
+];
 
 const results = [];
 const record = (level, check, detail = "") =>
@@ -77,6 +101,44 @@ function findMeta(html, key, keyAttr) {
 function metaContent(html, key, keyAttr) {
   const tag = findMeta(html, key, keyAttr);
   return tag ? decodeEntities(getAttr(tag, "content") || "") : null;
+}
+
+// --- the form WhatsApp reads ---------------------------------------------------
+// Every attribute of a tag, in order, with whether its value was quoted.
+const ATTR_RE = /([^\s"'=<>\/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+function parseAttrs(tag) {
+  const inner = tag.replace(/^<meta\b/i, "").replace(/\/?>$/, "");
+  return [...inner.matchAll(ATTR_RE)].map((m) => ({
+    name: m[1].toLowerCase(),
+    value: m[2] ?? m[3] ?? m[4] ?? null,
+    quoted: m[2] !== undefined || m[3] !== undefined,
+  }));
+}
+function checkTagForm(html, rel) {
+  const headEnd = (() => {
+    const i = html.search(/<\/head\s*>|<body\b/i);
+    return i < 0 ? html.length : i;
+  })();
+  for (const [key, keyAttr] of FORM_KEYS) {
+    const tag = findMeta(html, key, keyAttr);
+    if (!tag) continue; // missing tags are reported by the checks below
+    const attrs = parseAttrs(tag);
+    const k = attrs.find((a) => a.name === keyAttr);
+    const c = attrs.find((a) => a.name === "content");
+    const problems = [];
+    if (html.indexOf(tag) >= headEnd) problems.push("outside <head>");
+    if (k && !k.quoted) problems.push(`${keyAttr} not quoted`);
+    if (c && !c.quoted) problems.push("content not quoted");
+    if (problems.length) {
+      record(
+        "FAIL",
+        `${key} tag WhatsApp cannot read (${rel})`,
+        `${problems.join(", ")}: ${tag.slice(0, 120)} — expected <meta ${keyAttr}="${key}" content="...">`
+      );
+    } else if (c && k && attrs.indexOf(c) < attrs.indexOf(k)) {
+      record("WARN", `${key}: content before ${keyAttr} (${rel})`, "some preview parsers expect the key first");
+    }
+  }
 }
 
 // --- JPEG/PNG dimension reader (no deps) ------------------------------------
@@ -140,9 +202,12 @@ function main() {
   }
 
   let pages = walk(PUBLIC_DIR);
-  if (HOME_ONLY) {
-    const home = path.join(PUBLIC_DIR, "index.html");
-    pages = fs.existsSync(home) ? [home] : [];
+  if (!ALL_PAGES) {
+    pages = SHARE_PAGES.map((p) => path.join(PUBLIC_DIR, p, "index.html")).filter((p) => {
+      if (fs.existsSync(p)) return true;
+      record("FAIL", `shared page missing from build (/${path.relative(PUBLIC_DIR, path.dirname(p))})`, p);
+      return false;
+    });
   }
 
   let checked = 0;
@@ -154,6 +219,8 @@ function main() {
     const robots = robotsTag ? getAttr(robotsTag, "content") || "" : "";
     if (/noindex/i.test(robots)) continue;
     checked++;
+
+    checkTagForm(html, rel);
 
     const ogImage = metaContent(html, "og:image", "property");
     const ogImageUrl = metaContent(html, "og:image:url", "property") || ogImage;
@@ -210,15 +277,25 @@ function main() {
       record("FAIL", `og:image is 0 bytes (${rel})`, ogImageUrl);
       continue;
     }
+    const kb = Math.round(stat.size / 1024);
+    if (stat.size > MAX_IMAGE_BYTES) {
+      record("FAIL", `og:image too heavy (${rel})`, `${ogImageUrl} is ${kb} KB; WhatsApp drops it, keep it under 300 KB`);
+    } else if (stat.size > WARN_IMAGE_BYTES) {
+      record("WARN", `og:image heavy (${rel})`, `${ogImageUrl} is ${kb} KB; WhatsApp is reliable under 300 KB`);
+    }
+    if (/\.svg$/i.test(imgRel)) {
+      record("FAIL", `og:image is SVG (${rel})`, `${ogImageUrl}: link previews need JPEG or PNG`);
+      continue;
+    }
     const dim = imageSize(fs.readFileSync(imgAbs));
-    // SVG has no raster dimensions — presence is enough; skip the size gate.
     if (!dim) {
-      if (/\.svg$/i.test(imgRel)) {
-        record("PASS", `og:image ok (${rel})`, `${ogImageUrl} (SVG, dimensions N/A)`);
-      } else {
-        record("WARN", `og:image dimensions unreadable (${rel})`, `${ogImageUrl} (${stat.size} bytes)`);
-      }
+      record("WARN", `og:image dimensions unreadable (${rel})`, `${ogImageUrl} (${stat.size} bytes)`);
     } else {
+      const declaredW = parseInt(metaContent(html, "og:image:width", "property") || "", 10);
+      const declaredH = parseInt(metaContent(html, "og:image:height", "property") || "", 10);
+      if ((declaredW && declaredW !== dim.w) || (declaredH && declaredH !== dim.h)) {
+        record("WARN", `og:image:width/height wrong (${rel})`, `say ${declaredW || "?"}x${declaredH || "?"}, image is ${dim.w}x${dim.h}`);
+      }
       if (dim.w < 200 || dim.h < 200) {
         record("FAIL", `og:image too small (${rel})`, `${ogImageUrl} is ${dim.w}x${dim.h} (< 200x200)`);
       } else if (dim.w < 600 || dim.h < 315) {

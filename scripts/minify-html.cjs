@@ -22,7 +22,12 @@
  *     their top-level names (other inline scripts and onclick handlers rely on
  *     those globals);
  *   - a script esbuild cannot parse is kept as is and reported, never dropped;
- *   - <pre>/<textarea> whitespace is always preserved by minify-html.
+ *   - <pre>/<textarea> whitespace is always preserved by minify-html;
+ *   - Open Graph and Twitter <meta> tags are written back with quoted values
+ *     and the property/name attribute first. minify-html drops the quotes and
+ *     reorders attributes (content=... property=og:image), which Facebook
+ *     reads but WhatsApp's link-preview parser does not: links shared on
+ *     WhatsApp showed no image.
  *
  * Usage:
  *   node scripts/minify-html.cjs              # minify public/ in place
@@ -49,6 +54,25 @@ const SCRIPT_RE = /<script(\s[^>]*)?>([\s\S]*?)<\/script>/gi;
 const JS_TYPES = /^(module|text\/javascript|application\/javascript)$/i;
 
 const scriptErrors = [];
+
+const META_RE = /<meta\s([^>]*?)\/?>/gi;
+const ATTR_RE = /([^\s"'=<>\/]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+const SOCIAL_KEY = /^(og:|twitter:|article:|fb:)/i;
+const quoteAttr = (v) => v.replace(/"/g, "&quot;");
+
+// Rewrite social <meta> tags in <head> as <meta property="og:..." content="...">.
+function quoteSocialMeta(html) {
+  const headEnd = html.search(/<\/head>/i);
+  if (headEnd < 0) return html;
+  const head = html.slice(0, headEnd).replace(META_RE, (whole, attrs) => {
+    const map = new Map();
+    for (const m of attrs.matchAll(ATTR_RE)) map.set(m[1].toLowerCase(), m[2] ?? m[3] ?? m[4] ?? "");
+    const keyAttr = map.has("property") ? "property" : map.has("name") ? "name" : null;
+    if (!keyAttr || !SOCIAL_KEY.test(map.get(keyAttr)) || !map.has("content")) return whole;
+    return `<meta ${keyAttr}="${quoteAttr(map.get(keyAttr))}" content="${quoteAttr(map.get("content"))}">`;
+  });
+  return head + html.slice(headEnd);
+}
 
 function minifyInlineScripts(html, file) {
   return html.replace(SCRIPT_RE, (whole, attrs = "", body) => {
@@ -90,9 +114,10 @@ let before = 0;
 let after = 0;
 for (const file of files) {
   const input = fs.readFileSync(file, "utf8");
-  const output = minify(Buffer.from(minifyInlineScripts(input, file)), HTML_OPTIONS);
+  const minified = minify(Buffer.from(minifyInlineScripts(input, file)), HTML_OPTIONS);
+  const output = quoteSocialMeta(minified.toString("utf8"));
   before += Buffer.byteLength(input);
-  after += output.length;
+  after += Buffer.byteLength(output);
   fs.writeFileSync(file, output);
 }
 

@@ -1,0 +1,199 @@
+---
+draft: false
+title: "Build the Same AI Agent Twice: Demo to Production"
+snippet: "The 90-minute companion lab to my Skopje keynote: build one AI agent the easy way, then rebuild it inside a boundary where no client data leaves the machine."
+description: "The 90-minute companion lab to my Skopje keynote: build one AI agent the easy way, then rebuild it inside a boundary where no client data leaves the machine."
+seoTitle: "Lab: Build the Same AI Agent Twice (Demo to Production)"
+image:
+  src: "/blog/thumbnails/ai-tech-summit-skopje-2026-lab-from-demo-to-production.jpg"
+  alt: "Title card for the From AI Demo to Production companion lab from AI Tech Summit Skopje 2026."
+publishDate: "2026-10-04"
+lastModified: "2026-10-04"
+category: "AI"
+author: "Luca Berton"
+tags: ["AI Tech Summit", "Skopje", "MLOps", "Platform Engineering", "AI Agents", "RAG", "MCP", "Ollama", "Sovereign AI", "Observability", "Governance", "Conferences"]
+event:
+  name: 'AI Tech Summit "Filip Avramchev" 2026'
+  startDate: "2026-09-22"
+  endDate: "2026-09-23"
+  city: "Skopje"
+  venue: "National Opera and Ballet"
+  organizer: "Cyborg Code Syndicate"
+  country: "MK"
+  url: "https://techsummit.ai/"
+  role: "speaker"
+  companies:
+    - "Open Empower"
+  topics:
+    - "MLOps"
+    - "Platform Engineering"
+    - "AI Agents"
+    - "RAG"
+    - "MCP"
+  speakers:
+    - name: "Luca Berton"
+      company: "Open Empower"
+---
+
+Every talk I give ends the same way: *"the agent took ten minutes. The platform took months."* People leave the room convinced of the sentence and still not sure what the months consist of. So at [AI Tech Summit Skopje 2026](/blog/ai-tech-summit-skopje-2026-ai-demo-to-production/) I shipped a companion lab. Ninety minutes, free tiers only, no Kubernetes, no GPU required. You build the **same agent twice** — first the version that works in an afternoon and that you cannot ship, then the version that answers the identical question without a single byte of your data leaving your machine. In between, you make the six platform decisions from the keynote yourself, on something small enough to finish in a sitting.
+
+This is the lab, end to end.
+
+## The scenario
+
+You are building a legal-research assistant for a professional-services firm — accountants, auditors, tax advisers. It has to answer a question like the one from the keynote:
+
+> *"Under Swedish law, can an auditor be held liable for aiding accounting fraud — bokföringsbrott — by issuing a clean audit opinion despite known deficiencies in the bookkeeping? Cite the actual case law."*
+
+An LLM answering from memory produces something fluent and possibly fictional. What you want is an agent that goes and looks it up in an authoritative source, and shows you what it found. The twist — the whole point of the lab — is the sentence a real user adds to the end: *"…in the engagement we're looking at right now."* The moment that sentence exists, the question stops being a legal query and becomes client-confidential financial data. Part 1 ignores that. Part 2 fixes it.
+
+The external source both parts use is **Ratio Lex** (`https://ratiolex.se/mcp`) — a free, public MCP server publishing Swedish case law, legislative preparatory works and legal scholarship. No account, no login, no API key. It is Swedish because it is *demoable*, not because the jurisdiction matters: point the same agent at a different MCP server and it gains that source's authority instead.
+
+## Part 1 — Build it the easy way, and watch it work
+
+### Probe the source first, before you spend a token
+
+The MCP server needs no auth, so you can talk to it directly:
+
+```bash
+curl -s -X POST https://ratiolex.se/mcp \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"sok_rattsfall",
+       "arguments":{"q":"bokföringsbrott revisor ansvar","max":5}}}'
+```
+
+The search is **diacritic-sensitive**. `bokföringsbrott` returns results; the ASCII spelling `bokforingsbrott` returns nothing. If you get an empty set, check your shell encoding before you conclude the server is down. That is exactly the class of bug that looks like "the AI failed" and isn't.
+
+### The whole agent
+
+With a server-side MCP connector there is no local MCP client to run, no tool-execution loop to write, and nothing to host:
+
+```python
+import anthropic
+
+client = anthropic.Anthropic()
+
+with client.beta.messages.stream(
+    model="claude-opus-5",
+    max_tokens=4096,
+    betas=["mcp-client-2025-11-20"],
+    mcp_servers=[{"type": "url", "url": "https://ratiolex.se/mcp", "name": "ratiolex"}],
+    tools=[{"type": "mcp_toolset", "mcp_server_name": "ratiolex"}],
+    system=(
+        "You are a legal research assistant for accounting, tax and audit professionals. "
+        "Use the ratiolex tool to look up real Swedish case law before answering — never "
+        "answer from memory. Quote citations exactly as the tool returns them and give the "
+        "source URL. If the tool finds nothing, say so — do not guess."
+    ),
+    messages=[{"role": "user", "content": QUESTION}],
+) as stream:
+    for text in stream.text_stream:
+        print(text, end="", flush=True)
+```
+
+**Stream it.** The non-streaming version of this call sits at a blank terminal for 30–90 seconds and then dumps everything at once. The visible round-trip — the tool call firing, then the answer arriving — *is* the lesson. Don't hide it behind a blocking call.
+
+### The hinge
+
+Before you go on, answer this honestly:
+
+> Now assume the question contains a client's name and a figure from their ledger. What in this design is now unshippable — and which specific line makes it so?
+
+Be precise. It is not a vague "cloud bad" objection. Name the line. The answer: the question — carrying the client's engagement data — is handed to a model the firm does not run, over a network it does not control. Nothing here is broken. It is just not allowed.
+
+## Part 2 — Rebuild it inside a boundary
+
+Same capability. Nothing leaves your machine.
+
+### A model you run
+
+```bash
+ollama pull qwen3:8b
+ollama serve          # OpenAI-compatible endpoint on http://localhost:11434/v1
+```
+
+Point your client at that base URL. The model is smaller and slower than a frontier model, and that is fine — it isn't being asked to remember Swedish case law, it's being handed the text. Tools lower the bar on the model, and lowering the bar on the model is what makes running it yourself affordable.
+
+### An index over your own documents
+
+Take two documents of your own — anything you wouldn't paste into a public chat window. Chunk them, embed them locally (`ollama pull nomic-embed-text`), and keep the vectors in a local file or SQLite. Thirty lines, no vector database required. Retrieval quality is not the exercise. The boundary is.
+
+### Declare the tool once, in config — not in code
+
+This is the smallest change in the lab and the most important one. Instead of the MCP URL being a string literal inside the agent script, declare it:
+
+```yaml
+tools:
+  - name: ratiolex
+    kind: mcp
+    url: https://ratiolex.se/mcp
+    owner: research-team
+    auth: none
+    scope: read-only
+```
+
+Load that file at start-up; refuse to call anything not in it. You have just built a tool registry. It is fifteen lines and it is a **governance surface**: there is now exactly one place that answers "what is this agent allowed to reach?", it has an owner, and revoking a capability is a one-line diff rather than a code change. That is the difference between the two builds in the keynote, in miniature.
+
+### Log every call
+
+Append one line per model call and per tool call: timestamp, which tool, which arguments, how many tokens, how long. A JSONL file is enough. This single file is your observability pillar *and* your governance pillar. Every question an auditor asks — what did it do, what was it grounded in, who ran it — is now answerable by `grep`.
+
+### Prove it
+
+The payoff step. Ask a question with obviously invented client data:
+
+> *"Can an auditor be liable for bokföringsbrott after issuing a clean opinion for Nordvind Facilities AB, whose 2025 ledger shows a 47% jump in facilities spend?"*
+
+Now confirm the client's name never crossed the wire:
+
+```bash
+# watch outbound traffic while the query runs
+sudo tcpdump -A -s0 'tcp port 443' | grep -i "Nordvind"
+```
+
+The MCP call should carry your *search terms* — `bokföringsbrott revisor ansvar` — and nothing else. The client name, the figure, the document text: all of it stayed local. That is the whole argument of the keynote, and you just demonstrated it on a laptop.
+
+## Part 3 — Score what you built
+
+Go back through the six decisions and answer honestly for the thing now running on your machine:
+
+| Pillar | Ask yourself |
+|---|---|
+| **Containers & Kubernetes** | If this had to run somewhere other than your laptop tomorrow, what's the packaging story? Which parts aren't in your Dockerfile — the model weights, the driver, the tokenizer? |
+| **GPU orchestration** | If two colleagues needed this model at once, what happens? What would you change to give them a share rather than a queue? |
+| **Observability** | If the tool silently stopped returning results tonight, how would you find out — and how fast? |
+| **Security** | Which credential does this hold, and what's the blast radius if it leaks? What does your registry let the agent reach that it doesn't need? |
+| **Governance** | From your log alone, can you reconstruct what the agent did and what it was grounded in? Could someone else? |
+| **Cost control** | What stops a retry loop here? What would the ceiling be, and where would you enforce it — in a dashboard, or at the gateway? |
+
+If you can answer all six for something you built in 90 minutes, you have done at small scale exactly what separates a demo from a platform.
+
+## Stretch goals
+
+**Add a human in the loop, and make it survive a slow human.** Add an approval step: the agent proposes, a person decides. Then make it survive a reviewer who takes three days rather than thirty seconds. The rule: nothing blocks. A pending approval is a business record, not execution state — so it must be queryable, re-drivable and escalatable, and you must be able to redeploy the workflow underneath it without losing what's in flight. One table is enough:
+
+```sql
+create table decisions (
+  id          uuid primary key default gen_random_uuid(),
+  status      text not null default 'proposed',  -- proposed | approved | rejected | posted
+  subject     text not null,
+  proposed_by text,
+  reviewer    text,
+  decided_at  timestamptz,
+  posted_at   timestamptz,
+  created_at  timestamptz not null default now()
+);
+```
+
+Every state transition is one row update with a name and a timestamp. That is the audit trail — not a feature bolted on afterwards, the same row.
+
+**Other directions:** swap Ratio Lex for an MCP server in your own jurisdiction or domain; add a second tool and watch how the registry earns its keep; measure your override rate (how often a human reverses the agent) and treat that, not accuracy, as your quality metric.
+
+## A note on tools
+
+Everything in Part 2 is hand-rolled on purpose — you learn the decisions by making them. Commercial platforms make the same decisions for you: **ConfidentialMind** (the platform in the keynote's demo) is one, Red Hat OpenShift AI is another, and vLLM plus KServe plus a gateway you write yourself is a third. The pattern is what transfers, not the product.
+
+Be honest about what a 90-minute lab does not give you: tenant isolation, a real authorization model, audit export, key rotation, and quota enforcement that someone can't just edit. Those are why the platform took months and the agent took ten minutes.
+
+*The [full keynote recap](/blog/ai-tech-summit-skopje-2026-ai-demo-to-production/) and the [ConfidentialMind case study](/blog/ai-tech-summit-skopje-2026-confidentialmind-built-twice/) go with this lab.*

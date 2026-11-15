@@ -1,0 +1,113 @@
+---
+draft: false
+title: "The Same Agent, Built Twice: ConfidentialMind"
+snippet: "At AI Tech Summit Skopje, one legal-research agent built twice — a script, and ConfidentialMind, the version a compliance officer would let near a client file."
+description: "At AI Tech Summit Skopje, one legal-research agent built twice — a script, and ConfidentialMind, the version a compliance officer would let near a client file."
+seoTitle: "The Same Agent, Built Twice: ConfidentialMind (Skopje)"
+image:
+  src: "/blog/thumbnails/ai-tech-summit-skopje-2026-confidentialmind-built-twice.jpg"
+  alt: "Title card for the ConfidentialMind built-twice case study from AI Tech Summit Skopje 2026."
+publishDate: "2026-10-05"
+lastModified: "2026-10-05"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["AI Tech Summit", "Skopje", "MLOps", "Platform Engineering", "AI Agents", "RAG", "MCP", "Sovereign AI", "AI Governance", "FinOps", "Observability", "Conferences"]
+event:
+  name: 'AI Tech Summit "Filip Avramchev" 2026'
+  startDate: "2026-09-22"
+  endDate: "2026-09-23"
+  city: "Skopje"
+  venue: "National Opera and Ballet"
+  organizer: "Cyborg Code Syndicate"
+  country: "MK"
+  url: "https://techsummit.ai/"
+  role: "speaker"
+  companies:
+    - "Open Empower"
+  topics:
+    - "MLOps"
+    - "Platform Engineering"
+    - "AI Agents"
+    - "RAG"
+    - "MCP"
+    - "Sovereign AI"
+    - "AI Governance"
+  speakers:
+    - name: "Luca Berton"
+      company: "Open Empower"
+---
+
+The centre of the [keynote at AI Tech Summit Skopje 2026](/blog/ai-tech-summit-skopje-2026-ai-demo-to-production/) was a single question, asked of the same agent in two different ways. I want to tell it properly, because it is the clearest illustration of the demo-to-production gap I can produce on a stage.
+
+## The question
+
+A legal-research agent for a professional-services firm — accountants, auditors, tax advisers. It has to answer:
+
+> *"Under Swedish law, can an auditor be held liable for aiding accounting fraud — bokföringsbrott — by issuing a clean audit opinion despite known deficiencies in the bookkeeping? Cite the actual case law."*
+
+On its own, that is a public legal question. An agent that looks it up and returns a real citation is a beautiful demo. And then a real user adds one sentence:
+
+> *"…in the engagement we're looking at right now."*
+
+That sentence is the whole talk. The moment it exists, the question stops being a legal query and becomes **client-confidential financial data**. The question the model answers now carries facts about a client engagement the firm is legally obliged to keep. The demo and the platform are the same agent answering the same question — and one of them is unshippable for a reason that has nothing to do with the agent's quality.
+
+## Build 1 — what works in an afternoon
+
+One file. One API call. It fits on a slide:
+
+```python
+client.beta.messages.create(
+    model="claude-opus-5",
+    mcp_servers=[{"type": "url", "url": "https://ratiolex.se/mcp", "name": "ratiolex"}],
+    tools=[{"type": "mcp_toolset", ...}],
+    messages=[{"role": "user", "content": question}],
+)
+```
+
+No local MCP client, no tool-execution loop, no server to host. It really is this short — and it really does work. And it's unshippable. The question goes to a model this firm does not run, over a network they do not control, carrying facts about a client engagement they are legally obliged to keep. Nothing here is broken. It's just not allowed.
+
+## Build 2 — ConfidentialMind
+
+**ConfidentialMind**: a private model plus RAG plus MCP, inside the firm's own boundary. The agent can read a client file *and* a law library, but the client file never leaves the building. When it runs the keynote question, here is the receipt:
+
+- A **registered platform tool** — `ratiolex`, listed in *External MCP Servers*, owned and scoped.
+- **It looked. It didn't remember.** The `sok_rattsfall` tool call firing, with the citation the tool returned.
+- The cited answer: **NJA 2009 s. 3**, *Högsta domstolen*, 2009-01-13 — 11 kap. 5 § and 23 kap. 4 § brottsbalken (1962:700), `https://ratiolex.se/nja/2009/s-3/`. Retrieved live from the tool. *Read the case before you rely on the summary.*
+
+> **The answer isn't the achievement. Getting it without client data leaving the building — that's the achievement.**
+
+## Six things had to be true
+
+For that answer to exist on the firm's own infrastructure, six platform decisions had to hold — the same six from the keynote:
+
+- **Containers & Kubernetes** — the model is a containerised service the platform scheduled, not a process somebody started by hand.
+- **GPU orchestration** — it ran on the firm's own GPUs, sized and scheduled by the platform.
+- **Observability** — every model call and every tool call is a traced, logged request. The tool call you watched is an audit record.
+- **Cost control** — the reasoning model is small, because tools do the remembering. Cheap models plus good tools beats an expensive model guessing.
+- **Security** — the client documents were indexed inside the boundary. The question never left it.
+- **Governance** — the MCP server is a registry entry, not a line in somebody's script: named, owned, scoped, revocable.
+
+The agent took ten minutes. The platform took months. The agent was always going to be the easy part.
+
+## A second system, the same six questions
+
+A different problem, the same kind of buyer, the same wall: an **invoice exception workflow**. AI reads the invoice, flags an anomaly, waits for a human to approve. Flawless when the click comes in ten seconds. Stretch it to three days and the pending item exists only as execution state — nobody can query "what's waiting on me," and editing the workflow orphans everything in flight.
+
+The fix is three workflows over **one shared table**:
+
+- **Exception Watch** (every 4 hours) — extracts, compares to vendor history. Clean → approved. Anomaly → proposed + alert.
+- **Review Decision** (webhook) — fires only on the human's click, seconds or days later. Nothing waits in between.
+- **Settlement Sequence** (every 15 minutes) — syncs approved rows to the ledger, escalates anything still waiting as its due date nears.
+
+All three read and write one table. Settlement only claims rows still marked `APPROVED`, and the ledger post is idempotent on the invoice ID — they agree on the truth because the database arbitrates, not because they coordinate. The two runs on stage:
+
+- **Run 1 · clean invoice, +0.1%** — clears automatically. Nothing for a human to do.
+- **Run 2 · anomaly, +47%** — flagged, paused, routed to a person. (Threshold: >15% above the 12-month vendor mean routes to a human. Synthetic, illustrative.)
+
+> **The platform's job isn't to remove the human. It's to know exactly when to ask for one.**
+
+## The takeaway
+
+Everyone has an AI demo. Almost nobody has an AI platform. The gap is where platform engineering happens — containers, GPUs, observability, security, governance, cost. A demo quietly gets away with one execution path, one owner, no persisted state, nobody paged, one idle card, one retry loop. Six ways it breaks; six decisions that fix them. You don't need an AI factory to have an AI platform. You need six decisions and a database.
+
+*The [companion lab](/blog/ai-tech-summit-skopje-2026-lab-from-demo-to-production/) builds both versions in 90 minutes; the [full keynote recap](/blog/ai-tech-summit-skopje-2026-ai-demo-to-production/) has the sessions I photographed.*

@@ -52,6 +52,10 @@ const blogCollection = defineCollection({
       speakers: z.array(z.object({ name: z.string(), company: z.string().optional() })).default([]),
       topics: z.array(z.string()).default([]),
     }).optional(),
+    // Launch pages: suppress cross-promotion of OTHER books/courses (the
+    // rotating book/course cards and the Related Articles grid) so the page
+    // only pushes this post's own product. Consumed by blog/[slug].astro.
+    noCrossPromo: z.boolean().optional(),
   }),
 });
 

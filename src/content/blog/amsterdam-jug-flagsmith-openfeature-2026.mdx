@@ -1,0 +1,174 @@
+---
+draft: false
+title: "Fun with Flags: OpenFeature at the Amsterdam JUG, Hosted by Flagsmith"
+snippet: "Amsterdam JUG at Flagsmith: Simon Schrottner on OpenFeature. Providers against lock-in, evaluation context for targeting, hooks + OpenTelemetry for old flags."
+description: "Amsterdam JUG at Flagsmith: Simon Schrottner on OpenFeature, the CNCF feature-flag standard. Providers, evaluation context, and hooks with OpenTelemetry."
+seoTitle: "OpenFeature at Amsterdam JUG: Feature Flags Without Lock-In"
+image:
+  src: "/blog/thumbnails/amsterdam-jug-flagsmith-openfeature-2026.jpg"
+  alt: "Simon Schrottner presents 'Fun with Flags: How OpenFeature Solves Your Feature Flag Headaches' at the Amsterdam JUG, hosted by Flagsmith."
+publishDate: "2026-11-17"
+lastModified: "2026-11-17"
+category: "Platform Engineering"
+author: "Luca Berton"
+tags: ["OpenFeature", "Feature Flags", "Flagsmith", "CNCF", "Java", "OpenTelemetry", "Platform Engineering", "meetup", "amsterdam"]
+event:
+  name: "Amsterdam Java User Group meetup at Flagsmith"
+  startDate: "2026-11-17"
+  endDate: "2026-11-17"
+  city: "Amsterdam"
+  venue: "Flagsmith"
+  organizer: "Amsterdam JUG"
+  country: "NL"
+  role: "attendee"
+  companies: ["Flagsmith", "Amsterdam JUG", "OpenFeature"]
+  speakers:
+    - name: "Simon Schrottner"
+      company: "Flagsmith"
+    - name: "Željko Kozina"
+      company: "Chronomill"
+    - name: "Sarah Gruneisen"
+      company: "Xebia"
+  topics: ["java-jvm", "feature-flags", "openfeature", "opentelemetry"]
+---
+
+Tonight the Amsterdam Java User Group met at **Flagsmith**, on the Plantage Kerklaan. It was a loft with plants everywhere, bikes on the wall, folding chairs and good pizza. The host could not have fit the first talk better: a feature-flag company hosting a talk about the open standard for feature flags.
+
+![Luca Berton with Simon Schrottner of Flagsmith before the talk, Simon in a feature-toggle T-shirt.](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-with-simon.jpg)
+
+I caught up with **Simon Schrottner** before he went on. He wore a T-shirt with a toggle switch on it, which was a good sign for a talk called *"Fun with Flags: How OpenFeature Solves Your Feature Flag Headaches."* Simon works on open standards and developer experience at Flagsmith, and he is a maintainer in the OpenFeature community. What follows is my write-up of his talk, with my own notes from the platform side.
+
+![Simon Schrottner opens "Fun with Flags" in front of the Flagsmith banner at the Amsterdam JUG.](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-fun-with-flags.jpg)
+
+## Half a billion dollars in one hour
+
+Simon opened with the story every feature-flag talk should start with. A trading firm lost **half a billion USD in one hour** because of a feature flag. They had *repurposed* an old flag: an old flag name now switched on new code, and one server still ran the old code. (Simon's reference was Statsig's write-up, *How to lose half a billion dollars*, about Knight Capital in 2012.)
+
+![Slide: "What happened — lost half a billion USD, in one hour, due to a feature flag they repurposed."](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-half-a-billion.jpg)
+
+The point is not that flags are dangerous. The point is that a flag is **production configuration with a lifecycle**. If you treat it as a throwaway `if`, it stays in the code long after you forget it.
+
+## Not every flag is the same flag
+
+Simon used Pete Hodgson's classification from martinfowler.com. Flags differ in two dimensions: **longevity** (days to years) and **dynamism** (changes with a deployment, with a runtime re-configuration, or with each request).
+
+- **Release toggles** live for days or weeks and change with a deployment.
+- **Ops toggles** (kill switches) can live for years.
+- **Experiment toggles** change with each request.
+- **Permission toggles** are long-lived and per-user.
+
+![Slide: "Categories of Feature Flags" on longevity and dynamism axes — release, ops, experiment and permission toggles.](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-flag-categories.jpg)
+
+This is the slide I would show any team that says "we just need a boolean." A release toggle and a permission toggle need very different tools and very different clean-up rules.
+
+## A glorified conditional, until it isn't
+
+The next slide was the most honest one of the evening. At the start you see *a glorified conditional*: a boolean, `if (flag) { newThing() }`, and the question "how hard can it be?" Later you discover vendor lock-in, dynamic targeting and experiments, stale and obsolete flags, observability gaps, brittle string keys, and lifecycle and governance.
+
+![Slide: "At the start, you see a glorified conditional… Later you discover vendor lock-in, dynamic targeting, stale flags, observability gaps, brittle string keys, lifecycle and governance."](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-start-vs-later.jpg)
+
+Simon's "Homegrown" slide said it in three steps: *early, a quick win* (ten lines of code); *later, complexity creeps in* (each service rolls its own, with no central UI, no targeting, and flags that duplicate, drift and rot); *eventually, you built a platform* (API, UI, targeting, observability). "Congratulations, you're a vendor."
+
+I see the same pattern in platform engineering all the time. Every internal tool that is not a product becomes one by accident. The fix is the same as for logs, metrics and traces: **standardise the interface and let the back end be replaceable.**
+
+## OpenFeature: one API, many providers
+
+That is what OpenFeature is. It is a vendor-neutral, CNCF-hosted specification and a set of SDKs for feature-flag evaluation. Simon showed a short history:
+
+- **May 2022**: announced at KubeCon Valencia by a group of flag-vendor engineers, who invited the community to contribute.
+- **June 2022**: accepted into the CNCF Sandbox.
+- **November 2023**: promoted to CNCF Incubating, with a stable spec and 1.0 SDKs for the major languages.
+- **Today**: a collaborative, multi-vendor standard with broad adoption.
+
+![Slide: "A short history — May 2022 KubeCon Valencia, June 2022 CNCF Sandbox, Nov 2023 CNCF Incubating, today a multi-vendor standard."](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-history.jpg)
+
+The rest of the talk followed three problems, and one OpenFeature concept for each.
+
+### Problem 1: vendor lock-in. Concept: providers
+
+The **Evaluation API** is the part your code calls: *one API, many languages, never breaks your code.* Behind it sits a **provider**, which is the adapter to the actual flag source. That source can be a JSON file, flagd, Flagsmith, or a commercial vendor. You change the provider and the application code stays the same.
+
+![Slide: "Concept: Providers" — your app calls the feature-flagging client; the provider talks to the flags service.](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-providers.jpg)
+
+The design choice I liked most: **the default is mandatory.** Every evaluation call takes a fallback, so the SDK always returns *something*:
+
+```java
+boolean on = client.getBooleanValue("v2_enabled", false);
+//                                                ^^^^^ the fallback, not optional
+```
+
+The provider is unreachable? You get `false`. The flag key has a typo? The fallback wins. The flag returns a string where you asked for a boolean? The fallback wins. The rule engine throws? The fallback wins. *Your code path always has a value to work with.* For anyone who has seen a flag service outage take down a checkout, this is the most important line in the spec.
+
+![Slide: "The default is mandatory" — provider unreachable, flag key missing, type mismatch, evaluation error: the fallback wins.](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-default-mandatory.jpg)
+
+Simon then showed *the same flag in a UI*: Flagsmith's self-hosted dashboard instead of a JSON file, with the same OpenFeature call on the client. The flag source is an implementation detail.
+
+![Slide: "The same flag — in a UI": the Flagsmith dashboard managing the same flag, with the same OpenFeature SDK call on the client.](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-ui.jpg)
+
+In Java, the setup is short:
+
+```java
+OpenFeatureAPI api = OpenFeatureAPI.getInstance();
+api.setProviderAndWait(provider); // flagd, Flagsmith, or any other vendor's provider
+
+Client client = api.getClient("checkout");
+boolean on = client.getBooleanValue("v2_enabled", false);
+```
+
+### Problem 2: dynamic evaluation. Concept: evaluation context
+
+Targeting needs data: who the user is, which tenant, which region. OpenFeature calls this the **evaluation context**: *dynamic evaluation, deterministic targeting, reduce blast radius.* You set the context where the data actually lives: globally, per request (transaction), per client, or per call.
+
+```java
+// global: true for every evaluation
+api.setEvaluationContext(new MutableContext().add("region", "eu"));
+
+// client: scoped to one domain
+Client client = api.getClient("checkout");
+client.setEvaluationContext(new MutableContext().add("domain", "checkout"));
+
+// invocation: per call
+client.getBooleanValue("v2_enabled", false, new MutableContext("user-42"));
+```
+
+The contexts are merged in a fixed order: **API (global) → transaction → client → invocation → before hooks.** Later stages override earlier ones, so the context of a call wins over the global default.
+
+![Slide: "Merge Order" — API (global), transaction, client, invocation, before hooks. Later stages override earlier ones.](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-merge-order.jpg)
+
+### Problem 3: obsolete flags. Concept: hooks and OpenTelemetry
+
+You cannot remove a flag if you do not know whether anyone still evaluates it. OpenFeature gives you **hooks** around every evaluation: a *before* stage, the evaluation, then an *after* or *error* stage, and always a *finally* stage.
+
+![Slide: "Flag Evaluation Life-Cycle" — before stage, flag evaluation, after or error stage, finally stage.](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-lifecycle.jpg)
+
+This is where my observability side got interested. The community maintains ready-made **OpenTelemetry hooks** for Java, Node.js, Go, Python, .NET and more, in the `open-feature/<lang>-sdk-contrib` repositories. Add the hook and every evaluation emits signals that follow the **OTel semantic conventions for feature flags**:
+
+- **Traces**: a span event per evaluation, attached to the current span, with the flag key, the provider and the chosen variant, plus error details on failure.
+- **Metrics**: total evaluation calls, success and error counts, and an active evaluations counter.
+
+![Slide: "Hooks + OpenTelemetry = observability for free" — traces and metrics for every flag evaluation.](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-hooks-otel.jpg)
+
+"Observability for free" is the right title. Once flag evaluations are in your traces, two hard questions become dashboard queries: *which variant did this failing request get?* and *has anyone evaluated this flag in the last 30 days?* The second question is how you find obsolete flags and remove them safely, before one gets repurposed by mistake.
+
+## What I take home
+
+![Slide: "What we covered" — Evaluation API; vendor lock-in → providers; dynamic evaluation → evaluation context; obsolete flags → hooks + OpenTelemetry.](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-what-we-covered.jpg)
+
+My summary for platform teams:
+
+1. **Put feature flags behind a standard interface now**, even if you have only one vendor or a homegrown system. OpenFeature costs very little, and it keeps the option to change providers.
+2. **Always use a safe default.** OpenFeature forces you to, which is a good reason to use it.
+3. **Treat flag evaluations as telemetry.** Add the OpenTelemetry hook in the platform's base image or starter, so every team gets it without asking. It is the same idea as [OpenTelemetry on Kubernetes](/blog/opentelemetry-kubernetes-observability-2026/): the standard is the pipeline, the back end is a choice.
+4. **Give every flag an owner and an expiry.** The type of flag (release, ops, experiment, permission) tells you how long it should live.
+
+Simon closed with an invitation to join: `#openfeature` on the CNCF Slack, `github.com/open-feature`, the community page and the public community meetings. The maintainers label good first issues on GitHub, so it is an easy project to start contributing to.
+
+## The rest of the evening
+
+After Simon, **Željko Kozina** (Chronomill) gave *"No Country For Old APIs,"* about wrapping legacy Java REST and SOAP services as MCP tools without a rewrite. He quoted Martin Fowler ("the only thing a Big Bang rewrite guarantees is a Big Bang") and argued for a GraphQL facade between the MCP server and the legacy estate, with hand-written tools built with Spring AI's `@McpTool`. One data point from his slides stayed with me: tool-selection accuracy drops below 90% somewhere between 10 and 30 tools, depending on the model. More tools is not better. The last talk of the evening is **Sarah Gruneisen** (Xebia) with *"When Silence Becomes a Security Vulnerability,"* about how a vulnerability can start when someone notices a weak signal and does not speak up. Her five-layer model puts human safety at the bottom, under technical controls.
+
+![Željko Kozina presents "No Country For Old APIs" at the Amsterdam JUG at Flagsmith, with a full room.](/blog/events/amsterdam-jug-flagsmith-openfeature-2026/jug-flagsmith-mcp-talk.jpg)
+
+Thanks to Flagsmith for the venue and the pizza, to Simon, Željko and Sarah for the talks, and to Geertjan Wielenga and the Amsterdam JUG team for another excellent evening. If you want to speak at a future meetup, the JUG takes proposals at amsterdamjug@googlegroups.com.
+
+*More Amsterdam JUG write-ups: [Project Valhalla at Trifork](/blog/amsterdam-jug-project-valhalla-trifork-april-2026/) and [@Retryable at Doctolib](/blog/amsterdam-jug-doctolib-retryable-spring-aop-2026/).*

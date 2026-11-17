@@ -1,0 +1,182 @@
+---
+draft: false
+title: "No Country for Old APIs: Legacy Java Services as MCP Tools, Through GraphQL"
+snippet: "Željko Kozina at the Amsterdam JUG: wrap legacy REST and SOAP as MCP tools without a rewrite. GraphQL as the facade, curated tools, tool search, and GATool."
+description: "Amsterdam JUG at Flagsmith: Željko Kozina on legacy Java services as MCP tools, with GraphQL as the facade, Spring AI @McpTool, tool search and GATool."
+seoTitle: "Legacy Java APIs as MCP Tools Through GraphQL"
+image:
+  src: "/blog/thumbnails/amsterdam-jug-graphql-mcp-2026.jpg"
+  alt: "Željko Kozina presents 'No Country For Old APIs' at the Amsterdam JUG, with an 'Inspired by Star Trek' slide."
+publishDate: "2026-11-17"
+lastModified: "2026-11-17"
+category: "AI"
+author: "Luca Berton"
+tags: ["MCP", "GraphQL", "Spring AI", "Java", "Legacy Modernization", "AI Agents", "GATool", "meetup", "amsterdam"]
+event:
+  name: "Amsterdam Java User Group meetup at Flagsmith"
+  startDate: "2026-11-17"
+  endDate: "2026-11-17"
+  city: "Amsterdam"
+  venue: "Flagsmith"
+  organizer: "Amsterdam JUG"
+  country: "NL"
+  role: "attendee"
+  companies: ["Chronomill", "Flagsmith", "Amsterdam JUG"]
+  speakers:
+    - name: "Željko Kozina"
+      company: "Chronomill"
+  topics: ["java-jvm", "mcp", "graphql", "ai-agents"]
+---
+
+The second talk at tonight's Amsterdam JUG at Flagsmith was the one I had circled in the agenda. **Željko Kozina** (Chronomill) presented *"No Country For Old APIs: Wrapping Legacy Java Services As MCP Tools Without Rewriting Them."* Željko has spent more than 15 years modernising legacy systems for banks and insurers. He is a GraphQL Ambassador and a member of the GraphQL AI Working Group. (The first talk of the evening was Simon Schrottner on OpenFeature; [my write-up is here](/blog/amsterdam-jug-flagsmith-openfeature-2026/).)
+
+![Luca Berton in the full room at Flagsmith while Željko Kozina opens his talk.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-room.jpg)
+
+## Star Trek already shipped
+
+Željko opened with a question to the room: *which TV franchise best predicted the future?* His answer was Star Trek: automatic sliding doors, flip phones, tablets, Bluetooth earpieces, video calls, real-time translation, handheld medical scanners and **voice assistants**.
+
+![Željko Kozina in front of his "Inspired by Star Trek" slide: sliding doors, flip phones, tablets, video calls, real-time translation, voice assistants.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-star-trek.jpg)
+
+The last item is the one that matters for this talk. Google now has a Home MCP server, and Amazon has an MCP toolkit for Alexa+. Assistants talk to your systems through the **Model Context Protocol**. So the question for every enterprise Java team is no longer *whether* an agent will call your services, but *which* of them, and *how*.
+
+![Slide: the Google Home MCP Server documentation page, in early access.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-google-home-mcp.jpg)
+
+## The real picture: LLM, MCP, and a pile of old APIs
+
+The simple diagram is *LLM → MCP → your data and processes*. The real diagram has REST, SOAP, OData, JSON:API and XML-RPC on the right side, built over twenty years, often with session-based authentication, and with few people left who know how it all fits together.
+
+The obvious answer is a rewrite. Željko answered it with Martin Fowler: *"The only thing a Big Bang rewrite guarantees is a Big Bang."*
+
+![Slide: "Complete rewrite?" with Martin Fowler's quote, "The only thing a Big Bang rewrite guarantees is a Big Bang."](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-big-bang.jpg)
+
+The second obvious answer is to generate one MCP tool per endpoint. That fails too, for a reason that has nothing to do with legacy code: **tool sprawl**. The numbers on his slide: tool-selection accuracy drops below 90% somewhere between 10 and 15 tools for Claude Haiku 4.5, and between 20 and 30 tools for Sonnet 4. Bigger models tolerate more tools, but none of them is immune. GitHub's MCP server grew to more than 100 tools after a month of community contributions, agents got worse, and it was cut back to about 40.
+
+![Slide: tool-selection accuracy drops below 90% between 10 and 15 tools for Claude Haiku 4.5 and between 20 and 30 for Sonnet 4; GitHub's MCP server cut from 100+ tools to about 40.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-tool-accuracy.jpg)
+
+## The UI already knows the use cases
+
+This was the insight of the talk for me. Look at the old web front end, the JSP and Thymeleaf pages with their session-based JSON endpoints:
+
+> For a legacy system which nobody fully understands, the UI is the one place where someone has already curated the real use cases. Screens and buttons tell you which of the dozens of endpoints matter and how they combine.
+
+![Slide: "For a legacy system which nobody fully understands, the UI is the one place where someone has already curated the real use cases."](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-legacy-ui.jpg)
+
+So you do not design MCP tools from the endpoint list. You design them from the screens. Between the MCP server and the legacy estate you then need a layer that combines the calls a screen makes. Željko went through the options, a facade and a backend-for-frontend (BFF), and argued for **GraphQL**: one schema in front of REST, SOAP, OData, JSON:API and XML-RPC, which serves the MCP server *and* the new React, Angular, Vue and mobile front ends.
+
+![Slide: the LLM calls MCP, which calls a GraphQL layer in front of the legacy REST, SOAP, OData, JSON:API and XML-RPC services.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-mcp-graphql.jpg)
+
+## One screen, five requests, one query
+
+The demo used the Spring PetClinic domain. The *Owner information* page needs five REST calls: `GET /owners/6`, `GET /owners/6/pets`, `GET /pettypes`, and one `GET /pets/{id}/visits` per pet. It downloads every field of every object, and all six pet types only to show the word "cat."
+
+![Slide: the Owner information page makes five REST requests — every field of every object, all 6 pet types to show "cat".](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-five-requests.jpg)
+
+The same screen in GraphQL is one query that asks for exactly the fields it shows:
+
+```graphql
+query {
+  owner(id: 6) {
+    firstName lastName
+    address city telephone
+    pets {
+      name birthDate
+      type { name }
+      visits { date description }
+    }
+  }
+}
+```
+
+![Slide: one GraphQL query for the owner and their pets, and the JSON response for Jean Coleman.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-one-query.jpg)
+
+For an agent this is not only an optimisation. A response with only the needed fields is a smaller, cheaper context window, and it fixes one of the failure modes from his abstract: **oversized responses**.
+
+## A GraphQL operation already is an MCP tool
+
+Then came the neat part. An MCP tool definition has four parts: a **name**, a **description**, an **input schema** and an **output schema**. A named GraphQL operation has the same four: the operation name, a comment, the variables and the selection set.
+
+![Slide: "MCP tool definition" — name, description, inputSchema and outputSchema for GetOwnerDetails.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-tool-definition.jpg)
+
+Written by hand with Spring AI's `@McpTool` and Spring's `HttpSyncGraphQlClient`, the mapping looks like this:
+
+```java
+@McpTool(
+    description = "One owner with their pets",
+    name = "getOwnerDetails")
+Owner getOwnerDetails(
+        @McpToolParam(description = "Owner id") String id) {
+    return graphQlClient.document("""
+            query GetOwnerDetails($id: ID!) {
+              owner(id: $id) {
+                firstName lastName
+                pets { name type { name } }
+              }
+            }""")
+        .variable("id", id)
+        .retrieveSync("owner")
+        .toEntity(Owner.class);
+}
+```
+
+![Slide: "From operation to MCP tool" — the GraphQL operation's comment, name and body map to the @McpTool description, name and query.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-operation-to-tool.jpg)
+
+## GATool: the operation file is the tool
+
+Writing that by hand for every screen gets old fast. Željko's closing slide pointed to **[GATool](https://gatool.io/)**, a set of open-source Spring Boot starters (Apache 2.0, [on GitHub](https://github.com/api-agent-bridge/gatool)) that remove the Java part. You put a `.graphql` file in the repository:
+
+```graphql
+# Returns one owner with their pets.
+query GetOwnerDetails($id: ID!) {
+  owner(id: $id) {
+    firstName lastName
+    pets { name type { name } }
+  }
+}
+```
+
+The operation name becomes the tool name, the comment becomes the description and the variables become the input schema. GATool publishes it on an MCP endpoint (`gatool-mcp-spring-boot-starter`, at `/mcp`) or as an in-process tool for Spring AI. The design choices are the ones I would want for a production estate:
+
+- **Trusted documents.** The repository holds the list of allowed operations, and every new tool is a pull request with a review. The model chooses from that list. It never sees the schema and cannot send its own query.
+- **Fail at startup.** Every operation is validated against the schema file when the application starts. A query that names a missing field stops the start, not a customer call.
+- **Small results.** Only the `data` and `errors` of the GraphQL response go back to the model.
+- **Secure by default.** Without Spring Security you must set a property with `unsafe` in its name to accept unauthenticated MCP calls, and the application logs a warning at each start. The docs tell you to bind to loopback or put an authenticating gateway in front.
+
+It is version 0.1.0, so treat it as early. But the model is right, and it is the same discipline I recommend for any [agent in production](/blog/agntcon-mcpcon-europe-2026-recap-agents-in-production/): tools are code, they go through review, and they get tested in CI.
+
+## When you have 273 tools anyway
+
+The last part of the talk was about scale. What if the curated list grows past what any model can choose from? Željko showed two approaches.
+
+**Tool search: load tools only when needed.** The model sees one tool, `toolSearch`. It calls `toolSearch("owner's pets")`, the search (BM25, embeddings or regex) runs over the 273 waiting tools, and only two definitions come back into the context, not 273. He referenced Anthropic's tool search (November 2025, regex and BM25) and Spring AI's Tool Search Tool (Lucene, vector and regex).
+
+![Slide: "Tool search: load tools only when needed" — toolSearch("owner's pets") returns 2 definitions out of 273 waiting tools.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-tool-search.jpg)
+
+**Three dynamic tools, no curated files.** This is the experimental mode, where the model writes the query itself:
+
+1. `searchSchema` finds fields by meaning. At startup, every field of the schema (SDL) goes through an embedding model, and one vector per field is cached on disk. For each question, for example *"Which pets does Jean Coleman have?"*, the question is embedded and compared with every field by cosine similarity.
+2. `introspectType` reads one type.
+3. `executeGraphql` runs the query the model wrote.
+
+![Slide: "searchSchema, step by step" — every schema field embedded once at startup; each question embedded and compared with every field.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-search-schema.jpg)
+
+![Slide: three tools for an agent with no curated files — searchSchema, introspectType, executeGraphql. Experimental: the model writes the query.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-three-tools.jpg)
+
+His conclusion was balanced, and I agree with it:
+
+- **Curated operations** are reviewed in a pull request: small, cheap, predictable, for the questions you planned for.
+- **The three dynamic tools** let the model write the query against the whole schema: the long tail.
+- **Or both:** curated tools for the common questions, the three tools for the rest.
+
+![Slide: curated operations versus dynamic three tools — "Or both: curated tools for the common questions, the three tools for the rest."](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-curated-vs-dynamic.jpg)
+
+## What I take home
+
+1. **Do not rewrite to get agents.** Put a GraphQL layer in front of what you have, and design the tools from the screens, not from the endpoints.
+2. **Fewer tools are better tools.** If the list grows past a few dozen, add tool search before you add more tools.
+3. **Curated by default, dynamic by exception.** If you enable the model-written query mode, treat it like any untrusted client: read-only operations, query depth and cost limits, and authorisation in the GraphQL layer, not in the prompt.
+4. **The hard parts are still the old ones.** His abstract named them: translating session-based authentication, and unsafe retries on non-idempotent writes. An agent that retries a payment is a new way to hit an old bug. Keep write operations out of the first release, or make them idempotent first.
+
+![Željko Kozina's closing slide: "Thank you — Questions?" with links to his LinkedIn and gatool.io.](/blog/events/amsterdam-jug-graphql-mcp-2026/jug-graphql-thank-you.jpg)
+
+Thanks to Željko for a talk with no hype and lots of working code, to Flagsmith for hosting, and to the Amsterdam JUG for the evening. You can find Željko on [LinkedIn](https://www.linkedin.com/in/zkozina/) and GATool at [gatool.io](https://gatool.io/).

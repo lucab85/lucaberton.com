@@ -56,6 +56,11 @@ const blogCollection = defineCollection({
     // rotating book/course cards and the Related Articles grid) so the page
     // only pushes this post's own product. Consumed by blog/[slug].astro.
     noCrossPromo: z.boolean().optional(),
+    // Optional full book/course cover, rendered uncropped and centered at the
+    // top of a launch page. Kept separate from `image` (the landscape social/OG
+    // card) so a portrait cover isn't cropped by the 1024x420 hero. Consumed by
+    // blog/[slug].astro.
+    cover: z.string().optional(),
   }),
 });
 

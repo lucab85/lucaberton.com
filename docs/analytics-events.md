@@ -77,6 +77,18 @@ CTA clicks are operational metrics; `booked_call`, `contact_form_submit`,
 `email_signup`, and `bootcamp_application_submitted` are the numbers to quote
 as "conversions" (`assessment_submit` until Nov 2, 2026).
 
+### Own-product cards are not `affiliate_click`
+
+`<BlogPromoCard variant="copypastelearn" course="…" />` promotes Luca's own
+courses on copypastelearn.com. It deliberately carries no `data-track-event`:
+`affiliate_click` is the key event behind the weekly "paid clicks" report, and
+a click on an own product is not a paid click. The click is still counted by
+`InteractionTracker.astro` (`site_interaction`, `interaction_action=outbound_click`,
+`interaction_label=copypastelearn_course_<key>`), and the link carries
+`utm_source=lucaberton.com&utm_medium=referral&utm_campaign=group-crosslink&utm_content=<key>`,
+so copypastelearn.com's analytics attribute the visit (same idea as
+`UdienzaBanner.astro`). The course table is in `src/components/BlogPromoCard.astro`.
+
 ## Shared parameters (every event)
 
 - `page_path`, `page_type` (`article` / `page` / `confirmation`)

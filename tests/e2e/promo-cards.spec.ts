@@ -52,3 +52,40 @@ test.describe('time-boxed promo cards', () => {
     });
   }
 });
+
+/**
+ * CopyPasteLearn course cards (BlogPromoCard variant="copypastelearn"): Luca's
+ * own product, so one card per post, a followed link (no nofollow/sponsored),
+ * no affiliate label or affiliate_click event, and UTM tags that name the
+ * course key. Any affiliate card already on the post stays.
+ */
+test.describe('copypastelearn course cards', () => {
+  const placements = [
+    { post: '/blog/claude-code-econnreset-fix/', course: 'claude-code' },
+    { post: '/blog/fix-claude-code-subscription-disabled-copilot-credit-limit/', course: 'claude-code' },
+    { post: '/blog/codex-device-code-auth-chatgpt-security-2026/', course: 'claude-code' },
+    { post: '/blog/karpathy-claude-md-llm-coding-principles-2026/', course: 'claude-code' },
+    { post: '/blog/claude-code-remote-control-enable-2026/', course: 'claude-code' },
+    { post: '/blog/claude-code-opentelemetry-monitoring-coding-agents/', course: 'claude-code' },
+    { post: '/blog/claude-code-enterprise-setup-authentication-mcp-guide/', course: 'claude-code' },
+    { post: '/blog/hermes-agent-oracle-cloud-free-tier-deployment/', course: 'ai-agent' },
+    { post: '/blog/hermes-agent-troubleshooting/', course: 'ai-agent' },
+    { post: '/blog/connecting-hermes-agent-to-discord/', course: 'ai-agent' },
+  ];
+  for (const { post, course } of placements) {
+    test(`${course} course card on ${post}`, async ({ page }) => {
+      await page.goto(post, { waitUntil: 'domcontentloaded' });
+      const card = page.locator('#article-content a[href^="https://www.copypastelearn.com/courses/"]');
+      await expect(card).toHaveCount(1);
+      const url = new URL((await card.getAttribute('href'))!);
+      expect(url.searchParams.get('utm_source')).toBe('lucaberton.com');
+      expect(url.searchParams.get('utm_medium')).toBe('referral');
+      expect(url.searchParams.get('utm_campaign')).toBe('group-crosslink');
+      expect(url.searchParams.get('utm_content')).toBe(course);
+      await expect(card).not.toHaveAttribute('rel', /nofollow|sponsored/);
+      await expect(card).not.toHaveAttribute('data-track-event', /.*/);
+      await expect(card).not.toContainText('(Affiliate)');
+      await expect(card).toContainText('Start the free lesson');
+    });
+  }
+});

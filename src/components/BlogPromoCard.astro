@@ -16,10 +16,84 @@ interface Props {
     | 'udemySecondChance'
     | 'pocket'
     | 'flatpay'
-    | 'linuxFoundation';
+    | 'linuxFoundation'
+    | 'copypastelearn';
+  /** Only for variant="copypastelearn": a key of `copypastelearnCourses` below. */
+  course?: string;
 }
 
-const { variant = 'book' } = Astro.props;
+const { variant = 'book', course: copypastelearnCourse } = Astro.props;
+
+// --- CopyPasteLearn: Luca's own course site (not an affiliate offer) ---
+// THE ONE PLACE TO EDIT. A post picks a course by key:
+//   <BlogPromoCard variant="copypastelearn" course="claude-code" />
+// To promote another course under a key (for example the successor of the
+// Claude Code Masterclass), change `title`, `description` and `path` of that
+// entry: every post that uses the key follows on the next build, and the key
+// stays in utm_content, so the reports keep one line per placement group.
+// Only courses that are live on copypastelearn.com. Titles and descriptions are
+// the ones on each course page (copied Nov 18, 2026): no prices, ratings or
+// student counts here, they go stale.
+const copypastelearnCourses: Record<string, { title: string; description: string; path: string }> = {
+  'claude-code': {
+    title: 'Claude Code Masterclass: Ship Real Code with AI',
+    description: 'Stop treating AI like a magic autocomplete and start using it like a sharp junior engineer you direct, review, and hold accountable. Ten hands-on modules on the Plan → Implement → Test → Review → Commit loop.',
+    path: '/courses/claude-code-masterclass',
+  },
+  'ai-agent': {
+    title: 'OpenClaw: Your First AI Agent',
+    description: 'Deploy OpenClaw locally or on a small VPS, add real tools, create one reusable automation, and apply essential security guardrails.',
+    path: '/courses/openclaw-agent',
+  },
+  ansible: {
+    title: 'Ansible Automation in 30 Minutes',
+    description: 'A crash course in IT automation with Ansible: the essential skills to start automating tasks and managing infrastructure in just 30 minutes.',
+    path: '/courses/ansible-quickstart',
+  },
+  docker: {
+    title: 'Docker Fundamentals',
+    description: 'Learn Docker from scratch. Build, ship, and run containers with confidence, from basic container concepts to multi-stage builds.',
+    path: '/courses/docker-fundamentals',
+  },
+  terraform: {
+    title: 'Terraform: Code, Deploy, and Scale',
+    description: 'A practical approach for beginners to learn cloud infrastructure with Terraform: Infrastructure as Code, HCL, and hands-on AWS provisioning.',
+    path: '/courses/terraform-beginners',
+  },
+  mlops: {
+    title: 'MLflow on Kubernetes: ML at Scale',
+    description: 'Build scalable MLOps with MLflow, KServe, Docker, and Kubernetes. Automate deployments, monitor models, and workflows.',
+    path: '/courses/mlflow-kubernetes-mlops',
+  },
+};
+
+// A typo in `course` must stop the build, not ship a card that links nowhere.
+const copypastelearnEntry =
+  variant === 'copypastelearn' && copypastelearnCourse && Object.hasOwn(copypastelearnCourses, copypastelearnCourse)
+    ? copypastelearnCourses[copypastelearnCourse]
+    : null;
+if (variant === 'copypastelearn' && !copypastelearnEntry) {
+  throw new Error(
+    `<BlogPromoCard variant="copypastelearn"> on ${Astro.url.pathname}: course="${copypastelearnCourse ?? ''}" is not one of ${Object.keys(copypastelearnCourses).join(', ')}`,
+  );
+}
+
+// Built like a `staticPromos` entry, so it renders through the same card markup.
+// Own product: no "(Affiliate)" label and a normal followed link (no `rel`
+// override, unlike the paid offers below). The UTM tags let copypastelearn.com's
+// analytics attribute the visit to this site and to the course key.
+const copypastelearnPromo = copypastelearnEntry
+  ? {
+      eyebrow: '🎓 My CopyPasteLearn Course',
+      title: copypastelearnEntry.title,
+      description: `${copypastelearnEntry.description} The first lesson is free, no signup required.`,
+      cta: 'Start the free lesson',
+      ctaUrl: `https://www.copypastelearn.com${copypastelearnEntry.path}?utm_source=lucaberton.com&utm_medium=referral&utm_campaign=group-crosslink&utm_content=${copypastelearnCourse}`,
+      accent: 'border-teal-500',
+      image: '',
+      external: true,
+    }
+  : null;
 
 // --- Books rotation pool (actual covers) ---
 const books = [
@@ -300,7 +374,7 @@ const staticPromos = {
   },
 };
 
-const cardVariants = ['service', 'vps', 'atoms', 'claudeBootcamp', 'nordicApis', 'udemyCertification', 'udemySecondChance', 'pocket', 'flatpay', 'linuxFoundation'];
+const cardVariants = ['service', 'vps', 'atoms', 'claudeBootcamp', 'nordicApis', 'udemyCertification', 'udemySecondChance', 'pocket', 'flatpay', 'linuxFoundation', 'copypastelearn'];
 
 // Time-boxed offers (event discounts, coupon codes) set `validUntil`
 // (YYYY-MM-DD, inclusive). Evaluated at build time; the site rebuilds on every
@@ -339,7 +413,16 @@ const trackingAttrs = affiliateMeta[variant]
         'data-tp-cta-position': 'post_conclusion',
         'data-tp-cta-variant': 'promo_card_service',
       }
-    : {};
+    : variant === 'copypastelearn'
+      ? {
+          // Deliberately NOT in affiliateMeta: affiliate_click is the GA4 key
+          // event behind the weekly "paid clicks" report, and Luca's own
+          // course is not a paid click. The click is still counted by
+          // InteractionTracker (site_interaction / outbound_click), which
+          // reads this label; the visit is attributed by the UTM tags.
+          'data-track-label': `copypastelearn_course_${copypastelearnCourse}`,
+        }
+      : {};
 ---
 
 {variant === 'book' && (
@@ -479,7 +562,7 @@ const trackingAttrs = affiliateMeta[variant]
 )}
 
 {cardVariants.includes(variant) && !promoExpired && (() => {
-  const promo = staticPromos[variant];
+  const promo = copypastelearnPromo ?? staticPromos[variant];
   return (
     <aside class={`not-prose my-10 rounded-xl overflow-hidden border-l-4 ${promo.accent}`} role="complementary">
       <a

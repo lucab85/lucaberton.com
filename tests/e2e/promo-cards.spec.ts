@@ -61,13 +61,13 @@ test.describe('time-boxed promo cards', () => {
  */
 test.describe('copypastelearn course cards', () => {
   const placements = [
-    { post: '/blog/claude-code-econnreset-fix/', course: 'claude-code' },
-    { post: '/blog/fix-claude-code-subscription-disabled-copilot-credit-limit/', course: 'claude-code' },
-    { post: '/blog/codex-device-code-auth-chatgpt-security-2026/', course: 'claude-code' },
-    { post: '/blog/karpathy-claude-md-llm-coding-principles-2026/', course: 'claude-code' },
-    { post: '/blog/claude-code-remote-control-enable-2026/', course: 'claude-code' },
-    { post: '/blog/claude-code-opentelemetry-monitoring-coding-agents/', course: 'claude-code' },
-    { post: '/blog/claude-code-enterprise-setup-authentication-mcp-guide/', course: 'claude-code' },
+    { post: '/blog/claude-code-econnreset-fix/', course: 'coding-agents' },
+    { post: '/blog/fix-claude-code-subscription-disabled-copilot-credit-limit/', course: 'coding-agents' },
+    { post: '/blog/codex-device-code-auth-chatgpt-security-2026/', course: 'coding-agents' },
+    { post: '/blog/karpathy-claude-md-llm-coding-principles-2026/', course: 'coding-agents' },
+    { post: '/blog/claude-code-remote-control-enable-2026/', course: 'coding-agents' },
+    { post: '/blog/claude-code-opentelemetry-monitoring-coding-agents/', course: 'otel-agents' },
+    { post: '/blog/claude-code-enterprise-setup-authentication-mcp-guide/', course: 'mcp' },
     { post: '/blog/hermes-agent-oracle-cloud-free-tier-deployment/', course: 'ai-agent' },
     { post: '/blog/hermes-agent-troubleshooting/', course: 'ai-agent' },
     { post: '/blog/connecting-hermes-agent-to-discord/', course: 'ai-agent' },

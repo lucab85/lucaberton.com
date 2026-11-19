@@ -10,6 +10,15 @@ One config drives the sponsored banner on all eight sites:
    (the 1200x300 strip, at 2x), `card-800.webp`, `card-1200.webp` and
    `card.jpg` (the full creative, for phones). `scripts/generate-lf-halloween-banners.mjs`
    shows how the October 2026 set was built from a partner creative.
+   For an animated banner, also add `wide.mp4` and `card.mp4` (muted H.264
+   loops, same sizes as the images, a few hundred KB) and set `"video": true`
+   on the campaign. The images are then the still that shows first; after the
+   page has loaded, the inline script puts the loop over it (card.mp4 on
+   phones), with a pause button. It keeps the still with reduced motion or data
+   saver on, and when the loop cannot play. The Academy banners of November
+   2026 (`static/promo/academy-*`) are built this way. A site whose CSP has no
+   `media-src` allowing lucaberton.com (or a `default-src 'self'` without one)
+   shows the still only: add `media-src 'self' https://lucaberton.com`.
 2. Add the campaign at the top of `campaigns` in `promos.json` (the first match
    wins), or edit the current one:
    - `sites`: `["*"]` or site ids (`lucaberton.com`, `udienza.com`,
@@ -18,6 +27,7 @@ One config drives the sponsored banner on all eight sites:
    - `start`: `YYYY-MM-DD`, from each visitor's local midnight
    - `end`: an ISO instant, e.g. `2026-10-30T00:00:00Z` (partners often end in UTC)
    - `enabled: false` turns a campaign off without deleting it
+   - `video` (optional): `true` when `wide.mp4` and `card.mp4` exist
    - `href`, `code` (optional), `alt`, `caption`, `disclosure` (optional),
      `image.base` + the `wide`/`card` sizes, `tracking` (campaign, company, offerId)
 3. Run `node scripts/sync-promo.mjs lucaberton.com --local static/promo/promos.json`:
@@ -37,7 +47,7 @@ resolves it into `src/generated/promo.json` (or `null`) and the site's
 `PromoBanner` component renders that file. If the config cannot be fetched,
 the script keeps the last synced campaign, so a build never fails because of
 it. udienza.com runs it with `--self-host public`, which copies the images
-into the site (its SEO validator forbids third-party images).
+(and the loops of a video campaign) into the site (its SEO validator forbids third-party images).
 
 The banner is in the page from the build, but CSS hides it unless an inline
 script right before it has flagged `<html>` with `data-promo-on` for the

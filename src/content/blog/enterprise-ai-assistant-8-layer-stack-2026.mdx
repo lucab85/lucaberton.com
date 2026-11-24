@@ -1,0 +1,181 @@
+---
+draft: false
+title: "The Model Is Only Layer One: The 8-Layer Stack of an Enterprise AI Assistant"
+snippet: "ChatGPT or Claude is only the bottom layer. On top: system prompt, RAG, MCP tools, OAuth, guardrails, cache and router, traces and tests."
+description: "An enterprise AI assistant is eight layers, not one model: model, prompt, RAG, MCP tools, OAuth, guardrails, cache and router, traces and tests."
+seoTitle: "Enterprise AI Assistant Architecture: The 8-Layer Stack"
+image:
+  src: "/blog/thumbnails/enterprise-ai-assistant-8-layer-stack-2026.jpg"
+  alt: "The 8-layer stack of an enterprise AI assistant: model, system prompt, RAG, MCP tools, OAuth permissions, guardrails, cache and router, traces and tests."
+publishDate: "2026-11-22"
+lastModified: "2026-11-22"
+category: "AI"
+author: "Luca Berton"
+tags: ["AI", "Enterprise AI", "LLM", "RAG", "MCP", "OAuth", "Guardrails", "AI Gateway", "Observability", "OpenTelemetry", "LLMOps", "Platform Engineering", "OpenEmpower"]
+faq:
+  - question: "What are the layers of an enterprise AI assistant?"
+    answer: "Eight layers, from the bottom up: 1) the model (ChatGPT, Claude, Gemini or an open-weight model), 2) the system prompt with fixed instructions, 3) RAG over your own documents, 4) tools connected with MCP, 5) OAuth permissions that decide who sees what, 6) guardrails, 7) cache and model router to control cost, 8) traces and tests so you know what happens."
+  - question: "Is the system prompt a security control?"
+    answer: "No. The system prompt sets role, tone and format, but a user or a poisoned document can talk the model out of it. Access control belongs in the permission layer (OAuth scopes, document ACLs) and in guardrails, outside the model."
+  - question: "Which layer should I build first?"
+    answer: "Start with model, system prompt and RAG to prove value, but add traces and tests from day one. Permissions and guardrails must be in place before real users and real data. Cache and routing come when usage grows."
+  - question: "What does MCP add to an AI assistant?"
+    answer: "The Model Context Protocol (MCP) is an open standard to connect an AI application to tools and data sources such as a CRM, a ticketing system or a database. You write one MCP server per system, and any MCP-compatible client can use it."
+---
+
+Every week a customer tells me: *"We picked the model. Now we just need to connect it to our data."*
+
+The model is the easy part. It is **layer one of eight**. Most of the work, and most of the risk, sits in the seven layers above it.
+
+This is the stack I draw on the whiteboard in every enterprise AI workshop. Read it from the bottom up:
+
+| #  | Layer | What it answers |
+|----|-------|-----------------|
+| 08 | **Traces + tests** | Do I know what happens? |
+| 07 | **Cache + router** | Are costs under control? |
+| 06 | **Guardrails** | What are my defences? |
+| 05 | **OAuth permissions** | Who sees what? |
+| 04 | **MCP tools** | Can it act in my apps? |
+| 03 | **RAG documents** | Does it know my rules? |
+| 02 | **System prompt** | What are the fixed instructions? |
+| 01 | **Model** | ChatGPT, Claude, Gemini, open-weight... |
+
+A demo needs layers 1 and 2. A pilot needs layers 1 to 4. **Production needs all eight.** Let's go through them.
+
+## 01 — Model: ChatGPT, Claude, Gemini...
+
+The model is the engine: GPT, Claude, Gemini, or an open-weight model such as Llama, Mistral, Qwen or Granite that you serve yourself with vLLM on your own GPUs.
+
+Three things I tell every team:
+
+- **Do not marry one model.** Models change every few months. Put an API gateway or an abstraction in front of the model so you can swap it without rewriting the application.
+- **The best model is not always the right model.** A frontier model for a classification task is a sports car to go to the bakery.
+- **Data residency is a model decision.** If your data cannot leave the EU, or cannot leave your data centre, that decides between a hosted API, a regional cloud endpoint, or self-hosting.
+
+The model is a commodity. The value is in the layers you build on top of it.
+
+## 02 — System prompt: fixed instructions
+
+The system prompt is the job description. It tells the model who it is, what it does, what it does not do, the tone, the language and the output format.
+
+Treat it like code:
+
+- **Keep it in Git.** Review changes in pull requests. One word in a system prompt can change the behaviour of thousands of conversations.
+- **Version it** and log which version answered each request (you will need this in layer 8).
+- **Keep it short and specific.** Long lists of "never do X" are less reliable than clear examples of the correct behaviour.
+
+And one important warning: **the system prompt is not a security boundary.** A clever user, or a poisoned document from layer 3, can talk the model out of its instructions. "Do not show salary data" in a prompt is a wish, not a control. Real control lives in layers 5 and 6.
+
+## 03 — RAG documents: your rules
+
+A general model knows the internet. It does not know your return policy, your HR handbook or the procedure you changed last Tuesday. **Retrieval-Augmented Generation (RAG)** finds the relevant passages in your documents and gives them to the model together with the question.
+
+What makes RAG work in practice is rarely the vector database. It is:
+
+- **Clean sources.** Three versions of the same policy in SharePoint give three different answers. Garbage in, confident garbage out.
+- **Good chunking and metadata:** owner, date, department, language, version.
+- **Citations.** Every answer shows the source document, so the user can check it and trust it.
+- **Freshness.** A pipeline that re-indexes when a document changes, not a one-time import.
+- **Permission-aware retrieval.** Search only the documents this user is allowed to read. More on this in layer 5.
+
+## 04 — MCP tools: your apps
+
+RAG lets the assistant *read*. Tools let it *act*: open a ticket, look up an order, book a meeting, query a database.
+
+The **Model Context Protocol (MCP)** is the open standard for this connection. You write one MCP server for your CRM, one for your ticketing system, one for your database, and every MCP-compatible client (Claude, ChatGPT, IDE agents, your own application) can use them. It is the USB-C port for AI applications: build the connector once, plug it in everywhere.
+
+Design rules for tools:
+
+- **Small tools with clear names and descriptions.** The model chooses a tool by reading its description. `get_invoice_by_number` is better than `do_finance_stuff`.
+- **Separate read tools from write tools.** Reading a customer record and deleting it are not the same risk.
+- **Validate every input on the server side.** The model fills in the parameters. Treat them as untrusted user input, because they are.
+
+## 05 — OAuth permissions: who sees what
+
+This is the layer that most pilots skip and every security review asks about.
+
+The question is simple: **when the assistant answers Maria, does it see what Maria sees, or what the service account sees?**
+
+If the answer is "the service account", you just built a machine that lets every employee read every document and call every API. That is not an AI assistant. That is a data leak with a chat interface.
+
+The correct pattern:
+
+- **The assistant acts on behalf of the user.** It uses the user's identity (OAuth 2.x / OpenID Connect via your identity provider: Entra ID, Okta, Keycloak) and not a shared super-user.
+- **Scoped, short-lived tokens.** The assistant gets only the scopes it needs for this task. The MCP specification uses OAuth 2.1 for exactly this reason.
+- **Enforce access in the data layer.** RAG filters documents by the user's ACLs *before* retrieval. Tools check permissions on the server. Never rely on the model to "not mention" something it already received.
+- **Human approval for high-impact actions:** payments, deletions, emails to customers.
+
+Rule of thumb: **if the model never receives the data, it cannot leak the data.**
+
+## 06 — Guardrails: your defences
+
+Guardrails are the checks around the model, on the way in and on the way out.
+
+**Input guardrails:**
+- Detect prompt injection and jailbreak attempts, also inside retrieved documents and tool results (indirect prompt injection).
+- Detect and mask personal data (PII) before it goes to an external model.
+- Keep the assistant on topic: an HR assistant does not write marketing copy or give legal advice.
+
+**Output guardrails:**
+- Block sensitive data, toxic content or answers outside policy.
+- Check that the answer is grounded in the retrieved sources.
+- Validate structured output (JSON schema) before another system uses it.
+
+You can use open-source building blocks such as NVIDIA NeMo Guardrails, Llama Guard or Guardrails AI, or the safety features of your cloud provider. Whatever you choose, guardrails are **defence in depth**, not a replacement for layer 5. A filter can miss an attack. A missing permission cannot be bypassed.
+
+For regulated companies in Europe, this layer is also where a big part of your **EU AI Act** evidence comes from: documented risks, documented mitigations.
+
+## 07 — Cache + router: costs under control
+
+The first month of a pilot is cheap. Then 5,000 employees start to use it, and finance calls.
+
+Three tools keep the bill predictable:
+
+- **Prompt caching.** Your system prompt and common context are the same in every request. Providers can cache that prefix and charge a fraction of the normal input price for it. It also reduces latency.
+- **Semantic cache.** "How many vacation days do I have?" and "How much annual leave do I get?" are the same question. Answer it once, serve it many times. (Be careful: cache only answers that do not depend on the user's permissions.)
+- **Model router.** Send simple requests (classification, extraction, short answers) to a small, cheap model. Send only the hard ones to the frontier model. Most enterprise traffic is simple.
+
+Put all of this in an **AI gateway** (for example LiteLLM, or your cloud provider's gateway) together with budgets and rate limits per team. Then cost becomes a platform metric, like CPU and memory, not a surprise at the end of the month.
+
+## 08 — Traces + tests: you know what happens
+
+This is the top of the stack because it watches all the other layers.
+
+**Traces.** For every request, record the full path: user, system prompt version, retrieved documents, tools called with their parameters, guardrail decisions, model, tokens, latency and cost. When a user says "the assistant gave me a wrong answer yesterday", you need to open the trace and see *why*: wrong document? wrong tool? hallucination? Use OpenTelemetry (it has semantic conventions for generative AI) and a tool like Langfuse or Arize Phoenix, or your existing observability platform.
+
+**Tests (evals).** Every change in layers 1 to 7 can break something: a new model version, a new prompt, a new chunking strategy. So:
+
+- Build a **golden dataset**: real questions with the expected answers and the expected sources.
+- Run it **in CI** on every change, like unit tests.
+- Measure what matters: correctness, groundedness, correct tool choice, refusals when the user has no permission.
+- Turn every production incident into a new test case.
+
+Without this layer you do not have an AI system in production. You have an AI system *somewhere*, doing *something*.
+
+## In which order should you build it?
+
+Not all at once. This is the order that works for my customers:
+
+1. **Prove value:** layers 1, 2 and 3 on one use case with one clean document set. Add **layer 8 from day one**: traces cost nothing at the start and save weeks later.
+2. **Before real users and real data:** layers 5 and 6. No exceptions. This is where the security, privacy and compliance teams say yes or no.
+3. **Make it useful:** layer 4. Start with read-only tools, add write tools with human approval.
+4. **Scale:** layer 7, when usage grows and cost becomes visible.
+
+If you come from platform engineering, this picture will feel familiar. The model is the container runtime. Everything above it (identity, policy, gateway, observability, CI) is the platform. The teams that succeed with AI in production are the teams that treat it as a platform problem, not a prompt problem.
+
+## A quick self-check
+
+Ask these eight questions about your assistant. Every "no" is a layer to build.
+
+- [ ] Can we change the model without rewriting the application?
+- [ ] Is the system prompt in Git, versioned and reviewed?
+- [ ] Does every answer cite its source documents?
+- [ ] Are tools connected with a standard (MCP) and validated on the server?
+- [ ] Does the assistant see only what *this user* is allowed to see?
+- [ ] Do we detect prompt injection and PII, on input and on output?
+- [ ] Do we know the cost per team, and do cheap requests go to cheap models?
+- [ ] Can we open a trace for any answer, and do evals run on every change?
+
+---
+
+**Want help with this?** At [OpenEmpower](https://openempower.com) I help enterprise teams design and build all eight layers: from the first RAG pilot to a governed AI platform on Kubernetes and OpenShift, with OAuth, guardrails, an AI gateway and evals in CI. We also run hands-on workshops for platform and security teams. [Get in touch](https://openempower.com) and tell me which layer is keeping you awake.

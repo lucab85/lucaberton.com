@@ -1,0 +1,158 @@
+---
+draft: true
+title: "Capability Mesh: Architecture for the Agentic Era (Amsterdam JUG at Metafactory)"
+snippet: "Makan Sepehrifar at the Amsterdam JUG: from service mesh to capability mesh. An MCP registry, A2A agent cards and an LLM that picks agents, in a Spring AI demo."
+description: "Amsterdam JUG at Metafactory: Makan Sepehrifar on Capability Mesh. MCP tools and a registry, A2A agent cards and an LLM orchestrator in a Spring AI demo."
+seoTitle: "Capability Mesh: MCP Registry, A2A Agent Cards and LLM Orchestration"
+image:
+  src: "/blog/thumbnails/amsterdam-jug-metafactory-capability-mesh-2026.jpg"
+  alt: "Capability Mesh: Architecture for the Agentic Era, a talk by Makan Sepehrifar at the Amsterdam JUG at Metafactory."
+publishDate: "2026-11-24"
+lastModified: "2026-11-25"
+category: "AI"
+author: "Luca Berton"
+tags: ["MCP", "A2A", "Capability Mesh", "AI Agents", "Service Mesh", "Spring AI", "Java", "Policy as Code", "Observability", "meetup", "amsterdam"]
+event:
+  name: "Amsterdam Java User Group meetup at Metafactory"
+  startDate: "2026-11-24"
+  endDate: "2026-11-24"
+  city: "Amsterdam"
+  venue: "Metafactory"
+  organizer: "Amsterdam JUG"
+  url: "https://www.meetup.com/amsterdam-java-user-group/events/317048407/"
+  country: "NL"
+  role: "attendee"
+  companies: ["Productboard", "Metafactory", "Amsterdam JUG"]
+  speakers:
+    - name: "Makan Sepehrifar"
+      company: "Productboard"
+  topics: ["java-jvm", "mcp", "ai-agents", "architecture"]
+---
+
+{/* DRAFT: written from the meetup abstract and a close reading of the public repo (all 8 modules). No photos or slides yet: add them and your own notes from the talk, then set draft: false. */}
+
+{/* TODO(on publish): link the other talks of the night: /blog/amsterdam-jug-metafactory-openjcockpit-ai-orchestrator-2026/, /blog/amsterdam-jug-metafactory-quantum-java-2026/. Draft posts cannot link to each other (validate-seo-fixes fails), so they are plain text until all are published. */}
+
+{/* TODO(verify): the demo's agents use the JSON-RPC method "tasks/send". Check against the current A2A specification (method names changed between spec versions) before saying anything about spec compliance. */}
+
+The middle talk of the Amsterdam JUG evening at **Metafactory** was *"Capability Mesh: Architecture for the Agentic Era"* by **Makan Sepehrifar** of Productboard. It is the talk with a GitHub repository behind it, so you can run what he describes: [makan1869/capability-mesh](https://github.com/makan1869/capability-mesh).
+
+(The other talks of the night: OpenJCockpit, an in-house AI orchestrator and securing Java for the quantum era.)
+
+{/* TODO: photo of Makan on stage + title slide */}
+
+## From service mesh to capability mesh
+
+In the microservices era, the hard problem was the network: service discovery, retries, mTLS, traffic shaping. We solved it with the **service mesh**.
+
+In the agentic era, the abstract says, the integration problem is about **capabilities**, not networking. An orchestrator does not call `POST /orders`. It decides *"I need something that can look up an order"* and picks an agent or tool that offers that capability.
+
+And the old problems come back in a new form:
+
+- **Discoverability:** how does the orchestrator find the right capability?
+- **Scalability:** what happens with hundreds of tools in the context window?
+- **Observability:** which agent did what, and why?
+- **Explainability and unintended actions:** LLMs are non-deterministic, so "it worked yesterday" is not a guarantee.
+
+The proposal: move from **technical service contracts** to **semantic capability integration**.
+
+## The five topics
+
+The talk is organised around five ideas:
+
+1. **From OpenAPI to MCP: the protocol shift.** OpenAPI describes endpoints for developers. MCP describes tools for models: a name, a natural-language description, and a typed input schema that a model can read and choose from.
+2. **Capability hierarchies: composing agents at scale.** Small capabilities compose into bigger ones, and the orchestrator reasons at the right level instead of seeing a flat list of hundreds of tools.
+3. **Human-on-the-loop.** The human moves from approving every step (in the loop) to supervising and setting boundaries (on the loop).
+4. **Policy as code.** Governance for autonomous agents written as versioned, testable rules, like we already do for Kubernetes admission control. (If you know OPA or Kyverno, this will feel familiar.)
+5. **Observability and safety: tracing agent behaviour.** Every capability call is traced, so you can explain afterwards what the system did.
+
+{/* TODO: your notes on each topic from the talk, with slide photos */}
+
+## The demo repository: two layers of capability
+
+The repo is a deliberately small mesh, so the architecture is easy to see. It is a Maven multi-module project (Java 25, Spring Boot 4.1.1, Spring AI 2.0.1) with **eight modules**, and it shows capabilities at **two levels**. (The README lists six of the modules. The two clients, `printer` and `capability-mesh-agent-card`, are not in it.)
+
+The capabilities themselves are toys: print a letter. That is on purpose. The interesting part is how a model discovers them, chooses between them and composes them.
+
+### Layer 1: tools. MCP servers plus a registry
+
+Five modules are independent Spring Boot apps, and each exposes a remote **MCP server** over the Streamable HTTP transport:
+
+| Module | Capability | Port |
+|---|---|---|
+| `echo-printer` | `echo`: returns the letter or digit it is given (only a-z, A-Z, 0-9) | 8081 |
+| `char-printer` | 26 no-input tools, `a` to `z`, each returning the uppercase letter | 8082 |
+| `second-character-printer` | `second_character`: the second character of any string | 8083 |
+| `random-printer` | `random_character`: a random character from a 6-character string | 8084 |
+| `next-char-printer` | `next_character`: next letter of the alphabet, `Z` wraps to `A` | 8085 |
+| `mcp-registry` | REST API to **discover** the servers above | 8090 |
+
+- **Tools are plain annotated methods.** In Spring AI you expose a capability with `@McpTool`, and the starter `spring-ai-starter-mcp-server-webmvc` does the rest. A new server means a new module, a port, a server name and one annotation.
+- **Discovery is a registry, not a config file.** `mcp-registry` implements the read endpoints of the MCP [generic registry API](https://github.com/modelcontextprotocol/registry) (`GET /v0.1/servers`, with search and pagination). Each server is one small `server.json` file with a reverse-DNS name, a title, a description, a version and a `streamable-http` remote URL.
+- **A real-world detail.** Server names contain a slash (`nl.makan1869.capabilitymesh/echo-printer`), the spec requires it as `%2F` in the URL, and Tomcat rejects that by default. The registry reconfigures the connector to pass it through, with an integration test that sends real encoded requests. The kind of thing you only learn by building it.
+- **Strict inputs.** Tool input is untrusted, because the model fills in the parameters. `echo-printer` accepts only a letter or a digit.
+
+**The client** is the `printer` module, a one-shot app. On startup it asks the registry for all servers, opens an MCP client to each, hands the model the **combined tool set**, and gives it the task **"Print ABC02+"**.
+
+The system instructions are the clever part. They say every character must come from a tool call, and the model may not type any character itself, but they **do not say which tool handles which character**. The letters have dedicated tools. The digits and the `+` do not. So the model has to read the tool descriptions and work out that `second_character` can produce a symbol (call it with `X+` and it returns `+`), while `random_character` could only do it by chance. That is *capability reasoning* in a few lines, and it is a nice test of how well tool descriptions work. The client also logs every tool call, so you can see what the model actually did.
+
+### Layer 2: agents. A2A-style agent cards and an LLM orchestrator
+
+The `capability-mesh-agent-card` module (derived, according to the commit history, from the Spring AI community *agent-utils* skills demo) moves up one level: from tools to **agents**.
+
+Each printer is wrapped as an agent with a small hand-written A2A-style API:
+
+- `GET /api/agents/printer-a` returns an **agent card**: name, description, URL, version, capabilities, and a list of **skills**, each with an id, a name, a description, tags and example prompts.
+- `POST /api/agents/printer-a` accepts a **JSON-RPC 2.0** request (`tasks/send`) and returns a task result with a status and **artifacts**.
+
+There are six agents: A to D print a fixed letter, **E asks an LLM to produce the letter E** (an agent whose inside is non-deterministic), and a **Smart Printer** that prints whatever letter it is asked for.
+
+Two orchestrators show the difference between a mesh and a script:
+
+1. A **static** orchestrator calls agents A, B and C in a fixed order. It is kept as the baseline, but disabled in the code.
+2. A **smart** orchestrator **fetches every agent card**, builds a capability list from the skill descriptions, and asks the LLM to return, as **structured output**, an ordered list of *(agent URL, letter)* pairs that produce the target string `ABC`. The prompt tells it to prefer a dedicated agent when one exists and to use the Smart Printer only for letters that have no dedicated agent. Then plain code calls only the selected agents, in that order.
+
+Note the split: **the model plans, the code acts.** The LLM never calls an agent itself. It returns a typed plan that the orchestrator validates and executes. That is a small but real pattern for keeping an agentic system explainable.
+
+The module also carries two Spring AI *skills* (`ai-tutor` and `code-reviewer`), loaded from the classpath, and a logging advisor for the chat client. Models and keys are configuration: the API key comes from the `ANTHROPIC_API_KEY` environment variable, the model name is a property, and the reasoning effort of the client is configurable.
+
+### How it maps to the five topics
+
+My reading of the code against the talk's themes (not a summary of the slides):
+
+| Talk topic | In the repo |
+|---|---|
+| OpenAPI to MCP | MCP servers with tool descriptions, and `server.json` files in a registry |
+| Capability hierarchies | Tools (MCP) below agents (A2A-style); dedicated capability first, generic one as a fallback |
+| Observability | Logged tool calls in the client and a logging advisor in the agent module |
+| Non-determinism and unintended actions | The E agent and `random_character`: capabilities that may not do the same thing twice |
+| Human-on-the-loop, policy as code | Not implemented in the repo. These are the talk's part. |
+
+The repo has no licence file at the time of writing, so read it, run it and learn from it, but ask the author before reusing code.
+
+## Why this matters for platform teams
+
+If you run a platform, you know the next question: *who owns the catalogue of capabilities, and who decides which agent may call which?* A registry plus policy as code plus traces is the same pattern as a service catalogue plus admission control plus OpenTelemetry. The vocabulary changed. The discipline did not.
+
+For the identity and permission side of the same problem, see my post on the [8-layer stack of an enterprise AI assistant](/blog/enterprise-ai-assistant-8-layer-stack-2026/), and the earlier Amsterdam JUG talk on [legacy Java services as MCP tools](/blog/amsterdam-jug-graphql-mcp-2026/).
+
+## Try it yourself
+
+The mesh needs only Java 25 and Maven. The two clients also need an Anthropic API key in `ANTHROPIC_API_KEY`.
+
+```bash
+git clone https://github.com/makan1869/capability-mesh
+cd capability-mesh
+mvn clean verify
+
+# 1. the registry (port 8090)
+mvn -pl mcp-registry spring-boot:run
+curl "http://localhost:8090/v0.1/servers?limit=2"
+
+# 2. the five MCP servers, each in its own terminal, for example:
+mvn -pl echo-printer spring-boot:run
+```
+
+Or use `./build/build.sh` to put all six servers into one Docker image, then run the `printer` module to let the model discover the tools and print `ABC02+`.
+
+*Thanks to Makan Sepehrifar for the talk, to Metafactory and Geertjan Wielenga for hosting, and to the Amsterdam JUG for another good evening.*

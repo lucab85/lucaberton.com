@@ -1,0 +1,108 @@
+---
+draft: true
+title: "Capability Mesh: Architecture for the Agentic Era (Amsterdam JUG at Metafactory)"
+snippet: "Makan Sepehrifar at the Amsterdam JUG: from service mesh to capability mesh. OpenAPI to MCP, capability hierarchies, policy as code, and a working Spring AI demo."
+description: "Amsterdam JUG at Metafactory: Makan Sepehrifar (Productboard) on Capability Mesh, the agentic-era successor to the service mesh. MCP, registries, policy as code, observability."
+seoTitle: "Capability Mesh: Architecture for AI Agents (MCP + Registry)"
+image:
+  src: "/blog/thumbnails/amsterdam-jug-metafactory-capability-mesh-2026.jpg"
+  alt: "Capability Mesh: Architecture for the Agentic Era, a talk by Makan Sepehrifar at the Amsterdam JUG at Metafactory."
+publishDate: "2026-11-24"
+lastModified: "2026-11-24"
+category: "AI"
+author: "Luca Berton"
+tags: ["MCP", "Capability Mesh", "AI Agents", "Service Mesh", "Spring AI", "Java", "Policy as Code", "Observability", "meetup", "amsterdam"]
+event:
+  name: "Amsterdam Java User Group meetup at Metafactory"
+  startDate: "2026-11-24"
+  endDate: "2026-11-24"
+  city: "Amsterdam"
+  venue: "Metafactory"
+  organizer: "Amsterdam JUG"
+  url: "https://www.meetup.com/amsterdam-java-user-group/events/317048407/"
+  country: "NL"
+  role: "attendee"
+  companies: ["Productboard", "Metafactory", "Amsterdam JUG"]
+  speakers:
+    - name: "Makan Sepehrifar"
+      company: "Productboard"
+  topics: ["java-jvm", "mcp", "ai-agents", "architecture"]
+---
+
+{/* DRAFT: written from the meetup abstract and the public repo. Add photos and your own notes from the talk, then set draft: false. */}
+
+{/* TODO(on publish): link the other talks of the night: /blog/amsterdam-jug-metafactory-openjcockpit-ai-orchestrator-2026/, /blog/amsterdam-jug-metafactory-quantum-java-2026/. Draft posts cannot link to each other (validate-seo-fixes fails), so they are plain text until all are published. */}
+
+The middle talk of the Amsterdam JUG evening at **Metafactory** was *"Capability Mesh: Architecture for the Agentic Era"* by **Makan Sepehrifar** of Productboard. It is the talk with a GitHub repository behind it, so you can run what he describes: [makan1869/capability-mesh](https://github.com/makan1869/capability-mesh).
+
+(The other talks of the night: OpenJCockpit, an in-house AI orchestrator and securing Java for the quantum era.)
+
+{/* TODO: photo of Makan on stage + title slide */}
+
+## From service mesh to capability mesh
+
+In the microservices era, the hard problem was the network: service discovery, retries, mTLS, traffic shaping. We solved it with the **service mesh**.
+
+In the agentic era, the abstract says, the integration problem is about **capabilities**, not networking. An orchestrator does not call `POST /orders`. It decides *"I need something that can look up an order"* and picks an agent or tool that offers that capability.
+
+And the old problems come back in a new form:
+
+- **Discoverability:** how does the orchestrator find the right capability?
+- **Scalability:** what happens with hundreds of tools in the context window?
+- **Observability:** which agent did what, and why?
+- **Explainability and unintended actions:** LLMs are non-deterministic, so "it worked yesterday" is not a guarantee.
+
+The proposal: move from **technical service contracts** to **semantic capability integration**.
+
+## The five topics
+
+The talk is organised around five ideas:
+
+1. **From OpenAPI to MCP: the protocol shift.** OpenAPI describes endpoints for developers. MCP describes tools for models: a name, a natural-language description, and a typed input schema that a model can read and choose from.
+2. **Capability hierarchies: composing agents at scale.** Small capabilities compose into bigger ones, and the orchestrator reasons at the right level instead of seeing a flat list of hundreds of tools.
+3. **Human-on-the-loop.** The human moves from approving every step (in the loop) to supervising and setting boundaries (on the loop).
+4. **Policy as code.** Governance for autonomous agents written as versioned, testable rules, like we already do for Kubernetes admission control. (If you know OPA or Kyverno, this will feel familiar.)
+5. **Observability and safety: tracing agent behaviour.** Every capability call is traced, so you can explain afterwards what the system did.
+
+{/* TODO: your notes on each topic from the talk, with slide photos */}
+
+## The demo repository
+
+The repo is a deliberately small mesh, so the architecture is easy to see. It is a Maven multi-module project (Java 25, Spring Boot 4.1.1, Spring AI 2.0.1). Each module is an independent Spring Boot app, and most expose a remote MCP server over the **Streamable HTTP** transport:
+
+| Module | Capability | Port |
+|---|---|---|
+| `echo-printer` | `echo`: returns the letter or digit it is given | 8081 |
+| `char-printer` | 26 no-input tools, `a` to `z`, returning the uppercase letter | 8082 |
+| `second-character-printer` | `second_character`: second character of a string | 8083 |
+| `random-printer` | `random_character`: a random character from a 6-character string | 8084 |
+| `next-char-printer` | `next_character`: next letter of the alphabet, `Z` wraps to `A` | 8085 |
+| `mcp-registry` | REST API to **discover** the servers above | 8090 |
+
+The printers are toy capabilities on purpose. What matters is the shape:
+
+- **Tools are plain annotated methods.** In Spring AI you expose a capability with `@McpTool`, and the starter `spring-ai-starter-mcp-server-webmvc` does the rest. Adding a new server means a new module, a port, a server name and one annotation.
+- **Discovery is a registry, not a config file.** `mcp-registry` implements the read endpoints of the MCP [generic registry API](https://github.com/modelcontextprotocol/registry) (`GET /v0.1/servers`, with search and pagination), seeded with the five servers. A client asks the registry what exists and then connects to the right MCP server.
+- **A real-world detail.** Server names are reverse-DNS with a slash, like `nl.makan1869.capabilitymesh/echo-printer`, and the spec requires `%2F` in the URL. Tomcat rejects that by default, so the registry reconfigures the connector to pass it through, with an integration test that sends real encoded requests. The kind of thing you only learn by building it.
+- **Strict inputs.** `echo-printer` accepts only a letter or a digit. Tool input is untrusted: the model fills in the parameters.
+- **One image to try it all.** `./build/build.sh` builds all six jars into a single Docker image with all ports exposed.
+
+There is also a `capability-mesh-agent-card` module, an agent in action derived from the Spring AI community skills demo.
+
+## Why this matters for platform teams
+
+If you run a platform, you know the next question: *who owns the catalogue of capabilities, and who decides which agent may call which?* A registry plus policy as code plus traces is the same pattern as a service catalogue plus admission control plus OpenTelemetry. The vocabulary changed. The discipline did not.
+
+For the identity and permission side of the same problem, see my post on the [8-layer stack of an enterprise AI assistant](/blog/enterprise-ai-assistant-8-layer-stack-2026/), and the earlier Amsterdam JUG talk on [legacy Java services as MCP tools](/blog/amsterdam-jug-graphql-mcp-2026/).
+
+## Try it yourself
+
+```bash
+git clone https://github.com/makan1869/capability-mesh
+cd capability-mesh
+mvn clean verify
+mvn -pl mcp-registry spring-boot:run
+curl "http://localhost:8090/v0.1/servers?limit=2"
+```
+
+*Thanks to Makan Sepehrifar for the talk, to Metafactory and Geertjan Wielenga for hosting, and to the Amsterdam JUG for another good evening.*

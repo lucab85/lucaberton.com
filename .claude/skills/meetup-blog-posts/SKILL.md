@@ -103,12 +103,19 @@ timeline, and it settles claims you would otherwise flag as "from memory".
 
 ## Images
 
+**CI limits (`scripts/check-image-sizes.cjs`, needs `sharp`, so it only runs in CI):**
+event photos `static/blog/events/**` at most **1280 px** on the longest edge and **320 KB**;
+thumbnails `static/blog/thumbnails/**` at most 1280 px and **220 KB**. A first PR failed on 14 files because
+photos were exported at 1600 px. Always generate to the limits, from the original (not from an already
+resized copy):
+
 ```bash
-D=static/blog/events/<slug>; mkdir -p $D
-sips -Z 1600 -s format jpeg -s formatOptions 78 "<source>.jpg" --out "$D/<name>.jpg"      # per photo
-sips -Z 1200 -s format jpeg -s formatOptions 82 "<best photo>.jpg" --out static/blog/thumbnails/<slug>.jpg
-python3 -I .claude/skills/meetup-blog-posts/scripts/strip_exif.py $D/*.jpg static/blog/thumbnails/<slug>.jpg
+S=.claude/skills/meetup-blog-posts/scripts; D=static/blog/events/<slug>; mkdir -p $D
+$S/shrink.sh "<source>.jpg" "$D/<name>.jpg" 1280 $((300*1024))                       # each photo
+$S/shrink.sh "<best photo>.jpg" static/blog/thumbnails/<slug>.jpg 1200 $((205*1024)) # thumbnail
 ```
+
+`shrink.sh` resizes with `sips`, lowers the JPEG quality until the file fits, and strips EXIF.
 
 - **Strip EXIF. Always.** Phone photos carry GPS and device data. `sips` resizing and PNG round-trips keep it
   (verified). `strip_exif.py` removes the APP1/APP13 segments. `check_post.sh` reports any left. A lone
@@ -151,7 +158,8 @@ voice usually stay on lucaberton.com only: ask or offer instead of assuming.
   Run them one per command, because zsh does not split a quoted command string into arguments:
   `node scripts/check-links.cjs`, `node scripts/check-broken-tables.cjs`,
   `node scripts/validate-seo-fixes.cjs --source-only` (expect `FAIL 0`). `check-image-sizes.cjs` needs `sharp`
-  and skips itself here; CI enforces it, so keep photos at 1600 px / about 300 to 450 KB (earlier PRs used 1280 px).
+  and silently skips itself here, so **a clean local run proves nothing about images**: CI enforces it. Check
+  the limits yourself (see "Images"): longest edge from `sips -g pixelWidth -g pixelHeight`, size from `stat -f%z`.
 - Rules those checks enforce, learned the hard way:
   - **`snippet` and `description` must be 160 characters or fewer.** Count them; do not eyeball. The validator
     appears to skip drafts for this (172 and 178-character draft snippets passed, a 162-character published one

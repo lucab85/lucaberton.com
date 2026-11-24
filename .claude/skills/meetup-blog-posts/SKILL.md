@@ -40,6 +40,16 @@ Automation, Conferences, Open Source. In MDX use `{/* comment */}` for comments;
 2. **Read the speaker's repo** if given: `gh repo view`, `gh api repos/<o>/<r>/readme -q .content | base64 -d`,
    list contents, read module READMEs and recent commit messages. Describe what the repo really does
    (modules, ports, versions), and mark toy/demo code as a demo.
+   **Do not stop at the README.** It lagged the code in the capability-mesh repo (6 modules listed, 8 present,
+   and the two undocumented ones held the most interesting part). Go deeper:
+   `gh api "repos/<o>/<r>/git/trees/HEAD?recursive=1" -q '.tree[]|select(.type=="blob")|.path'` for the full tree,
+   read the root `pom.xml`/`package.json` module list, then the entry points, the orchestrator/client code,
+   config files and one sample of each resource type. Read file content with
+   `gh api -H "Accept: application/vnd.github.raw" "repos/<o>/<r>/contents/<path>"`.
+   Also check: `licenseInfo` (no licence means "read and learn, ask before reusing code", and paraphrase instead
+   of pasting code), and that config files hold env-var placeholders, not real keys (test the value's shape
+   without printing it; never copy a key into a post). Say which model names and settings come from config,
+   not from what the speaker said.
    **Ask for or look for the speaker's slide deck.** Speakers often publish a PDF (for example in their GitHub
    profile repo). See "Speaker slide decks (PDF)": it gives the whole talk, not just the slides someone photographed.
 3. **Look at siblings** of the same group for tone and structure (`src/content/blog/amsterdam-jug-*.mdx`).
@@ -143,7 +153,9 @@ voice usually stay on lucaberton.com only: ask or offer instead of assuming.
   `node scripts/validate-seo-fixes.cjs --source-only` (expect `FAIL 0`). `check-image-sizes.cjs` needs `sharp`
   and skips itself here; CI enforces it, so keep photos at 1600 px / about 300 to 450 KB (earlier PRs used 1280 px).
 - Rules those checks enforce, learned the hard way:
-  - **`snippet` and `description` must be 160 characters or fewer.** Count them; do not eyeball.
+  - **`snippet` and `description` must be 160 characters or fewer.** Count them; do not eyeball. The validator
+    appears to skip drafts for this (172 and 178-character draft snippets passed, a 162-character published one
+    failed), so size the meta on drafts too, or CI fails the day `draft: false` is set.
   - **A post may not link to a `draft: true` post, even from another draft.** While talks of one night are all
     drafts, write the sibling talks as plain text and leave one `{/* TODO(on publish): link ... */}` comment
     with the slugs. Add the links in the same edit that flips `draft: false`. Links to published posts are fine.

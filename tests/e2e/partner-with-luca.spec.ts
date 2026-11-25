@@ -40,6 +40,17 @@ test.describe('partner with Luca', () => {
     }
   });
 
+  test('tracks the MRPeasy affiliate partner link', async ({ page }) => {
+    await page.goto('/partner-with-luca/', { waitUntil: 'domcontentloaded' });
+    const link = page.locator('#commercial-partners a[data-tp-offer-id="mrpeasy_affiliate"]');
+    await expect(link).toHaveCount(1);
+    await expect(link).toHaveAttribute('href', 'https://try.mrpeasy.com/0wh78g0svtll');
+    await expect(link).toHaveAttribute('rel', /\bsponsored\b/);
+    await expect(link).toHaveAttribute('data-track-event', 'affiliate_click');
+    await expect(link).toHaveAttribute('data-tp-company', 'mrpeasy');
+    await expect(link).toHaveAttribute('data-tp-offer-type', 'affiliate');
+  });
+
   test('expires the Revolut referral after the campaign deadline', async ({ page }) => {
     await page.clock.install({ time: new Date('2026-11-25T12:00:00Z') });
     await page.goto('/partner-with-luca/', { waitUntil: 'domcontentloaded' });

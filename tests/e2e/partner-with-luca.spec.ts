@@ -78,6 +78,7 @@ test.describe('partner with Luca', () => {
   });
 
   test('loads the DigitalOcean Awin banner only after explicit opt-in', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 });
     let requests = 0;
     await page.route('https://www.awin1.com/cshow.php?**', async (route) => {
       if (route.request().url().includes('s=4977900')) requests++;
@@ -85,6 +86,7 @@ test.describe('partner with Luca', () => {
     });
     await page.goto('/blog/gemini-spark-vs-openclaw-hosted-vs-self-hosted-personal-agents/', { waitUntil: 'domcontentloaded' });
     const banner = page.locator('do-managed-agents-banner');
+    await expect(page.locator('[aria-label="Affiliate disclosure"]').first()).toBeVisible();
     const image = banner.locator('img');
     await expect(image).not.toHaveAttribute('src', /.+/);
     await expect(image).toBeHidden();
@@ -97,6 +99,29 @@ test.describe('partner with Luca', () => {
     await expect(image).toHaveAttribute('src', 'https://www.awin1.com/cshow.php?s=4977900&v=123996&q=622311&r=1937397');
     await image.scrollIntoViewIfNeeded();
     await expect.poll(() => requests).toBe(1);
+  });
+
+  test('uses the official 300x250 Managed Agents creative on narrow screens', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    const requests: string[] = [];
+    await page.route('https://www.awin1.com/cshow.php?**', async (route) => {
+      if (/s=4977895|s=4977900/.test(route.request().url())) requests.push(route.request().url());
+      await route.abort();
+    });
+    await page.goto('/blog/gemini-spark-vs-openclaw-hosted-vs-self-hosted-personal-agents/', { waitUntil: 'domcontentloaded' });
+    const banner = page.locator('do-managed-agents-banner');
+    const image = banner.locator('img');
+    await expect(image).not.toHaveAttribute('src', /.+/);
+    expect(requests).toHaveLength(0);
+    await banner.getByRole('button', { name: 'Allow and load advertising banner' }).click();
+    await expect(image).toHaveAttribute('src', 'https://www.awin1.com/cshow.php?s=4977895&v=123996&q=622311&r=1937397');
+    await expect(image).toHaveAttribute('width', '300');
+    await expect(image).toHaveAttribute('height', '250');
+    await expect(banner.locator('a')).toHaveAttribute('href', 'https://www.awin1.com/cread.php?s=4977895&v=123996&q=622311&r=1937397');
+    await expect(banner.locator('a')).toHaveAttribute('data-tp-offer-id', 'digitalocean_managed_agents_4977895');
+    await image.scrollIntoViewIfNeeded();
+    await expect.poll(() => requests.length).toBe(1);
+    expect(requests[0]).toContain('s=4977895');
   });
 
   test('expires the Revolut referral after the campaign deadline', async ({ page }) => {

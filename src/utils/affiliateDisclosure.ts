@@ -34,6 +34,8 @@ export const AFFILIATE_LINK_PATTERNS: RegExp[] = [
   /[?&]sca_ref=/i,                                  // Pocket and other SCA links
   /[?&]refcode=/i,                                  // generic refcode
   /[?&]REFERRALCODE=/,                              // Hostinger referral
+  /\brootly\.com\/[^\s)"']*[?&]utm_source=lucaberton(?:&|[\s)"']|$)/i, // Rootly tracked partner link
+  /\btiiny\.host\/?\?[^\s)"']*\bfpr=luca-97b16e(?:&|[\s)"']|$)/i, // Tiiny Host affiliate
 ];
 
 /**

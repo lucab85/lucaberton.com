@@ -51,6 +51,32 @@ test.describe('partner with Luca', () => {
     await expect(link).toHaveAttribute('data-tp-offer-type', 'affiliate');
   });
 
+  test('tracks DigitalOcean affiliate links with an upfront disclosure', async ({ page }) => {
+    for (const path of [
+      '/partner-with-luca/',
+      '/blog/openclaw-vps-deployment-always-on-ai-agent/',
+      '/blog/coolify-open-source-heroku-self-hosted-paas-2026/',
+      '/blog/openclaw-hardware-guide-mac-mini-vs-pi-vs-vps/',
+    ]) {
+      await page.goto(path, { waitUntil: 'domcontentloaded' });
+      const link = page.locator('a[data-tp-offer-id="digitalocean_affiliate"]');
+      await expect(link).toHaveCount(1);
+      await expect(link).toHaveAttribute('href', 'https://www.awin1.com/cread.php?awinmid=123996&awinaffid=1937397');
+      await expect(link).toHaveAttribute('rel', /\bsponsored\b/);
+      await expect(link).toHaveAttribute('data-track-event', 'affiliate_click');
+      await expect(link).toHaveAttribute('data-tp-company', 'digitalocean');
+      await expect(link).toHaveAttribute('data-tp-offer-type', 'affiliate');
+      const disclosure = page.locator('[aria-label="Affiliate disclosure"]').first();
+      await expect(disclosure).toBeVisible();
+      await expect(disclosure).toContainText('We earn commissions when you shop through the links below');
+      const before = await disclosure.evaluate((el) => {
+        const target = document.querySelector('a[data-tp-offer-id="digitalocean_affiliate"]');
+        return !!target && !!(el.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING);
+      });
+      expect(before).toBe(true);
+    }
+  });
+
   test('expires the Revolut referral after the campaign deadline', async ({ page }) => {
     await page.clock.install({ time: new Date('2026-11-25T12:00:00Z') });
     await page.goto('/partner-with-luca/', { waitUntil: 'domcontentloaded' });

@@ -124,6 +124,42 @@ test.describe('partner with Luca', () => {
     expect(requests[0]).toContain('s=4977895');
   });
 
+  for (const creative of [
+    { slug: 'llm-inference-cost-optimization-kubernetes-2026', campaign: 'inference', id: '4955787', group: '604641' },
+    { slug: 'coolify-open-source-heroku-self-hosted-paas-2026', campaign: 'general_cloud', id: '4757507', group: '601070' },
+  ]) {
+    test('loads the correct DigitalOcean ' + creative.campaign + ' graphic only after consent', async ({ page }) => {
+      await page.setViewportSize({ width: 375, height: 812 });
+      const query = 's=' + creative.id + '&v=123996&q=' + creative.group + '&r=1937397';
+      const imageUrl = 'https://www.awin1.com/cshow.php?' + query;
+      const clickUrl = 'https://www.awin1.com/cread.php?' + query;
+      let requests = 0;
+      await page.route('https://www.awin1.com/cshow.php?**', async (route) => {
+        if (route.request().url() === imageUrl) requests++;
+        await route.abort();
+      });
+      await page.goto('/blog/' + creative.slug + '/', { waitUntil: 'domcontentloaded' });
+      const banner = page.locator('do-managed-agents-banner[data-campaign="' + creative.campaign + '"]');
+      const image = banner.locator('img');
+      const link = banner.locator('a');
+      await expect(banner).toHaveCount(1);
+      await expect(page.locator('[aria-label="Affiliate disclosure"]').first()).toBeVisible();
+      await expect(link).toHaveAttribute('href', clickUrl);
+      await expect(link).toHaveAttribute('rel', /\\bsponsored\\b/);
+      await expect(link).toHaveAttribute('data-tp-offer-id', 'digitalocean_' + creative.campaign + '_' + creative.id);
+      await expect(link).toHaveAttribute('data-tp-cta-position', 'inline');
+      await expect(image).not.toHaveAttribute('src', /.+/);
+      await expect(image).toBeHidden();
+      expect(requests).toBe(0);
+      await banner.getByRole('button', { name: 'Allow and load advertising banner' }).click();
+      await expect(image).toHaveAttribute('src', imageUrl);
+      await expect(image).toHaveAttribute('width', '300');
+      await expect(image).toHaveAttribute('height', '250');
+      await image.scrollIntoViewIfNeeded();
+      await expect.poll(() => requests).toBe(1);
+    });
+  }
+
   test('expires the Revolut referral after the campaign deadline', async ({ page }) => {
     await page.clock.install({ time: new Date('2026-11-25T12:00:00Z') });
     await page.goto('/partner-with-luca/', { waitUntil: 'domcontentloaded' });

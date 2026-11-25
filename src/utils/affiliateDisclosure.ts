@@ -36,6 +36,7 @@ export const AFFILIATE_LINK_PATTERNS: RegExp[] = [
   /[?&]REFERRALCODE=/,                              // Hostinger referral
   /\brootly\.com\/[^\s)"']*[?&]utm_source=lucaberton(?:&|[\s)"']|$)/i, // Rootly tracked partner link
   /\btiiny\.host\/?\?[^\s)"']*\bfpr=luca-97b16e(?:&|[\s)"']|$)/i, // Tiiny Host affiliate
+  /\bbuildliy\.com\/r\/4zm2h2(?:[/?#\s)"\']|$)/i, // Buildliy affiliate
 ];
 
 /**

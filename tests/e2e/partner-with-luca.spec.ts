@@ -26,6 +26,20 @@ test.describe('partner with Luca', () => {
     await expect(tiinyLink).toHaveAttribute('rel', /\bsponsored\b/);
   });
 
+  test('expires the Revolut referral after the campaign deadline', async ({ page }) => {
+    await page.clock.install({ time: new Date('2026-11-25T12:00:00Z') });
+    await page.goto('/partner-with-luca/', { waitUntil: 'domcontentloaded' });
+    const referral = page.locator('#revolut-referral');
+    const link = referral.locator('a');
+    await expect(referral).toBeVisible();
+    await expect(link).toHaveAttribute('href', 'https://business.revolut.com/signup?promo=B2B-NOV2-26-AR-H3&ext=40513667-16ae-4a35-b760-ee714790fc1c&context=B2B_REFERRAL');
+    await expect(link).toHaveAttribute('data-track-event', 'affiliate_click');
+    await expect(link).toHaveAttribute('rel', /\bsponsored\b/);
+    await page.clock.setSystemTime(new Date('2026-12-03T12:00:00Z'));
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await expect(referral).toBeHidden();
+  });
+
   test('exposes partnership offers and a tracked inquiry form', async ({ page }) => {
     await page.goto('/partner-with-luca/', { waitUntil: 'domcontentloaded' });
 

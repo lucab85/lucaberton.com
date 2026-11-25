@@ -26,6 +26,20 @@ test.describe('partner with Luca', () => {
     await expect(tiinyLink).toHaveAttribute('rel', /\bsponsored\b/);
   });
 
+  test('tracks Buildliy affiliate links on the partner page and design roundup', async ({ page }) => {
+    for (const path of ['/partner-with-luca/', '/blog/40-ai-web-design-tools-ui-inspiration-2026/']) {
+      await page.goto(path, { waitUntil: 'domcontentloaded' });
+      const link = page.locator('a[data-tp-offer-id="buildliy_affiliate"]');
+      await expect(link).toHaveCount(1);
+      await expect(link).toHaveAttribute('href', 'https://www.buildliy.com/r/4zm2h2');
+      await expect(link).toHaveAttribute('rel', /\bsponsored\b/);
+      await expect(link).toHaveAttribute('data-track-event', 'affiliate_click');
+      await expect(link).toHaveAttribute('data-tp-company', 'buildliy');
+      await expect(link).toHaveAttribute('data-tp-offer-type', 'affiliate');
+      await expect(page.getByText(/50 bonus credits/).first()).toBeVisible();
+    }
+  });
+
   test('expires the Revolut referral after the campaign deadline', async ({ page }) => {
     await page.clock.install({ time: new Date('2026-11-25T12:00:00Z') });
     await page.goto('/partner-with-luca/', { waitUntil: 'domcontentloaded' });

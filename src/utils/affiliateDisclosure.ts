@@ -70,5 +70,6 @@ const PROMO_VARIANT_RE = new RegExp(
 export function hasAffiliateLinks(source: string | undefined | null): boolean {
   if (!source) return false;
   if (PROMO_VARIANT_RE.test(source)) return true;
+  if (/<DigitalOceanManagedAgentsBanner\b/i.test(source)) return true;
   return AFFILIATE_LINK_PATTERNS.some((re) => re.test(source));
 }

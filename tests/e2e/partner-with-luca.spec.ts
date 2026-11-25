@@ -77,6 +77,28 @@ test.describe('partner with Luca', () => {
     }
   });
 
+  test('loads the DigitalOcean Awin banner only after explicit opt-in', async ({ page }) => {
+    let requests = 0;
+    await page.route('https://www.awin1.com/cshow.php?**', async (route) => {
+      if (route.request().url().includes('s=4977900')) requests++;
+      await route.abort();
+    });
+    await page.goto('/blog/gemini-spark-vs-openclaw-hosted-vs-self-hosted-personal-agents/', { waitUntil: 'domcontentloaded' });
+    const banner = page.locator('do-managed-agents-banner');
+    const image = banner.locator('img');
+    await expect(image).not.toHaveAttribute('src', /.+/);
+    await expect(image).toBeHidden();
+    expect(requests).toBe(0);
+    const link = banner.locator('a');
+    await expect(link).toHaveAttribute('href', 'https://www.awin1.com/cread.php?s=4977900&v=123996&q=622311&r=1937397');
+    await expect(link).toHaveAttribute('rel', /\bsponsored\b/);
+    await expect(link).toHaveAttribute('data-track-event', 'affiliate_click');
+    await banner.getByRole('button', { name: 'Allow and load advertising banner' }).click();
+    await expect(image).toHaveAttribute('src', 'https://www.awin1.com/cshow.php?s=4977900&v=123996&q=622311&r=1937397');
+    await image.scrollIntoViewIfNeeded();
+    await expect.poll(() => requests).toBe(1);
+  });
+
   test('expires the Revolut referral after the campaign deadline', async ({ page }) => {
     await page.clock.install({ time: new Date('2026-11-25T12:00:00Z') });
     await page.goto('/partner-with-luca/', { waitUntil: 'domcontentloaded' });

@@ -81,8 +81,8 @@ only counts purchase events) ranks pages, CTAs and channels by expected money:
 
 | Event | value (EUR) | Assumption |
 |---|---|---|
-| `booked_call` | 1200 | €12k engagement × ~10% call → project |
-| `contact_form_submit` | 600 | half a call (mixed intent, incl. partnership) |
+| `booked_call` | 500 | Nov 2026: 1 of 11 calls was a paid lead (€1k); the shared link also books podcast guests, vendors, recruiters. Site bookings skew more commercial |
+| `contact_form_submit` | 250 | half a call (mixed intent, incl. partnership) |
 | `bootcamp_application_submitted` | 300 | €595 entry tier × ~50% application → enrollment |
 | `email_signup` | 10 | long-tail: a small share books a call later |
 | `affiliate_click` | 1 | typical commission per click |

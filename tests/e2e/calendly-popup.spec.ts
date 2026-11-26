@@ -259,7 +259,7 @@ test.describe('Calendly popup booking flow', () => {
 
     await expect.poll(() => events.filter((e) => e.event === 'booked_call')).toHaveLength(1);
     const booked = events.find((e) => e.event === 'booked_call')!;
-    expect(booked.value).toBe(1200);
+    expect(booked.value).toBe(500);
     expect(booked.currency).toBe('EUR');
     expect(booked.booking_source).toBe('calendly_popup');
     expect(booked.target_offer).toBe('ai_platform_assessment');

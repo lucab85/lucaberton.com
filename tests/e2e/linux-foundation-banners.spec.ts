@@ -1,0 +1,59 @@
+import { test, expect } from '@playwright/test';
+
+const evergreen = 's=3740967&v=85919&q=500799&r=1937397';
+
+for (const placement of [
+  { path: '/blog/devops-roadmap-2026-skills-tools-career/', audience: 'linux' },
+  { path: '/blog/kubecon-japan-2026-cncf-japan-briefing/', audience: 'cncf' },
+]) {
+  test('Linux Foundation banner consent and fallback: ' + placement.audience, async ({ page }) => {
+    await page.clock.install({ time: new Date('2030-01-01T00:00:00Z') });
+    let requests = 0;
+    await page.route('https://www.awin1.com/cshow.php?**', async route => {
+      if (route.request().url().includes(evergreen)) requests++;
+      await route.abort();
+    });
+    await page.goto(placement.path, { waitUntil: 'domcontentloaded' });
+    const banner = page.locator('lf-training-banner[data-audience="' + placement.audience + '"]');
+    const link = banner.locator('a');
+    const image = banner.locator('img');
+    await expect(banner).toHaveCount(1);
+    await expect(page.locator('[aria-label="Affiliate disclosure"]').first()).toBeVisible();
+    await expect(link).toHaveAttribute('href', 'https://www.awin1.com/cread.php?' + evergreen);
+    await expect(link).toHaveAttribute('data-tp-offer-id', 'linux_foundation_training');
+    await expect(link).toHaveAttribute('rel', /\bsponsored\b/);
+    await expect(image).not.toHaveAttribute('src', /.+/);
+    expect(requests).toBe(0);
+    await banner.getByRole('button', { name: 'Allow and load advertising banner' }).click();
+    await expect(image).toHaveAttribute('src', 'https://www.awin1.com/cshow.php?' + evergreen);
+    await image.scrollIntoViewIfNeeded();
+    await expect.poll(() => requests).toBe(1);
+  });
+}
+
+test('scheduled creative switches at boundaries and returns to evergreen', async ({ page }) => {
+  await page.clock.install({ time: new Date('2030-01-01T00:00:00Z') });
+  await page.goto('/blog/devops-roadmap-2026-skills-tools-career/', { waitUntil: 'domcontentloaded' });
+  await page.evaluate(async () => {
+    await customElements.whenDefined('lf-training-banner');
+    const original = document.querySelector('lf-training-banner')!;
+    const clone = original.cloneNode(true) as HTMLElement;
+    clone.id = 'schedule-fixture';
+    clone.dataset.campaigns = JSON.stringify([
+      { start: '2030-01-01T00:01:00Z', end: '2030-01-01T00:02:00Z',
+        creative: { id: '1', group: '1', width: 600, height: 300, label: 'Test creative', offerId: 'fixture_offer' } },
+      { start: '2030-01-01T00:02:00Z', end: '2030-01-01T00:03:00Z',
+        creative: { id: '2', group: '1', width: 600, height: 300, label: 'Second test creative', offerId: 'fixture_second' } },
+    ]);
+    original.replaceWith(clone);
+  });
+  const link = page.locator('#schedule-fixture a');
+  await expect(link).toHaveAttribute('data-tp-offer-id', 'linux_foundation_training');
+  await page.clock.fastForward(60000);
+  await expect(link).toHaveAttribute('data-tp-offer-id', 'fixture_offer');
+  await page.clock.fastForward(60000);
+  await expect(link).toHaveAttribute('data-tp-offer-id', 'fixture_second');
+  await page.clock.fastForward(60000);
+  await expect(link).toHaveAttribute('data-tp-offer-id', 'linux_foundation_training');
+  await expect(page.locator('#schedule-fixture img')).not.toHaveAttribute('src', /.+/);
+});

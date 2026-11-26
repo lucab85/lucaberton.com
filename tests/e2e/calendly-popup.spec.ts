@@ -240,6 +240,35 @@ test.describe('Calendly popup booking flow', () => {
     });
   }
 
+  test('Calendly confirmation fires booked_call once, with its EUR value', async ({ page }) => {
+    const events = await recordEvents(page);
+    await stubCalendlyAssets(page);
+    await page.goto(POST, { waitUntil: 'domcontentloaded' });
+    await cta(page).dispatchEvent('click');
+    await expect.poll(() => events.map((e) => e.event)).toContain('booking_start');
+
+    await page.evaluate(() => {
+      const msg = { event: 'calendly.event_scheduled', payload: { invitee: { uri: 'https://api.calendly.com/x/1' } } };
+      // Same invitee twice: Calendly can redeliver, only one conversion counts.
+      for (let i = 0; i < 2; i++) {
+        window.dispatchEvent(new MessageEvent('message', { origin: 'https://calendly.com', data: msg }));
+      }
+      // Wrong origin is ignored.
+      window.dispatchEvent(new MessageEvent('message', { origin: 'https://evil.example', data: msg }));
+    });
+
+    await expect.poll(() => events.filter((e) => e.event === 'booked_call')).toHaveLength(1);
+    const booked = events.find((e) => e.event === 'booked_call')!;
+    expect(booked.value).toBe(1200);
+    expect(booked.currency).toBe('EUR');
+    expect(booked.booking_source).toBe('calendly_popup');
+    expect(booked.target_offer).toBe('ai_platform_assessment');
+
+    // Micro-conversions carry no value.
+    const start = events.find((e) => e.event === 'booking_start')!;
+    expect(start.value).toBeUndefined();
+  });
+
   test('modifier-click keeps the native link (no popup, widget never loaded)', async ({ page }) => {
     await stubCalendlyAssets(page);
     await page.goto(POST, { waitUntil: 'domcontentloaded' });

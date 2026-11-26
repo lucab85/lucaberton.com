@@ -73,6 +73,24 @@ visitor.
 | `bootcamp_application_submitted` | application POST succeeded (name kept for data continuity; add a separate purchase event only if paid enrollment moves on-site) | — | **key event** |
 | `affiliate_click` | outbound affiliate/partner CTA clicked — one event for ALL partners | `company`, `offer_id`, `offer_type`, `cta_position`, `cta_variant`, `destination_url` | key event (lowest priority) |
 
+### Event values
+
+`ConversionTracker.astro` (`EVENT_VALUES_EUR`) adds `value` + `currency=EUR`
+to every key event, so GA4's **Key event value** (not "Total revenue", which
+only counts purchase events) ranks pages, CTAs and channels by expected money:
+
+| Event | value (EUR) | Assumption |
+|---|---|---|
+| `booked_call` | 1200 | €12k engagement × ~10% call → project |
+| `contact_form_submit` | 600 | half a call (mixed intent, incl. partnership) |
+| `bootcamp_application_submitted` | 300 | €595 entry tier × ~50% application → enrollment |
+| `email_signup` | 10 | long-tail: a small share books a call later |
+| `affiliate_click` | 1 | typical commission per click |
+
+These are estimates. Revisit them once the CRM shows real call → project
+rates, and change the constant and this table together. A `value` passed
+explicitly by a caller wins over the default.
+
 CTA clicks are operational metrics; `booked_call`, `contact_form_submit`,
 `email_signup`, and `bootcamp_application_submitted` are the numbers to quote
 as "conversions" (`assessment_submit` until Nov 2, 2026).

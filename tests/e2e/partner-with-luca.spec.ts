@@ -145,7 +145,7 @@ test.describe('partner with Luca', () => {
       await expect(banner).toHaveCount(1);
       await expect(page.locator('[aria-label="Affiliate disclosure"]').first()).toBeVisible();
       await expect(link).toHaveAttribute('href', clickUrl);
-      await expect(link).toHaveAttribute('rel', /\\bsponsored\\b/);
+      await expect(link).toHaveAttribute('rel', /\bsponsored\b/);
       await expect(link).toHaveAttribute('data-tp-offer-id', 'digitalocean_' + creative.campaign + '_' + creative.id);
       await expect(link).toHaveAttribute('data-tp-cta-position', 'inline');
       await expect(image).not.toHaveAttribute('src', /.+/);

@@ -160,6 +160,37 @@ test.describe('partner with Luca', () => {
     });
   }
 
+
+  for (const creative of [
+    { slug: 'llm-inference-cost-optimization-kubernetes-2026', campaign: 'inference', wide: '4955790', tall: '4955788', group: '604641' },
+    { slug: 'coolify-open-source-heroku-self-hosted-paas-2026', campaign: 'general_cloud', wide: '4937156', tall: '4757505', group: '601070' },
+  ]) {
+    for (const format of ['wide', 'tall'] as const) {
+      test('selects DigitalOcean ' + creative.campaign + ' ' + format + ' creative with matching click URL', async ({ page }) => {
+        await page.setViewportSize({ width: 1440, height: 900 });
+        await page.route('https://www.awin1.com/cshow.php?**', route => route.abort());
+        await page.goto('/blog/' + creative.slug + '/', { waitUntil: 'domcontentloaded' });
+        const banner = page.locator('do-managed-agents-banner[data-campaign="' + creative.campaign + '"]');
+        await banner.evaluate((el, chosen) => {
+          // Explicitly size this fixture independently of the production article column.
+          el.style.width = chosen === 'wide' ? '800px' : '340px';
+          el.style.maxWidth = 'none';
+          if (chosen === 'tall') el.dataset.placement = 'sidebar';
+        }, format);
+        const image = banner.locator('img');
+        await expect(image).not.toHaveAttribute('src', /.+/);
+        await banner.getByRole('button', { name: 'Allow and load advertising banner' }).click();
+        const id = creative[format];
+        const query = 's=' + id + '&v=123996&q=' + creative.group + '&r=1937397';
+        await expect(image).toHaveAttribute('src', 'https://www.awin1.com/cshow.php?' + query);
+        await expect(image).toHaveAttribute('width', format === 'wide' ? '728' : '300');
+        await expect(image).toHaveAttribute('height', format === 'wide' ? '90' : '600');
+        await expect(banner.locator('a')).toHaveAttribute('href', 'https://www.awin1.com/cread.php?' + query);
+        await expect(banner.locator('a')).toHaveAttribute('data-tp-offer-id', 'digitalocean_' + creative.campaign + '_' + id);
+      });
+    }
+  }
+
   test('expires the Revolut referral after the campaign deadline', async ({ page }) => {
     await page.clock.install({ time: new Date('2026-11-25T12:00:00Z') });
     await page.goto('/partner-with-luca/', { waitUntil: 'domcontentloaded' });
@@ -195,3 +226,38 @@ test.describe('partner with Luca', () => {
     ).toHaveText('Partner');
   });
 });
+
+for (const creative of [
+  { format: 'compact', id: '4977898', container: 550, width: 468, height: 60, placement: 'inline' },
+  { format: 'wide', id: '4977904', container: 800, width: 728, height: 90, placement: 'wide' },
+  { format: 'tall', id: '4977902', container: 680, width: 600, height: 900, placement: 'sidebar' },
+]) {
+  test('Managed Agents ' + creative.format + ' creative uses matching Awin URLs after consent', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    const requests: string[] = [];
+    await page.route('https://www.awin1.com/cshow.php?**', async route => {
+      if (route.request().url().includes('v=123996')) requests.push(route.request().url());
+      await route.abort();
+    });
+    await page.goto('/blog/gemini-spark-vs-openclaw-hosted-vs-self-hosted-personal-agents/', { waitUntil: 'domcontentloaded' });
+    const banner = page.locator('do-managed-agents-banner');
+    await banner.evaluate((el, fixture) => {
+      el.style.width = fixture.container + 'px';
+      el.style.maxWidth = 'none';
+      el.dataset.placement = fixture.placement;
+    }, creative);
+    const image = banner.locator('img');
+    const link = banner.locator('a');
+    const query = 's=' + creative.id + '&v=123996&q=622311&r=1937397';
+    await expect(image).not.toHaveAttribute('src', /.+/);
+    expect(requests).toHaveLength(0);
+    await banner.getByRole('button', { name: 'Allow and load advertising banner' }).click();
+    await expect(image).toHaveAttribute('src', 'https://www.awin1.com/cshow.php?' + query);
+    await expect(image).toHaveAttribute('width', String(creative.width));
+    await expect(image).toHaveAttribute('height', String(creative.height));
+    await expect(link).toHaveAttribute('href', 'https://www.awin1.com/cread.php?' + query);
+    await expect(link).toHaveAttribute('data-tp-offer-id', 'digitalocean_managed_agents_' + creative.id);
+    await image.scrollIntoViewIfNeeded();
+    await expect.poll(() => requests.length).toBe(1);
+  });
+}

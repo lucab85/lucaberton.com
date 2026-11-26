@@ -35,3 +35,30 @@ test('Jotform AI Agents contextual referral uses dedicated tracking link', async
   await expect(link).toHaveAttribute('data-track-event', 'affiliate_click');
   await expect(page.locator('[aria-label="Affiliate disclosure"]').first()).toBeVisible();
 });
+
+test('Jotform graphic switches to evergreen at campaign cutoff', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.clock.install({ time: new Date('2026-11-26T12:00:00Z') });
+  await page.goto('/blog/40-ai-web-design-tools-ui-inspiration-2026/', { waitUntil: 'domcontentloaded' });
+  const creative = page.locator('jotform-creative[data-variant="forms"]');
+  const link = creative.locator('a');
+  await expect(creative).toBeVisible();
+  await expect(link).toHaveAttribute('data-tp-offer-id', 'jotform_black_friday_banner');
+  await expect(link).toHaveAttribute('href', 'https://www.jotform.com/discounts/black-friday/?partner=lucaberton');
+  await expect(creative.locator('source')).toHaveAttribute('srcset', /black-friday-wide/);
+  await expect(creative.locator('img')).toHaveAttribute('src', /black-friday-compact/);
+  await page.clock.setSystemTime(new Date('2026-11-30T07:59:59Z'));
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await expect(link).toHaveAttribute('data-tp-offer-id', 'jotform_forms_banner');
+  await expect(link).toHaveAttribute('href', 'https://www.jotform.com/?partner=lucaberton');
+  await expect(creative.locator('source')).toHaveAttribute('srcset', /forms-wide/);
+  await expect(creative.locator('img')).toHaveAttribute('src', /forms-compact/);
+});
+
+test('Jotform AI Agents graphic has its own affiliate link', async ({ page }) => {
+  await page.goto('/blog/n8n-workflow-automation-self-hosted-kubernetes-2026/', { waitUntil: 'domcontentloaded' });
+  const creative = page.locator('jotform-creative[data-variant="ai_agents"]');
+  await expect(creative).toBeVisible();
+  await expect(creative.locator('a')).toHaveAttribute('href', 'https://www.jotform.com/ai/agents/?partner=lucaberton');
+  await expect(creative.locator('img')).toHaveAttribute('src', /ai-agents/);
+});

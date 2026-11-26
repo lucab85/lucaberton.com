@@ -13,11 +13,11 @@ for (const path of ['/partner-with-luca/', '/blog/40-ai-web-design-tools-ui-insp
     await expect(link).toHaveAttribute('data-tp-company', 'jotform');
     await expect(link).toHaveAttribute('data-tp-offer-type', 'affiliate');
     await expect(page.locator('[aria-label="Affiliate disclosure"]').first()).toBeVisible();
-    await expect(offer).toHaveText('Black Friday: 60% off eligible annual plans through November 30, 2026.');
+    await expect(offer).toHaveText('Black Friday: 60% off eligible annual plans (first year only; ends November 30, 2026).');
     await expect(offer).toHaveAttribute('href', 'https://www.jotform.com/discounts/black-friday/?partner=lucaberton');
     await expect(offer).toHaveAttribute('data-tp-offer-id', 'jotform_black_friday_2026');
     await expect(offer).toHaveAttribute('rel', /\bsponsored\b/);
-    await page.clock.setSystemTime(new Date('2026-12-01T00:00:00+01:00'));
+    await page.clock.setSystemTime(new Date('2026-11-30T07:59:59Z'));
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(offer).toHaveText('Partner offer: 50% off annual plans.');
     await expect(offer).toHaveAttribute('href', 'https://www.jotform.com/pricing/?partner=lucaberton');

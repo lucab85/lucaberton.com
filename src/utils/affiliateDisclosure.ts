@@ -37,6 +37,7 @@ export const AFFILIATE_LINK_PATTERNS: RegExp[] = [
   /\brootly\.com\/[^\s)"']*[?&]utm_source=lucaberton(?:&|[\s)"']|$)/i, // Rootly tracked partner link
   /\btiiny\.host\/?\?[^\s)"']*\bfpr=luca-97b16e(?:&|[\s)"']|$)/i, // Tiiny Host affiliate
   /\bbuildliy\.com\/r\/4zm2h2(?:[/?#\s)"\']|$)/i, // Buildliy affiliate
+  /\bjotform\.com\/[^\s)"']*[?&]partner=lucaberton(?:[&#\s)"']|$)/i, // Jotform affiliate
   /\btry\.mrpeasy\.com\/0wh78g0svtll(?:[/?#\s)"']|$)/i, // MRPeasy affiliate
 ];
 

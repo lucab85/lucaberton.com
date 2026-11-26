@@ -98,7 +98,7 @@ test.describe('Calendly popup booking flow', () => {
     expect(page.url()).toContain(POST); // no navigation away
 
     const popupUrl = new URL(await page.evaluate(() => (window as any).__popupUrl));
-    expect(popupUrl.origin + popupUrl.pathname).toBe('https://calendly.com/lucaberton/');
+    expect(popupUrl.origin + popupUrl.pathname).toBe('https://calendly.com/lucaberton/30min');
     expect(popupUrl.searchParams.get('hide_gdpr_banner')).toBeNull(); // no analytics consent given
     expect(popupUrl.searchParams.get('utm_source')).toBe('lucaberton.com');
     expect(popupUrl.searchParams.get('utm_medium')).toBe('site');
@@ -203,7 +203,7 @@ test.describe('Calendly popup booking flow', () => {
     await page.evaluate(() => {
       const a = document.createElement('a');
       a.id = 'inline-calendly';
-      a.href = 'https://calendly.com/lucaberton/';
+      a.href = 'https://calendly.com/lucaberton/30min';
       a.textContent = 'Book a consultation';
       document.querySelector('article')!.appendChild(a);
     });

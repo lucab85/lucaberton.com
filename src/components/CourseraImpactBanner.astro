@@ -1,0 +1,92 @@
+---
+/** Impact asset URLs must come from the publisher dashboard, not a thumbnail.
+ * Configure campaign values only after the advertiser's publication embargo.
+ * Static build output is public, even when the banner is hidden.
+ */
+const approvedLink = (value: unknown): string | undefined => {
+  if (typeof value !== "string" || !value) return;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" && url.hostname === "imp.i384100.net" && !url.username && !url.password) return url.href;
+  } catch {}
+};
+const approvedImage = (value: unknown): string | undefined => {
+  if (typeof value !== "string" || !value) return;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "https:" && !url.username && !url.password) return url.href;
+  } catch {}
+};
+const evergreen = approvedLink(import.meta.env.PUBLIC_COURSERA_IMPACT_EVERGREEN_URL);
+const campaign = approvedLink(import.meta.env.PUBLIC_COURSERA_IMPACT_CAMPAIGN_URL);
+const start = Date.parse(import.meta.env.PUBLIC_COURSERA_IMPACT_START ?? "");
+const end = Date.parse(import.meta.env.PUBLIC_COURSERA_IMPACT_END ?? "");
+const datedCampaign = campaign && Number.isFinite(start) && Number.isFinite(end) && start < end;
+const image = datedCampaign ? approvedImage(import.meta.env.PUBLIC_COURSERA_IMPACT_IMAGE_URL) : undefined;
+---
+{(evergreen || datedCampaign) && (
+  <coursera-impact-banner hidden class="not-prose my-6 block rounded-lg border border-slate-200 p-4"
+    style="display:none" data-evergreen={evergreen} data-campaign={datedCampaign ? campaign : undefined}
+    data-start={datedCampaign ? String(start) : undefined} data-end={datedCampaign ? String(end) : undefined}
+    data-image={image}>
+    <p class="m-0 text-xs font-semibold uppercase text-slate-600">Advertisement · Affiliate link</p>
+    <a target="_blank" rel="nofollow sponsored noopener noreferrer"
+      data-track-event="affiliate_click" data-tp-company="coursera" data-tp-offer-type="affiliate"
+      data-tp-offer-id={evergreen ? "coursera_impact_evergreen" : "coursera_impact_campaign"}
+      data-tp-cta-position="inline" data-tp-cta-variant="impact_creative"
+      class="mt-2 block font-semibold text-blue-700 hover:underline">Explore Coursera courses</a>
+    <img hidden alt="Coursera promotional banner" loading="lazy" decoding="async" referrerpolicy="no-referrer" class="mt-2 mx-auto h-auto max-w-full rounded" />
+    <button hidden type="button" class="mt-2 rounded border border-slate-300 px-3 py-2 text-sm font-semibold">Allow and load advertising banner (contacts a third party)</button>
+  </coursera-impact-banner>
+)}
+<script>
+  class CourseraImpactBanner extends HTMLElement {
+    private timer?: number;
+    private controller?: AbortController;
+    connectedCallback() {
+      this.controller?.abort();
+      this.controller = new AbortController();
+      const link = this.querySelector<HTMLAnchorElement>("a");
+      const image = this.querySelector<HTMLImageElement>("img");
+      const button = this.querySelector<HTMLButtonElement>("button");
+      if (!link || !image || !button) return;
+      let previous = "";
+      const refresh = () => {
+        const now = Date.now();
+        const active = !!this.dataset.campaign && now >= Number(this.dataset.start) && now < Number(this.dataset.end);
+        const href = active ? this.dataset.campaign : this.dataset.evergreen;
+        const key = href ? (active ? "campaign" : "evergreen") : "";
+        if (key !== previous) {
+          image.hidden = true;
+          image.removeAttribute("src");
+          button.hidden = !active || !this.dataset.image;
+          previous = key;
+        }
+        if (!href) {
+          link.removeAttribute("href");
+          this.hidden = true;
+          this.style.display = "none";
+          return;
+        }
+        link.href = href;
+        link.dataset.tpOfferId = "coursera_impact_" + key;
+        this.hidden = false;
+        this.style.removeProperty("display");
+      };
+      button.addEventListener("click", () => {
+        refresh();
+        if (previous !== "campaign" || !this.dataset.image) return;
+        image.src = this.dataset.image;
+        image.hidden = false;
+        button.hidden = true;
+      }, { signal: this.controller.signal });
+      refresh();
+      this.timer = window.setInterval(refresh, 1000);
+    }
+    disconnectedCallback() {
+      this.controller?.abort();
+      if (this.timer !== undefined) window.clearInterval(this.timer);
+    }
+  }
+  if (!customElements.get("coursera-impact-banner")) customElements.define("coursera-impact-banner", CourseraImpactBanner);
+</script>

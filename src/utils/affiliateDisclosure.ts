@@ -23,6 +23,7 @@ export const AFFILIATE_DISCLOSURE_TEXT =
  * non-affiliate URLs and would disclose commissions that do not exist.
  */
 export const AFFILIATE_LINK_PATTERNS: RegExp[] = [
+  /\brefer\.rizamo\.com\/luca(?:[/?#\s)"']|$)/i, // Rizamo affiliate
   /\bamzn\.to\//i,                                // Amazon Associates (short)
   /\bamazon\.[a-z.]{2,}\/[^\s)"']*[?&]tag=/i,      // Amazon Associates (long)
   /\bm\.do\.co\//i,                               // DigitalOcean

@@ -1,4 +1,13 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { test, expect } from '@playwright/test';
+
+// JotformCreative.astro renders the image placements only once the approved
+// media-kit WebP files are committed (src/assets/affiliate/jotform/README.md).
+// Until then the text links are the only Jotform placements, so skip these.
+const JOTFORM_ASSETS = join(process.cwd(), 'src/assets/affiliate/jotform');
+const hasJotformCreatives = ['forms-wide', 'forms-compact', 'black-friday-wide', 'black-friday-compact', 'ai-agents']
+  .every((name) => existsSync(join(JOTFORM_ASSETS, name + '.webp')));
 
 for (const path of ['/partner-with-luca/', '/blog/40-ai-web-design-tools-ui-inspiration-2026/']) {
   test('Jotform text-only affiliate offer and expiry on ' + path, async ({ page }) => {
@@ -37,6 +46,7 @@ test('Jotform AI Agents contextual referral uses dedicated tracking link', async
 });
 
 test('Jotform graphic switches to evergreen at campaign cutoff', async ({ page }) => {
+  test.skip(!hasJotformCreatives, 'Jotform media-kit WebP files not committed yet');
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.clock.install({ time: new Date('2026-11-26T12:00:00Z') });
   await page.goto('/blog/40-ai-web-design-tools-ui-inspiration-2026/', { waitUntil: 'domcontentloaded' });
@@ -56,6 +66,7 @@ test('Jotform graphic switches to evergreen at campaign cutoff', async ({ page }
 });
 
 test('Jotform AI Agents graphic has its own affiliate link', async ({ page }) => {
+  test.skip(!hasJotformCreatives, 'Jotform media-kit WebP files not committed yet');
   await page.goto('/blog/n8n-workflow-automation-self-hosted-kubernetes-2026/', { waitUntil: 'domcontentloaded' });
   const creative = page.locator('jotform-creative[data-variant="ai_agents"]');
   await expect(creative).toBeVisible();

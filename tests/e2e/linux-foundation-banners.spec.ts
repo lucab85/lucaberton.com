@@ -2,11 +2,11 @@ import { test, expect } from '@playwright/test';
 
 const evergreen = 's=3740967&v=85919&q=500799&r=1937397';
 
+// Only published posts: drafts (e.g. kubecon-japan-2026-ecosystem and
+// -opening-keynote) are not built, so their banners cannot be tested.
 for (const placement of [
   { path: '/blog/devops-roadmap-2026-skills-tools-career/', audience: 'linux' },
   { path: '/blog/kubecon-japan-2026-cncf-japan-briefing/', audience: 'cncf' },
-  { path: '/blog/kubecon-japan-2026-ecosystem/', audience: 'cncf' },
-  { path: '/blog/kubecon-japan-2026-opening-keynote/', audience: 'cncf' },
   { path: '/blog/kubecon-2026-pepijn-oomen-sovereign-cloud/', audience: 'cncf' },
   { path: '/blog/rocky-linux-10-rhel-alternative/', audience: 'linux' },
 ]) {

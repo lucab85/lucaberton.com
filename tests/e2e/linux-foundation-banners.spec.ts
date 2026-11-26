@@ -5,6 +5,10 @@ const evergreen = 's=3740967&v=85919&q=500799&r=1937397';
 for (const placement of [
   { path: '/blog/devops-roadmap-2026-skills-tools-career/', audience: 'linux' },
   { path: '/blog/kubecon-japan-2026-cncf-japan-briefing/', audience: 'cncf' },
+  { path: '/blog/kubecon-japan-2026-ecosystem/', audience: 'cncf' },
+  { path: '/blog/kubecon-japan-2026-opening-keynote/', audience: 'cncf' },
+  { path: '/blog/kubecon-2026-pepijn-oomen-sovereign-cloud/', audience: 'cncf' },
+  { path: '/blog/rocky-linux-10-rhel-alternative/', audience: 'linux' },
 ]) {
   test('Linux Foundation banner consent and fallback: ' + placement.audience, async ({ page }) => {
     await page.clock.install({ time: new Date('2030-01-01T00:00:00Z') });

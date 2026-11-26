@@ -226,3 +226,38 @@ test.describe('partner with Luca', () => {
     ).toHaveText('Partner');
   });
 });
+
+for (const creative of [
+  { format: 'compact', id: '4977898', container: 550, width: 468, height: 60, placement: 'inline' },
+  { format: 'wide', id: '4977904', container: 800, width: 728, height: 90, placement: 'wide' },
+  { format: 'tall', id: '4977902', container: 680, width: 600, height: 900, placement: 'sidebar' },
+]) {
+  test('Managed Agents ' + creative.format + ' creative uses matching Awin URLs after consent', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    const requests: string[] = [];
+    await page.route('https://www.awin1.com/cshow.php?**', async route => {
+      if (route.request().url().includes('v=123996')) requests.push(route.request().url());
+      await route.abort();
+    });
+    await page.goto('/blog/gemini-spark-vs-openclaw-hosted-vs-self-hosted-personal-agents/', { waitUntil: 'domcontentloaded' });
+    const banner = page.locator('do-managed-agents-banner');
+    await banner.evaluate((el, fixture) => {
+      el.style.width = fixture.container + 'px';
+      el.style.maxWidth = 'none';
+      el.dataset.placement = fixture.placement;
+    }, creative);
+    const image = banner.locator('img');
+    const link = banner.locator('a');
+    const query = 's=' + creative.id + '&v=123996&q=622311&r=1937397';
+    await expect(image).not.toHaveAttribute('src', /.+/);
+    expect(requests).toHaveLength(0);
+    await banner.getByRole('button', { name: 'Allow and load advertising banner' }).click();
+    await expect(image).toHaveAttribute('src', 'https://www.awin1.com/cshow.php?' + query);
+    await expect(image).toHaveAttribute('width', String(creative.width));
+    await expect(image).toHaveAttribute('height', String(creative.height));
+    await expect(link).toHaveAttribute('href', 'https://www.awin1.com/cread.php?' + query);
+    await expect(link).toHaveAttribute('data-tp-offer-id', 'digitalocean_managed_agents_' + creative.id);
+    await image.scrollIntoViewIfNeeded();
+    await expect.poll(() => requests.length).toBe(1);
+  });
+}

@@ -10,6 +10,9 @@
  * GA4 accounts (Admin > Account access management); to just read, Viewer is
  * enough for --dry-run.
  *
+ * Items may carry "properties": ["lucaberton.com"] to apply to those
+ * properties only (events that only one site fires).
+ *
  * Usage:
  *   node scripts/ga4-ensure.mjs --dry-run   # report what is missing, change nothing
  *   node scripts/ga4-ensure.mjs             # create what is missing
@@ -76,12 +79,18 @@ let errors = 0;
 let missing = 0;
 let created = 0;
 
+// An item may list `properties` (names from config.properties) to apply to
+// those properties only; the field is not part of the Admin API body.
+const appliesTo = (item, prop) => !item.properties || item.properties.includes(prop.name);
+const body = ({ properties, ...rest }) => rest;
+
 for (const prop of config.properties) {
   const id = `properties/${prop.id}`;
   const label = `${prop.name} (${prop.id})`;
   try {
     const keyEvents = new Set((await listAll(`${id}/keyEvents`, "keyEvents")).map((k) => k.eventName));
     for (const ev of config.keyEvents) {
+      if (!appliesTo(ev, prop)) continue;
       if (keyEvents.has(ev.eventName)) {
         console.log(`✓ ${label}  key event ${ev.eventName}`);
         continue;
@@ -91,13 +100,14 @@ for (const prop of config.properties) {
         console.log(`✗ ${label}  key event ${ev.eventName} is missing`);
         continue;
       }
-      await api("POST", `${id}/keyEvents`, ev);
+      await api("POST", `${id}/keyEvents`, body(ev));
       created++;
       console.log(`+ ${label}  key event ${ev.eventName} created`);
     }
 
     const dims = new Map((await listAll(`${id}/customDimensions`, "customDimensions")).map((d) => [`${d.scope}:${d.parameterName}`, d]));
     for (const dim of config.customDimensions) {
+      if (!appliesTo(dim, prop)) continue;
       if (dims.has(`${dim.scope}:${dim.parameterName}`)) {
         console.log(`✓ ${label}  dimension ${dim.parameterName}`);
         continue;
@@ -107,7 +117,7 @@ for (const prop of config.properties) {
         console.log(`✗ ${label}  dimension ${dim.parameterName} (${dim.displayName}) is missing`);
         continue;
       }
-      await api("POST", `${id}/customDimensions`, dim);
+      await api("POST", `${id}/customDimensions`, body(dim));
       created++;
       console.log(`+ ${label}  dimension ${dim.parameterName} (${dim.displayName}) created`);
     }

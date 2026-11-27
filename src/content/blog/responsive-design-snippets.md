@@ -7,7 +7,7 @@ lastModified: "2025-03-25"
 category: "design"
 author: "Luca Berton"
 image:
-  src: "https://placehold.co/600x400?text=Responsive%20Design%20Snippets"
+  src: "/blog/thumbnails/responsive-design-snippets.jpg"
   alt: "Cover placeholder for Responsive Design Snippets"
 tags: ["responsive", "google", "udacity", "nanodegree"]
 ---

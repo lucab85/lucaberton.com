@@ -138,8 +138,34 @@ $S/shrink.sh "<best photo>.jpg" static/blog/thumbnails/<slug>.jpg 1200 $((205*10
   number from memory) goes into the final report for the user to verify.
 - Structure that worked: opening with venue and speaker, photo, 4 to 6 `##` sections that follow the talk,
   a short "what to do on Monday" or "my takeaway", links to the other talks of the night, thanks to speaker,
-  host and group. About 700 to 1,200 words.
+  host and group. About 700 to 1,200 words from abstract and slides; up to about 2,500 with a transcript.
 - Do not link a URL you read off a banner or QR code unless it is legible; leave a TODO to verify instead.
+
+## Talk transcripts (mic recordings)
+
+Luca records the talks and may upload transcripts (`.txt` from speech-to-text). They are the best source for what
+was actually said, and they turn a draft built from abstract and slides into a real report. Read them as noisy data:
+
+- **Speaker labels and names are wrong.** "Speaker 0/1", or a wrong name (Makan was transcribed as "Mohammed", Ricky
+  as "Ike Verijn"). Use the names from the agenda and slides.
+- **Product and tech names are garbled**: "OpenGI Cockpit"/"OpenChay Profit" = OpenJCockpit, "gyro" = Jira,
+  "conference page" = Confluence, "Gurken" = Gherkin, "a label agent from Rob Johnson" = Embabel (Rod Johnson),
+  "MLCAM"/"LCM" = ML-KEM, "GFR" = JFR, "GK/JC/GDP 27" = JDK 27, "entity" = MCP, "eight way" = A2A,
+  "the screen book" = Spring PetClinic. Map each against the slides, the repo or a quick web search.
+- **Mixed languages.** Dutch speakers switch between Dutch and English mid-sentence; numbers in Dutch use a dot
+  for thousands ("19. 525 lijnen" = 19,525 lines). Flag any number you derived this way in the final report.
+- **Recordings can stop early** (the OpenJCockpit transcript ends mid-talk). Say in the DRAFT comment which parts
+  come from the abstract instead.
+- **Use timestamps to correct captions.** A photo captioned "Q&A" was taken at 18:32, two minutes into the evening:
+  it was the organiser's introduction. Check photo times (UTC in the file name) against the talk timeline.
+- **Quote only clean sentences**, short, and only when the transcript is unambiguous; paraphrase the rest.
+  Do not attribute an opinion that is only in a garbled passage.
+- The transcript also covers what slides never show: the organiser's announcements (next meetup, call for
+  speakers), the demo steps, and the Q&A. Those make the post.
+- **Verify the uncertain parts on the web** (WebSearch, "standard" mode, several queries in one turn): exact JEP
+  numbers and what they contain, spec method names, executive order dates, framework authors. Link the primary
+  source (openjdk.org, federalregister.gov, GitHub) in the post, and keep "per the slide" for numbers only the
+  speaker gives.
 - Keep private data out of posts and out of any external request: no user email, no personal details.
 - Do not add a model name or tool attribution to files in the repo.
 
@@ -164,6 +190,8 @@ voice usually stay on lucaberton.com only: ask or offer instead of assuming.
   - **`snippet` and `description` must be 160 characters or fewer.** Count them; do not eyeball. The validator
     appears to skip drafts for this (172 and 178-character draft snippets passed, a 162-character published one
     failed), so size the meta on drafts too, or CI fails the day `draft: false` is set.
+  - **`seoTitle` (or `title` if there is no `seoTitle`) must be 60 characters or fewer.** Also skipped for drafts.
+    A long `title` is fine if `seoTitle` is short.
   - **A post may not link to a `draft: true` post, even from another draft.** While talks of one night are all
     drafts, write the sibling talks as plain text and leave one `{/* TODO(on publish): link ... */}` comment
     with the slugs. Add the links in the same edit that flips `draft: false`. Links to published posts are fine.

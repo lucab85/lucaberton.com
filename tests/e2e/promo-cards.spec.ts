@@ -22,6 +22,9 @@ test.describe('contextual affiliate cards', () => {
   ];
   for (const { post, company, offerId } of placements) {
     test(`${company} card on ${post}`, async ({ page }) => {
+      // The Linux Foundation banner swaps in seasonal Awin campaigns with their
+      // own offer ids; check the evergreen placement outside any campaign.
+      if (company === 'linux_foundation') await page.clock.install({ time: new Date('2030-01-01T00:00:00Z') });
       await page.goto(post, { waitUntil: 'domcontentloaded' });
       const card = page.locator(`a[data-track-event="affiliate_click"][data-tp-offer-id="${offerId}"]`);
       await expect(card).toHaveCount(1);

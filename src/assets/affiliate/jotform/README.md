@@ -1,3 +1,13 @@
 # Jotform approved media kit
 
-Copy the original, unmodified WebP files supplied by the affiliate dashboard here: `black-friday-wide.webp` (2048×527), `black-friday-compact.webp` (1200×1000), `forms-wide.webp` (2048×853), `forms-compact.webp` (1200×1000), `ai-agents.webp` (1200×1200). Until these are committed, the image placements are omitted and the existing text links remain usable. Do not commit dashboard HTML or personal account information.
+The component uses the uploaded original PNG assets directly (no duplicate files or conversion):
+
+| Placement | File | Dimensions |
+| --- | --- | --- |
+| Black Friday wide | `Jotform_Banner_3.png` | 3880×1000 |
+| Black Friday compact | `Jotform_Banner_2.png` | 1200×1000 |
+| Forms wide | `Jotform_Banner_11.png` | 2400×1000 |
+| Forms compact | `Jotform_Banner_13.png` | 1200×1000 |
+| AI Agents | `Jotform_Banner_4.png` | 1200×1200 |
+
+Keep the existing campaign cutoff and affiliate tracking. Do not commit dashboard HTML or personal account information.

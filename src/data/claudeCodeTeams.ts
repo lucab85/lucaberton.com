@@ -15,6 +15,12 @@ export const claudeCodeTeams = {
   seatPrice: "€490",
   cohortPrice: "€4,500",
   cohortSize: 10,
+  /**
+   * Claude Code Team Kit (guardrail hooks, managed-settings guide, CLAUDE.md
+   * templates, skills): Individual €29, Team €149. Its page is internal, so
+   * links carry no UTMs. Sold through the kit page, not Gumroad.
+   */
+  teamKit: { name: "Claude Code Team Kit", page: "/claude-code-team-kit/", fromPrice: "€29" },
   /** Public session dates (YYYY-MM-DD). Past dates drop out at build time. */
   sessions: ["2026-12-11", "2027-01-20"],
 };

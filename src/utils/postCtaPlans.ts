@@ -8,8 +8,9 @@
  *
  *   team_rollout  one TeamRolloutBox right after the fix section: the reader
  *                 has to ask an admin, or is the admin. Public workshop seats,
- *                 the company cohort, the "Claude Code Masterclass" ebook, the
- *                 Guardrails Pack and a "forward this to your admin" email.
+ *                 the company cohort, the "Claude Code Masterclass" ebook (and
+ *                 its Leanpub team packs), the Claude Code Team Kit and a
+ *                 "forward this to your admin" email.
  *                 Clicks fire offer_click.
  *   single        one softer offer for an individual-user problem, right after
  *                 the fix: the "Claude Code Masterclass" ebook on Leanpub

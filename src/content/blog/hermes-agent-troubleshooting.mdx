@@ -19,9 +19,9 @@ tags:
   - "Discord"
 faq:
   - question: "Why does Hermes say 'The model provider is rate-limiting requests'?"
-    answer: "The provider returned an HTTP 429 Too Many Requests response. Hermes surfaces this directly instead of retrying silently. It means your requests are exceeding the provider's quota/rate window. Inspect the gateway log for the rate-limit detail: grep -i '429\\|rate' ~/.hermes/logs/gateway.log. With credential pools, exhaustion on every key in the pool produces this too. Clear an exhaustion flag with 'hermes auth reset PROVIDER', then switch models with 'hermes model' or pause and retry once the rate window resets."
+    answer: "The provider returned an HTTP 429 Too Many Requests response. Hermes surfaces this directly instead of retrying silently. It means your requests are exceeding the provider's quota/rate window. Current versions word it as '⏱️ The AI model service is rate-limiting requests. Wait a moment, then use /retry.' or '{provider} is rate-limiting requests right now'. Inspect the rate-limit detail with 'hermes logs errors --since 1h' (API errors go to agent.log and errors.log, not gateway.log). With credential pools, exhaustion on every key in the pool produces this too. Clear an exhaustion flag with 'hermes auth reset PROVIDER', then switch models with 'hermes model' or pause and retry once the rate window resets."
   - question: "Why does Hermes say 'the model provider failed after retries'?"
-    answer: "Hermes called the LLM, the call failed, and the built-in retry loop gave up. The raw provider error is kept out of chat for privacy and written to the gateway logs instead. Check the logs with 'grep -i error ~/.hermes/logs/gateway.log' and then inspect your credential pool with 'hermes auth list' or switch models with 'hermes model'."
+    answer: "Hermes called the LLM, the call failed, and the built-in retry loop gave up. Current versions say '{provider} didn't answer after N attempts' (or '...returned a server error on all N attempts' / '...rate-limited every one of N attempts'). The raw provider error is kept out of chat and written to agent.log and errors.log instead. Check them with 'hermes logs errors --since 1h' and then inspect your credential pool with 'hermes auth list' or switch models with 'hermes model'."
   - question: "Why does Hermes say 'Provider authentication failed' when provider is nous?"
     answer: "The Nous inference provider can be selected correctly while the Nous Portal OAuth login is still missing. Run 'hermes portal info'. If it says 'Auth: not logged in' and 'Model: using Nous as inference provider', authenticate with 'hermes portal' or 'hermes auth add nous --type oauth', then restart the gateway process."
   - question: "Why do I get 'HTTP 404: Model not found'?"
@@ -29,15 +29,15 @@ faq:
   - question: "My Hermes cron job fails with a model 404 — why?"
     answer: "A per-job model override set at creation time does not follow the profile default afterwards. If that model disappears from the catalog — including when a free-tier model's free period ends (HTTP 404: This model's free period has ended) — the job keeps 404-ing. Fix it with 'hermes cron list' then 'hermes cron edit <job_id>' to update or clear the override, and run 'hermes model' to pick from currently-listed entries without retyping an old slug."
   - question: "The Discord bot is silent — what is wrong?"
-    answer: "Most often the Message Content Intent is disabled. Enable it under Bot → Privileged Gateway Intents in the Discord developer portal, then restart the gateway with 'hermes gateway restart'."
+    answer: "If the bot is online but silent, most often no Discord access policy is configured (set DISCORD_ALLOWED_USERS, DISCORD_ALLOWED_ROLES, or DISCORD_ALLOW_ALL_USERS=true). If the bot never comes online, the Message Content Intent is disabled: Discord refuses the connection. Enable it under Bot → Privileged Gateway Intents in the Discord developer portal, then restart the gateway with 'hermes gateway restart'."
   - question: "Why does Hermes say 'The model declined to respond' (safety refusal)?"
     answer: "That is not a Hermes, network, or credential error — the upstream model ran and then refused to answer that specific prompt, often for policy reasons or a misfiring safety classifier. Hermes reports the refusal plus the model's own explanation directly in chat. Fix it by rephrasing the request, switching models with 'hermes model', or adding a fallback provider with 'hermes fallback add' so the next provider in the chain answers instead."
   - question: "Why does Hermes say 'Model returned no content after all retries'?"
-    answer: "The request succeeded at the HTTP level but the model returned an empty completion. Hermes retried (you see 'Empty response from model — retrying') and, with no fallback chain configured, surfaced 'Model returned no content after all retries. No fallback providers configured.' Fix it by adding a fallback provider with 'hermes fallback add' so an empty primary response rolls to the next model, or switch models with 'hermes model' and smoke-test with 'hermes chat -m <provider>/<model>'."
+    answer: "The request succeeded at the HTTP level but the model returned an empty completion. Hermes retried (you see 'Empty response from model — retrying') and, with no fallback chain configured, surfaced 'Model returned no content after all retries. No fallback providers configured.' Fix it by adding a fallback provider with 'hermes fallback add' so an empty primary response rolls to the next model, or switch models with 'hermes model' and smoke-test with 'hermes chat --provider <provider> -m <model> -q \"Reply OK\" --oneshot'."
   - question: "What does 'Credit access paused — run /topup' mean?"
     answer: "That is a Nous Portal billing state, not a model or credential error: your Portal credits are exhausted or paused, so inference is blocked before it reaches a model. Run 'hermes portal open' to open the subscription / top-up page (https://portal.nousresearch.com/manage-subscription). There is no 'hermes topup' or 'hermes credit' subcommand. After you top up, the next request picks up the restored credit automatically — no reinstall needed."
   - question: "Why do I see 'Provider authentication failed'?"
-    answer: "The provider rejected your credential (usually HTTP 401/403 at auth), distinct from a transient 'provider failed after retries.' The raw provider auth error is in the gateway logs: grep -i 'auth|401|403|unauthorized' ~/.hermes/logs/gateway.log. Fix it with 'hermes auth list', 'hermes auth reset PROVIDER', and 'hermes auth add PROVIDER' to refresh or re-add the credential."
+    answer: "The provider rejected your credential (usually HTTP 401/403 at auth), distinct from a transient 'provider failed after retries.' Current versions say '{provider} rejected your sign-in...' (OAuth) or '{provider} rejected your API key...'. The raw provider auth error is in agent.log and errors.log: run 'hermes logs errors --since 1h'. Fix it with 'hermes auth list', 'hermes auth reset PROVIDER', and 'hermes auth add PROVIDER' to refresh or re-add the credential."
 ---
 
 import BlogPromoCard from "../../components/BlogPromoCard.astro";
@@ -70,7 +70,8 @@ hermes portal info       # crucial when model.provider is nous
 If the agent itself is misbehaving rather than the provider, read the logs:
 
 ```bash
-grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20
+hermes logs errors --since 1h                                          # API/provider errors (errors.log)
+grep -i "failed to send\|error" ~/.hermes/logs/gateway.log | tail -20  # platform delivery errors
 ```
 
 The files you will care about most:
@@ -100,6 +101,8 @@ A common Discord/gateway error is:
 ⚠️ Provider authentication failed. Check the configured credentials;
 raw provider details are in the gateway logs.
 ```
+
+Current versions word it per credential type: `{provider} rejected your sign-in, so the model can't be reached. Sign in again: ...` for OAuth, or `{provider} rejected your API key, so the model can't be reached. ...` for API keys.
 
 If your configuration looks like this:
 
@@ -252,14 +255,17 @@ extras.
 ### "The model provider failed after retries"
 
 This means Hermes called the LLM, the call failed, and the built-in
-retry/backoff loop exhausted its attempts. The raw provider error is
-deliberately kept out of chat output for privacy — it lands in the gateway logs
-instead.
+retry/backoff loop exhausted its attempts. Current versions name the provider
+and the reason instead: `{provider} didn't answer after N attempts`,
+`{provider} returned a server error on all N attempts`, or
+`{provider} rate-limited every one of N attempts`. The raw provider error is
+deliberately kept out of chat output for privacy — it lands in `agent.log` and
+`errors.log` instead.
 
 Look there first:
 
 ```bash
-grep -i "provider\|retry\|upstream\|timeout\|auth" ~/.hermes/logs/gateway.log | tail -40
+hermes logs errors --since 1h
 ```
 
 The usual causes:
@@ -295,13 +301,15 @@ exceeded the provider's quota or rate window for the selected model/key:
 > ⏱️ The model provider is rate-limiting requests. Please wait a moment and
 > try again.
 
+Current versions say `⏱️ The AI model service is rate-limiting requests. Wait a moment, then use /retry.` or `{provider} is rate-limiting requests right now`.
+
 It is surfaced directly rather than retried silently, because retrying a
 429 against the same credential only extends the block.
 
 Diagnose it:
 
 ```bash
-grep -i "429\|rate" ~/.hermes/logs/gateway.log | tail -20
+hermes logs errors --since 1h | grep -i "429\|rate"
 hermes auth list        # look for "rate-limited" or "exhausted" on a pool member
 ```
 
@@ -412,7 +420,7 @@ Fix it:
 
 ```bash
 hermes model                       # pick a currently-valid model interactively
-hermes chat -m openrouter/<model>  # smoke-test an OpenRouter model
+hermes chat --provider openrouter -m <model> -q "Reply OK" --oneshot  # smoke-test an OpenRouter model
 hermes cron list                   # find jobs with a pinned model
 hermes cron edit <job_id>          # update or clear the per-job model override
 ```
@@ -544,7 +552,7 @@ Fix it:
    ```
 2. **Switch the primary model.** Use `hermes model`, or smoke-test first:
    ```bash
-   hermes chat -m openrouter/<other-model>  # confirm it returns text
+   hermes chat --provider openrouter -m <other-model> -q "Reply OK" --oneshot  # confirm it returns text
    ```
 3. **If you run a local/proxy endpoint**, verify it returns valid completions (correct `base_url`, no empty `choices`), then retry.
 
@@ -572,10 +580,12 @@ This is a _credential_ rejection from the provider (typically HTTP 401/403 at au
 
 > ⚠️ Provider authentication failed. Check the configured credentials; raw provider details are in the gateway logs.
 
-The raw provider auth error is deliberately kept out of chat for privacy — it is in the gateway logs:
+Current versions say `{provider} rejected your sign-in...` (OAuth) or `{provider} rejected your API key...` instead.
+
+The raw provider auth error is deliberately kept out of chat for privacy — it is in `agent.log` and `errors.log`:
 
 ```bash
-grep -i "auth\|401\|403\|unauthorized" ~/.hermes/logs/gateway.log | tail -20
+hermes logs errors --since 1h | grep -i "auth\|401\|403\|unauthorized"
 ```
 
 Fix it:
@@ -648,9 +658,11 @@ environment. This is one of the most useful checks on VPS deployments.
 sudo loginctl enable-linger $USER   # keep user services alive after logout
 ```
 
-**Gateway dies when WSL2 closes:** WSL2 needs `systemd=true` in `/etc/wsl.conf`
-for user services to survive. Without it the gateway falls back to `nohup` and
-dies with the session.
+**Gateway dies when WSL2 closes:** WSL2 needs `systemd=true` under the `[boot]`
+section of `/etc/wsl.conf` for user services to survive. Without it the gateway
+falls back to `nohup` and dies with the session. Because systemd on WSL is
+unreliable, the docs recommend `hermes gateway run` inside tmux instead:
+`tmux new -s hermes 'hermes gateway run'`.
 
 **Crash loop:**
 
@@ -799,13 +811,13 @@ When you have isolated the problem but still need help:
 | `Provider authentication failed` + `provider: nous` | `hermes portal info`                      | if `Auth: not logged in`, run `hermes portal`                                       |
 | Nous model configured, Discord still fails auth     | check gateway Linux user                  | authenticate in that user's `~/.hermes` and restart gateway                         |
 | "model provider failed after retries"               | `hermes auth list` / `hermes portal info` | refresh auth, rotate key, or switch model                                           |
-| "The model provider is rate-limiting requests"      | `grep -i 429 ~/.hermes/logs/gateway.log`  | wait for window reset, `hermes auth reset`, switch models                           |
+| "The model provider is rate-limiting requests"      | `hermes logs errors --since 1h`           | wait for window reset, `hermes auth reset`, switch models                           |
 | "Gateway shutting down — task interrupted"          | `systemctl --user status hermes-gateway`  | wait for restart, resend; raise MemoryMax if OOM                                    |
 | "HTTP 404: Model 'X' not found"                     | `hermes model`                            | pick a model that exists in the current catalog                                     |
 | old free model stopped working                      | `hermes model`                            | select a currently listed `:free` model; run `hermes update` to refresh the catalog |
 | cron job fails on model 404                         | `hermes cron edit <id>`                   | update the per-job model override                                                   |
 | cron "free period has ended"                        | `hermes cron edit <id>`                   | update pinned model + add a fallback chain                                          |
-| gateway silent on Discord                           | check Bot intents                         | enable Message Content Intent                                                       |
+| gateway silent on Discord                           | check access policy and Bot intents       | set `DISCORD_ALLOWED_USERS`; if the bot stays offline, enable Message Content Intent |
 | gateway dies after SSH logout                       | `loginctl enable-linger`                  | keep user service alive                                                             |
 | tool/skill missing                                  | `hermes tools` / `/skill`                 | enable, then `/reset`                                                               |
 | config change ignored                               | `/restart` or relaunch                    | new session / process                                                               |
@@ -814,7 +826,7 @@ When you have isolated the problem but still need help:
 | "The model declined to respond" (safety refusal)    | `hermes fallback add`                     | rephrase, switch model, or set a fallback chain                                     |
 | "Model returned no content after all retries"       | `hermes fallback add`                     | add a fallback chain, or switch/smoke-test the model                                |
 | "Credit access paused — run /topup"                 | `hermes portal open`                      | top up at portal.nousresearch.com; credit restores automatically                    |
-| "Provider authentication failed"                    | `hermes auth list`                        | refresh/re-add credential; check gateway logs for raw error                         |
+| "Provider authentication failed"                    | `hermes auth list`                        | refresh/re-add credential; check `hermes logs errors` for raw error                 |
 
 ## Case Study: Free-Tier Model Expiry + Discord Gateway Recovery (Sep 2026)
 
@@ -856,6 +868,8 @@ The request body used `model: "tencent/hy3:free"`, URL `https://inference-api.no
 ```text
 ⚠️ The model provider failed after retries. I kept raw provider details out of chat; check gateway logs for diagnostics.
 ```
+
+That is the wording of the version running during the incident; current versions say `{provider} didn't answer after N attempts` instead.
 
 ### Error 2 — Nous Portal OAuth token missing
 

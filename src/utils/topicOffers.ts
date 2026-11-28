@@ -28,6 +28,7 @@
  * would start a new GA4 session); offer_click still records the click.
  */
 import { topicCluster } from "./topicCluster";
+import { leanpubUrl } from "./leanpub";
 
 export type OfferId =
   | "leanpub_claude_code"
@@ -56,7 +57,8 @@ const ebook = (slug: string, title: string, body: string, id: OfferId): TopicOff
   title,
   body,
   ctaLabel: "Get the ebook on Leanpub →",
-  href: `https://leanpub.com/${slug}`,
+  // Coupon path for books with a lucaberton.com coupon (src/utils/leanpub.ts).
+  href: leanpubUrl(slug),
   utmCampaign: `leanpub-${slug}`,
 });
 

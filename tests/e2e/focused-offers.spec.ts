@@ -90,7 +90,8 @@ test.describe('team-rollout box on the org-policy posts', () => {
       await expect(page.locator(TOPIC_BOX)).toHaveCount(0);
 
       const ebook = (await page.locator(`${BOX} a[data-tp-offer="leanpub_claude_code"]`).getAttribute('href'))!;
-      expect(ebook.startsWith('https://leanpub.com/claude-code?')).toBe(true);
+      // lucaberton.com coupon path (src/utils/leanpub.ts), UTMs after it.
+      expect(ebook.startsWith('https://leanpub.com/claude-code/c/lucaberton?')).toBe(true);
       expectUtm(ebook, 'leanpub-claude-code', slug);
       // The ebook comes before the Guardrails Pack.
       const order = await page.locator(`${BOX} a[data-track-event="offer_click"]`).evaluateAll((els) => els.map((e) => e.getAttribute('data-tp-offer')));
@@ -189,6 +190,14 @@ test.describe('topic default offers at the end of the post', () => {
         const href = (await link.getAttribute('href'))!;
         if (campaigns[i]) expectUtm(href, campaigns[i]!, slug);
         else expect(href.startsWith('/')).toBe(true); // internal page: no UTMs
+        if (offers[i].startsWith('leanpub_')) {
+          // Only claude-code has a lucaberton.com coupon (src/utils/leanpub.ts);
+          // the other books keep the plain https://leanpub.com/<book> path.
+          const { hostname, pathname } = new URL(href);
+          expect(hostname).toBe('leanpub.com');
+          const book = campaigns[i]!.replace(/^leanpub-/, '');
+          expect(pathname).toBe(book === 'claude-code' ? '/claude-code/c/lucaberton' : `/${book}`);
+        }
       }
       await links.first().click();
       await expect.poll(() => events.filter((e) => e.event === 'offer_click').map((e) => e.offer)).toContain(offers[0]);

@@ -208,7 +208,7 @@ OpenClaw posts stay.
 
 | Topic | Rule (first match wins) | Offers |
 |---|---|---|
-| `ai_coding` | `claude_code` cluster, or Codex, GitHub Copilot, Cursor, Windsurf, Gemini CLI, coding agents, vibe coding… | "Claude Code Masterclass" (leanpub.com/claude-code) |
+| `ai_coding` | `claude_code` cluster, or Codex, GitHub Copilot, Cursor, Windsurf, Gemini CLI, coding agents, vibe coding… | "Claude Code Masterclass" (leanpub.com/claude-code/c/lucaberton, the site coupon) |
 | `gpu_ai_infra` | `gpu_kubernetes` cluster, or GPU / NVIDIA / vLLM / inference / RHEL AI / OpenShift AI / AI infrastructure terms | GPU cluster design review (`/services/gpu-cluster-review/`, EUR 10,000) + "Kubernetes AI" |
 | `aap` | Ansible posts about AAP, Tower, automation controller, Event-Driven Ansible | AAP 2.6 Upgrade Review (€2,900, openempower.com) + "Ansible AWX By Examples" |
 | `ansible` | other Ansible posts | AWX → "Ansible AWX By Examples"; containers / Kubernetes → "Ansible For Containers and Kubernetes By Examples"; RHEL → "Red Hat Enterprise Linux 10 Handbook"; else "Ansible by Examples" |

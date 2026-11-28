@@ -12,6 +12,7 @@ import InteractionTracker from "@components/InteractionTracker.astro";
 import ConversionTracker from "@components/ConversionTracker.astro";
 import CalendlyPopup from "@components/CalendlyPopup.astro";
 import StickyCta from "@components/StickyCta.astro";
+import AnalyticsGate from "@components/AnalyticsGate.astro";
 import { person, organization, PERSON_ID, WEBSITE_ID } from "@utils/entity";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -36,6 +37,9 @@ export interface Props {
   canonical?: string;
   // Topic cluster of the page (blog posts) — picks the announcement banner.
   topicCluster?: string;
+  // Posts with a CTA plan (src/utils/postCtaPlans.ts): no topic banner, no
+  // sponsored banner and no sticky bar, so the page has one focused offer.
+  quietOffers?: boolean;
 }
 
 // ============================================
@@ -76,7 +80,7 @@ if (!canonicalURL.endsWith('/')) {
 // same image for older references (RSS, blog JSON-LD).
 const DEFAULT_OG_IMAGE = "/og/luca-berton-production-ai-expert.jpg";
 const resolvedImageWithDomain = new URL(DEFAULT_OG_IMAGE, siteOrigin).toString();
-const { title, description: customDescription, image: customImage, noindex, minimalChrome = false, minimalCtaHref, minimalCtaLabel = "Book Assessment", minimalCtaOffer = "discovery_call", canonical: canonicalOverride, topicCluster } = Astro.props;
+const { title, description: customDescription, image: customImage, noindex, minimalChrome = false, minimalCtaHref, minimalCtaLabel = "Book Assessment", minimalCtaOffer = "discovery_call", canonical: canonicalOverride, topicCluster, quietOffers = false } = Astro.props;
 const hasCanonicalOverride = Boolean(canonicalOverride);
 
 if (canonicalOverride) canonicalURL = canonicalOverride;
@@ -315,25 +319,19 @@ const siteGraph = {
       media="print"
       onload="this.media='all'"
     />
-    <!-- No analytics from local builds or automated browsers. 205 of the 214
-         contact_form_submit key events from Sep 28 to Oct 30, 2026 came from
-         127.0.0.1: the Playwright suite runs against `astro preview` with the
-         production tags built in. GA4, PostHog, Clarity and the LinkedIn tag
-         check this flag; ConversionTracker still pushes every event to
-         window.dataLayer, which is what the E2E tests read. -->
-    <script is:inline>
-      window.__lucaNoAnalytics = (function () {
-        var h = window.location.hostname;
-        return h === 'localhost' || h === '127.0.0.1' || h === '0.0.0.0' || h === '::1' || h === '[::1]' ||
-          /\.localhost$/.test(h) || navigator.webdriver === true;
-      })();
-    </script>
+    <!-- No analytics from local, private or automated browsers: see
+         AnalyticsGate.astro for the host list. GA4, PostHog, Clarity and the
+         LinkedIn tag check window.__lucaNoAnalytics; ConversionTracker still
+         pushes every event to window.dataLayer, which the E2E tests read. -->
+    <AnalyticsGate />
     <!-- Google Analytics (gtag.js) — loads immediately to capture all visitors -->
     <script async src="https://www.googletagmanager.com/gtag/js?id=G-M9Q5F672JT" is:inline></script>
     <script is:inline>
       window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      // Google's documented opt-out: gtag.js still reads the dataLayer but sends nothing.
+      // On a gated host gtag() is a no-op: no config and no events reach
+      // gtag.js, so nothing is sent. ga-disable is Google's own opt-out, kept
+      // as a second lock.
+      function gtag(){ if (!window.__lucaNoAnalytics) dataLayer.push(arguments); }
       if (window.__lucaNoAnalytics) window['ga-disable-G-M9Q5F672JT'] = true;
       gtag('js', new Date());
       gtag('config', 'G-M9Q5F672JT');
@@ -414,7 +412,7 @@ const siteGraph = {
       Skip to main content
     </a>
     {!minimalChrome && <AnnouncementBanner {...kubeconBanner} />}
-    {!minimalChrome && <AnnouncementBanner {...bannerFor(topicCluster)} />}
+    {!minimalChrome && !quietOffers && <AnnouncementBanner {...bannerFor(topicCluster)} />}
     {minimalChrome ? (
       <header class="sticky top-0 z-50 border-b border-slate-200/80 bg-white/90 py-4 backdrop-blur-xl">
         <div class="mx-auto flex max-w-7xl items-center justify-between px-5 sm:px-8 lg:px-12">
@@ -453,7 +451,7 @@ const siteGraph = {
     </script>
     <main id="main-content">
       {/* Sponsored banner from static/promo/promos.json (docs/promo-banners.md) */}
-      {!minimalChrome && (
+      {!minimalChrome && !quietOffers && (
         <Container>
           <PromoBanner class="mt-6 mb-2" />
         </Container>
@@ -461,7 +459,7 @@ const siteGraph = {
       <slot />
     </main>
     {!minimalChrome && <Footer />}
-    {!minimalChrome && <StickyCta topicCluster={topicCluster} />}
+    {!minimalChrome && !quietOffers && <StickyCta topicCluster={topicCluster} />}
     <WebVitals />
     <InteractionTracker />
     <ConversionTracker />

@@ -17,6 +17,10 @@ import { getReadingTime } from "@utils/readingTime";
 import { isBootcampRelevant } from "@utils/serviceMatches";
 import { topicCluster } from "@utils/topicCluster";
 import { getBlogConsultingCta } from "@utils/blogConsultingCtas";
+import { getPostCtaPlan } from "@utils/postCtaPlans";
+import TeamRolloutBox from "@components/TeamRolloutBox.astro";
+import TopicOfferBox from "@components/TopicOfferBox.astro";
+import { topicOfferFor, TOPIC_HEADLINES } from "@utils/topicOffers";
 import { PERSON_REF } from "@utils/entity";
 import { eventTopicLinksFor } from "@utils/eventGraph";
 import EventContextBox from "@components/EventContextBox.astro";
@@ -198,10 +202,31 @@ const postUrl = `https://lucaberton.com/blog/${entry.id}/`;
 // Generated cards (/blog/thumbnails/) only repeat the title: keep them for
 // social previews, show a hero only for real photos and artwork.
 const hasImage = Boolean(entry.data.image?.src) && !entry.data.image.src.startsWith('/blog/thumbnails/');
-const consultingOffer = getBlogConsultingCta(entry.id);
+// Posts with a CTA plan (src/utils/postCtaPlans.ts) show only what the plan
+// names: one team-rollout box, or one softer offer after the fix. Posts in a
+// topic with a default offer (src/utils/topicOffers.ts: AI coding, GPU / AI
+// infrastructure, Ansible / AAP, RHEL) show one TopicOfferBox at the end.
+// Both switch the generic offer stack off.
+const ctaPlan = getPostCtaPlan(entry.id);
+const topicMatch = ctaPlan ? null : topicOfferFor(entry.id, entry.data.category || "", entry.data.tags || []);
+const focusedOffers = !!ctaPlan || !!topicMatch;
+const teamPlan = ctaPlan?.kind === "team_rollout" ? ctaPlan : undefined;
+const singlePlan = ctaPlan?.kind === "single" ? ctaPlan : undefined;
+const offerSlotSection = ctaPlan?.afterSection;
+// Explicit consulting cards (blogConsultingCtas.ts) stay on topic posts; a
+// CTA plan replaces them.
+const consultingOffer = ctaPlan ? undefined : getBlogConsultingCta(entry.id);
+// Configured enterprise pages and focused pages both skip the long-tail
+// closing offers (service cards, generic consulting CTA, bootcamp, book).
+const quietTail = !!consultingOffer || focusedOffers;
 const pageCluster = topicCluster(entry.data.category || "", entry.data.tags || []);
 const inlineProduct = productFor(entry.data.category || "", entry.data.tags || []);
+const showProductBanner = !!inlineProduct && !focusedOffers;
+const showNewsletterCard = !focusedOffers;
 const hostingAgent = inlineProduct === "claudePack" ? null : hostingAgentFor(entry.id);
+// The Hostinger strip is topical (Hermes Agent / OpenClaw posts), so it stays
+// on topic posts; the doctor strip and Udienza banner do not.
+const showTopSlot = !focusedOffers || (!!topicMatch && !!hostingAgent);
 // Launch pages suppress cross-promotion of OTHER books/courses (the rotating
 // book/course cards and the Related Articles grid) so the page only pushes
 // this post's own product.
@@ -215,6 +240,7 @@ const hasOwnCourseCard = /<BlogPromoCard[^>]*\bvariant\s*=\s*["']copypastelearn[
 
 <Layout 
   topicCluster={pageCluster}
+  quietOffers={focusedOffers}
   title={entry.data.seoTitle || entry.data.title}
   description={entry.data.snippet}
   image={entry.data.image?.src}
@@ -379,15 +405,17 @@ const hasOwnCourseCard = /<BlogPromoCard[^>]*\bvariant\s*=\s*["']copypastelearn[
 
     <!-- Udienza at eye level: rendered here (the no-JS place), then moved by the
          script below to right after the article's first paragraph. -->
-    <div id="udienza-slot">
-      {inlineProduct === "claudePack" ? (
-        <ProductStrip slug={entry.id} />
-      ) : hostingAgent ? (
-        <HostingStrip slug={entry.id} agent={hostingAgent} />
-      ) : (
-        <UdienzaBanner placement="blog_top" eager />
-      )}
-    </div>
+    {showTopSlot && (
+      <div id="udienza-slot">
+        {inlineProduct === "claudePack" ? (
+          <ProductStrip slug={entry.id} />
+        ) : hostingAgent ? (
+          <HostingStrip slug={entry.id} agent={hostingAgent} />
+        ) : (
+          <UdienzaBanner placement="blog_top" eager />
+        )}
+      </div>
+    )}
 
     <!-- Table of Contents -->
     <TableOfContents headings={headings} />
@@ -410,8 +438,34 @@ const hasOwnCourseCard = /<BlogPromoCard[^>]*\bvariant\s*=\s*["']copypastelearn[
       <Content />
     </div>
 
+    <!-- CTA-plan box (team-rollout box or one softer offer): rendered here for
+         no-JS readers, then moved by the script below to right before the H2
+         that follows the fix section (plan.afterSection). -->
+    {offerSlotSection && (
+      <div id="offer-slot" data-after-section={offerSlotSection}>
+        {teamPlan && <TeamRolloutBox slug={entry.id} plan={teamPlan} pageUrl={postUrl} />}
+        {singlePlan && (
+          <TopicOfferBox offers={singlePlan.offers} postSlug={entry.id} headline={singlePlan.headline} placement="post_solution" />
+        )}
+      </div>
+    )}
+    {offerSlotSection && (
+      <script is:inline>
+        (function () {
+          var slot = document.getElementById('offer-slot');
+          var body = document.getElementById('article-content');
+          if (!slot || !body) return;
+          var fix = document.getElementById(slot.getAttribute('data-after-section'));
+          if (!fix || !body.contains(fix)) return;
+          var next = fix.nextElementSibling;
+          while (next && next.tagName !== 'H2') next = next.nextElementSibling;
+          if (next) next.parentNode.insertBefore(slot, next);
+        })();
+      </script>
+    )}
+
     {eventTopicLinks && entry?.data.event && (
-      <EventContextBox event={entry.data.event} ctx={eventTopicLinks} showOffer={!consultingOffer} />
+      <EventContextBox event={entry.data.event} ctx={eventTopicLinks} showOffer={!quietTail} />
     )}
     <script is:inline>
       // Runs while the page is still parsing, before first paint: thumbnail,
@@ -451,15 +505,17 @@ const hasOwnCourseCard = /<BlogPromoCard[^>]*\bvariant\s*=\s*["']copypastelearn[
     <!-- Mid-article promo cards (injected via JS after render).
          High-value enterprise landing pages get a contextual consulting bridge
          before lower-priority monetization. -->
-    {inlineProduct && (
+    {showProductBanner && (
       <div id="promo-product" class="hidden">
         <ProductBanner category={entry.data.category || ""} tags={entry.data.tags || []} slug={entry.id} />
       </div>
     )}
 
-    <div id="promo-newsletter" class="hidden">
-      <BlogPromoCard variant="newsletter" />
-    </div>
+    {showNewsletterCard && (
+      <div id="promo-newsletter" class="hidden">
+        <BlogPromoCard variant="newsletter" />
+      </div>
+    )}
 
     {consultingOffer && (
       <div id="promo-consulting" class="hidden">
@@ -480,13 +536,13 @@ const hasOwnCourseCard = /<BlogPromoCard[^>]*\bvariant\s*=\s*["']copypastelearn[
       </div>
     )}
 
-    {!consultingOffer && !noCrossPromo && (
+    {!quietTail && !noCrossPromo && (
       <div id="promo-book" class="hidden">
         <BlogPromoCard variant="book" />
       </div>
     )}
 
-    {!noCrossPromo && !hasOwnCourseCard && (
+    {!noCrossPromo && !hasOwnCourseCard && !focusedOffers && (
       <div id="promo-course" class="hidden">
         <BlogPromoCard variant="course" />
       </div>
@@ -494,6 +550,11 @@ const hasOwnCourseCard = /<BlogPromoCard[^>]*\bvariant\s*=\s*["']copypastelearn[
 
     <!-- Bottom section -->
     <footer class="mt-12">
+      <!-- Topic default offer (src/utils/topicOffers.ts): at most two offers. -->
+      {topicMatch && (
+        <TopicOfferBox offers={topicMatch.offers} postSlug={entry.id} headline={TOPIC_HEADLINES[topicMatch.topic]} placement="post_conclusion" />
+      )}
+
       <!-- Tags -->
       <div class="flex flex-wrap gap-2 mb-6">
         {entry.data.tags.map((tag) => (
@@ -507,25 +568,27 @@ const hasOwnCourseCard = /<BlogPromoCard[^>]*\bvariant\s*=\s*["']copypastelearn[
       <ShareButtons title={entry.data.title} url={postUrl} />
 
       <!-- Paid offers: hidden until their links are set in src/data/sales.ts -->
-      <SalesOffers category={entry.data.category || ""} tags={entry.data.tags || []} slug={entry.id} />
+      {!focusedOffers && (
+        <SalesOffers category={entry.data.category || ""} tags={entry.data.tags || []} slug={entry.id} />
+      )}
 
       <!-- Service promotion. Configured enterprise pages skip it: the topic
            match is "AI Integration & GPU Platforms" for most of them, which is
            off-topic for their readers, and their card already links a service. -->
-      {!consultingOffer && (
+      {!quietTail && (
         <RelatedServices category={entry.data.category} tags={entry.data.tags || []} />
       )}
 
       <!-- Keep the legacy post-conclusion CTA on the long tail. The top
            enterprise-intent pages already received a contextual inline CTA. -->
-      {!consultingOffer && (
+      {!quietTail && (
         <BlogConsultationCta category={entry.data.category} tags={entry.data.tags || []} />
       )}
 
       <!-- Individual-path CTA remains available on the long tail. Suppress it
            on the prioritized enterprise pages so the consulting path has one
            clear primary conversion action. -->
-      {!consultingOffer && isBootcampRelevant(entry.data.category, entry.data.tags || []) && (
+      {!quietTail && isBootcampRelevant(entry.data.category, entry.data.tags || []) && (
         <div class="mt-6 rounded-xl border border-amber-200 bg-amber-50/50 p-6 flex flex-col sm:flex-row sm:items-center gap-4 justify-between">
           <div>
             <p class="font-bold text-gray-900">Want to operate this yourself, in production?</p>

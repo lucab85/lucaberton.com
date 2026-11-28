@@ -57,6 +57,8 @@ test('Jotform graphic switches to evergreen at campaign cutoff', async ({ page }
   await expect(creative.locator('source')).toHaveAttribute('srcset', /Jotform_Banner_3\./);
   await expect(creative.locator('img')).toHaveAttribute('src', /Jotform_Banner_2\./);
   await expect(creative.locator('source')).toHaveAttribute('width', '3880');
+  // The creative is loading="lazy": bring it into view so the browser fetches it.
+  await creative.scrollIntoViewIfNeeded();
   await expect.poll(() => creative.locator('img').evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
   await page.clock.setSystemTime(new Date('2026-11-30T07:59:59Z'));
   await page.reload({ waitUntil: 'domcontentloaded' });

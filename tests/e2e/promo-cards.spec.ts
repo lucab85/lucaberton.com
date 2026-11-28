@@ -63,12 +63,10 @@ test.describe('time-boxed promo cards', () => {
  * course key. Any affiliate card already on the post stays.
  */
 test.describe('copypastelearn course cards', () => {
+  // The Claude Code / Codex error posts in src/utils/postCtaPlans.ts carry one
+  // focused offer instead (tests/e2e/focused-offers.spec.ts).
   const placements = [
-    { post: '/blog/claude-code-econnreset-fix/', course: 'coding-agents' },
-    { post: '/blog/fix-claude-code-subscription-disabled-copilot-credit-limit/', course: 'coding-agents' },
-    { post: '/blog/codex-device-code-auth-chatgpt-security-2026/', course: 'coding-agents' },
     { post: '/blog/karpathy-claude-md-llm-coding-principles-2026/', course: 'coding-agents' },
-    { post: '/blog/claude-code-remote-control-enable-2026/', course: 'coding-agents' },
     { post: '/blog/claude-code-opentelemetry-monitoring-coding-agents/', course: 'otel-agents' },
     { post: '/blog/claude-code-enterprise-setup-authentication-mcp-guide/', course: 'mcp' },
     { post: '/blog/hermes-agent-oracle-cloud-free-tier-deployment/', course: 'ai-agent' },

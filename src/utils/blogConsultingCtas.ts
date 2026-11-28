@@ -25,32 +25,8 @@ export interface BlogConsultingOffer {
  * 301 there). target_offer keeps naming the offer the copy pitches.
  */
 export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
-  'claude-code-econnreset-fix': {
-    headline: 'Seeing this across multiple developers?',
-    body:
-      'Repeated failures across managed laptops, VPNs, proxies, or corporate networks are usually an environment-design problem, not a one-machine problem.',
-    ctaLabel: 'Assess Your AI Developer Platform →',
-    ctaHref: 'https://www.openempower.com/services/assessment',
-    targetOffer: 'ai_developer_platform_assessment',
-    ctaVariant: 'corporate_network_problem',
-    benefits: ['Network', 'Identity', 'Security', 'Developer access'],
-    secondaryLabel: 'See AI & cloud advisory services',
-    secondaryHref: '/services/',
-  },
-
-  'fix-claude-code-subscription-disabled-copilot-credit-limit': {
-    headline: 'Is your whole team hitting this?',
-    body:
-      'When the organisation controls access, the fix is a rollout plan, not a workaround per laptop: one authentication method, managed settings, guardrails and clear rules for MCP servers. I run workshops that set this up with your team.',
-    ctaLabel: 'Claude Code for Teams →',
-    ctaHref: '/claude-code-for-teams/',
-    targetOffer: 'claude_code_team_workshop',
-    ctaVariant: 'team_rollout_access',
-    benefits: ['Authentication', 'Managed settings', 'Guardrails', 'MCP policy'],
-    secondaryLabel: 'Explore enterprise services',
-    secondaryHref: '/services/',
-  },
-
+  // The Claude Code / Codex error posts are not here: src/utils/postCtaPlans.ts
+  // gives them one focused offer each (team-rollout box or one softer CTA).
   'hermes-agent-troubleshooting': {
     headline: 'One agent is easy. Operating agents reliably is the hard part.',
     body:
@@ -87,19 +63,6 @@ export const blogConsultingCtas: Record<string, BlogConsultingOffer> = {
     ctaVariant: 'repo_to_org_governance',
     benefits: ['Policy', 'MCP access', 'Security', 'Review gates'],
     secondaryLabel: 'Explore advisory services',
-    secondaryHref: '/services/',
-  },
-
-  'claude-code-remote-control-enable-2026': {
-    headline: 'Rolling Claude Code out across managed devices?',
-    body:
-      'When deployment depends on identity, MDM, retention, and network controls, configuration becomes platform architecture.',
-    ctaLabel: 'Claude Code for Teams →',
-    ctaHref: '/claude-code-for-teams/',
-    targetOffer: 'claude_code_team_workshop',
-    ctaVariant: 'managed_device_rollout',
-    benefits: ['Identity', 'MDM', 'Network', 'Governance'],
-    secondaryLabel: 'See enterprise AI services',
     secondaryHref: '/services/',
   },
 

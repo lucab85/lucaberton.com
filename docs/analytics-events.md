@@ -72,6 +72,8 @@ visitor.
 | `bootcamp_apply_start` | first focus inside the application form | — | micro-conversion |
 | `bootcamp_application_submitted` | application POST succeeded (name kept for data continuity; add a separate purchase event only if paid enrollment moves on-site) | — | **key event** |
 | `affiliate_click` | outbound affiliate/partner CTA clicked — one event for ALL partners | `company`, `offer_id`, `offer_type`, `cta_position`, `cta_variant`, `destination_url` | key event (lowest priority) |
+| `offer_click` | an own offer clicked in the team-rollout box (`TeamRolloutBox.astro`), a topic offer box (`TopicOfferBox.astro`), the price cards on `/claude-code-for-teams/` or a buy button on `/claude-code-team-kit/` | `offer` (`claude_code_teams_seat`, `claude_code_teams_cohort`, `claude_code_guardrails_pack`, `team-kit` (Claude Code Team Kit, from the team-rollout box), `team-kit-individual`, `team-kit-team` (buy buttons on `/claude-code-team-kit/`), `forward_to_admin`, `leanpub_*`, `gpu_cluster_review`, `aap_upgrade_review`), `placement` (`hero`, `post_solution`, `post_conclusion`, `inline`, …), `team` (`true` on a Leanpub team-pack link, 3–25 copies; `offer` is the ebook's), `destination_url` | key event (no value: the sale completes on openempower.com, Leanpub, Gumroad or Stripe) |
+| `kit_checkout_complete` | `/claude-code-team-kit/thanks/` viewed (Stripe Payment Link success redirect), once per session | — | purchase intent, no value (the payment is recorded in Stripe) |
 
 ### Event values
 
@@ -173,6 +175,52 @@ contents. The validator fails on offers or variants in that file that are not
 in the taxonomy, on keys that are not real post slugs, and on `ctaHref` /
 `secondaryHref` values that are not pages on this site.
 
+## Focused CTAs on the Claude Code / Codex error posts
+
+`src/utils/postCtaPlans.ts` gives a few error posts one offer instead of the
+usual stack (topic banner, sponsored banner, doctor strip, product banner,
+newsletter card, consulting card, course cards, paid-offer cards, sticky bar,
+closing CTA). `src/pages/blog/[slug].astro` and `Layout.astro` (`quietOffers`)
+switch the rest off.
+
+| Post | Plan | What shows |
+|---|---|---|
+| `claude-code-remote-control-enable-2026` | `team_rollout` | `TeamRolloutBox` right before the H2 after `how-an-admin-enables-it` |
+| `fix-claude-code-subscription-disabled-copilot-credit-limit` | `team_rollout` | `TeamRolloutBox` right before the H2 after `fix-claude-code-subscription-access-disabled` |
+| `claude-code-econnreset-fix` | `single` | the "Claude Code Masterclass" ebook (`TopicOfferBox`) after `fix-it-in-this-order` |
+| `codex-device-code-auth-chatgpt-security-2026` | `single` | the same ebook after `run-the-login-again` |
+
+The team-rollout box also offers the ebook, before the Guardrails Pack. The box fires `offer_click` with `placement=post_solution`. Outbound links
+carry `utm_source=lucaberton.com&utm_medium=referral&utm_campaign=claude-code-teams&utm_content=<post slug>`
+(`withTeamsUtm` in `src/data/claudeCodeTeams.ts`, which also holds the seat
+and cohort prices and the public session dates; past dates drop out at build
+time). The Guardrails Pack link is internal and carries no UTMs. Why: in the 28
+days to Nov 25, 2026 these four posts brought ~830 organic sessions, but only
+15 of 1,096 pageviews reached a team or guardrails offer.
+
+## Topic default offers
+
+`src/utils/topicOffers.ts` picks a default end-of-post offer from a post's
+slug, category and tags (posts with a CTA plan are handled first). A matching
+post ends with one `TopicOfferBox` (at most two offers, `placement=post_conclusion`)
+and drops the generic stack the same way (`quietOffers`); explicit consulting
+cards from `blogConsultingCtas.ts` and the Hostinger strip on Hermes /
+OpenClaw posts stay.
+
+| Topic | Rule (first match wins) | Offers |
+|---|---|---|
+| `ai_coding` | `claude_code` cluster, or Codex, GitHub Copilot, Cursor, Windsurf, Gemini CLI, coding agents, vibe coding… | "Claude Code Masterclass" (leanpub.com/claude-code/c/lucaberton, the site coupon) |
+| `gpu_ai_infra` | `gpu_kubernetes` cluster, or GPU / NVIDIA / vLLM / inference / RHEL AI / OpenShift AI / AI infrastructure terms | GPU cluster design review (`/services/gpu-cluster-review/`, EUR 10,000) + "Kubernetes AI" |
+| `aap` | Ansible posts about AAP, Tower, automation controller, Event-Driven Ansible | AAP 2.6 Upgrade Review (€2,900, openempower.com) + "Ansible Automation Platform By Example" (leanpub.com/Ansible-Automation-Platform/c/lucaberton) |
+| `ansible` | other Ansible posts | AWX → "Ansible AWX By Examples"; containers / Kubernetes → "Ansible by Examples" (the containers and Kubernetes ebook is retired on Leanpub); RHEL → "Red Hat Enterprise Linux 10 Handbook"; else "Ansible by Examples" |
+| `rhel` | RHEL / Red Hat posts | "Red Hat Enterprise Linux 10 Handbook" |
+
+External links carry `utm_source=lucaberton.com&utm_medium=referral&utm_campaign=<leanpub-<book slug> | aap-review>&utm_content=<post slug>`.
+The GPU review is a page on this site, so it has no UTMs. No Leanpub prices
+are shown. Why (Nov 2026): Leanpub ebooks are the best-selling self-serve
+product (41 sales in 90 days, 26 of them "Claude Code Masterclass"), and
+Gumroad payouts are paused, so Gumroad products no longer lead.
+
 ## Paid offers (kit and expert call)
 
 `src/data/sales.ts` holds the checkout links for the Production AI Platform
@@ -194,6 +242,20 @@ Both use `consulting_cta_click`:
 
 Purchases and paid bookings complete on the shop and on Cal.com, so the
 conversion itself is counted there, not in GA4.
+
+## Claude Code Team Kit (Stripe Payment Links)
+
+`src/data/claudeCodeTeamKit.ts` holds the two Payment Link URLs
+(`INDIVIDUAL_PAYMENT_LINK_URL`, €29; `TEAM_PAYMENT_LINK_URL`, €149). While a
+URL is empty, that plan's buttons on `/claude-code-team-kit/` say "Request
+access" and go to `/contact/?topic=claude-code-team-kit`, and the page has no
+Product/Offer JSON-LD for it. Every buy button fires `offer_click` with
+`offer=team-kit-individual` or `team-kit-team` and `placement=hero`, `inline`
+(price cards) or `post_conclusion`. Set each link's "After payment" redirect
+to `https://lucaberton.com/claude-code-team-kit/thanks/`, which fires
+`kit_checkout_complete` (no value). Links to the page from the homepage strip
+(`OffersStrip.astro`) and `/claude-code-for-teams/` use
+`consulting_cta_click` with `target_offer=claude_code_team_kit`.
 
 ## Calendly booking flow
 
@@ -223,16 +285,21 @@ element (deduped per session against refreshes).
 
 ## Local and test traffic
 
-`src/layouts/Layout.astro` sets `window.__lucaNoAnalytics` when the page runs
-on `localhost`, `127.0.0.1`, `0.0.0.0`, `::1` or `*.localhost`, or in an
-automated browser (`navigator.webdriver`, which Playwright sets). GA4 then gets
-`window['ga-disable-G-M9Q5F672JT'] = true` (Google's opt-out: gtag.js sends
-nothing), and PostHog, Microsoft Clarity and the LinkedIn tag do not load.
-ConversionTracker still pushes every event to `window.dataLayer`, which is
-what the E2E tests assert on. Before this, 205 of the 214
+`src/components/AnalyticsGate.astro` (in `<head>` of `Layout.astro` and of the
+standalone `/kubernetes-recipes/` and `/practical-rhel-ai/` pages) sets
+`window.__lucaNoAnalytics` when the page runs on `localhost`, `127.0.0.0/8`,
+`0.0.0.0`, `::1`, `*.localhost`, `*.local`, a Tailscale `*.ts.net` host or a
+`file://` URL, or in an automated browser (`navigator.webdriver`, which
+Playwright sets). Then `gtag()` is a no-op (no `config`, no events),
+`window['ga-disable-G-M9Q5F672JT'] = true` is set as a second lock,
+ConversionTracker and InteractionTracker skip their `gtag('event')` calls, and
+PostHog, Microsoft Clarity and the LinkedIn tag do not load. ConversionTracker
+still pushes every event to `window.dataLayer`, which is what the E2E tests
+assert on. Before the first version of this gate (Nov 2, 2026), 205 of the 214
 `contact_form_submit` key events from Sep 28 to Oct 30, 2026 came from
-hostname `127.0.0.1` (E2E runs against `astro preview`); for reports covering
-that period, filter on hostname `lucaberton.com`.
+hostname `127.0.0.1` (E2E runs against `astro preview`); GA4 still showed 19
+of 22 from `127.0.0.1` for Oct 31 to Nov 27, 2026. For reports covering those
+periods, filter on hostname `lucaberton.com`.
 
 ## External setup (not in this repo)
 
@@ -244,7 +311,9 @@ that period, filter on hostname `lucaberton.com`.
   (optionally `?booking_type=<slug>`). The popup marks the `/call-booked/`
   pageview as already counted for the session, so a redirect in the same tab
   does not double-count; a redirect opened in a *new* tab still would.
-- **GA4 admin**: mark the key events above as key events (`contact_form_submit`
+- **GA4 admin**: `scripts/ga4-ensure.config.json` (workflow "GA4 settings")
+  creates the key events and custom dimensions on merge to main, including
+  `offer_click` and the `offer` / `placement` dimensions. Otherwise mark the key events above as key events (`contact_form_submit`
   was added 2026-09-27 — create it by name like the others; `booked_call`
   must be a key event too; `assessment_submit` no longer fires); register custom
   dimensions `topic_cluster`, `cta_position`, `cta_variant`, `target_offer`,

@@ -29,36 +29,54 @@ sudo dnf update
 
 ## Step 2: Add Official Repository
 
-Kubernetes should be installed from the official repository to get the latest stable version and security updates.
+Kubernetes should be installed from the official repository to get the latest stable version and security updates. The packages live at `pkgs.k8s.io`, with one repository per minor version (1.35 to 1.37 are supported).
 
 ```bash
-# Add the official Kubernetes repository
-# Check Kubernetes documentation for the latest repo URL
-sudo dnf install -y curl gnupg2
+# Add the official Kubernetes repository (v1.37)
+cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.37/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.37/rpm/repodata/repomd.xml.key
+exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+EOF
 ```
 
 ## Step 3: Install Kubernetes
 
+There is no `kubernetes` package. Install the three components instead: `kubelet`, `kubeadm` and `kubectl`.
+
 ```bash
-sudo dnf install -y kubernetes
+sudo dnf install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+sudo systemctl enable --now kubelet
 ```
 
 ## Step 4: Verify Installation
 
 ```bash
-kubernetes version
+kubeadm version
+kubectl version --client
 ```
 
 Expected output should show the installed version.
 
 ## Step 5: Post-Install Configuration
 
-```bash
-# Enable and start the service (if applicable)
-sudo systemctl enable --now kubernetes
+There is no `kubernetes` service. The kubelet restarts every few seconds until you bootstrap a cluster with `kubeadm init`, which also needs a container runtime such as containerd and swap turned off. See the [container runtimes](https://kubernetes.io/docs/setup/production-environment/container-runtimes/) page.
 
-# Verify status
-sudo systemctl status kubernetes
+```bash
+# Bootstrap the control plane
+sudo kubeadm init --pod-network-cidr=10.244.0.0/16
+
+# Let your user run kubectl
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+# Verify status (the node stays NotReady until you install a CNI plugin)
+kubectl get nodes
 ```
 
 ## Troubleshooting
@@ -74,17 +92,17 @@ dnf repolist
 
 ### Permission Denied
 
-Ensure your user has the correct group membership:
+There is no `kubernetes` group. `kubectl` reads its credentials from `~/.kube/config`, so copy `admin.conf` as shown in Step 5:
 
 ```bash
-sudo usermod -aG kubernetes $USER
-newgrp kubernetes
+ls -l $HOME/.kube/config
 ```
 
 ## Uninstall
 
 ```bash
-sudo dnf remove -y kubernetes
+sudo kubeadm reset
+sudo dnf remove -y kubelet kubeadm kubectl
 ```
 
 ## Related Guides

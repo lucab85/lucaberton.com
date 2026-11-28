@@ -30,18 +30,29 @@ sudo apt update && sudo apt upgrade -y
 
 ## Step 2: Add Official Repository
 
-Helm should be installed from the official repository to get the latest stable version and security updates.
+Ubuntu's own archive has no `helm` package, so add the Helm apt repository first (a community package hosted by Buildkite, as listed in the Helm docs). The official script, `curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash`, is the alternative.
 
 ```bash
-# Add the official Helm repository
-# Check Helm documentation for the latest repo URL
-sudo apt install -y curl gnupg2
+# Add the Helm apt repository
+sudo apt-get install -y curl gpg
+curl -fsSL https://packages.buildkite.com/helm-linux/helm-debian/gpgkey > "${TMPDIR:-/tmp}/helm.asc"
+gpg --import --import-options=show-only --with-colons "${TMPDIR:-/tmp}/helm.asc" | awk -F: '$1 == "fpr" {print $10}' | head -n 1
+# Must print DDF78C3E6EBB2D2CC223C95C62BA89D07698DBC6; stop if it does not
+sudo install -m 0644 -Dt /etc/apt/keyrings/ "${TMPDIR:-/tmp}/helm.asc"
+sudo tee /etc/apt/sources.list.d/helm-stable-debian.sources > /dev/null <<EOF
+Types: deb
+URIs: https://packages.buildkite.com/helm-linux/helm-debian/any/
+Suites: any
+Components: main
+Signed-By: /etc/apt/keyrings/helm.asc
+EOF
 ```
 
 ## Step 3: Install Helm
 
 ```bash
-sudo apt install -y helm
+sudo apt-get update
+sudo apt-get install -y helm
 ```
 
 ## Step 4: Verify Installation
@@ -54,12 +65,12 @@ Expected output should show the installed version.
 
 ## Step 5: Post-Install Configuration
 
-```bash
-# Enable and start the service (if applicable)
-sudo systemctl enable --now helm
+Helm is a client binary: there is no `helm` service to enable. It uses the same kubeconfig as `kubectl`.
 
-# Verify status
-sudo systemctl status helm
+```bash
+# Check that Helm can reach your cluster
+kubectl get nodes
+helm list -A
 ```
 
 ## Troubleshooting
@@ -69,23 +80,23 @@ sudo systemctl status helm
 Make sure the repository was added correctly:
 
 ```bash
-# List configured repositories
-apt repolist
+# Show which repository provides helm
+apt-cache policy helm
 ```
 
 ### Permission Denied
 
-Ensure your user has the correct group membership:
+There is no `helm` group. Helm uses the credentials in your kubeconfig (`~/.kube/config` or `$KUBECONFIG`); check that the file is readable and that `kubectl` works with it:
 
 ```bash
-sudo usermod -aG helm $USER
-newgrp helm
+ls -l ~/.kube/config
+kubectl auth can-i list pods
 ```
 
 ## Uninstall
 
 ```bash
-sudo apt remove -y helm
+sudo apt-get remove -y helm
 ```
 
 ## Related Guides

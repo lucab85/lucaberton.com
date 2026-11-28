@@ -28,6 +28,8 @@ Before installing Kubernetes on Amazon Linux 2023 with EKS:
 - Internet connectivity
 - Container runtime (containerd recommended)
 
+These steps build a self-managed cluster with kubeadm on Amazon Linux 2023 instances. Amazon EKS runs the control plane for you, so on EKS you do not run `kubeadm` yourself.
+
 ## Installation Steps
 
 ### Step 1: Prepare the System
@@ -55,18 +57,32 @@ sudo sysctl --system
 ### Step 2: Install Container Runtime
 
 ```bash
-# Install containerd
-sudo apt-get update && sudo apt-get install -y containerd
+# Install containerd (from the Amazon Linux 2023 repositories)
+sudo dnf install -y containerd
 sudo mkdir -p /etc/containerd
 containerd config default | sudo tee /etc/containerd/config.toml
+# Use the systemd cgroup driver
+sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
 sudo systemctl restart containerd
 ```
 
 ### Step 3: Install Kubernetes Components
 
 ```bash
-# Add Kubernetes repo and install
-# kubeadm, kubelet, kubectl
+# Add the Kubernetes repository (v1.37)
+cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.37/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.37/rpm/repodata/repomd.xml.key
+exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+EOF
+
+# Install kubeadm, kubelet, kubectl
+sudo dnf install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+sudo systemctl enable --now kubelet
 ```
 
 ### Step 4: Initialize the Cluster
@@ -85,7 +101,7 @@ sudo chown $(id -u):$(id -g) $HOME/.kube/config
 
 ```bash
 # Install Calico CNI
-kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.1/manifests/calico.yaml
 
 # Verify nodes are Ready
 kubectl get nodes

@@ -20,8 +20,8 @@
  *     (that page fires the GA4 event kit_checkout_complete).
  */
 
-export const INDIVIDUAL_PAYMENT_LINK_URL = "";
-export const TEAM_PAYMENT_LINK_URL = "";
+export const INDIVIDUAL_PAYMENT_LINK_URL = "https://buy.stripe.com/3cI00j25T8PafPBcYT1oI00";
+export const TEAM_PAYMENT_LINK_URL = "https://buy.stripe.com/00w9AT8uhe9u9rdaQL1oI01";
 
 export type TeamKitPlan = {
   /** GA4 offer_click `offer` value (src/config/analytics-taxonomy.json). */

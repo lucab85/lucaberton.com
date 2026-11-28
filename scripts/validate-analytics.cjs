@@ -71,7 +71,7 @@ if (STAGED) {
 // ---------------------------------------------------------------------------
 const EVENTS = taxonomy.events;
 const PARAMS = taxonomy.params;
-const PAGEVIEW_EVENTS = new Set(["email_signup", "booked_call"]);
+const PAGEVIEW_EVENTS = new Set(["email_signup", "booked_call", "kit_checkout_complete"]);
 const isEvent = (name) => typeof name === "string" && hasOwn(EVENTS, name);
 
 const topicClusterSrc = fs.readFileSync(path.join(SRC, "utils/topicCluster.ts"), "utf8");

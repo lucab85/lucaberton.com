@@ -72,7 +72,8 @@ visitor.
 | `bootcamp_apply_start` | first focus inside the application form | — | micro-conversion |
 | `bootcamp_application_submitted` | application POST succeeded (name kept for data continuity; add a separate purchase event only if paid enrollment moves on-site) | — | **key event** |
 | `affiliate_click` | outbound affiliate/partner CTA clicked — one event for ALL partners | `company`, `offer_id`, `offer_type`, `cta_position`, `cta_variant`, `destination_url` | key event (lowest priority) |
-| `offer_click` | an own offer clicked in the team-rollout box (`TeamRolloutBox.astro`), a topic offer box (`TopicOfferBox.astro`) or the price cards on `/claude-code-for-teams/` | `offer` (`claude_code_teams_seat`, `claude_code_teams_cohort`, `claude_code_guardrails_pack`, `team-kit` (Claude Code Team Kit), `forward_to_admin`, `leanpub_*`, `gpu_cluster_review`, `aap_upgrade_review`), `placement` (`post_solution`, `post_conclusion`, `inline`, …), `team` (`true` on a Leanpub team-pack link, 3–25 copies; `offer` is the ebook's), `destination_url` | key event (no value: the sale completes on openempower.com, Leanpub or Gumroad) |
+| `offer_click` | an own offer clicked in the team-rollout box (`TeamRolloutBox.astro`), a topic offer box (`TopicOfferBox.astro`), the price cards on `/claude-code-for-teams/` or a buy button on `/claude-code-team-kit/` | `offer` (`claude_code_teams_seat`, `claude_code_teams_cohort`, `claude_code_guardrails_pack`, `team-kit` (Claude Code Team Kit, from the team-rollout box), `team-kit-individual`, `team-kit-team` (buy buttons on `/claude-code-team-kit/`), `forward_to_admin`, `leanpub_*`, `gpu_cluster_review`, `aap_upgrade_review`), `placement` (`hero`, `post_solution`, `post_conclusion`, `inline`, …), `team` (`true` on a Leanpub team-pack link, 3–25 copies; `offer` is the ebook's), `destination_url` | key event (no value: the sale completes on openempower.com, Leanpub, Gumroad or Stripe) |
+| `kit_checkout_complete` | `/claude-code-team-kit/thanks/` viewed (Stripe Payment Link success redirect), once per session | — | purchase intent, no value (the payment is recorded in Stripe) |
 
 ### Event values
 
@@ -241,6 +242,20 @@ Both use `consulting_cta_click`:
 
 Purchases and paid bookings complete on the shop and on Cal.com, so the
 conversion itself is counted there, not in GA4.
+
+## Claude Code Team Kit (Stripe Payment Links)
+
+`src/data/claudeCodeTeamKit.ts` holds the two Payment Link URLs
+(`INDIVIDUAL_PAYMENT_LINK_URL`, €29; `TEAM_PAYMENT_LINK_URL`, €149). While a
+URL is empty, that plan's buttons on `/claude-code-team-kit/` say "Request
+access" and go to `/contact/?topic=claude-code-team-kit`, and the page has no
+Product/Offer JSON-LD for it. Every buy button fires `offer_click` with
+`offer=team-kit-individual` or `team-kit-team` and `placement=hero`, `inline`
+(price cards) or `post_conclusion`. Set each link's "After payment" redirect
+to `https://lucaberton.com/claude-code-team-kit/thanks/`, which fires
+`kit_checkout_complete` (no value). Links to the page from the homepage strip
+(`OffersStrip.astro`) and `/claude-code-for-teams/` use
+`consulting_cta_click` with `target_offer=claude_code_team_kit`.
 
 ## Calendly booking flow
 

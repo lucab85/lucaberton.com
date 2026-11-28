@@ -102,7 +102,7 @@ spec:
           image: vllm/vllm-openai:latest
           args:
             - "--model"
-            - "meta-llama/Llama-3-8B"
+            - "meta-llama/Meta-Llama-3-8B"
             - "--max-model-len"
             - "4096"
           ports:
@@ -130,7 +130,9 @@ spec:
 
 By default, one GPU = one pod. For sharing GPUs across teams:
 
-### Time-Slicing (MPS)
+### Time-Slicing
+
+Time-slicing and MPS are different sharing mechanisms in the NVIDIA device plugin, and they are mutually exclusive. This example uses time-slicing:
 
 ```yaml
 # ConfigMap for GPU time-slicing
@@ -152,20 +154,26 @@ data:
 ### MIG (Multi-Instance GPU) — A100/H100
 
 ```bash
-# Enable MIG on H100
-nvidia-smi mig -cgi 19,19,19,19,19,19,19 -C
-# Creates 7 MIG instances from one H100
+# Enable MIG mode on GPU 0 first (the driver may reset the GPU)
+sudo nvidia-smi -i 0 -mig 1
+
+# Then create 7 GPU instances (and their compute instances) on that H100
+sudo nvidia-smi mig -i 0 -cgi 19,19,19,19,19,19,19 -C
 ```
+
+On Kubernetes with the GPU Operator, let MIG Manager do this: label the node with `nvidia.com/mig.config` (for example `kubectl label nodes <node> nvidia.com/mig.config=all-1g.10gb --overwrite`).
 
 ## Monitoring GPU Utilization
 
-Deploy DCGM Exporter for Prometheus metrics:
+The GPU Operator already deploys DCGM Exporter for Prometheus metrics. Turn on its ServiceMonitor:
 
 ```bash
-helm install dcgm-exporter nvidia/dcgm-exporter \
-  --namespace gpu-operator \
-  --set serviceMonitor.enabled=true
+helm upgrade gpu-operator nvidia/gpu-operator \
+  --namespace gpu-operator --reuse-values \
+  --set dcgmExporter.serviceMonitor.enabled=true
 ```
+
+Without the GPU Operator, use the standalone chart from `https://nvidia.github.io/dcgm-exporter/helm-charts` (it is not in the `nvidia` NGC Helm repo).
 
 Key metrics:
 - `DCGM_FI_DEV_GPU_UTIL` — GPU utilization percentage

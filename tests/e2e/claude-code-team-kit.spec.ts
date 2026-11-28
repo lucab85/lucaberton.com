@@ -51,7 +51,7 @@ test.describe('Claude Code Team Kit page', () => {
     const pricing = page.locator('#pricing');
     await expect(pricing).toContainText('€29');
     await expect(pricing).toContainText('€149');
-    await expect(pricing).toContainText('VAT may apply at checkout');
+    await expect(pricing).toContainText('excluding VAT');
     await expect(page.locator('[data-team-kit-independent]')).toContainText('not affiliated with or endorsed by Anthropic');
     await expect(page.locator('meta[name="robots"][content*="noindex"]')).toHaveCount(0);
   });

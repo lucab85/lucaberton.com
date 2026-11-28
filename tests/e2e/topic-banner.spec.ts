@@ -24,7 +24,8 @@ test.describe('topic-aware announcement banner', () => {
   });
 
   test('Claude Code posts sell the Guardrails Pack, tracked, same tab', async ({ page }) => {
-    await page.goto('/blog/claude-code-econnreset-fix/', { waitUntil: 'domcontentloaded' });
+    // Not one of the focused error posts (src/utils/postCtaPlans.ts), which show no banner.
+    await page.goto('/blog/fix-claude-code-homebrew-macos-node-26-install/', { waitUntil: 'domcontentloaded' });
     const link = banner(page);
     await expect(link).toHaveAttribute('href', '/claude-code-guardrails-pack/');
     await expect(link).toHaveAttribute('data-track-event', 'consulting_cta_click');

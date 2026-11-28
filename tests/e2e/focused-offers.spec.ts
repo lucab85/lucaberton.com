@@ -88,7 +88,7 @@ const TEAM_POSTS = [
   {
     slug: 'claude-code-remote-control-enable-2026',
     fix: 'how-an-admin-enables-it',
-    next: 'the-trusted-devices-layer-beta',
+    next: 'the-trusted-devices-layer',
   },
   {
     slug: 'fix-claude-code-subscription-disabled-copilot-credit-limit',

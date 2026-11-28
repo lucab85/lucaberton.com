@@ -47,7 +47,8 @@ The CRA requires manufacturers to provide a Software Bill of Materials (SBOM) fo
 # GitLab CI
 generate-sbom:
   stage: build
-  image: cyclonedx/cyclonedx-cli:latest
+  # cyclonedx/cyclonedx-cli only contains the `cyclonedx` CLI (merge, convert, validate),
+  # not these generators: run each command in an image for that ecosystem
   script:
     # For Node.js projects
     - cyclonedx-npm --output-file sbom.json --output-format json
@@ -81,8 +82,10 @@ vulnerability-scan:
         exit 1
       fi
   artifacts:
-    reports:
-      dependency_scanning: vulnerabilities.json
+    # Grype JSON does not follow GitLab's security report schema: keep it as a plain artifact
+    when: always
+    paths:
+      - vulnerabilities.json
 ```
 
 ### Container Image SBOM with Syft
@@ -91,11 +94,11 @@ vulnerability-scan:
 # Generate SBOM for a container image
 syft registry.internal/myapp:v2.1 -o cyclonedx-json > sbom.json
 
-# Attach SBOM to container image using cosign
-cosign attach sbom --sbom sbom.json registry.internal/myapp:v2.1
+# Attach SBOM to the image as a signed attestation (use the image digest)
+cosign attest --key cosign.key --type cyclonedx --predicate sbom.json registry.internal/myapp@sha256:<digest>
 
-# Verify SBOM is attached
-cosign verify-attestation registry.internal/myapp:v2.1
+# Verify the SBOM attestation
+cosign verify-attestation --key cosign.pub --type cyclonedx registry.internal/myapp@sha256:<digest>
 ```
 
 ## What Must Your SBOM Include?

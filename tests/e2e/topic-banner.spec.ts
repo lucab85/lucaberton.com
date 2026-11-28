@@ -28,7 +28,7 @@ test.describe('topic-aware announcement banner', () => {
     // switches the banner off; see tests/e2e/focused-offers.spec.ts.
     await page.goto('/blog/fix-claude-code-homebrew-macos-node-26-install/', { waitUntil: 'domcontentloaded' });
     await expect(page.locator(BANNER)).toHaveCount(0);
-    await expect(page.locator('aside[data-topic-offer-box] a[data-tp-offer="leanpub_claude_code"]')).toHaveCount(1);
+    await expect(page.locator('aside[data-topic-offer-box] a[data-tp-offer="leanpub_claude_code"]:not([data-tp-team])')).toHaveCount(1);
   });
 
   test('DevOps posts offer the newsletter', async ({ page }) => {

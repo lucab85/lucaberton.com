@@ -2,10 +2,17 @@
 /**
  * End-of-post (or after-the-fix) offer box: one or two offers from
  * src/utils/topicOffers.ts (Leanpub ebooks, the GPU cluster design review,
- * the AAP 2.6 Upgrade Review). Every link fires offer_click (offer,
- * placement); external links carry the referral UTMs (offerHref).
+ * the AAP 2.6 Upgrade Review). Ebooks render as a BookCard with the cover;
+ * a review renders as a service card with an icon (no cover). Two offers sit
+ * side by side when there is room, stacked otherwise.
+ *
+ * Every link fires offer_click (offer, placement); external links carry the
+ * referral UTMs (offerHref).
  */
-import { OFFERS, offerHref, type OfferId } from "@utils/topicOffers";
+import { Icon } from "astro-icon/components";
+import BookCard from "./BookCard.astro";
+import { BOOKS_BY_ID, bookPills } from "../data/books";
+import { OFFERS, offerHref, teamHref, type OfferId } from "@utils/topicOffers";
 
 export interface Props {
   offers: OfferId[];
@@ -16,34 +23,189 @@ export interface Props {
 }
 
 const { offers: ids, postSlug, headline, placement } = Astro.props;
-const offers = ids.slice(0, 2).map((id) => OFFERS[id]);
+const offers = ids.slice(0, 2).map((id) => ({ offer: OFFERS[id], book: OFFERS[id].book ? BOOKS_BY_ID[OFFERS[id].book!] : undefined }));
 const headingId = `topic-offer-${placement}`;
+const tint = offers.find((o) => o.book)?.book?.topic ?? "ai";
+const SERVICE_ICONS: Partial<Record<OfferId, string>> = {
+  gpu_cluster_review: "bx:chip",
+  aap_upgrade_review: "simple-icons:ansible",
+};
 ---
 
 {offers.length > 0 && (
   <aside
-    class="not-prose my-10 rounded-2xl border border-slate-200 bg-slate-50 p-6 sm:p-8"
+    class:list={["topic-offer not-prose my-10", offers.length > 1 && "topic-offer--pair"]}
     aria-labelledby={headingId}
     data-topic-offer-box
+    data-bc-tint={tint}
   >
-    <h3 id={headingId} class="text-xl font-extrabold tracking-tight text-gray-900 sm:text-2xl">{headline}</h3>
-    <div class={`mt-5 grid gap-4 ${offers.length > 1 ? "sm:grid-cols-2" : ""}`}>
-      {offers.map((o) => (
-        <div class="flex flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p class="text-xs font-bold uppercase tracking-wider text-teal-700">{o.eyebrow}</p>
-          <p class="mt-2 text-lg font-bold text-gray-900">{o.title}</p>
-          <p class="mt-1 flex-1 text-sm leading-6 text-gray-600">{o.body}</p>
-          <a
-            href={offerHref(o, postSlug)}
-            data-track-event="offer_click"
-            data-tp-offer={o.id}
-            data-tp-placement={placement}
-            class="mt-4 inline-flex items-center justify-center rounded-lg bg-slate-950 px-5 py-3 text-sm font-extrabold text-white transition hover:bg-slate-800"
-          >
-            {o.ctaLabel}
-          </a>
-        </div>
-      ))}
+    <h3 id={headingId} class="topic-offer__headline">{headline}</h3>
+    <div class="topic-offer__grid">
+      {offers.map(({ offer: o, book }) =>
+        book ? (
+          <BookCard
+            title={o.title}
+            blurb={o.body}
+            cover={book.cover}
+            eyebrow={o.eyebrow}
+            pills={bookPills(book)}
+            tint={book.topic}
+            team={{ href: teamHref(o, placement)!, offer: o.id, placement }}
+            actions={[
+              {
+                label: o.ctaLabel,
+                href: offerHref(o, postSlug),
+                ariaLabel: `${o.ctaLabel}: ${o.title} on Leanpub`,
+                offer: o.id,
+                placement,
+              },
+            ]}
+          />
+        ) : (
+          <div class="topic-offer__service">
+            <div class="topic-offer__service-head">
+              <span class="topic-offer__icon" aria-hidden="true">
+                <Icon name={SERVICE_ICONS[o.id] ?? "bx:check-circle"} />
+              </span>
+              <div>
+                <p class="topic-offer__eyebrow">{o.eyebrow}</p>
+                <p class="topic-offer__title">{o.title}</p>
+              </div>
+            </div>
+            <p class="topic-offer__body">{o.body}</p>
+            <a
+              href={offerHref(o, postSlug)}
+              data-track-event="offer_click"
+              data-tp-offer={o.id}
+              data-tp-placement={placement}
+              class="topic-offer__btn"
+            >
+              {o.ctaLabel}
+            </a>
+          </div>
+        ),
+      )}
     </div>
   </aside>
 )}
+
+<style>
+  .topic-offer {
+    position: relative;
+    container-type: inline-size;
+    overflow: hidden;
+    border: 1px solid rgb(15 23 42 / 0.08);
+    border-radius: 1.25rem;
+    padding: 1.25rem;
+    background:
+      radial-gradient(90% 120% at 100% 0%, var(--bc-glow, rgb(45 212 191 / 0.2)) 0%, transparent 55%),
+      linear-gradient(160deg, var(--bc-wash, #f8fafc) 0%, #f8fafc 55%, #ffffff 100%);
+  }
+  @media (min-width: 640px) {
+    .topic-offer {
+      padding: 1.75rem;
+    }
+  }
+  .topic-offer__headline {
+    margin: 0 0 1.125rem;
+    font-size: 1.3rem;
+    font-weight: 800;
+    line-height: 1.25;
+    letter-spacing: -0.015em;
+    color: #0f172a;
+    text-wrap: balance;
+  }
+  @media (min-width: 640px) {
+    .topic-offer__headline {
+      font-size: 1.5rem;
+    }
+  }
+  .topic-offer__grid {
+    display: grid;
+    gap: 1rem;
+  }
+  @container (min-width: 40rem) {
+    .topic-offer--pair .topic-offer__grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  /* Service (review) card: no cover, an icon tile and the site's dark button. */
+  .topic-offer__service {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 1.125rem;
+    border: 1px solid rgb(15 23 42 / 0.1);
+    border-radius: 1rem;
+    background: #ffffff;
+    box-shadow: 0 1px 2px rgb(15 23 42 / 0.04);
+  }
+  .topic-offer__service-head {
+    display: flex;
+    align-items: center;
+    gap: 0.875rem;
+  }
+  .topic-offer__icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    width: 3rem;
+    height: 3rem;
+    border-radius: 0.875rem;
+    background: linear-gradient(145deg, #0f172a, #1e293b);
+    color: #5eead4;
+    box-shadow: 0 8px 18px -10px rgb(15 23 42 / 0.6);
+    font-size: 1.5rem;
+  }
+  .topic-offer__icon :global(svg) {
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+  .topic-offer__eyebrow {
+    margin: 0;
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: #0f766e;
+  }
+  .topic-offer__title {
+    margin: 0.2rem 0 0;
+    font-size: 1.125rem;
+    font-weight: 800;
+    line-height: 1.25;
+    color: #0f172a;
+  }
+  .topic-offer__body {
+    flex: 1;
+    margin: 0.75rem 0 0;
+    font-size: 0.9rem;
+    line-height: 1.55;
+    color: #475569;
+  }
+  .topic-offer__btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2.75rem;
+    margin-top: 1rem;
+    padding: 0.625rem 1.25rem;
+    border: 1px solid rgb(15 23 42 / 0.85);
+    border-radius: 0.625rem;
+    background: #ffffff;
+    color: #0f172a;
+    font-size: 0.9rem;
+    font-weight: 800;
+    text-decoration: none;
+  }
+  .topic-offer__btn:hover {
+    background: #0f172a;
+    color: #ffffff;
+  }
+  .topic-offer__btn:focus-visible {
+    outline: 3px solid #2563eb;
+    outline-offset: 2px;
+  }
+</style>

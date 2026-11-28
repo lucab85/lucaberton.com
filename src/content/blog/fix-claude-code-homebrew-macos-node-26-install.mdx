@@ -24,7 +24,9 @@ This guide walks through the complete fix I used to get Claude Code v2.1.149 run
 
 ## Root Cause
 
-The install is half-conflicting: Homebrew tries to install the new `claude-code` cask, but `/opt/homebrew/bin/claude` already exists from a previous `npm install -g @anthropic-ai/claude-code`. The existing binary runs through Node.js v26.0.0, which is too new and causes compatibility crashes.
+The install is half-conflicting: Homebrew tries to install the new `claude-code` cask, but `/opt/homebrew/bin/claude` already exists from a previous `npm install -g @anthropic-ai/claude-code`. That old npm launcher, not the cask, is what ran through Node.js v26.0.0 and crashed.
+
+The Homebrew cask and the native installer ship a self-contained binary and do not use your system Node.js at all. Only the npm package cares about Node: it requires Node.js 22 or later, and current versions download the same native binary, which does not invoke Node at runtime.
 
 ## Step 1: Identify the Conflict
 
@@ -42,8 +44,14 @@ If it points to a Node.js script or npm global, that's your problem.
 # Remove the global npm package
 npm uninstall -g @anthropic-ai/claude-code
 
-# Remove the stale binary if still there
-rm -f /opt/homebrew/bin/claude
+# Check what is left on your PATH
+which -a claude
+```
+
+Only if `which -a claude` still lists `/opt/homebrew/bin/claude` and `ls -l /opt/homebrew/bin/claude` shows it is a dangling npm launcher (pointing into a deleted `node_modules`), remove that one file:
+
+```bash
+rm /opt/homebrew/bin/claude
 ```
 
 ## Step 3: Reinstall via Homebrew Cask
@@ -62,19 +70,21 @@ Expected output:
 2.1.149 (Claude Code)
 ```
 
-## Step 4: Fix Node.js Version (If Still Crashing)
+## Step 4: Still Launching via Node? Don't Change Your System Node
 
-If Claude still launches via Node and crashes, switch from v26 to LTS:
+You do not need to downgrade or relink Node.js. Replacing the system `node` with `node@22` affects every other project on your Mac, and the Homebrew cask never uses it anyway.
+
+If `claude` still launches via Node and crashes, an npm install is still first on your PATH. Remove it (Step 2) and keep only the Homebrew cask, or use the native installer instead:
 
 ```bash
-brew uninstall node
-brew install node@22
-brew link --overwrite --force node@22
+curl -fsSL https://claude.ai/install.sh | bash
 
-# Verify
-node -v   # Should show v22.x.x
-claude    # Should work now
+# Open a new terminal, then verify a single install
+which -a claude
+claude --version
 ```
+
+If you deliberately want the npm package, use Node.js 22 or later and install with `npm install -g @anthropic-ai/claude-code@latest` (never with `sudo`).
 
 ## Step 5: Fix macOS Gatekeeper Block
 
@@ -82,18 +92,36 @@ When you see "Apple could not verify claude is free of malware":
 
 **Option A — System Settings UI:**
 
-1. Run `claude` (it will fail)
-2. Go to **System Settings → Privacy & Security → Security**
-3. Click **"Open Anyway"** (appears for about 1 hour after the blocked attempt)
-4. Run `claude` again
-
-**Option B — Terminal (if you trust the Homebrew source):**
+The official macOS binary is signed by "Anthropic PBC" and notarized by Apple, so this warning is unexpected. Check the binary before you override anything:
 
 ```bash
-xattr -dr com.apple.quarantine /opt/homebrew/bin/claude
-xattr -dr com.apple.quarantine /opt/homebrew/Caskroom/claude-code
+CLAUDE_BIN="$(readlink -f "$(command -v claude)")"
+echo "$CLAUDE_BIN"
+xattr -l "$CLAUDE_BIN"
+codesign --verify --verbose "$CLAUDE_BIN"
+codesign -dv --verbose=2 "$CLAUDE_BIN" 2>&1 | grep -E 'Authority|TeamIdentifier'
+spctl --assess --type execute -vv "$CLAUDE_BIN"
+```
+
+If the signature is not Anthropic's, or `codesign` reports it as invalid, do not bypass Gatekeeper: delete it and reinstall from the official source (`brew reinstall --cask claude-code` or the native installer). Reinstalling from the official source is the preferred fix in any case.
+
+**Option A — System Settings UI:**
+
+1. Run `claude` (it will fail)
+2. Go to **System Settings → Privacy & Security → Security**
+3. Click **"Open Anyway"** right after the blocked attempt
+4. Run `claude` again
+
+**Option B — Terminal (only for a binary you verified above):**
+
+Remove the quarantine flag from that one binary, not from the whole Caskroom folder:
+
+```bash
+xattr -d com.apple.quarantine "$CLAUDE_BIN"
 claude
 ```
+
+On a managed Mac, ask IT first: MDM policy may forbid overriding Gatekeeper.
 
 ## Step 6: Nuclear Option (Clean Reinstall)
 
@@ -101,7 +129,8 @@ If nothing else works:
 
 ```bash
 brew uninstall --cask claude-code
-rm -f /opt/homebrew/bin/claude
+npm uninstall -g @anthropic-ai/claude-code   # if an npm install is still around
+which -a claude                              # should print nothing now
 brew install --cask claude-code
 claude
 ```
@@ -127,8 +156,8 @@ Use arrow keys to select, press Enter. You can change this later with `/theme`.
 | Problem | Fix |
 |---------|-----|
 | Binary conflict | `npm uninstall -g @anthropic-ai/claude-code` then `brew install --cask claude-code` |
-| Node.js v26 crash | Switch to `node@22` via Homebrew |
-| Gatekeeper block | System Settings → Open Anyway, or `xattr -dr com.apple.quarantine` |
+| Node.js v26 crash | Remove the npm install; the cask and native installer don't use your Node.js |
+| Gatekeeper block | Verify with `codesign`/`spctl`, reinstall from the official source, or Open Anyway / `xattr -d com.apple.quarantine` on that one binary |
 
 ## Related Content
 

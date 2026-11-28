@@ -20,9 +20,9 @@ tags:
   - "Agents"
 ---
 
-This guide covers the connection-reset family of errors (`ECONNRESET`, `Response stalled mid-stream`) that affect any API client—whether you're using Claude Code, OpenCV, or another tool communicating over HTTPS. Pick the section that matches what you saw.
+This guide covers the connection-reset family of errors (`ECONNRESET`, `The response stopped arriving`, formerly `Response stalled mid-stream`) that affect any API client—whether you're using Claude Code, OpenCV, or another tool communicating over HTTPS. Pick the section that matches what you saw.
 
-If you suddenly hit `ECONNRESET` — or the related **`API Error: Response stalled mid-stream. The response above may be incomplete`** — it means the TCP connection between your client and the remote API was closed by the other side before the request finished. The error is a *network* signal, not a code bug in your project. That distinction matters, because it tells you where to look first: the transport layer, not your source code. Both messages come from the same family of failure — the link dropped while data was still in flight.
+If you suddenly hit `ECONNRESET` — or the related **`API Error: The response stopped arriving. The response above may be incomplete`** (called `Response stalled mid-stream` before Claude Code v2.1.227) — it means the TCP connection between your client and the remote API was closed by the other side before the request finished. The error is a *network* signal, not a code bug in your project. That distinction matters, because it tells you where to look first: the transport layer, not your source code. Both messages come from the same family of failure — the link dropped while data was still in flight.
 
 First, the reassuring part. As of this writing, the [Claude status page](https://status.anthropic.com/) shows **Claude API and Claude Code as operational**. Several incidents did occur and were resolved on July 22–23, 2026, so a brief retry after an incident window usually clears itself. If the status page is green and you are still seeing resets, the cause is almost always on your side of the network.
 
@@ -35,8 +35,11 @@ API Error: Connection dropped (ECONNRESET)
 API Error: Connection lost mid-response. The response above may be incomplete.
 API Error: The response stopped arriving. The response above may be incomplete.
 API Error: Response stalled mid-stream. The response above may be incomplete.
+API Error: Connection closed mid-response. The response above may be incomplete.
 ECONNRESET: The socket connection was closed unexpectedly.
 ```
+
+The last two are the older wording: before Claude Code v2.1.227, `Connection lost mid-response` read `Connection closed mid-response` and `The response stopped arriving` read `Response stalled mid-stream`.
 
 They all mean the same thing: the connection to the API broke before the answer finished. Same causes, same fixes. Start with [Fix it in this order](#fix-it-in-this-order). If the message says the response may be incomplete, also read [the stalled-stream section](#api-error-response-stalled-mid-stream).
 
@@ -82,7 +85,7 @@ For long API requests, use streaming or reduce the request duration. Anthropic n
 
 ## API Error: Response stalled mid-stream
 
-`ECONNRESET` is the abrupt version of this failure. The **`Response stalled mid-stream`** message is the gentler cousin: the connection was held open, but bytes stopped arriving before the response completed, so Claude Code reports the output as potentially incomplete. Same root causes — a VPN, proxy, firewall, or unstable network silently cutting or throttling the stream — just surfaced at a different point in the request lifecycle.
+`ECONNRESET` is the abrupt version of this failure. The **`The response stopped arriving`** message (named `Response stalled mid-stream` before v2.1.227) is the gentler cousin: the connection was held open, but bytes stopped arriving before the response completed, so Claude Code reports the output as potentially incomplete. Same root causes — a VPN, proxy, firewall, or unstable network silently cutting or throttling the stream — just surfaced at a different point in the request lifecycle.
 
 What to do when you see it:
 
@@ -134,7 +137,7 @@ The reset is almost always local — a VPN, proxy, firewall, or unstable network
 Some networks drop idle, non-streaming connections. Streaming sends bytes continuously, keeping the connection from looking idle to intermediate proxies.
 
 **What is "Response stalled mid-stream"?**
-The same family of failure as `ECONNRESET`, but the connection was held open while bytes stopped arriving, so Claude Code flags the output as possibly incomplete. Retry, drop the VPN/proxy, and keep generations short and streamed.
+It is the older name (before v2.1.227) of `The response stopped arriving`. The same family of failure as `ECONNRESET`, but the connection was held open while bytes stopped arriving, so Claude Code flags the output as possibly incomplete. Retry, drop the VPN/proxy, and keep generations short and streamed.
 
 **"Agent process failed to restart after 5 consecutive crashes" — what now?**
 That is a process-stability fault, not a network one. Start `claude --safe-mode`; if it launches cleanly, a hook, MCP server, or plugin is the culprit. Run `/doctor` and `/mcp`, then re-enable customizations one at a time to isolate the bad one. Memory exhaustion (check `journalctl`/Event Viewer for an OOM kill) and a bad CLI build are the other common causes.
@@ -142,7 +145,7 @@ That is a process-stability fault, not a network one. Start `claude --safe-mode`
 ## Key takeaways
 
 - `ECONNRESET` is a network fault, not a code bug — check the transport layer first.
-- `Response stalled mid-stream` is the same failure family; retry and treat the last output block as suspect.
+- `The response stopped arriving` (formerly `Response stalled mid-stream`) and `Connection lost mid-response` (formerly `Connection closed mid-response`) are the same failure family; retry and treat the last output block as suspect.
 - `Agent process failed to restart after 5 consecutive crashes` is a *process-stability* fault — launch `claude --safe-mode`; if it works, a hook/MCP server/plugin is crashing it.
 - Restart Claude Code, then drop the VPN/proxy before anything else.
 - `curl -v https://api.anthropic.com` is your fastest diagnostic: any HTTP status = reachable, TLS reset = network fault.

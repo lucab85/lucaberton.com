@@ -72,7 +72,7 @@ visitor.
 | `bootcamp_apply_start` | first focus inside the application form | — | micro-conversion |
 | `bootcamp_application_submitted` | application POST succeeded (name kept for data continuity; add a separate purchase event only if paid enrollment moves on-site) | — | **key event** |
 | `affiliate_click` | outbound affiliate/partner CTA clicked — one event for ALL partners | `company`, `offer_id`, `offer_type`, `cta_position`, `cta_variant`, `destination_url` | key event (lowest priority) |
-| `offer_click` | an own offer clicked in the team-rollout box (`TeamRolloutBox.astro`), a topic offer box (`TopicOfferBox.astro`) or the price cards on `/claude-code-for-teams/` | `offer` (`claude_code_teams_seat`, `claude_code_teams_cohort`, `claude_code_guardrails_pack`, `forward_to_admin`, `leanpub_*`, `gpu_cluster_review`, `aap_upgrade_review`), `placement` (`post_solution`, `post_conclusion`, `inline`, …), `destination_url` | key event (no value: the sale completes on openempower.com, Leanpub or Gumroad) |
+| `offer_click` | an own offer clicked in the team-rollout box (`TeamRolloutBox.astro`), a topic offer box (`TopicOfferBox.astro`) or the price cards on `/claude-code-for-teams/` | `offer` (`claude_code_teams_seat`, `claude_code_teams_cohort`, `claude_code_guardrails_pack`, `team-kit` (Claude Code Team Kit), `forward_to_admin`, `leanpub_*`, `gpu_cluster_review`, `aap_upgrade_review`), `placement` (`post_solution`, `post_conclusion`, `inline`, …), `team` (`true` on a Leanpub team-pack link, 3–25 copies; `offer` is the ebook's), `destination_url` | key event (no value: the sale completes on openempower.com, Leanpub or Gumroad) |
 
 ### Event values
 
@@ -210,8 +210,8 @@ OpenClaw posts stay.
 |---|---|---|
 | `ai_coding` | `claude_code` cluster, or Codex, GitHub Copilot, Cursor, Windsurf, Gemini CLI, coding agents, vibe coding… | "Claude Code Masterclass" (leanpub.com/claude-code/c/lucaberton, the site coupon) |
 | `gpu_ai_infra` | `gpu_kubernetes` cluster, or GPU / NVIDIA / vLLM / inference / RHEL AI / OpenShift AI / AI infrastructure terms | GPU cluster design review (`/services/gpu-cluster-review/`, EUR 10,000) + "Kubernetes AI" |
-| `aap` | Ansible posts about AAP, Tower, automation controller, Event-Driven Ansible | AAP 2.6 Upgrade Review (€2,900, openempower.com) + "Ansible AWX By Examples" |
-| `ansible` | other Ansible posts | AWX → "Ansible AWX By Examples"; containers / Kubernetes → "Ansible For Containers and Kubernetes By Examples"; RHEL → "Red Hat Enterprise Linux 10 Handbook"; else "Ansible by Examples" |
+| `aap` | Ansible posts about AAP, Tower, automation controller, Event-Driven Ansible | AAP 2.6 Upgrade Review (€2,900, openempower.com) + "Ansible Automation Platform By Example" (leanpub.com/Ansible-Automation-Platform/c/lucaberton) |
+| `ansible` | other Ansible posts | AWX → "Ansible AWX By Examples"; containers / Kubernetes → "Ansible by Examples" (the containers and Kubernetes ebook is retired on Leanpub); RHEL → "Red Hat Enterprise Linux 10 Handbook"; else "Ansible by Examples" |
 | `rhel` | RHEL / Red Hat posts | "Red Hat Enterprise Linux 10 Handbook" |
 
 External links carry `utm_source=lucaberton.com&utm_medium=referral&utm_campaign=<leanpub-<book slug> | aap-review>&utm_content=<post slug>`.

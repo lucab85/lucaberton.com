@@ -14,6 +14,7 @@
 /** Book slug → this site's Leanpub coupon code. */
 export const LEANPUB_COUPONS: Readonly<Record<string, string>> = {
   "claude-code": "lucaberton",
+  "Ansible-Automation-Platform": "lucaberton",
 };
 
 /**
@@ -30,3 +31,13 @@ export function leanpubUrl(book: string, query = ""): string {
   return q ? `${base}?${q}` : base;
 }
 
+/**
+ * Leanpub team-discount section of a book page (packs of 3–25 copies). Always
+ * the plain book page: the team packs are listed there, not on a coupon page.
+ * `query` (with or without a leading "?") goes before the #team-discounts
+ * fragment.
+ */
+export function leanpubTeamUrl(book: string, query = ""): string {
+  const q = query.replace(/^\?/, "");
+  return `https://leanpub.com/${book}${q ? `?${q}` : ""}#team-discounts`;
+}

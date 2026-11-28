@@ -12,9 +12,12 @@
  *   gpu_ai_infra  GPU and AI-infrastructure posts
  *                 → GPU cluster design review + "Kubernetes AI" ebook
  *   aap           Ansible Automation Platform posts
- *                 → AAP 2.6 Upgrade Review + "Ansible AWX By Examples" ebook
- *   ansible       other Ansible posts → the matching ebook: AWX, containers
- *                 and Kubernetes, RHEL, or "Ansible by Examples"
+ *                 → AAP 2.6 Upgrade Review + "Ansible Automation Platform By
+ *                 Example" ebook
+ *   ansible       other Ansible posts → the matching ebook: AWX, RHEL, or
+ *                 "Ansible by Examples" (also for Ansible + Kubernetes posts:
+ *                 Leanpub retired "Ansible for Containers and Kubernetes By
+ *                 Examples" in Nov 2026)
  *   rhel          RHEL / Red Hat posts → "Red Hat Enterprise Linux 10 Handbook"
  *
  * Why (Nov 2026): the Leanpub ebooks are the best-selling self-serve product
@@ -22,19 +25,22 @@
  * payouts are paused, so Gumroad products no longer lead. No Leanpub prices
  * are shown (Leanpub sets them).
  *
+ * Every ebook card also links to the book's Leanpub team packs (3–25 copies):
+ * offer_click with team=true, utm_content=<placement>-team (teamHref).
+ *
  * Every link fires offer_click (offer, placement). External links carry
  * utm_source=lucaberton.com&utm_medium=referral&utm_campaign=<campaign>&utm_content=<post slug>.
  * The GPU review page is on this site, so it carries no UTMs (internal UTMs
  * would start a new GA4 session); offer_click still records the click.
  */
 import { topicCluster } from "./topicCluster";
-import { leanpubUrl } from "./leanpub";
+import { leanpubTeamUrl, leanpubUrl } from "./leanpub";
 
 export type OfferId =
   | "leanpub_claude_code"
   | "leanpub_kubernetes_ai"
   | "leanpub_ansible_awx"
-  | "leanpub_ansible_kubernetes"
+  | "leanpub_aap"
   | "leanpub_rhel10"
   | "leanpub_ansible_examples"
   | "gpu_cluster_review"
@@ -49,6 +55,8 @@ export interface TopicOffer {
   href: string;
   /** utm_campaign for external links; omitted for pages on this site. */
   utmCampaign?: string;
+  /** Ebooks: id in src/data/books.ts (cover, pills) for BookCard. */
+  book?: string;
 }
 
 const ebook = (slug: string, title: string, body: string, id: OfferId): TopicOffer => ({
@@ -56,10 +64,11 @@ const ebook = (slug: string, title: string, body: string, id: OfferId): TopicOff
   eyebrow: "Ebook by Luca Berton",
   title,
   body,
-  ctaLabel: "Get the ebook on Leanpub →",
+  ctaLabel: "Get the ebook",
   // Coupon path for books with a lucaberton.com coupon (src/utils/leanpub.ts).
   href: leanpubUrl(slug),
-  utmCampaign: `leanpub-${slug}`,
+  utmCampaign: `leanpub-${slug.toLowerCase()}`,
+  book: slug,
 });
 
 export const OFFERS: Record<OfferId, TopicOffer> = {
@@ -81,11 +90,11 @@ export const OFFERS: Record<OfferId, TopicOffer> = {
     "AWX and the automation controller, step by step, with real examples.",
     "leanpub_ansible_awx",
   ),
-  leanpub_ansible_kubernetes: ebook(
-    "ansible-for-kubernetes-by-examples",
-    "Ansible For Containers and Kubernetes By Examples",
-    "Automate day-to-day operations on containers, Kubernetes and OpenShift with Ansible, with real-life examples.",
-    "leanpub_ansible_kubernetes",
+  leanpub_aap: ebook(
+    "Ansible-Automation-Platform",
+    "Ansible Automation Platform By Example",
+    "A step-by-step guide to the most common Ansible Automation Platform scenarios.",
+    "leanpub_aap",
   ),
   leanpub_rhel10: ebook(
     "red-hat-enterprise-linux-10",
@@ -160,9 +169,11 @@ export function topicOfferFor(slug: string, category: string, tags: string[] = [
     return { topic: "gpu_ai_infra", offers: ["gpu_cluster_review", "leanpub_kubernetes_ai"] };
   }
   if (ANSIBLE.test(text)) {
-    if (AAP.test(text)) return { topic: "aap", offers: ["aap_upgrade_review", "leanpub_ansible_awx"] };
+    if (AAP.test(text)) return { topic: "aap", offers: ["aap_upgrade_review", "leanpub_aap"] };
     if (AWX.test(text)) return { topic: "ansible", offers: ["leanpub_ansible_awx"] };
-    if (K8S.test(text)) return { topic: "ansible", offers: ["leanpub_ansible_kubernetes"] };
+    // Ansible + containers / Kubernetes: "Ansible by Examples" (the containers
+    // and Kubernetes ebook is retired on Leanpub), ahead of the RHEL match.
+    if (K8S.test(text)) return { topic: "ansible", offers: ["leanpub_ansible_examples"] };
     if (RHEL.test(text)) return { topic: "ansible", offers: ["leanpub_rhel10"] };
     return { topic: "ansible", offers: ["leanpub_ansible_examples"] };
   }
@@ -181,4 +192,13 @@ export function offerHref(offer: TopicOffer, postSlug: string): string {
   u.searchParams.set("utm_campaign", offer.utmCampaign);
   u.searchParams.set("utm_content", postSlug);
   return u.toString();
+}
+
+/** Leanpub team-pack link for an ebook offer, or null for other offers. */
+export function teamHref(offer: TopicOffer, placement: string): string | null {
+  if (!offer.book || !offer.utmCampaign) return null;
+  return leanpubTeamUrl(
+    offer.book,
+    `utm_source=lucaberton.com&utm_medium=referral&utm_campaign=${offer.utmCampaign}&utm_content=${placement}-team`,
+  );
 }

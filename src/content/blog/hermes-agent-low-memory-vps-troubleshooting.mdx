@@ -21,9 +21,9 @@ faq:
   - question: "Why does 'hermes' say command not found right after installing it?"
     answer: "The installer adds ~/.local/bin to PATH by editing ~/.bashrc, but a shell session that was already open won't pick that up automatically. Run `source ~/.bashrc` (or open a fresh SSH session) and confirm with `which hermes`."
   - question: "Why does the Playwright/Chromium install fail during Hermes setup?"
-    answer: "On a 1 GB RAM instance (like Oracle Cloud's free VM.Standard.E2.1.Micro shape) there usually isn't enough memory headroom to install Chromium, and no swap is configured by default. Add a 2GB swap file first, then retry `npx playwright install --with-deps chromium`."
+    answer: "On a 1 GB RAM instance (like Oracle Cloud's free VM.Standard.E2.1.Micro shape) there usually isn't enough memory headroom to install Chromium, and no swap is configured by default. Add a 2GB swap file first, then retry with `hermes pm install chromium` (older versions suggested `npx playwright install --with-deps chromium`)."
   - question: "Is it 'hermes gateway setup' or 'hermes setup gateway'?"
-    answer: "It's `hermes gateway setup`, followed by `hermes gateway start`. Those are the only two gateway subcommands documented in the official README — running them in the reversed order, or expecting extra subcommands like `gateway install` or `gateway status`, will fail because those aren't part of the documented CLI."
+    answer: "It's `hermes gateway setup`. `hermes setup gateway` (the reversed order) fails. The documented gateway subcommands also include `run`, `start`, `stop`, `restart`, `status`, `install`, `uninstall`, and `list`; `hermes gateway install` plus `sudo loginctl enable-linger $USER` keeps the gateway running as a systemd user service."
   - question: "Can I trust AI-generated Hermes Agent commands from ChatGPT or other assistants?"
     answer: "Treat them as a draft, not a fact. Cross-check any specific subcommand, flag, or claimed behavior against the official GitHub README or docs site before running it — assistants (this one included) can confidently suggest commands or mechanisms that were never actually shipped."
 ---
@@ -64,7 +64,7 @@ If that file is missing too, the install itself didn't complete — re-run the i
 
 ## Issue 2: Playwright/Chromium Install Fails During Setup
 
-**Symptom:** Near the end of the installer (or when `hermes doctor` runs later), you see:
+**Symptom:** Current installers download a pinned Chromium through Hermes' package manager; if that download fails, the install still completes and prints the command to retry. Older versions printed this near the end of the installer (or when `hermes doctor` ran later):
 
 ```text
 → Installing browser engine (Playwright Chromium)...
@@ -84,11 +84,12 @@ sudo swapon /swapfile
 echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 free -h   # confirm ~2.0Gi now shows on the Swap line
 
-cd ~/.hermes/hermes-agent
-npx playwright install --with-deps chromium
+hermes pm install chromium
 ```
 
-If you don't need browser automation (scraping JS-heavy pages, visual checks), it's fine to just leave this disabled and move on — it's one tool out of Hermes's full pool, not a dependency for the rest of the agent.
+On older versions that printed the Playwright warning above, run the command it suggests instead.
+
+If you don't need browser automation (scraping JS-heavy pages, visual checks), it's fine to just leave this disabled and move on (the installer's `--skip-browser` flag leaves it out from the start) — it's one tool out of Hermes's full pool, not a dependency for the rest of the agent.
 
 ## Issue 3: Wrong Gateway Subcommand Order
 
@@ -100,11 +101,20 @@ If you don't need browser automation (scraping JS-heavy pages, visual checks), i
 
 ```bash
 hermes gateway setup      # configure Telegram, Discord, Slack, WhatsApp, or Signal
-hermes gateway start      # run the messaging gateway
+hermes gateway run        # run the messaging gateway in the foreground
 hermes gateway restart    # restart it after a config change (e.g. new allowlist entry)
 ```
 
-If you've seen references to `hermes gateway install`, `hermes gateway status`, or a built-in `systemd --user` service manager with `loginctl enable-linger` — none of that appears in the official GitHub README or the docs site as of this writing. Don't build automation around subcommands you haven't confirmed exist; check `hermes gateway --help` or the docs directly first.
+To keep the gateway running after you log out, install it as a service. `hermes gateway install`, `start`, `stop`, `status`, and `uninstall` are part of the documented CLI, and lingering keeps a systemd user service alive without an open session:
+
+```bash
+hermes gateway install              # systemd user service on Linux
+sudo loginctl enable-linger $USER   # start at boot, survive logout
+hermes gateway start
+hermes gateway status
+```
+
+Don't build automation around subcommands you haven't confirmed exist; check `hermes gateway --help` or the docs directly first.
 
 ## A General Rule for This Kind of Setup
 

@@ -20,19 +20,19 @@ tags:
   - "Tutorial"
 faq:
   - question: "Why is my Hermes Discord bot online but not responding to messages?"
-    answer: "Almost always the Message Content Intent is disabled in the Discord Developer Portal. Without it, the bot receives message events but the text field is empty — it literally can't see what you typed. Enable it under Bot → Privileged Gateway Intents and restart the gateway."
+    answer: "Usually no Discord access policy is configured, so Hermes denies inbound messages by default (set DISCORD_ALLOWED_USERS, DISCORD_ALLOWED_ROLES, or DISCORD_ALLOW_ALL_USERS=true). A disabled Message Content Intent looks different: Hermes always requests message content, so Discord refuses the connection and the bot never comes online, and gateway.log says privileged Gateway Intents are not enabled. Enable it under Bot → Privileged Gateway Intents and restart the gateway."
   - question: "How do I give myself access to my own Hermes Discord bot?"
     answer: "Hermes denies all inbound Discord messages by default until you configure an access policy. Set DISCORD_ALLOWED_USERS to your Discord user ID (found via Settings → Advanced → Developer Mode, then right-click your name → Copy User ID), or DISCORD_ALLOWED_ROLES for role-based access, or DISCORD_ALLOW_ALL_USERS=true to allow anyone."
   - question: "Do I configure the Discord bot token interactively or by editing a file?"
     answer: "Either works. `hermes gateway setup` prompts for the token and your user ID interactively. Alternatively, add DISCORD_BOT_TOKEN and DISCORD_ALLOWED_USERS directly to ~/.hermes/.env, and put per-channel behavior settings like require_mention or auto_thread under a discord: section in ~/.hermes/config.yaml."
   - question: "What Discord bot permissions does Hermes Agent need?"
-    answer: "At minimum: View Channels, Send Messages, Embed Links, Attach Files, and Read Message History. The recommended invite link also adds threading and reactions support, corresponding to permissions integer 274878286912."
+    answer: "At minimum: View Channels, Send Messages, Embed Links, Attach Files, and Read Message History. The recommended invite link also adds threading and reactions support, corresponding to permissions integer 309237763136 (minimal set: 117760; with voice Connect and Speak: 309240908864)."
 ---
 import BlogPromoCard from '../../components/BlogPromoCard.astro';
 
 Discord is one of the messaging channels [Hermes Agent](/blog/what-is-hermes-agent-nous-research/) can connect to, alongside Telegram, Slack, WhatsApp, and Signal. Once it's wired up, the agent running on your server — see [deploying it on Oracle Cloud's free tier](/blog/hermes-agent-oracle-cloud-free-tier-deployment/) — becomes reachable from any Discord server or DM, not just an SSH session.
 
-This covers the full path: creating the bot in Discord's Developer Portal, the one setting that silently breaks everything if you skip it, and the config on the Hermes side.
+This covers the full path: creating the bot in Discord's Developer Portal, the one setting that keeps the bot offline if you skip it, and the config on the Hermes side.
 
 ## Step 1: Create a Discord Application
 
@@ -47,13 +47,13 @@ This covers the full path: creating the bot in Discord's Developer Portal, the o
 
 ## Step 3: Enable Privileged Gateway Intents (Don't Skip This)
 
-This is the step that causes almost every "bot's online but won't respond" report. On the **Bot** page, scroll to **Privileged Gateway Intents** and enable:
+This is the step that causes almost every "bot never comes online" report. On the **Bot** page, scroll to **Privileged Gateway Intents** and enable:
 
 - **Message Content Intent** — required to read message text at all
 - **Server Members Intent** — required to resolve usernames
 - **Presence Intent** — optional, only needed for online/offline status features
 
-Without Message Content Intent, the bot receives message *events* but the text field arrives empty — it genuinely cannot see what you typed, even though it looks fully connected. Click **Save Changes** once all three are toggled.
+Hermes always requests message content, so without Message Content Intent Discord refuses the connection and the bot never comes online; `gateway.log` shows that privileged Gateway Intents are not enabled. Click **Save Changes** once all three are toggled.
 
 ## Step 4: Retrieve the Bot Token
 
@@ -79,10 +79,10 @@ For permissions, the minimum to get messages flowing is View Channels, Send Mess
 **Manual alternative** — construct the invite URL directly, adjusting the `permissions` value if you use Discord's own permission calculator for a different set:
 
 ```text
-https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=274878286912
+https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=309237763136
 ```
 
-The integer above is a reasonable starting point but doesn't include thread management — if your bot's replies aren't appearing, check whether it's missing thread-related permissions before assuming something else is broken.
+The integer above is the recommended set from the Hermes docs (View Channels, Send Messages, Embed Links, Attach Files, Read Message History, plus Create Public Threads, Send Messages in Threads, and Add Reactions). Use `117760` for the minimal set without threads and reactions, or `309240908864` to add voice (Connect and Speak), which is what `hermes gateway setup` prints.
 
 ## Step 6: Invite the Bot to Your Server
 
@@ -215,13 +215,15 @@ journalctl --user -u hermes-gateway --since "2 minutes ago" --no-pager \
   | grep -Ei 'discord|connected|ready|error|forbidden'
 ```
 
+This assumes the user service from `hermes gateway install`; for a system service (`sudo hermes gateway install --system`), use `journalctl -u hermes-gateway` without `--user`.
+
 ## Troubleshooting
 
-**Bot is online but never responds.** This is almost always the Message Content Intent being disabled — go back to Developer Portal → Bot → Privileged Gateway Intents and confirm all three are toggled on, then restart the gateway.
+**Bot is online but never responds.** This is usually a missing access policy (see the next item). A disabled Message Content Intent keeps the bot offline instead: Discord refuses the connection, so go back to Developer Portal → Bot → Privileged Gateway Intents, confirm the toggles are on, then restart the gateway.
 
 **"No env user allowlists configured."** The exact warning is: *"No env user allowlists configured. Messaging platforms default to pairing/allowlist policies and will deny unknown senders unless you configure platform allowlists (e.g., TELEGRAM_ALLOWED_USERS=your_id) or explicitly opt in with GATEWAY_ALLOW_ALL_USERS=true plus dm_policy/group_policy: open on the platform."* For Discord specifically, configure at least one of `DISCORD_ALLOWED_USERS`, `DISCORD_ALLOWED_ROLES`, or `DISCORD_ALLOW_ALL_USERS=true`.
 
-**Disallowed intents error on connect.** Same root cause as the "not responding" case — one or more Privileged Gateway Intents aren't enabled in the Developer Portal. Enable all three and restart.
+**Disallowed intents error on connect.** One or more Privileged Gateway Intents aren't enabled in the Developer Portal, so Discord refuses the connection and the bot stays offline. Enable all three and restart.
 
 **"User not allowed."** Your Discord user ID isn't in `DISCORD_ALLOWED_USERS`. Double-check you copied the numeric ID (not the username) and restart with `hermes gateway restart`.
 

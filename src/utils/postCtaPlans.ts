@@ -8,10 +8,12 @@
  *
  *   team_rollout  one TeamRolloutBox right after the fix section: the reader
  *                 has to ask an admin, or is the admin. Public workshop seats,
- *                 the company cohort, the Guardrails Pack and a "forward this
- *                 to your admin" email. Clicks fire offer_click.
- *   single        one softer offer for an individual-user problem: the
- *                 Guardrails Pack banner (claude_pack) or the newsletter card.
+ *                 the company cohort, the "Claude Code Masterclass" ebook, the
+ *                 Guardrails Pack and a "forward this to your admin" email.
+ *                 Clicks fire offer_click.
+ *   single        one softer offer for an individual-user problem, right after
+ *                 the fix: the "Claude Code Masterclass" ebook on Leanpub
+ *                 (TopicOfferBox, offers from src/utils/topicOffers.ts).
  *
  * Why (Search Console and GA4, 28 days to 25-27 Nov 2026): these four posts
  * bring ~830 organic sessions per 28 days, but 15 of 1,096 pageviews reached a
@@ -19,8 +21,10 @@
  * two org-policy posts have readers who depend on an admin.
  *
  * Prices and dates live in src/data/claudeCodeTeams.ts. Posts not listed here
- * keep the default stack (blogConsultingCtas.ts and friends).
+ * get their topic's default offer (src/utils/topicOffers.ts), or the default
+ * stack when no topic applies.
  */
+import type { OfferId } from "./topicOffers";
 
 export interface TeamRolloutPlan {
   kind: "team_rollout";
@@ -38,7 +42,10 @@ export interface TeamRolloutPlan {
 
 export interface SingleOfferPlan {
   kind: "single";
-  offer: "claude_pack" | "newsletter";
+  offers: OfferId[];
+  headline: string;
+  /** id of the H2 that holds the fix; the box goes right before the next H2. */
+  afterSection: string;
 }
 
 export type PostCtaPlan = TeamRolloutPlan | SingleOfferPlan;
@@ -67,9 +74,19 @@ export const postCtaPlans: Record<string, PostCtaPlan> = {
       "Hi,\n\nClaude Code returns \"Your organization has disabled Claude subscription access for Claude Code.\" Could you enable Claude Code subscription access for our organization, or invite me to the Claude Console so I can use an API key? This page explains the options:",
   },
 
-  // Individual-user problems: one softer offer each.
-  "claude-code-econnreset-fix": { kind: "single", offer: "claude_pack" },
-  "codex-device-code-auth-chatgpt-security-2026": { kind: "single", offer: "newsletter" },
+  // Individual-user problems: one softer offer each, right after the fix.
+  "claude-code-econnreset-fix": {
+    kind: "single",
+    offers: ["leanpub_claude_code"],
+    headline: "Connection back? Get the whole Claude Code workflow",
+    afterSection: "fix-it-in-this-order",
+  },
+  "codex-device-code-auth-chatgpt-security-2026": {
+    kind: "single",
+    offers: ["leanpub_claude_code"],
+    headline: "Logged in? Go further with AI coding agents",
+    afterSection: "run-the-login-again",
+  },
 };
 
 export function getPostCtaPlan(slug: string): PostCtaPlan | undefined {

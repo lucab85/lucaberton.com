@@ -1,11 +1,12 @@
 import { test, expect, type Page } from '@playwright/test';
 
 /**
- * Focused CTAs on the Claude Code / Codex error posts (src/utils/postCtaPlans.ts):
- * the two org-policy posts show one team-rollout box right after the fix,
- * the two individual-user posts show one softer offer, and none of them
- * carries the usual stack (topic banner, sticky bar, doctor strip, product
- * banner, newsletter card, course card, paid-offer cards).
+ * Focused CTAs (src/utils/postCtaPlans.ts, src/utils/topicOffers.ts): the two
+ * org-policy posts show one team-rollout box right after the fix, the two
+ * individual-user posts show the Claude Code Masterclass ebook after the fix,
+ * topic posts end with their default offer, and none of them carries the
+ * usual stack (topic banner, sticky bar, doctor strip, product banner,
+ * newsletter card, course card, paid-offer cards).
  */
 
 type TrackedEvent = { event: string } & Record<string, unknown>;
@@ -33,6 +34,15 @@ async function recordEvents(page: Page): Promise<TrackedEvent[]> {
 
 const TOPIC_BANNER = 'body > div[class*="bg-gradient-to-r"]';
 const BOX = 'aside[data-team-rollout-box]';
+const TOPIC_BOX = 'aside[data-topic-offer-box]';
+
+function expectUtm(href: string, campaign: string, content: string) {
+  const url = new URL(href);
+  expect(url.searchParams.get('utm_source')).toBe('lucaberton.com');
+  expect(url.searchParams.get('utm_medium')).toBe('referral');
+  expect(url.searchParams.get('utm_campaign')).toBe(campaign);
+  expect(url.searchParams.get('utm_content')).toBe(content);
+}
 
 async function expectNoStack(page: Page) {
   await expect(page.locator(TOPIC_BANNER)).toHaveCount(0);
@@ -75,8 +85,16 @@ test.describe('team-rollout box on the org-policy posts', () => {
       expect(placed).toBe(true);
 
       const links = page.locator(`${BOX} a[data-track-event="offer_click"]`);
-      await expect(links).toHaveCount(4);
-      await expect(page.locator(`${BOX} a[data-tp-placement="post_solution"]`)).toHaveCount(4);
+      await expect(links).toHaveCount(5);
+      await expect(page.locator(`${BOX} a[data-tp-placement="post_solution"]`)).toHaveCount(5);
+      await expect(page.locator(TOPIC_BOX)).toHaveCount(0);
+
+      const ebook = (await page.locator(`${BOX} a[data-tp-offer="leanpub_claude_code"]`).getAttribute('href'))!;
+      expect(ebook.startsWith('https://leanpub.com/claude-code?')).toBe(true);
+      expectUtm(ebook, 'leanpub-claude-code', slug);
+      // The ebook comes before the Guardrails Pack.
+      const order = await page.locator(`${BOX} a[data-track-event="offer_click"]`).evaluateAll((els) => els.map((e) => e.getAttribute('data-tp-offer')));
+      expect(order.indexOf('leanpub_claude_code')).toBeLessThan(order.indexOf('claude_code_guardrails_pack'));
 
       for (const offer of ['claude_code_teams_seat', 'claude_code_teams_cohort']) {
         const url = new URL((await page.locator(`${BOX} a[data-tp-offer="${offer}"]`).getAttribute('href'))!);
@@ -114,22 +132,68 @@ test.describe('team-rollout box on the org-policy posts', () => {
   });
 });
 
-test.describe('one softer offer on the individual-user posts', () => {
-  test('ECONNRESET post: the Guardrails Pack banner only', async ({ page }) => {
-    await page.goto('/blog/claude-code-econnreset-fix/', { waitUntil: 'domcontentloaded' });
-    await expectNoStack(page);
-    await expect(page.locator(BOX)).toHaveCount(0);
-    await expect(page.locator('aside[data-product-banner]')).toHaveCount(1);
-    await expect(page.locator('form.newsletter-inline')).toHaveCount(0);
-  });
+const SINGLE_POSTS = [
+  { slug: 'claude-code-econnreset-fix', fix: 'fix-it-in-this-order' },
+  { slug: 'codex-device-code-auth-chatgpt-security-2026', fix: 'run-the-login-again' },
+];
 
-  test('Codex device-code post: the newsletter card only', async ({ page }) => {
-    await page.goto('/blog/codex-device-code-auth-chatgpt-security-2026/', { waitUntil: 'domcontentloaded' });
-    await expectNoStack(page);
-    await expect(page.locator(BOX)).toHaveCount(0);
-    await expect(page.locator('aside[data-product-banner]')).toHaveCount(0);
-    await expect(page.locator('form.newsletter-inline')).toHaveCount(1);
-  });
+test.describe('one softer offer on the individual-user posts', () => {
+  for (const { slug, fix } of SINGLE_POSTS) {
+    test(`${slug}: the Claude Code Masterclass ebook after the fix, nothing else`, async ({ page }) => {
+      await page.goto(`/blog/${slug}/`, { waitUntil: 'domcontentloaded' });
+      await expectNoStack(page);
+      await expect(page.locator(BOX)).toHaveCount(0);
+      await expect(page.locator('aside[data-product-banner]')).toHaveCount(0);
+      await expect(page.locator('form.newsletter-inline')).toHaveCount(0);
+      await expect(page.locator(TOPIC_BOX)).toHaveCount(1);
+      const link = page.locator(`${TOPIC_BOX} a[data-track-event="offer_click"]`);
+      await expect(link).toHaveCount(1);
+      await expect(link).toHaveAttribute('data-tp-offer', 'leanpub_claude_code');
+      await expect(link).toHaveAttribute('data-tp-placement', 'post_solution');
+      expectUtm((await link.getAttribute('href'))!, 'leanpub-claude-code', slug);
+      const placed = await page.evaluate(({ fix, box }) => {
+        const b = document.querySelector(box)!;
+        const f = document.getElementById(fix)!;
+        let n = f.nextElementSibling;
+        while (n && n.tagName !== 'H2') n = n.nextElementSibling;
+        return !!(f.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+          (!n || !!(b.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING));
+      }, { fix, box: TOPIC_BOX });
+      expect(placed).toBe(true);
+    });
+  }
+});
+
+const TOPIC_POSTS = [
+  { slug: 'fix-claude-code-homebrew-macos-node-26-install', offers: ['leanpub_claude_code'], campaigns: ['leanpub-claude-code'] },
+  { slug: 'nvidia-gpu-operator-mig-partitioning', offers: ['gpu_cluster_review', 'leanpub_kubernetes_ai'], campaigns: [null, 'leanpub-kubernetes-ai'] },
+  { slug: 'ansible-automation-platform-upgrade-2-6-eol-timeline-2026', offers: ['aap_upgrade_review', 'leanpub_ansible_awx'], campaigns: ['aap-review', 'leanpub-ansible-awx-by-examples'] },
+  { slug: 'ansible-assert-module-guide-2026', offers: ['leanpub_ansible_examples'], campaigns: ['leanpub-ansiblebyexamples'] },
+  { slug: 'rhel-10-whats-new-enterprise-linux', offers: ['leanpub_rhel10'], campaigns: ['leanpub-red-hat-enterprise-linux-10'] },
+];
+
+test.describe('topic default offers at the end of the post', () => {
+  for (const { slug, offers, campaigns } of TOPIC_POSTS) {
+    test(`${slug}: ${offers.join(' + ')}`, async ({ page }) => {
+      const events = await recordEvents(page);
+      await page.goto(`/blog/${slug}/`, { waitUntil: 'domcontentloaded' });
+      await expectNoStack(page);
+      await expect(page.locator('aside[data-product-banner]')).toHaveCount(0);
+      await expect(page.locator(TOPIC_BOX)).toHaveCount(1);
+      const links = page.locator(`${TOPIC_BOX} a[data-track-event="offer_click"]`);
+      await expect(links).toHaveCount(offers.length);
+      for (let i = 0; i < offers.length; i++) {
+        const link = links.nth(i);
+        await expect(link).toHaveAttribute('data-tp-offer', offers[i]);
+        await expect(link).toHaveAttribute('data-tp-placement', 'post_conclusion');
+        const href = (await link.getAttribute('href'))!;
+        if (campaigns[i]) expectUtm(href, campaigns[i]!, slug);
+        else expect(href.startsWith('/')).toBe(true); // internal page: no UTMs
+      }
+      await links.first().click();
+      await expect.poll(() => events.filter((e) => e.event === 'offer_click').map((e) => e.offer)).toContain(offers[0]);
+    });
+  }
 });
 
 test.describe('no analytics from local hosts', () => {

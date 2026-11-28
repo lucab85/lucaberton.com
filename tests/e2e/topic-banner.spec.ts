@@ -4,8 +4,8 @@ import { test, expect, type Page } from '@playwright/test';
  * Site-wide announcement banner chosen by the page's topic cluster
  * (src/utils/topicBanners.ts): consulting offers for leader-intent clusters
  * (Open Empower, same tab, consulting_cta_click), the newsletter for engineer clusters,
- * the Claude Code Guardrails Pack for Claude Code posts while it is on sale
- * (src/data/sales.ts), and the Claude Code Masterclass on non-blog pages.
+ * and the Claude Code Masterclass on non-blog pages. Posts with a topic offer
+ * (src/utils/topicOffers.ts) show no banner.
  */
 
 // AnnouncementBanner root: a direct <body> child with the gradient background.
@@ -23,15 +23,12 @@ test.describe('topic-aware announcement banner', () => {
     await expect(link).not.toHaveAttribute('target', '_blank');
   });
 
-  test('Claude Code posts sell the Guardrails Pack, tracked, same tab', async ({ page }) => {
-    // Not one of the focused error posts (src/utils/postCtaPlans.ts), which show no banner.
+  test('Claude Code posts carry no top banner: their topic offer is the ebook at the end', async ({ page }) => {
+    // Every claude_code post has a topic offer (src/utils/topicOffers.ts), which
+    // switches the banner off; see tests/e2e/focused-offers.spec.ts.
     await page.goto('/blog/fix-claude-code-homebrew-macos-node-26-install/', { waitUntil: 'domcontentloaded' });
-    const link = banner(page);
-    await expect(link).toHaveAttribute('href', '/claude-code-guardrails-pack/');
-    await expect(link).toHaveAttribute('data-track-event', 'consulting_cta_click');
-    await expect(link).toHaveAttribute('data-tp-target-offer', 'claude_code_guardrails_pack');
-    await expect(link).toHaveAttribute('data-tp-cta-position', 'top_banner');
-    await expect(link).not.toHaveAttribute('target', '_blank');
+    await expect(page.locator(BANNER)).toHaveCount(0);
+    await expect(page.locator('aside[data-topic-offer-box] a[data-tp-offer="leanpub_claude_code"]')).toHaveCount(1);
   });
 
   test('DevOps posts offer the newsletter', async ({ page }) => {

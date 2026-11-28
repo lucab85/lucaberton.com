@@ -72,7 +72,7 @@ visitor.
 | `bootcamp_apply_start` | first focus inside the application form | — | micro-conversion |
 | `bootcamp_application_submitted` | application POST succeeded (name kept for data continuity; add a separate purchase event only if paid enrollment moves on-site) | — | **key event** |
 | `affiliate_click` | outbound affiliate/partner CTA clicked — one event for ALL partners | `company`, `offer_id`, `offer_type`, `cta_position`, `cta_variant`, `destination_url` | key event (lowest priority) |
-| `offer_click` | a priced own offer clicked in the team-rollout box (`TeamRolloutBox.astro`) or the price cards on `/claude-code-for-teams/` | `offer` (`claude_code_teams_seat`, `claude_code_teams_cohort`, `claude_code_guardrails_pack`, `forward_to_admin`), `placement` (`post_solution`, `inline`, …), `destination_url` | key event (no value: the sale completes on openempower.com / Gumroad) |
+| `offer_click` | an own offer clicked in the team-rollout box (`TeamRolloutBox.astro`), a topic offer box (`TopicOfferBox.astro`) or the price cards on `/claude-code-for-teams/` | `offer` (`claude_code_teams_seat`, `claude_code_teams_cohort`, `claude_code_guardrails_pack`, `forward_to_admin`, `leanpub_*`, `gpu_cluster_review`, `aap_upgrade_review`), `placement` (`post_solution`, `post_conclusion`, `inline`, …), `destination_url` | key event (no value: the sale completes on openempower.com, Leanpub or Gumroad) |
 
 ### Event values
 
@@ -186,16 +186,39 @@ switch the rest off.
 |---|---|---|
 | `claude-code-remote-control-enable-2026` | `team_rollout` | `TeamRolloutBox` right before the H2 after `how-an-admin-enables-it` |
 | `fix-claude-code-subscription-disabled-copilot-credit-limit` | `team_rollout` | `TeamRolloutBox` right before the H2 after `fix-claude-code-subscription-access-disabled` |
-| `claude-code-econnreset-fix` | `single` / `claude_pack` | the Guardrails Pack banner (`ProductBanner.astro`) only |
-| `codex-device-code-auth-chatgpt-security-2026` | `single` / `newsletter` | the newsletter card only |
+| `claude-code-econnreset-fix` | `single` | the "Claude Code Masterclass" ebook (`TopicOfferBox`) after `fix-it-in-this-order` |
+| `codex-device-code-auth-chatgpt-security-2026` | `single` | the same ebook after `run-the-login-again` |
 
-The box fires `offer_click` with `placement=post_solution`. Outbound links
+The team-rollout box also offers the ebook, before the Guardrails Pack. The box fires `offer_click` with `placement=post_solution`. Outbound links
 carry `utm_source=lucaberton.com&utm_medium=referral&utm_campaign=claude-code-teams&utm_content=<post slug>`
 (`withTeamsUtm` in `src/data/claudeCodeTeams.ts`, which also holds the seat
 and cohort prices and the public session dates; past dates drop out at build
 time). The Guardrails Pack link is internal and carries no UTMs. Why: in the 28
 days to Nov 25, 2026 these four posts brought ~830 organic sessions, but only
 15 of 1,096 pageviews reached a team or guardrails offer.
+
+## Topic default offers
+
+`src/utils/topicOffers.ts` picks a default end-of-post offer from a post's
+slug, category and tags (posts with a CTA plan are handled first). A matching
+post ends with one `TopicOfferBox` (at most two offers, `placement=post_conclusion`)
+and drops the generic stack the same way (`quietOffers`); explicit consulting
+cards from `blogConsultingCtas.ts` and the Hostinger strip on Hermes /
+OpenClaw posts stay.
+
+| Topic | Rule (first match wins) | Offers |
+|---|---|---|
+| `ai_coding` | `claude_code` cluster, or Codex, GitHub Copilot, Cursor, Windsurf, Gemini CLI, coding agents, vibe coding… | "Claude Code Masterclass" (leanpub.com/claude-code) |
+| `gpu_ai_infra` | `gpu_kubernetes` cluster, or GPU / NVIDIA / vLLM / inference / RHEL AI / OpenShift AI / AI infrastructure terms | GPU cluster design review (`/services/gpu-cluster-review/`, EUR 10,000) + "Kubernetes AI" |
+| `aap` | Ansible posts about AAP, Tower, automation controller, Event-Driven Ansible | AAP 2.6 Upgrade Review (€2,900, openempower.com) + "Ansible AWX By Examples" |
+| `ansible` | other Ansible posts | AWX → "Ansible AWX By Examples"; containers / Kubernetes → "Ansible For Containers and Kubernetes By Examples"; RHEL → "Red Hat Enterprise Linux 10 Handbook"; else "Ansible by Examples" |
+| `rhel` | RHEL / Red Hat posts | "Red Hat Enterprise Linux 10 Handbook" |
+
+External links carry `utm_source=lucaberton.com&utm_medium=referral&utm_campaign=<leanpub-<book slug> | aap-review>&utm_content=<post slug>`.
+The GPU review is a page on this site, so it has no UTMs. No Leanpub prices
+are shown. Why (Nov 2026): Leanpub ebooks are the best-selling self-serve
+product (41 sales in 90 days, 26 of them "Claude Code Masterclass"), and
+Gumroad payouts are paused, so Gumroad products no longer lead.
 
 ## Paid offers (kit and expert call)
 

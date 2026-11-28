@@ -94,6 +94,7 @@ export default defineConfig({
         // Noindex conversion-confirmation redirect targets (Kit/Calendly)
         if (page.includes('/newsletter-thank-you')) return false;
         if (page.includes('/call-booked')) return false;
+        if (page.includes('/claude-code-team-kit/thanks')) return false;
         if (!kitLive && page.includes('/production-ai-kit')) return false;
         if (!claudePackLive && page.includes('/claude-code-guardrails-pack')) return false;
         if (page.includes('?ref=')) return false;

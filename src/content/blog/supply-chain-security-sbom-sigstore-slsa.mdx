@@ -33,13 +33,16 @@ A Software Bill of Materials lists every component in your software. The [EU Cyb
 # GitLab CI
 generate-sbom:
   stage: security
-  image: anchore/syft:latest
+  # The default syft image is FROM scratch (no shell); the -debug tag has one
+  image:
+    name: anchore/syft:v1.57.2-debug
+    entrypoint: [""]
   script:
     # Source code SBOM
-    - syft dir:. -o spdx-json > sbom-source.spdx.json
+    - /syft dir:. -o spdx-json > sbom-source.spdx.json
 
     # Container image SBOM
-    - syft $DOCKER_REGISTRY:$CI_COMMIT_SHA -o cyclonedx-json > sbom-container.cdx.json
+    - /syft $DOCKER_REGISTRY:$CI_COMMIT_SHA -o cyclonedx-json > sbom-container.cdx.json
 
     # Upload as artifacts
   artifacts:
@@ -63,8 +66,13 @@ Sign your container images so consumers can verify they came from your pipeline,
 # GitLab CI - sign with cosign (Sigstore)
 sign-image:
   stage: security
-  image: gcr.io/projectsigstore/cosign:v2
+  # The cosign image is distroless (no shell), so use a shell image
+  image: alpine:3.22
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
   script:
+    - apk add --update cosign
     # Keyless signing (uses OIDC identity from CI)
     - cosign sign --yes $DOCKER_REGISTRY:$CI_COMMIT_SHA
 
@@ -80,7 +88,7 @@ Verify before deploying:
 ```bash
 # In your Kubernetes admission controller
 cosign verify $DOCKER_REGISTRY:$CI_COMMIT_SHA \
-  --certificate-identity-regexp=".*@yourcompany.com" \
+  --certificate-identity-regexp="^https://gitlab.com/yourgroup/.*//\.gitlab-ci\.yml@refs/heads/main$" \
   --certificate-oidc-issuer="https://gitlab.com"
 ```
 
@@ -105,7 +113,7 @@ spec:
           attestors:
             - entries:
                 - keyless:
-                    subject: "*@yourcompany.com"
+                    subject: "https://gitlab.com/yourgroup/yourproject//.gitlab-ci.yml@refs/heads/main"
                     issuer: "https://gitlab.com"
 ```
 
@@ -116,27 +124,29 @@ I detail Kubernetes admission control patterns at [Kubernetes Recipes](https://k
 SLSA (Supply-chain Levels for Software Artifacts) provides provenance — a cryptographic record of how an artifact was built:
 
 ```
-SLSA Level 1: Documentation of the build process
-SLSA Level 2: Tamper-resistant build service
-SLSA Level 3: Hardened build platform
-SLSA Level 4: Two-person review + hermetic builds
+SLSA Build L0: No guarantees
+SLSA Build L1: Provenance exists
+SLSA Build L2: Hosted build platform
+SLSA Build L3: Hardened builds
 ```
 
-Most organizations should target SLSA Level 2-3:
+Most organizations should target SLSA Build L2-L3. Note that `slsa-github-generator` is a set of reusable GitHub Actions workflows, not a container image or CLI, so it only runs on GitHub:
 
 ```yaml
-# Generate SLSA provenance in GitLab CI
+# Generate SLSA provenance in GitHub Actions (reusable workflow)
 provenance:
-  stage: security
-  image: slsa-framework/slsa-github-generator
-  script:
-    - slsa-provenance generate
-        --artifact $DOCKER_REGISTRY:$CI_COMMIT_SHA
-        --output provenance.jsonl
-    - cosign attest --yes
-        --predicate provenance.jsonl
-        --type slsaprovenance
-        $DOCKER_REGISTRY:$CI_COMMIT_SHA
+  needs: [build]
+  permissions:
+    actions: read
+    id-token: write
+    packages: write
+  uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.1.0
+  with:
+    image: ${{ needs.build.outputs.image }}
+    digest: ${{ needs.build.outputs.digest }}
+    registry-username: ${{ github.actor }}
+  secrets:
+    registry-password: ${{ secrets.GITHUB_TOKEN }}
 ```
 
 ## Automating Across the Fleet

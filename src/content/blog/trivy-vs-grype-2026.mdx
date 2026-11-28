@@ -42,7 +42,7 @@ This comparison is based on running both in production CI/CD pipelines, not on f
 | **Secret detection** | Yes | No |
 | **Misconfiguration** | Yes (CIS benchmarks, best practices) | No |
 | **Database** | Trivy DB (Aqua-maintained, NVD + vendor advisories) | Grype DB (Anchore-maintained, NVD + vendor advisories) |
-| **Database update** | `trivy db update` or auto on scan | `grype db update` or auto on scan |
+| **Database update** | `trivy image --download-db-only` or auto on scan | `grype db update` or auto on scan |
 | **Output formats** | Table, JSON, SARIF, CycloneDX, SPDX, GitHub | Table, JSON, CycloneDX, SARIF |
 | **CI/CD integrations** | GitHub Action, GitLab CI, Jenkins, Azure DevOps | GitHub Action, GitLab CI |
 | **Plugin system** | Yes | No |
@@ -106,6 +106,7 @@ In practice, both detect the vast majority of CVEs. Trivy has slightly broader c
     format: 'sarif'
     output: 'trivy-results.sarif'
     severity: 'CRITICAL,HIGH'
+    limit-severities-for-sarif: true  # SARIF otherwise includes every severity
 
 - name: Upload to GitHub Security
   uses: github/codeql-action/upload-sarif@v3
@@ -117,7 +118,8 @@ In practice, both detect the vast majority of CVEs. Trivy has slightly broader c
 
 ```yaml
 - name: Scan image
-  uses: anchore/scan-action@v4
+  id: scan
+  uses: anchore/scan-action@v7
   with:
     image: 'my-app:${{ github.sha }}'
     fail-build: true
@@ -127,7 +129,7 @@ In practice, both detect the vast majority of CVEs. Trivy has slightly broader c
 - name: Upload to GitHub Security
   uses: github/codeql-action/upload-sarif@v3
   with:
-    sarif_file: 'results.sarif'
+    sarif_file: ${{ steps.scan.outputs.sarif }}
 ```
 
 Both integrate cleanly with GitHub Security tab via SARIF.
@@ -138,11 +140,13 @@ Both integrate cleanly with GitHub Security tab via SARIF.
 
 ```yaml
 container_scanning:
-  image: aquasec/trivy:latest
+  image:
+    name: aquasec/trivy:0.76.2
+    entrypoint: [""]
   script:
-    - trivy image --exit-code 1 --severity HIGH,CRITICAL
-      --format json --output gl-container-scanning-report.json
-      $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    - trivy image --exit-code 0 --format template --template "@/contrib/gitlab.tpl"
+      --output gl-container-scanning-report.json $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
   artifacts:
     reports:
       container_scanning: gl-container-scanning-report.json
@@ -151,16 +155,21 @@ container_scanning:
 **Grype:**
 
 ```yaml
-container_scanning:
-  image: anchore/grype:latest
+grype_scan:
+  image:
+    name: anchore/grype:v0.122.1-debug
+    entrypoint: [""]
   script:
-    - grype $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    - /grype $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
       --fail-on high
-      --output json > gl-container-scanning-report.json
+      --output json --file grype-report.json
   artifacts:
-    reports:
-      container_scanning: gl-container-scanning-report.json
+    when: always
+    paths:
+      - grype-report.json
 ```
+
+The default `anchore/grype` image is built `FROM scratch` with no shell, so GitLab needs the `-debug` tag to run `script:`, and Grype's JSON does not follow GitLab's security report schema, so publish it as a plain artifact.
 
 ## SBOM workflow
 
@@ -196,10 +205,10 @@ Trivy's scope extends far beyond container images:
 
 ```bash
 # Scan running cluster for vulnerabilities and misconfigurations
-trivy k8s --report summary cluster
+trivy k8s --report summary
 
 # Scan specific namespace
-trivy k8s --namespace production --report all
+trivy k8s --include-namespaces production --report all
 ```
 
 No Grype equivalent exists. You would need to extract images from your cluster and scan them individually.

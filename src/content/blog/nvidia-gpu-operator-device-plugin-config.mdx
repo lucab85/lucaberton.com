@@ -91,7 +91,7 @@ kubectl label node dev-gpu-node nvidia.com/device-plugin.config=time-slicing-4
 | Memory isolation | No (shared) | Yes (dedicated) |
 | Compute isolation | No (time-shared) | Yes (dedicated SMs) |
 | Error isolation | No | Yes |
-| GPU support | All NVIDIA GPUs | A100, A30, H100 only |
+| GPU support | All NVIDIA GPUs | A100, A30, H100, H200, B200/GB200/B300, some RTX PRO Blackwell |
 | Overhead | Minimal | Minimal |
 | Use case | Dev/test, light inference | Production inference, multi-tenant |
 
@@ -118,7 +118,7 @@ spec:
 
 ## GPU Health Monitoring
 
-Configure health checks that remove unhealthy GPUs from the schedulable pool:
+Health checks are on by default and remove unhealthy GPUs from the schedulable pool. The config file has no `health` section (and no `mpsEnabled` flag); to turn checks off you set the `DP_DISABLE_HEALTHCHECKS` environment variable on the plugin. A typical flags block:
 
 ```yaml
 apiVersion: v1
@@ -134,18 +134,13 @@ data:
       failOnInitError: true
       nvidiaDriverRoot: /
       gdsEnabled: false
-      mpsEnabled: false
-    health:
-      plugin:
-        - name: nvidia.com/gpu
-          failOnInitError: true
 ```
 
 The device plugin runs Xid error monitoring. When a GPU reports specific Xid errors (hardware faults), the plugin marks the GPU as unhealthy and Kubernetes stops scheduling pods to it.
 
 ## Custom Resource Naming
 
-Expose different GPU models as different resource types:
+The device plugin cannot expose GPU models as different resource types: sharing entries only apply to resources it already advertises (`nvidia.com/gpu` or a MIG resource), and the per-resource `rename` and `devices` fields are ignored, and a sharing config applies to every GPU on the node. Instead, keep `nvidia.com/gpu`, give each node type its own config, and select the model with the GFD label:
 
 ```yaml
 apiVersion: v1
@@ -154,29 +149,34 @@ metadata:
   name: device-plugin-config
   namespace: gpu-operator
 data:
-  multi-gpu-types: |
+  a100-config: |
+    version: v1
+    flags:
+      migStrategy: none
+  t4-config: |
     version: v1
     flags:
       migStrategy: none
     sharing:
       timeSlicing:
         resources:
-          - name: nvidia.com/gpu.a100
-            replicas: 1
-            devices:
-              - "GPU-xxxxx-a100-uuid"
-          - name: nvidia.com/gpu.t4
+          - name: nvidia.com/gpu
             replicas: 4
-            devices:
-              - "GPU-xxxxx-t4-uuid"
 ```
 
-This lets you request specific GPU types:
+```bash
+# Pick the config per node
+kubectl label node t4-node-1 nvidia.com/device-plugin.config=t4-config --overwrite
+```
+
+Then request a specific GPU type with a node selector:
 
 ```yaml
+nodeSelector:
+  nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB  # value from your node labels
 resources:
   limits:
-    nvidia.com/gpu.a100: 1  # Specifically request an A100
+    nvidia.com/gpu: 1
 ```
 
 ## GPU Feature Discovery Integration
